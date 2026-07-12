@@ -128,12 +128,13 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         Ok(findings) => stage1_agent_findings.extend(findings),
         Err(err) => println!("  [warn] golangci-lint run failed: {err}"),
     }
+    stage1_agent_findings.extend(autoreview_core::run_duplication_check(&options.repo_root, &changed_file_paths));
     let stage1_finding_count = stage1_agent_findings.len();
     let stage1_findings: Vec<Finding> = assign_fingerprints(stage1_agent_findings)
         .into_iter()
         .map(to_finding)
         .collect();
-    println!("  stage 1:        {stage1_finding_count} deterministic finding(s) (ast-grep + golangci-lint)");
+    println!("  stage 1:        {stage1_finding_count} deterministic finding(s) (ast-grep + golangci-lint + duplication)");
 
     let overrides = PlanOverrides {
         tier: options.tier,
