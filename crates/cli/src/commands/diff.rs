@@ -438,6 +438,10 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     std::fs::write(&markdown_path, crate::render::render_markdown(&report))?;
     println!("  markdown written: {}", markdown_path.display());
 
+    let sarif_path = run_dir.join("report.sarif");
+    std::fs::write(&sarif_path, crate::render::render_sarif(&report))?;
+    println!("  sarif written:  {}", sarif_path.display());
+
     // Storage write path (M1 scope, per the plan): append this run's findings
     // to the local event log and index them in SQLite. Both are best-effort —
     // a failure here must never take down an otherwise-successful review.

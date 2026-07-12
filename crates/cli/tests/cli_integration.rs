@@ -251,6 +251,12 @@ fn diff_also_writes_a_markdown_report_alongside_the_json_one() {
     let markdown = std::fs::read_to_string(&markdown_path).unwrap();
     assert!(markdown.contains("# Code Review Report"));
     assert!(markdown.contains("No findings"));
+
+    let sarif_path = json_path.with_extension("sarif");
+    assert!(sarif_path.exists(), "expected report.sarif alongside report.json at {}", sarif_path.display());
+    let sarif: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&sarif_path).unwrap()).unwrap();
+    assert_eq!(sarif["version"], "2.1.0");
+    assert_eq!(sarif["runs"][0]["tool"]["driver"]["name"], "autoreview");
 }
 
 #[test]

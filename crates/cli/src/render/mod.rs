@@ -1,6 +1,8 @@
 pub mod markdown;
+pub mod sarif;
 
 pub use markdown::render_markdown;
+pub use sarif::render_sarif;
 
 #[cfg(test)]
 mod tests {
