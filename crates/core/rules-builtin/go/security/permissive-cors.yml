@@ -1,0 +1,7 @@
+id: go-permissive-cors
+language: Go
+category: security
+severity: warning
+message: Access-Control-Allow-Origin set to "*" allows any website to make credentialed cross-origin requests to this endpoint — scope it to a known allowlist of origins instead.
+rule:
+  pattern: $W.Header().Set("Access-Control-Allow-Origin", "*")

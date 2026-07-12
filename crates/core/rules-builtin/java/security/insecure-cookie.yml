@@ -1,0 +1,9 @@
+id: java-insecure-cookie
+language: Java
+category: security
+severity: warning
+message: A cookie is explicitly marked as not Secure or not HttpOnly — Secure prevents transmission over plain HTTP, HttpOnly prevents JavaScript (and XSS) from reading it.
+rule:
+  any:
+    - pattern: $C.setSecure(false)
+    - pattern: $C.setHttpOnly(false)

@@ -1,0 +1,11 @@
+id: go-tls-verification-disabled
+language: Go
+category: security
+severity: error
+message: InsecureSkipVerify disables TLS certificate validation entirely, making the connection vulnerable to man-in-the-middle attacks. Only acceptable in tests against a known-safe endpoint.
+rule:
+  any:
+    - pattern: "$C{$$$A, InsecureSkipVerify: true, $$$B}"
+    - pattern: "$C{$$$A, InsecureSkipVerify: true}"
+    - pattern: "$C{InsecureSkipVerify: true, $$$B}"
+    - pattern: "$C{InsecureSkipVerify: true}"

@@ -1,0 +1,7 @@
+id: go-jwt-parse-unverified
+language: Go
+category: security
+severity: error
+message: jwt.ParseUnverified skips signature verification entirely — any attacker-supplied token is accepted as valid. Use jwt.Parse/ParseWithClaims with a real key function instead.
+rule:
+  pattern: $TOK, $$$REST := jwt.ParseUnverified($$$ARGS)

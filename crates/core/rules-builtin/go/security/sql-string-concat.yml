@@ -1,0 +1,10 @@
+id: go-sql-string-concat
+language: Go
+category: security
+severity: error
+message: A SQL query built via string concatenation is vulnerable to SQL injection — use a parameterized query (?) instead of concatenating user input into the query text.
+rule:
+  pattern: $A, $B := $DB.Query($QUERY)
+constraints:
+  QUERY:
+    regex: '".*"\s*\+'

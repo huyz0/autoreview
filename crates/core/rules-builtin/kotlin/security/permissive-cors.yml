@@ -1,0 +1,7 @@
+id: kotlin-permissive-cors
+language: Kotlin
+category: security
+severity: warning
+message: Access-Control-Allow-Origin set to "*" allows any website to make credentialed cross-origin requests to this endpoint — scope it to a known allowlist of origins instead.
+rule:
+  pattern: $RESP.setHeader("Access-Control-Allow-Origin", "*")

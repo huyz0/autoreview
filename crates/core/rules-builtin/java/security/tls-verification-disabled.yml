@@ -1,0 +1,7 @@
+id: java-tls-verification-disabled
+language: Java
+category: security
+severity: error
+message: ALLOW_ALL_HOSTNAME_VERIFIER disables TLS hostname verification entirely, making the connection vulnerable to man-in-the-middle attacks. Only acceptable in tests against a known-safe endpoint.
+rule:
+  pattern: $X.setHostnameVerifier(SSLSocketFactory.ALLOW_ALL_HOSTNAME_VERIFIER)

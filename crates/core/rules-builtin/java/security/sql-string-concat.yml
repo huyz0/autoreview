@@ -1,0 +1,10 @@
+id: java-sql-string-concat
+language: Java
+category: security
+severity: error
+message: A SQL query built via string concatenation is vulnerable to SQL injection — use a PreparedStatement with bind parameters instead of concatenating user input into the query text.
+rule:
+  pattern: $STMT.executeQuery($QUERY)
+constraints:
+  QUERY:
+    regex: '".*"\s*\+'

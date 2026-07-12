@@ -306,7 +306,8 @@ mod tests {
         let categories = rule_categories();
         assert_eq!(categories.get("go-no-self-comparison").map(String::as_str), Some("correctness"));
         assert_eq!(categories.get("kotlin-avoid-not-null-assertion").map(String::as_str), Some("correctness"));
-        assert_eq!(categories.len(), 6, "expected exactly the 6 builtin rules to declare a category: {categories:?}");
+        assert_eq!(categories.get("go-hardcoded-credential").map(String::as_str), Some("security"));
+        assert!(categories.len() >= 33, "expected at least the 6 correctness + 27 security builtin rules to declare a category, got {}: {categories:?}", categories.len());
     }
 
     #[test]

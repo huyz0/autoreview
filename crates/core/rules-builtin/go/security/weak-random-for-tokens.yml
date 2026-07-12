@@ -1,0 +1,12 @@
+id: go-weak-random-for-tokens
+language: Go
+category: security
+severity: warning
+message: math/rand is not cryptographically secure and its output is predictable — use crypto/rand for tokens, session IDs, CSRF values, or nonces.
+rule:
+  any:
+    - pattern: $NAME := rand.Int63()
+    - pattern: $NAME := rand.Intn($N)
+constraints:
+  NAME:
+    regex: (?i)(token|session|csrf|nonce)

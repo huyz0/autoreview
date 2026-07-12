@@ -1,0 +1,10 @@
+id: kotlin-command-injection-concat
+language: Kotlin
+category: security
+severity: error
+message: A shell command built via string concatenation is vulnerable to command injection — pass arguments as a separate array/list instead of concatenating untrusted input into a single command string.
+rule:
+  pattern: Runtime.getRuntime().exec($CMD)
+constraints:
+  CMD:
+    regex: '".*"\s*\+'

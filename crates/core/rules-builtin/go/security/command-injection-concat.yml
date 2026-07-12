@@ -1,0 +1,10 @@
+id: go-command-injection-concat
+language: Go
+category: security
+severity: error
+message: A shell command built via string concatenation is vulnerable to command injection — avoid `sh -c` with concatenated input, or at minimum validate/escape the untrusted portion.
+rule:
+  pattern: $CMD := exec.Command("sh", "-c", $ARG)
+constraints:
+  ARG:
+    regex: '".*"\s*\+'

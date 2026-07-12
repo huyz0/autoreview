@@ -1,0 +1,10 @@
+id: kotlin-weak-hash
+language: Kotlin
+category: security
+severity: warning
+message: MD5 and SHA-1 are broken for security purposes (collision attacks) — use SHA-256 or better for anything security-sensitive (signatures, integrity checks, password-adjacent hashing).
+rule:
+  pattern: MessageDigest.getInstance("$ALG")
+constraints:
+  ALG:
+    regex: (?i)^(md5|sha-?1)$

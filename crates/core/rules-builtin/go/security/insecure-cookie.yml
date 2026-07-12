@@ -1,0 +1,15 @@
+id: go-insecure-cookie
+language: Go
+category: security
+severity: warning
+message: A cookie is explicitly created without the Secure or HttpOnly flag — Secure prevents transmission over plain HTTP, HttpOnly prevents JavaScript (and XSS) from reading it.
+rule:
+  any:
+    - pattern: "$C{$$$A, Secure: false, $$$B}"
+    - pattern: "$C{$$$A, Secure: false}"
+    - pattern: "$C{Secure: false, $$$B}"
+    - pattern: "$C{Secure: false}"
+    - pattern: "$C{$$$A, HttpOnly: false, $$$B}"
+    - pattern: "$C{$$$A, HttpOnly: false}"
+    - pattern: "$C{HttpOnly: false, $$$B}"
+    - pattern: "$C{HttpOnly: false}"

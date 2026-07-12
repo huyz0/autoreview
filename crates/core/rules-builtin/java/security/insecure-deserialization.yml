@@ -1,0 +1,7 @@
+id: java-insecure-deserialization
+language: Java
+category: security
+severity: warning
+message: Deserializing with ObjectInputStream.readObject() executes arbitrary code from untrusted input unless a class allowlist (ObjectInputFilter) is configured — verify the source is trusted or add a filter.
+rule:
+  pattern: $OIS.readObject()

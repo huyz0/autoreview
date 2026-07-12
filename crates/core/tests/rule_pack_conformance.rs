@@ -3,65 +3,85 @@
 //! and a negative fixture (must not fire at all). This is the same
 //! self-test discipline the plan's rule-factory bench stage calls for
 //! ("100% on its own positive/negative test files") applied to the builtin
-//! rules we ship today — adding a new rule means adding a row to this table,
-//! not writing a new test function.
+//! rules we ship today — adding a new rule means adding rule YAML +
+//! fixture files, not touching this test file.
+//!
+//! Rules are discovered by walking `rules-builtin/` at test time (not via
+//! the `include_dir!` embed used at build time for the shipped binary — an
+//! external integration test can just read the crate's own source tree off
+//! disk). Each rule's `id`/`language` drives which fixture files it expects
+//! at `tests/fixtures/rules/<rule-id>/{positive,negative}.<ext>` — a missing
+//! fixture pair fails the test for that rule, so a new rule without
+//! fixtures can't silently ship untested.
 //!
 //! Requires the real `ast-grep` binary; skips (not fails) when it's absent,
 //! so this suite is safe to run anywhere but exercises real integration
 //! wherever the tool is installed.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use autoreview_core::run_ast_grep;
+use serde::Deserialize;
 
-struct RuleCase {
-    rule_id: &'static str,
-    filename: &'static str,
-    positive: &'static str,
-    negative: &'static str,
+#[derive(Debug, Deserialize)]
+struct RuleMeta {
+    id: String,
+    language: String,
 }
-
-const CASES: &[RuleCase] = &[
-    RuleCase {
-        rule_id: "go-no-self-comparison",
-        filename: "main.go",
-        positive: "package main\n\nfunc main() {\n\tx := 1\n\tif x == x {\n\t\tprintln(\"bug\")\n\t}\n}\n",
-        negative: "package main\n\nfunc main() {\n\tx := 1\n\ty := 2\n\tif x == y {\n\t\tprintln(\"fine\")\n\t}\n}\n",
-    },
-    RuleCase {
-        rule_id: "go-empty-error-check",
-        filename: "main.go",
-        positive: "package main\n\nfunc doIt() error { return nil }\n\nfunc main() {\n\tif err := doIt(); err != nil {\n\t}\n}\n",
-        negative: "package main\n\nimport \"fmt\"\n\nfunc doIt() error { return nil }\n\nfunc main() {\n\tif err := doIt(); err != nil {\n\t\tfmt.Println(err)\n\t}\n}\n",
-    },
-    RuleCase {
-        rule_id: "java-self-comparison",
-        filename: "Sample.java",
-        positive: "public class Sample {\n    boolean check(int x) {\n        return x == x;\n    }\n}\n",
-        negative: "public class Sample {\n    boolean check(int x, int y) {\n        return x == y;\n    }\n}\n",
-    },
-    RuleCase {
-        rule_id: "java-empty-catch-block",
-        filename: "Sample.java",
-        positive: "public class Sample {\n    void run() {\n        try {\n            doThing();\n        } catch (Exception e) {\n        }\n    }\n    void doThing() {}\n}\n",
-        negative: "public class Sample {\n    void run() {\n        try {\n            doThing();\n        } catch (Exception e) {\n            e.printStackTrace();\n        }\n    }\n    void doThing() {}\n}\n",
-    },
-    RuleCase {
-        rule_id: "kotlin-avoid-not-null-assertion",
-        filename: "Sample.kt",
-        positive: "fun main() {\n    val s: String? = null\n    println(s!!.length)\n}\n",
-        negative: "fun main() {\n    val s: String? = null\n    println(s?.length)\n}\n",
-    },
-    RuleCase {
-        rule_id: "kotlin-empty-catch-block",
-        filename: "Sample.kt",
-        positive: "fun run() {\n    try {\n        doThing()\n    } catch (e: Exception) {\n    }\n}\nfun doThing() {}\n",
-        negative: "fun run() {\n    try {\n        doThing()\n    } catch (e: Exception) {\n        println(e)\n    }\n}\nfun doThing() {}\n",
-    },
-];
 
 fn ast_grep_available() -> bool {
     Command::new("ast-grep").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+fn rules_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("rules-builtin")
+}
+
+fn fixtures_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("rules")
+}
+
+fn discover_rules() -> Vec<RuleMeta> {
+    let mut rules = Vec::new();
+    walk(&rules_dir(), &mut rules);
+    rules.sort_by(|a, b| a.id.cmp(&b.id));
+    rules
+}
+
+fn walk(dir: &Path, out: &mut Vec<RuleMeta>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk(&path, out);
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+        let meta: RuleMeta = serde_yaml::from_str(&contents).unwrap_or_else(|e| panic!("failed to parse {} as rule metadata: {e}", path.display()));
+        out.push(meta);
+    }
+}
+
+fn extension_for_language(language: &str) -> &'static str {
+    match language {
+        "Go" => "go",
+        "Java" => "java",
+        "Kotlin" => "kt",
+        other => panic!("rule_pack_conformance doesn't know the fixture extension for language {other:?} — add it to extension_for_language"),
+    }
+}
+
+fn scan_filename_for_language(language: &str) -> &'static str {
+    match language {
+        "Go" => "main.go",
+        "Java" => "Sample.java",
+        "Kotlin" => "Sample.kt",
+        other => panic!("rule_pack_conformance doesn't know the scan filename for language {other:?} — add it to scan_filename_for_language"),
+    }
 }
 
 fn write_single_file(filename: &str, contents: &str) -> tempfile::TempDir {
@@ -77,28 +97,79 @@ fn every_builtin_rule_fires_on_its_positive_fixture_and_stays_silent_on_its_nega
         return;
     }
 
+    let rules = discover_rules();
+    assert!(!rules.is_empty(), "expected to discover at least one rule under {}", rules_dir().display());
+
     let mut failures = Vec::new();
 
-    for case in CASES {
-        let positive_dir = write_single_file(case.filename, case.positive);
-        let positive_findings = run_ast_grep(positive_dir.path(), &[case.filename.to_string()]).unwrap();
-        let positive_matches: Vec<_> = positive_findings.iter().filter(|f| f.source.rule_id.as_deref() == Some(case.rule_id)).collect();
+    for rule in &rules {
+        let ext = extension_for_language(&rule.language);
+        let filename = scan_filename_for_language(&rule.language);
+        let fixture_dir = fixtures_dir().join(&rule.id);
+        let positive_path = fixture_dir.join(format!("positive.{ext}"));
+        let negative_path = fixture_dir.join(format!("negative.{ext}"));
+
+        let (Ok(positive), Ok(negative)) = (std::fs::read_to_string(&positive_path), std::fs::read_to_string(&negative_path)) else {
+            failures.push(format!("{}: missing fixture files (expected {} and {})", rule.id, positive_path.display(), negative_path.display()));
+            continue;
+        };
+
+        let positive_dir = write_single_file(filename, &positive);
+        let positive_findings = run_ast_grep(positive_dir.path(), &[filename.to_string()]).unwrap();
+        let positive_matches: Vec<_> = positive_findings.iter().filter(|f| f.source.rule_id.as_deref() == Some(rule.id.as_str())).collect();
         if positive_matches.len() != 1 {
             failures.push(format!(
                 "{}: expected exactly 1 match on positive fixture, got {} (all findings: {:?})",
-                case.rule_id,
+                rule.id,
                 positive_matches.len(),
                 positive_findings.iter().map(|f| f.source.rule_id.clone()).collect::<Vec<_>>()
             ));
         }
 
-        let negative_dir = write_single_file(case.filename, case.negative);
-        let negative_findings = run_ast_grep(negative_dir.path(), &[case.filename.to_string()]).unwrap();
-        let negative_matches: Vec<_> = negative_findings.iter().filter(|f| f.source.rule_id.as_deref() == Some(case.rule_id)).collect();
+        let negative_dir = write_single_file(filename, &negative);
+        let negative_findings = run_ast_grep(negative_dir.path(), &[filename.to_string()]).unwrap();
+        let negative_matches: Vec<_> = negative_findings.iter().filter(|f| f.source.rule_id.as_deref() == Some(rule.id.as_str())).collect();
         if !negative_matches.is_empty() {
-            failures.push(format!("{}: expected 0 matches on negative fixture, got {}", case.rule_id, negative_matches.len()));
+            failures.push(format!("{}: expected 0 matches on negative fixture, got {}", rule.id, negative_matches.len()));
         }
     }
 
-    assert!(failures.is_empty(), "rule conformance failures:\n{}", failures.join("\n"));
+    assert!(failures.is_empty(), "rule conformance failures ({} rule(s) checked):\n{}", rules.len(), failures.join("\n"));
+}
+
+#[test]
+fn every_rule_declares_a_category() {
+    for rule in discover_rules() {
+        // Re-parse fully this time (discover_rules only pulls id/language) to
+        // assert the category field specifically — a rule with no category
+        // silently falls back to "correctness" in production, which is
+        // surprising enough to want a hard test failure instead.
+        let path = find_rule_file(&rule.id).unwrap_or_else(|| panic!("could not relocate rule file for {}", rule.id));
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let value: serde_yaml::Value = serde_yaml::from_str(&contents).unwrap();
+        assert!(value.get("category").and_then(|c| c.as_str()).is_some(), "{}: rule file has no `category` field ({})", rule.id, path.display());
+    }
+}
+
+fn find_rule_file(rule_id: &str) -> Option<PathBuf> {
+    fn walk_find(dir: &Path, rule_id: &str) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = walk_find(&path, rule_id) {
+                    return Some(found);
+                }
+            } else if path.extension().and_then(|e| e.to_str()) == Some("yml") {
+                if let Ok(contents) = std::fs::read_to_string(&path) {
+                    if let Ok(meta) = serde_yaml::from_str::<RuleMeta>(&contents) {
+                        if meta.id == rule_id {
+                            return Some(path);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+    walk_find(&rules_dir(), rule_id)
 }
