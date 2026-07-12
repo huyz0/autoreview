@@ -122,6 +122,32 @@ impl HistoryStore {
         Ok(())
     }
 
+    /// The most recently recorded run's id, by `created_at` — must be called
+    /// *before* `record_run` for the current run, or it returns itself.
+    /// Backs `--incremental`: `diff` calls this first, then
+    /// `fingerprints_for_run` on the result, to know what the *previous*
+    /// review on this repo already reported.
+    pub fn most_recent_run_id(&self) -> anyhow::Result<Option<String>> {
+        let result = self.conn.query_row("SELECT run_id FROM findings ORDER BY created_at DESC LIMIT 1", [], |row| row.get::<_, String>(0));
+        match result {
+            Ok(run_id) => Ok(Some(run_id)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// All fingerprints recorded for a given run — used with
+    /// `most_recent_run_id` to build the baseline set for `--incremental`.
+    pub fn fingerprints_for_run(&self, run_id: &str) -> anyhow::Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare("SELECT DISTINCT fingerprint FROM findings WHERE run_id = ?1")?;
+        let rows = stmt.query_map([run_id], |row| row.get::<_, String>(0))?;
+        let mut set = std::collections::HashSet::new();
+        for row in rows {
+            set.insert(row?);
+        }
+        Ok(set)
+    }
+
     /// Looks up the most recently recorded finding with this id (the report's
     /// `finding.id`, e.g. `f-<fingerprint prefix>`), used by `feedback` to
     /// resolve a human-supplied id back to its fingerprint/category/severity
@@ -213,10 +239,14 @@ mod tests {
     }
 
     fn make_report(run_id: &str, findings: Vec<Finding>) -> ReviewReport {
+        make_report_at(run_id, findings, "2026-07-12T00:00:00Z")
+    }
+
+    fn make_report_at(run_id: &str, findings: Vec<Finding>, created_at: &str) -> ReviewReport {
         ReviewReport {
             schema_version: "1".into(),
             run_id: run_id.into(),
-            created_at: "2026-07-12T00:00:00Z".into(),
+            created_at: created_at.into(),
             target: ReviewTarget { repo_root: "/repo".into(), base_ref: "main~1".into(), head_ref: "main".into(), diff_stats: DiffStats { files: 1, additions: 1, deletions: 0, languages: HashMap::new() } },
             plan: ReviewPlan { tier: Tier::Quick, score: 1.0, signals: vec![], specialists: vec![], budgets: PlanBudgets { max_agents: 1, total_token_cap: 1, wall_clock_sec: 1 }, overrides: vec![] },
             findings,
@@ -297,5 +327,28 @@ mod tests {
         store.record_feedback("f-a", &lookup, "fp", None, "2026-07-12T00:00:00Z").unwrap();
         store.record_feedback("f-a", &lookup, "fp", None, "2026-07-13T00:00:00Z").unwrap();
         assert_eq!(store.count_feedback_for_fingerprint("a").unwrap(), 2);
+    }
+
+    #[test]
+    fn most_recent_run_id_is_none_when_history_is_empty() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        assert_eq!(store.most_recent_run_id().unwrap(), None);
+    }
+
+    #[test]
+    fn most_recent_run_id_picks_the_latest_by_created_at() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        store.record_run(&make_report_at("run-1", vec![make_finding("a")], "2026-07-10T00:00:00Z")).unwrap();
+        store.record_run(&make_report_at("run-2", vec![make_finding("b")], "2026-07-12T00:00:00Z")).unwrap();
+        assert_eq!(store.most_recent_run_id().unwrap(), Some("run-2".to_string()));
+    }
+
+    #[test]
+    fn fingerprints_for_run_returns_only_that_runs_fingerprints() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        store.record_run(&make_report_at("run-1", vec![make_finding("a"), make_finding("b")], "2026-07-10T00:00:00Z")).unwrap();
+        store.record_run(&make_report_at("run-2", vec![make_finding("c")], "2026-07-12T00:00:00Z")).unwrap();
+        let fps = store.fingerprints_for_run("run-1").unwrap();
+        assert_eq!(fps, std::collections::HashSet::from(["a".to_string(), "b".to_string()]));
     }
 }

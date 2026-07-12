@@ -106,6 +106,44 @@ fn diff_against_a_seeded_bug_produces_a_valid_report_with_the_expected_finding()
 }
 
 #[test]
+fn diff_incremental_suppresses_findings_already_reported_in_the_previous_run() {
+    if !ast_grep_available() {
+        eprintln!("skipping: ast-grep not on PATH");
+        return;
+    }
+
+    let repo = init_repo_with_diff(
+        &[("main.go", "package main\n\nfunc main() {\n\tprintln(\"hello\")\n}\n")],
+        &[("main.go", "package main\n\nfunc main() {\n\tx := 1\n\tif x == x {\n\t\tprintln(\"bug\")\n\t}\n}\n")],
+        "seed a self-comparison bug",
+    );
+
+    // First run establishes the baseline in history — same fingerprint each
+    // time since it's content-anchored, not run-id-anchored.
+    let first = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["diff", "--base", "main~1", "--head", "main"]).assert().success();
+    let first_stdout = String::from_utf8_lossy(&first.get_output().stdout);
+    assert!(first_stdout.contains("go-no-self-comparison") || first_stdout.contains("Self Comparison"), "first run should report the seeded bug, got:\n{first_stdout}");
+
+    let second = Command::cargo_bin("autoreview")
+        .unwrap()
+        .current_dir(repo.path())
+        .args(["diff", "--base", "main~1", "--head", "main", "--incremental"])
+        .assert()
+        .success();
+    let second_stdout = String::from_utf8_lossy(&second.get_output().stdout);
+    assert!(second_stdout.contains("[incremental] suppressed"), "second run should report the incremental suppression, got:\n{second_stdout}");
+
+    let report_path = report_path_from_stdout(&second_stdout);
+    let report: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
+    assert_eq!(report["findings"].as_array().unwrap().len(), 0, "the repeat finding should be suppressed, not re-reported");
+    assert!(
+        report["suppressed"].as_array().unwrap().iter().any(|s| s["reason"] == "baseline"),
+        "suppressed list should record the baseline reason, got: {:#?}",
+        report["suppressed"]
+    );
+}
+
+#[test]
 fn diff_tier_override_is_honored_regardless_of_computed_score() {
     if !ast_grep_available() {
         eprintln!("skipping: ast-grep not on PATH");

@@ -34,6 +34,9 @@ enum Commands {
         aspects: Option<String>,
         #[arg(long = "max-usd")]
         max_usd: Option<f64>,
+        /// Suppress findings whose fingerprint was already reported in the most recent prior run on this repo
+        #[arg(long)]
+        incremental: bool,
     },
     /// Apply a finding's suggested patch, gated by a `git apply --check` sanity check
     Apply { finding_id: String },
@@ -109,7 +112,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Doctor => {
             run_doctor(&repo_root);
         }
-        Commands::Diff { base, head, tier, aspects, max_usd } => {
+        Commands::Diff { base, head, tier, aspects, max_usd, incremental } => {
             run_diff(DiffCommandOptions {
                 repo_root,
                 base_ref: base,
@@ -117,6 +120,7 @@ fn main() -> anyhow::Result<()> {
                 tier: tier.and_then(|t| parse_tier(&t)),
                 aspects: aspects.map(|a| a.split(',').map(|s| s.to_string()).collect()),
                 max_usd,
+                incremental,
             })?;
         }
         Commands::Apply { finding_id } => run_apply(&repo_root, &finding_id)?,

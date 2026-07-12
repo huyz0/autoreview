@@ -21,6 +21,7 @@ pub struct DiffCommandOptions {
     pub tier: Option<Tier>,
     pub aspects: Option<Vec<String>>,
     pub max_usd: Option<f64>,
+    pub incremental: bool,
 }
 
 const MAX_INLINE_DIFF_CHARS: usize = 20_000;
@@ -341,6 +342,33 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         );
     }
 
+    let history_dir = history_dir_for(&options.repo_root);
+
+    // Incremental mode: suppress findings already reported in the most
+    // recent prior run on this repo (queried *before* this run's own
+    // findings are recorded, further down, so it never sees itself). This is
+    // opt-in — it exists to cut repeat noise across successive `diff` runs
+    // against the same evolving branch, not to hide anything by default.
+    if options.incremental {
+        let baseline = HistoryStore::open(&history_dir)
+            .and_then(|store| match store.most_recent_run_id()? {
+                Some(run_id) => store.fingerprints_for_run(&run_id),
+                None => Ok(std::collections::HashSet::new()),
+            })
+            .unwrap_or_else(|err| {
+                println!("  [warn] --incremental: failed to read baseline from history: {err}");
+                std::collections::HashSet::new()
+            });
+        if !baseline.is_empty() {
+            let (new_findings, already_known): (Vec<_>, Vec<_>) = dedupe_result.findings.into_iter().partition(|f| !baseline.contains(&f.fingerprints.primary));
+            if !already_known.is_empty() {
+                println!("\n  [incremental] suppressed {} finding(s) already reported in the previous run", already_known.len());
+            }
+            dedupe_result.findings = new_findings;
+            dedupe_result.suppressed.extend(already_known.into_iter().map(|finding| autoreview_schema::SuppressedFinding { finding, reason: autoreview_schema::SuppressedReason::Baseline }));
+        }
+    }
+
     for finding in &dedupe_result.findings {
         println!(
             "\n  [{:?}] {} ({}) — {}",
@@ -352,7 +380,6 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         println!("\n  (use `autoreview feedback <id> --fp|--tp` to record feedback on a finding above)");
     }
 
-    let history_dir = history_dir_for(&options.repo_root);
     let run_id = uuid::Uuid::new_v4().to_string();
     let run_dir = history_dir.join("runs").join(&run_id);
     std::fs::create_dir_all(&run_dir)?;
