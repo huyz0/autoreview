@@ -113,6 +113,27 @@ fn empty_config_document_parses_to_full_working_defaults() {
     assert_eq!(config.storage.fp_block_threshold, 3);
     assert!(config.verify.enabled);
     assert_eq!(config.verify.noisy_categories, vec!["style".to_string()]);
+    assert_eq!(config.agents.backend, autoreview_schema::AgentBackendKind::ClaudeCode);
+    assert_eq!(config.agents.local_llm.base_url, "http://localhost:8080/v1");
+    assert_eq!(config.agents.local_llm.model, "local-model");
+    assert_eq!(config.agents.pi_provider, None);
+}
+
+#[test]
+fn agents_config_parses_camel_case_yaml_for_all_three_backends() {
+    let yaml = r#"
+agents:
+  backend: local-llm
+  piProvider: anthropic
+  localLlm:
+    baseUrl: http://localhost:8090/v1
+    model: my-local-model
+"#;
+    let config: AutoreviewConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(config.agents.backend, autoreview_schema::AgentBackendKind::LocalLlm);
+    assert_eq!(config.agents.pi_provider.as_deref(), Some("anthropic"));
+    assert_eq!(config.agents.local_llm.base_url, "http://localhost:8090/v1");
+    assert_eq!(config.agents.local_llm.model, "my-local-model");
 }
 
 #[test]

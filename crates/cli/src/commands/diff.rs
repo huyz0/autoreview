@@ -6,10 +6,11 @@ use autoreview_core::{
     append_event_log, assign_fingerprints, collect_context, collect_diff_facts, compile_skill,
     dedupe_exact, dedupe_fuzzy, discover_manifests, events_from_report, load_config, plan_review,
     render_context_block, run_ast_grep, run_golangci_lint, run_specialist, to_finding,
-    AgentBackend, ClaudeCodeBackend, HistoryStore, InvokeRequest, PlanOverrides, SpecialistStatus,
+    AgentBackend, ClaudeCodeBackend, HistoryStore, InvokeRequest, LocalLlmBackend, PiBackend,
+    PlanOverrides, SpecialistStatus,
 };
 use autoreview_schema::{
-    CostEntry, DiffStats, Finding, ReviewReport, ReviewSummary, ReviewTarget, RunCosts, Tier,
+    AgentBackendKind, AutoreviewConfig, CostEntry, DiffStats, Finding, ReviewReport, ReviewSummary, ReviewTarget, RunCosts, Tier,
 };
 
 use super::history::{history_dir_for, hostname};
@@ -22,6 +23,57 @@ pub struct DiffCommandOptions {
     pub aspects: Option<Vec<String>>,
     pub max_usd: Option<f64>,
     pub incremental: bool,
+    pub backend: Option<AgentBackendKind>,
+}
+
+fn backend_label(kind: AgentBackendKind) -> &'static str {
+    match kind {
+        AgentBackendKind::ClaudeCode => "claude",
+        AgentBackendKind::Pi => "pi",
+        AgentBackendKind::LocalLlm => "local-llm",
+    }
+}
+
+/// Availability check per backend, mirroring `claude --version` for the
+/// other two: `pi --version` for pi, an HTTP reachability probe for the
+/// local-LLM server (there's no CLI binary to version-check).
+fn backend_available(kind: AgentBackendKind, config: &AutoreviewConfig) -> bool {
+    match kind {
+        AgentBackendKind::ClaudeCode => Command::new("claude").arg("--version").output().map(|o| o.status.success()).unwrap_or(false),
+        AgentBackendKind::Pi => Command::new("pi").arg("--version").output().map(|o| o.status.success()).unwrap_or(false),
+        AgentBackendKind::LocalLlm => autoreview_core::local_llm_available(&config.agents.local_llm.base_url, "curl"),
+    }
+}
+
+fn build_backend(kind: AgentBackendKind, config: &AutoreviewConfig) -> Box<dyn AgentBackend + Sync> {
+    match kind {
+        AgentBackendKind::ClaudeCode => Box::new(ClaudeCodeBackend::default()),
+        AgentBackendKind::Pi => Box::new(PiBackend { binary: "pi".to_string(), provider: config.agents.pi_provider.clone() }),
+        AgentBackendKind::LocalLlm => Box::new(LocalLlmBackend { base_url: config.agents.local_llm.base_url.clone(), curl_binary: "curl".to_string() }),
+    }
+}
+
+/// The cheap-tier model name to use for a given backend. The local-LLM
+/// backend has exactly one served model (`agents.localLlm.model`) rather
+/// than a cheap/standard/deep alias set — there's no "cheaper" model to fall
+/// back to on a single local server, so it's used for every call regardless
+/// of tier.
+fn cheap_model_for(kind: AgentBackendKind, config: &AutoreviewConfig) -> &str {
+    match kind {
+        AgentBackendKind::LocalLlm => &config.agents.local_llm.model,
+        AgentBackendKind::ClaudeCode | AgentBackendKind::Pi => &config.budgets.models.cheap,
+    }
+}
+
+/// The model to invoke a specialist with. For the local-LLM backend this is
+/// always the one served model, overriding whatever tier-based alias
+/// `plan_review` resolved (Claude Code model aliases like "haiku"/"sonnet"
+/// mean nothing to a local server).
+fn specialist_model_for(kind: AgentBackendKind, config: &AutoreviewConfig, planned_model: &str) -> String {
+    match kind {
+        AgentBackendKind::LocalLlm => config.agents.local_llm.model.clone(),
+        AgentBackendKind::ClaudeCode | AgentBackendKind::Pi => planned_model.to_string(),
+    }
 }
 
 const MAX_INLINE_DIFF_CHARS: usize = 20_000;
@@ -56,13 +108,6 @@ fn diff_context(
     format!("The diff is too large to inline here. Changed files:\n{file_list}\n\nUse Read/Grep to inspect the files you need.")
 }
 
-fn claude_available() -> bool {
-    Command::new("claude")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
 
 /// A short, model-readable summary of Stage-1 findings for a given category,
 /// so specialists know what's already been flagged deterministically and
@@ -98,6 +143,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     let config = load_config(&options.repo_root.join(".autoreview").join("config.yaml"))?;
     let facts = collect_diff_facts(&repo_root_str, &options.base_ref, &options.head_ref, None)?;
     let skills = discover_manifests(&options.repo_root)?;
+    let backend_kind = options.backend.unwrap_or(config.agents.backend);
 
     println!(
         "autoreview diff  ({}...{})\n",
@@ -140,11 +186,11 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     // given and the heuristic score itself landed within the ambiguity band
     // of a tier boundary — the common case never pays for this call.
     let mut classified_tier = None;
-    if options.tier.is_none() && claude_available() {
+    if options.tier.is_none() && backend_available(backend_kind, &config) {
         let (heuristic_score, _) = autoreview_core::score_diff_facts(&facts, &config, stage1_finding_count);
         if let Some((lower, upper)) = autoreview_core::ambiguous_tier_boundary(heuristic_score, &config) {
-            let backend = ClaudeCodeBackend::default();
-            classified_tier = autoreview_core::classify_ambiguous_tier(&backend, &facts, heuristic_score, lower, upper, &config.budgets.models.cheap, &options.repo_root);
+            let backend = build_backend(backend_kind, &config);
+            classified_tier = autoreview_core::classify_ambiguous_tier(backend.as_ref(), &facts, heuristic_score, lower, upper, cheap_model_for(backend_kind, &config), &options.repo_root);
             if let Some(tier) = classified_tier {
                 println!("  [triage] score {heuristic_score:.1} is ambiguous between {lower} and {upper} — classifier picked '{tier}'");
             }
@@ -193,10 +239,10 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
             plan.tier
         );
     } else {
-        // Collected up front (and reported) regardless of whether `claude`
-        // ends up being available, so `autoreview diff` is still useful as a
-        // diagnostic of what context *would* be sent even when specialists
-        // can't run.
+        // Collected up front (and reported) regardless of whether the
+        // selected backend ends up being available, so `autoreview diff` is
+        // still useful as a diagnostic of what context *would* be sent even
+        // when specialists can't run.
         let context_items = collect_context(&options.repo_root, &facts, &config.context.providers);
         println!(
             "  context:        {} item(s){}",
@@ -216,17 +262,19 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         );
         let context_block = render_context_block(&context_items);
 
-        if !claude_available() {
+        if !backend_available(backend_kind, &config) {
             println!(
-                "  [warn] `claude` was not found on PATH — skipping {} planned specialist(s): {}. Run `autoreview doctor` to check required tools.",
+                "  [warn] backend '{}' was not found/reachable — skipping {} planned specialist(s): {}. Run `autoreview doctor` to check required tools.",
+                backend_label(backend_kind),
                 plan.specialists.len(),
                 plan.specialists.iter().map(|s| s.aspect.as_str()).collect::<Vec<_>>().join(", ")
             );
         } else {
             println!(
-                "\n  running {} specialist(s) at tier '{}':",
+                "\n  running {} specialist(s) at tier '{}' via backend '{}':",
                 plan.specialists.len(),
-                plan.tier
+                plan.tier,
+                backend_label(backend_kind)
             );
             let diff_text = diff_context(
                 &options.repo_root,
@@ -234,7 +282,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
                 &options.head_ref,
                 &facts.files,
             );
-            let backend = ClaudeCodeBackend::default();
+            let backend = build_backend(backend_kind, &config);
             let max_concurrency = match plan.tier {
                 Tier::Quick => config.budgets.tiers.quick.max_concurrency,
                 Tier::Standard => config.budgets.tiers.standard.max_concurrency,
@@ -251,7 +299,8 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
                             let context_block = context_block.clone();
                             let stage1_summary =
                                 stage1_summary_for_category(&stage1_findings, &specialist.aspect);
-                            let backend_ref: &(dyn AgentBackend + Sync) = &backend;
+                            let backend_ref: &(dyn AgentBackend + Sync) = backend.as_ref();
+                            let model_override = (backend_kind == AgentBackendKind::LocalLlm).then(|| specialist_model_for(backend_kind, &config, &specialist.model));
                             scope.spawn(move || {
                                 run_one_specialist(
                                     backend_ref,
@@ -261,6 +310,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
                                     &diff_text,
                                     &stage1_summary,
                                     &context_block,
+                                    model_override.as_deref(),
                                 )
                             })
                         })
@@ -317,17 +367,17 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     // look at, so a diff with no high/blocker or noisy-category findings
     // never pays for a judge call it doesn't need.
     let mut verify_suppressed = Vec::new();
-    if plan.tier != Tier::Quick && config.verify.enabled && claude_available() {
+    if plan.tier != Tier::Quick && config.verify.enabled && backend_available(backend_kind, &config) {
         let to_check = autoreview_core::select_for_verification(&findings, &config.verify.noisy_categories).len();
         if to_check > 0 {
             println!("\n  verify:         checking {to_check} finding(s) against the diff...");
             let diff_text = diff_context(&options.repo_root, &options.base_ref, &options.head_ref, &facts.files);
-            let backend = ClaudeCodeBackend::default();
+            let backend = build_backend(backend_kind, &config);
             let verify_result = autoreview_core::run_verify_pass(
-                &backend,
+                backend.as_ref(),
                 findings,
                 &diff_text,
-                &config.budgets.models.cheap,
+                cheap_model_for(backend_kind, &config),
                 4,
                 &options.repo_root,
                 &config.verify.noisy_categories,
@@ -499,6 +549,7 @@ fn run_one_specialist(
     diff_text: &str,
     stage1_summary: &str,
     context_block: &str,
+    model_override: Option<&str>,
 ) -> (String, anyhow::Result<autoreview_core::SpecialistResult>) {
     let aspect = specialist.aspect.clone();
     let result = (|| -> anyhow::Result<autoreview_core::SpecialistResult> {
@@ -525,7 +576,7 @@ fn run_one_specialist(
             system_prompt: compiled.system_prompt,
             allowed_tools,
             max_turns: specialist.max_turns,
-            model: specialist.model.clone(),
+            model: model_override.map(str::to_string).unwrap_or_else(|| specialist.model.clone()),
             cwd: repo_root.to_path_buf(),
         };
 

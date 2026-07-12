@@ -259,7 +259,7 @@ fn clone_request(req: &InvokeRequest) -> InvokeRequest {
     }
 }
 
-fn truncate(s: &str, max_chars: usize) -> String {
+pub(crate) fn truncate(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()
     } else {

@@ -187,6 +187,61 @@ impl Default for BudgetTiers {
     }
 }
 
+/// Which `AgentBackend` implementation drives Stage 3 specialists (and the
+/// Stage 3.5 verify pass / triage classifier, which reuse the same trait).
+/// Per the plan's Milestones: proving the abstraction with a second backend
+/// was originally scoped for M3 ("raw Anthropic API backend, proves the
+/// abstraction") — landed here instead via `pi` and a local-LLM backend,
+/// since the trait was already shaped for exactly this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentBackendKind {
+    #[default]
+    ClaudeCode,
+    Pi,
+    LocalLlm,
+}
+
+fn default_local_llm_base_url() -> String {
+    "http://localhost:8080/v1".to_string()
+}
+fn default_local_llm_model() -> String {
+    "local-model".to_string()
+}
+
+/// Settings for the local-LLM backend — an OpenAI-compatible
+/// `/v1/chat/completions` endpoint, the contract llama.cpp's `llama-server`
+/// exposes (also LM Studio, vLLM). No tool access: see the backend's own
+/// module docs for why.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalLlmConfig {
+    #[serde(default = "default_local_llm_base_url")]
+    pub base_url: String,
+    #[serde(default = "default_local_llm_model")]
+    pub model: String,
+}
+
+impl Default for LocalLlmConfig {
+    fn default() -> Self {
+        Self { base_url: default_local_llm_base_url(), model: default_local_llm_model() }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentsConfig {
+    #[serde(default)]
+    pub backend: AgentBackendKind,
+    /// `--provider` for the `pi` backend, e.g. `"anthropic"` or `"openai"` —
+    /// `None` lets `pi` resolve the bare model id against whatever provider
+    /// is already logged in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pi_provider: Option<String>,
+    #[serde(default)]
+    pub local_llm: LocalLlmConfig,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BudgetsConfig {
@@ -327,6 +382,8 @@ pub struct AutoreviewConfig {
     pub storage: StorageConfig,
     #[serde(default)]
     pub verify: VerifyConfig,
+    #[serde(default)]
+    pub agents: AgentsConfig,
 }
 
 impl Default for AutoreviewConfig {
@@ -337,6 +394,7 @@ impl Default for AutoreviewConfig {
             context: ContextConfig::default(),
             storage: StorageConfig::default(),
             verify: VerifyConfig::default(),
+            agents: AgentsConfig::default(),
         }
     }
 }

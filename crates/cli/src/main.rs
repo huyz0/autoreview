@@ -3,7 +3,7 @@ mod render;
 
 use clap::{Parser, Subcommand};
 
-use autoreview_schema::Tier;
+use autoreview_schema::{AgentBackendKind, Tier};
 use commands::apply::run_apply;
 use commands::diff::{run_diff, DiffCommandOptions};
 use commands::doctor::run_doctor;
@@ -37,6 +37,9 @@ enum Commands {
         /// Suppress findings whose fingerprint was already reported in the most recent prior run on this repo
         #[arg(long)]
         incremental: bool,
+        /// Which agent backend drives specialists: claude-code (default), pi, or local-llm
+        #[arg(long)]
+        backend: Option<String>,
     },
     /// Apply a finding's suggested patch, gated by a `git apply --check` sanity check
     Apply { finding_id: String },
@@ -104,6 +107,18 @@ fn parse_tier(s: &str) -> Option<Tier> {
     }
 }
 
+fn parse_backend(s: &str) -> Option<AgentBackendKind> {
+    match s {
+        "claude-code" => Some(AgentBackendKind::ClaudeCode),
+        "pi" => Some(AgentBackendKind::Pi),
+        "local-llm" => Some(AgentBackendKind::LocalLlm),
+        _ => {
+            eprintln!("warning: unrecognized --backend '{s}', ignoring override");
+            None
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let repo_root = std::env::current_dir()?;
@@ -112,7 +127,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Doctor => {
             run_doctor(&repo_root);
         }
-        Commands::Diff { base, head, tier, aspects, max_usd, incremental } => {
+        Commands::Diff { base, head, tier, aspects, max_usd, incremental, backend } => {
             run_diff(DiffCommandOptions {
                 repo_root,
                 base_ref: base,
@@ -121,6 +136,7 @@ fn main() -> anyhow::Result<()> {
                 aspects: aspects.map(|a| a.split(',').map(|s| s.to_string()).collect()),
                 max_usd,
                 incremental,
+                backend: backend.and_then(|b| parse_backend(&b)),
             })?;
         }
         Commands::Apply { finding_id } => run_apply(&repo_root, &finding_id)?,
