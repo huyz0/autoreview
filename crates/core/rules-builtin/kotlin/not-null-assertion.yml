@@ -1,5 +1,6 @@
 id: kotlin-avoid-not-null-assertion
 language: Kotlin
+category: correctness
 severity: warning
 message: Avoid the !! not-null assertion operator — it throws an NPE with no context on failure. Prefer a safe call (?.), an explicit null check, or requireNotNull() with a message.
 rule:

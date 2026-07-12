@@ -1,5 +1,6 @@
 id: java-self-comparison
 language: Java
+category: correctness
 severity: warning
 message: Comparing a value to itself is always true (or always false for NaN-like cases); this looks like a mistake.
 rule:

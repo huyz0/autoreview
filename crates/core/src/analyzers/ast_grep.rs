@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 
 use include_dir::{include_dir, Dir};
+use serde::Deserialize;
 
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
@@ -9,6 +11,51 @@ use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location
 /// builtin skills are: a single binary shouldn't need a side-car data
 /// directory installed next to it to have any deterministic coverage at all.
 static BUILTIN_RULES: Dir = include_dir!("$CARGO_MANIFEST_DIR/rules-builtin");
+
+fn default_category() -> String {
+    "correctness".to_string()
+}
+
+/// Just enough of the rule YAML shape to recover `category` — a field
+/// `ast-grep` itself doesn't understand (verified empirically: it neither
+/// errors on the unrecognized top-level key nor echoes a `metadata` block
+/// back in `--json` scan output, so category can't flow through ast-grep's
+/// own pipeline at all). Parsed directly from the embedded rule files
+/// ourselves, independent of the ast-grep invocation.
+#[derive(Debug, Deserialize)]
+struct RuleCategoryMeta {
+    id: String,
+    #[serde(default = "default_category")]
+    category: String,
+}
+
+/// Builds a `ruleId -> category` lookup by parsing every embedded rule file
+/// for just its `id`/`category` fields. Rules that fail to parse (shouldn't
+/// happen for our own builtin files, but this must never be the reason a
+/// whole scan fails) are silently skipped — their findings fall back to the
+/// default category via `unwrap_or`.
+fn rule_categories() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    collect_rule_categories(&BUILTIN_RULES, &mut map);
+    map
+}
+
+fn collect_rule_categories(dir: &Dir, map: &mut HashMap<String, String>) {
+    for file in dir.files() {
+        let is_yaml = file.path().extension().is_some_and(|ext| ext == "yml" || ext == "yaml");
+        if !is_yaml {
+            continue;
+        }
+        if let Some(contents) = file.contents_utf8() {
+            if let Ok(meta) = serde_yaml::from_str::<RuleCategoryMeta>(contents) {
+                map.insert(meta.id, meta.category);
+            }
+        }
+    }
+    for subdir in dir.dirs() {
+        collect_rule_categories(subdir, map);
+    }
+}
 
 const SOURCE_EXTENSIONS: &[&str] = &["go", "java", "kt", "kts"];
 
@@ -82,15 +129,17 @@ pub fn run_ast_grep(repo_root: &Path, changed_files: &[String]) -> anyhow::Resul
         }
     };
 
-    Ok(matches.iter().filter_map(match_to_finding).collect())
+    let categories = rule_categories();
+    Ok(matches.iter().filter_map(|m| match_to_finding(m, &categories)).collect())
 }
 
-fn match_to_finding(m: &serde_json::Value) -> Option<AgentFinding> {
+fn match_to_finding(m: &serde_json::Value, categories: &HashMap<String, String>) -> Option<AgentFinding> {
     let rule_id = m.get("ruleId")?.as_str()?.to_string();
     let file = m.get("file")?.as_str()?.to_string();
     let message = m.get("message").and_then(|v| v.as_str()).unwrap_or("(no message provided by rule)").to_string();
     let severity = map_severity(m.get("severity").and_then(|v| v.as_str()).unwrap_or("warning"));
     let snippet = m.get("lines").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let category = categories.get(&rule_id).cloned().unwrap_or_else(default_category);
 
     let range = m.get("range")?;
     // ast-grep reports 0-indexed line/column; our schema is 1-indexed to
@@ -102,10 +151,7 @@ fn match_to_finding(m: &serde_json::Value) -> Option<AgentFinding> {
 
     Some(AgentFinding {
         source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "ast-grep".to_string(), rule_id: Some(rule_id.clone()), aspect: None, backend: None },
-        // All builtin rules today are narrow correctness patterns; per-rule
-        // category metadata (security/style/etc) is a reasonable M2 addition
-        // once the rule pack grows beyond that.
-        category: "correctness".to_string(),
+        category,
         severity,
         confidence: 1.0,
         title: title_from_rule_id(&rule_id),
@@ -189,6 +235,7 @@ mod tests {
         assert_eq!(finding.source.rule_id.as_deref(), Some("go-no-self-comparison"));
         assert_eq!(finding.source.tool, "ast-grep");
         assert_eq!(finding.confidence, 1.0);
+        assert_eq!(finding.category, "correctness");
         assert_eq!(finding.location.path, "main.go");
         assert_eq!(finding.location.range.start_line, 4); // 1-indexed: line 4 is "if true == true {"
     }
@@ -252,5 +299,28 @@ mod tests {
     #[test]
     fn title_from_rule_id_is_human_readable() {
         assert_eq!(title_from_rule_id("go-no-self-comparison"), "Go No Self Comparison");
+    }
+
+    #[test]
+    fn rule_categories_reads_the_declared_category_for_every_builtin_rule() {
+        let categories = rule_categories();
+        assert_eq!(categories.get("go-no-self-comparison").map(String::as_str), Some("correctness"));
+        assert_eq!(categories.get("kotlin-avoid-not-null-assertion").map(String::as_str), Some("correctness"));
+        assert_eq!(categories.len(), 6, "expected exactly the 6 builtin rules to declare a category: {categories:?}");
+    }
+
+    #[test]
+    fn a_rule_with_no_declared_category_falls_back_to_correctness() {
+        let categories: HashMap<String, String> = HashMap::new();
+        let m = serde_json::json!({
+            "ruleId": "some-undeclared-rule",
+            "file": "a.go",
+            "message": "m",
+            "severity": "warning",
+            "lines": "x",
+            "range": {"start": {"line": 0, "column": 0}, "end": {"line": 0, "column": 1}}
+        });
+        let finding = match_to_finding(&m, &categories).unwrap();
+        assert_eq!(finding.category, "correctness");
     }
 }

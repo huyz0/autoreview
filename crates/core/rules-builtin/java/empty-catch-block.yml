@@ -1,5 +1,6 @@
 id: java-empty-catch-block
 language: Java
+category: correctness
 severity: warning
 message: Empty catch block silently swallows the exception — at minimum, log it or add a comment explaining why it's safe to ignore.
 rule:
