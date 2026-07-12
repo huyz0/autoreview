@@ -136,8 +136,24 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         .collect();
     println!("  stage 1:        {stage1_finding_count} deterministic finding(s) (ast-grep + golangci-lint + duplication)");
 
+    // LLM triage classifier (M2): only consulted when no explicit --tier was
+    // given and the heuristic score itself landed within the ambiguity band
+    // of a tier boundary — the common case never pays for this call.
+    let mut classified_tier = None;
+    if options.tier.is_none() && claude_available() {
+        let (heuristic_score, _) = autoreview_core::score_diff_facts(&facts, &config, stage1_finding_count);
+        if let Some((lower, upper)) = autoreview_core::ambiguous_tier_boundary(heuristic_score, &config) {
+            let backend = ClaudeCodeBackend::default();
+            classified_tier = autoreview_core::classify_ambiguous_tier(&backend, &facts, heuristic_score, lower, upper, &config.budgets.models.cheap, &options.repo_root);
+            if let Some(tier) = classified_tier {
+                println!("  [triage] score {heuristic_score:.1} is ambiguous between {lower} and {upper} — classifier picked '{tier}'");
+            }
+        }
+    }
+
     let overrides = PlanOverrides {
         tier: options.tier,
+        classified_tier,
         aspects: options.aspects.clone(),
         max_usd: options.max_usd,
     };

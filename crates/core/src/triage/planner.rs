@@ -91,6 +91,32 @@ pub fn score_diff_facts(facts: &DiffFacts, config: &AutoreviewConfig, analyzer_f
     (score, signals)
 }
 
+/// A score within this many points of a tier boundary is ambiguous enough
+/// that the heuristic's own confidence is low — the LLM triage classifier
+/// (M2) only ever gets consulted inside this band, per the plan: "Optional
+/// cheap-LLM classifier only within an ambiguity band, never exceeding
+/// budget ceiling." Outside the band, the heuristic alone decides.
+pub const AMBIGUITY_BAND: f64 = 5.0;
+
+/// Returns the two tiers in contention if `score` falls within
+/// `AMBIGUITY_BAND` of a configured tier boundary, else `None`. The caller
+/// (not this pure function) decides whether to actually spend a cheap-model
+/// call resolving the ambiguity.
+pub fn ambiguous_tier_boundary(score: f64, config: &AutoreviewConfig) -> Option<(Tier, Tier)> {
+    let tiers = &config.triage.tiers;
+    if let Some(quick_max) = tiers.quick.max_score {
+        if (score - quick_max).abs() <= AMBIGUITY_BAND {
+            return Some((Tier::Quick, Tier::Standard));
+        }
+    }
+    if let Some(standard_max) = tiers.standard.max_score {
+        if (score - standard_max).abs() <= AMBIGUITY_BAND {
+            return Some((Tier::Standard, Tier::Deep));
+        }
+    }
+    None
+}
+
 pub fn tier_for_score(score: f64, config: &AutoreviewConfig) -> Tier {
     let tiers = &config.triage.tiers;
     if let Some(max) = tiers.quick.max_score {
@@ -137,13 +163,18 @@ fn skill_matches_trigger(skill: &SkillManifest, facts: &DiffFacts, signal_names:
 #[derive(Debug, Default, Clone)]
 pub struct PlanOverrides {
     pub tier: Option<Tier>,
+    /// A tier suggested by the LLM ambiguity-band classifier (M2) — distinct
+    /// from `tier` (an explicit `--tier` CLI flag) so the report's
+    /// `overrides` transparency labels can tell a user's decision apart from
+    /// a model's. Only ever consulted when `tier` is `None`.
+    pub classified_tier: Option<Tier>,
     pub aspects: Option<Vec<String>>,
     pub max_usd: Option<f64>,
 }
 
 pub fn plan_review(facts: &DiffFacts, config: &AutoreviewConfig, skills: &[SkillManifest], analyzer_finding_count: usize, overrides: PlanOverrides) -> ReviewPlan {
     let (score, signals) = score_diff_facts(facts, config, analyzer_finding_count);
-    let tier = overrides.tier.unwrap_or_else(|| tier_for_score(score, config));
+    let tier = overrides.tier.or(overrides.classified_tier).unwrap_or_else(|| tier_for_score(score, config));
     let signal_names: Vec<String> = signals.iter().map(|s| s.signal.clone()).collect();
 
     let budget = match tier {
@@ -180,6 +211,8 @@ pub fn plan_review(facts: &DiffFacts, config: &AutoreviewConfig, skills: &[Skill
     let mut override_labels = Vec::new();
     if let Some(t) = overrides.tier {
         override_labels.push(format!("--tier={t}"));
+    } else if let Some(t) = overrides.classified_tier {
+        override_labels.push(format!("classifier:tier={t}"));
     }
     if let Some(aspects) = &overrides.aspects {
         override_labels.push(format!("--aspects={}", aspects.join(",")));
@@ -368,5 +401,45 @@ mod tests {
         let plan = plan_review(&facts, &config, &[], 0, PlanOverrides { tier: Some(Tier::Deep), max_usd: Some(2.0), ..Default::default() });
         assert!(plan.overrides.contains(&"--tier=deep".to_string()));
         assert!(plan.overrides.contains(&"--max-usd=2".to_string()));
+    }
+
+    #[test]
+    fn ambiguous_tier_boundary_is_none_far_from_any_boundary() {
+        let config = AutoreviewConfig::default(); // quick max 20, standard max 60
+        assert_eq!(ambiguous_tier_boundary(5.0, &config), None);
+        assert_eq!(ambiguous_tier_boundary(40.0, &config), None);
+    }
+
+    #[test]
+    fn ambiguous_tier_boundary_detects_the_quick_standard_boundary() {
+        let config = AutoreviewConfig::default();
+        assert_eq!(ambiguous_tier_boundary(18.0, &config), Some((Tier::Quick, Tier::Standard)));
+        assert_eq!(ambiguous_tier_boundary(23.0, &config), Some((Tier::Quick, Tier::Standard)));
+    }
+
+    #[test]
+    fn ambiguous_tier_boundary_detects_the_standard_deep_boundary() {
+        let config = AutoreviewConfig::default();
+        assert_eq!(ambiguous_tier_boundary(58.0, &config), Some((Tier::Standard, Tier::Deep)));
+        assert_eq!(ambiguous_tier_boundary(63.0, &config), Some((Tier::Standard, Tier::Deep)));
+    }
+
+    #[test]
+    fn classified_tier_override_is_used_when_no_explicit_tier_override_is_set() {
+        let config = AutoreviewConfig::default();
+        let facts = make_facts(|_| {});
+        let plan = plan_review(&facts, &config, &[], 0, PlanOverrides { classified_tier: Some(Tier::Deep), ..Default::default() });
+        assert_eq!(plan.tier, Tier::Deep);
+        assert!(plan.overrides.contains(&"classifier:tier=deep".to_string()));
+    }
+
+    #[test]
+    fn explicit_tier_override_wins_over_classified_tier() {
+        let config = AutoreviewConfig::default();
+        let facts = make_facts(|_| {});
+        let plan = plan_review(&facts, &config, &[], 0, PlanOverrides { tier: Some(Tier::Quick), classified_tier: Some(Tier::Deep), ..Default::default() });
+        assert_eq!(plan.tier, Tier::Quick);
+        assert!(plan.overrides.contains(&"--tier=quick".to_string()));
+        assert!(!plan.overrides.iter().any(|o| o.starts_with("classifier:")));
     }
 }
