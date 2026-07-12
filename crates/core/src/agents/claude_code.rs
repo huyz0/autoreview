@@ -10,12 +10,23 @@ use super::contract::parse_agent_output;
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// The actual dollar cost Anthropic computed for this invocation
+    /// (`total_cost_usd` on the final `result` event — verified against a
+    /// real invocation) — a real number, not derived from token counts,
+    /// since token-only accounting misses cache read/write pricing.
+    pub usd: Option<f64>,
 }
 
 impl Usage {
     fn add(&mut self, other: &Usage) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
+        self.usd = match (self.usd, other.usd) {
+            (Some(a), Some(b)) => Some(a + b),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
     }
 }
 
@@ -34,18 +45,44 @@ pub struct InvokeResult {
     pub wall_ms: u64,
 }
 
-/// Parses `claude -p --output-format stream-json` output: one JSON object per
-/// line. NOTE: the exact event shape (event `type` values, where the final
-/// text and usage numbers live) is a moving target across Claude Code
-/// versions and hasn't been verified against a live invocation in this
-/// environment — this parser is deliberately defensive rather than strict:
-/// it scans every line for a `usage` object (summing across events, so an
-/// undercounted single "source of truth" event still doesn't silently lose
-/// tokens) and keeps the last non-empty text it can find from either an
-/// assistant message's content or a terminal `result` field. Re-validate
-/// this against `claude --version`'s actual output before trusting the cost
-/// accounting in production — this is exactly the risk the plan calls out
-/// ("Claude Code headless flags move — isolate assumptions in claude_code.rs").
+/// On a non-zero exit (verified against a real `claude` invocation that hit
+/// `error_max_turns`), the error detail lives in stdout's final `result`
+/// event's `errors` array — stderr is empty. Scans stdout for that event and
+/// joins its `errors`, falling back to `None` if the shape doesn't match so
+/// the caller can fall back to stderr/a generic message instead of silently
+/// losing the failure reason.
+fn extract_error_detail(stdout: &str) -> Option<String> {
+    for line in stdout.lines().rev() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if value.get("type").and_then(|v| v.as_str()) != Some("result") {
+            continue;
+        }
+        if let Some(errors) = value.get("errors").and_then(|v| v.as_array()) {
+            let joined: Vec<String> = errors.iter().filter_map(|e| e.as_str().map(str::to_string)).collect();
+            if !joined.is_empty() {
+                return Some(joined.join("; "));
+            }
+        }
+        return value.get("subtype").and_then(|v| v.as_str()).map(str::to_string);
+    }
+    None
+}
+
+/// Parses `claude -p --output-format stream-json --verbose` output: one JSON
+/// object per line. Verified against real `claude` 2.1.207 transcripts (both
+/// `--verbose` is required for this mode — omitting it hard-errors — and the
+/// shapes below are the actual ones observed, not assumptions): assistant
+/// events nest `usage` inside `message` (not top-level), so this parser's
+/// top-level-only `usage` scan naturally skips them and picks up only the
+/// final `result` event's usage, which is the authoritative run total — not
+/// a coincidence to rely on blindly, but confirmed correct against a live
+/// run rather than merely plausible. `total_cost_usd` (the real dollar cost
+/// Anthropic computed, not a token-count estimate) also lives only on that
+/// same `result` event.
 pub fn parse_stream_json(stdout: &str) -> (String, Usage) {
     let mut usage = Usage::default();
     let mut last_text = String::new();
@@ -62,7 +99,8 @@ pub fn parse_stream_json(stdout: &str) -> (String, Usage) {
         if let Some(usage_obj) = value.get("usage") {
             let input = usage_obj.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
             let output = usage_obj.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            usage.add(&Usage { input_tokens: input, output_tokens: output });
+            let usd = value.get("total_cost_usd").and_then(|v| v.as_f64());
+            usage.add(&Usage { input_tokens: input, output_tokens: output, usd });
         }
 
         if let Some(result) = value.get("result").and_then(|v| v.as_str()) {
@@ -118,16 +156,23 @@ impl AgentBackend for ClaudeCodeBackend {
             .arg(&req.model)
             .arg("--output-format")
             .arg("stream-json")
+            // Verified against a real `claude` 2.1.207 invocation: `-p` with
+            // `--output-format stream-json` hard-errors ("requires
+            // --verbose") without this flag — it's not optional chattiness,
+            // it's a required companion flag for this exact mode.
+            .arg("--verbose")
             .current_dir(&req.cwd)
             .output()?;
 
         let wall_ms = start.elapsed().as_millis() as u64;
 
+        let stdout = String::from_utf8_lossy(&output.stdout);
         if !output.status.success() {
-            anyhow::bail!("claude exited with error: {}", String::from_utf8_lossy(&output.stderr));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = extract_error_detail(&stdout).or_else(|| (!stderr.trim().is_empty()).then(|| stderr.trim().to_string())).unwrap_or_else(|| "(no error detail captured)".to_string());
+            anyhow::bail!("claude exited with error: {detail}");
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
         let (final_text, usage) = parse_stream_json(&stdout);
         Ok(InvokeResult { final_text, usage, wall_ms })
     }
@@ -226,6 +271,49 @@ fn truncate(s: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn parse_stream_json_matches_a_real_claude_2_1_207_success_transcript() {
+        // Captured from a live `claude -p ... --output-format stream-json
+        // --verbose` invocation. Assistant events nest usage inside
+        // "message" (not top-level) and include a "thinking" content block
+        // with no "text" field — both real shapes a naive parser could trip
+        // on. Only the final "result" event has a top-level "usage", which
+        // is the authoritative total; per-message usage must not be
+        // double-counted on top of it.
+        let stdout = r#"{"type":"system","subtype":"init","session_id":"a"}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"thinking","thinking":"let me think"}],"usage":{"input_tokens":10,"output_tokens":4}}}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"```json\n{\"findings\": []}\n```"}],"usage":{"input_tokens":10,"output_tokens":4}}}
+{"type":"result","subtype":"success","is_error":false,"result":"```json\n{\"findings\": []}\n```","usage":{"input_tokens":10,"output_tokens":113}}
+"#;
+        let (text, usage) = parse_stream_json(stdout);
+        assert_eq!(usage.input_tokens, 10, "should reflect only the result event's authoritative total, not the nested per-message usage summed on top");
+        assert_eq!(usage.output_tokens, 113);
+        assert!(text.contains("findings"));
+    }
+
+    #[test]
+    fn extract_error_detail_reads_the_errors_array_from_a_real_max_turns_transcript() {
+        // Captured from a live invocation that hit error_max_turns: exit
+        // code 1, empty stderr, the actual reason living in stdout's final
+        // result event's "errors" array.
+        let stdout = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}
+{"type":"result","subtype":"error_max_turns","is_error":true,"errors":["Reached maximum number of turns (1)"]}
+"#;
+        assert_eq!(extract_error_detail(stdout).as_deref(), Some("Reached maximum number of turns (1)"));
+    }
+
+    #[test]
+    fn extract_error_detail_falls_back_to_subtype_when_no_errors_array() {
+        let stdout = r#"{"type":"result","subtype":"error_during_execution","is_error":true}"#;
+        assert_eq!(extract_error_detail(stdout).as_deref(), Some("error_during_execution"));
+    }
+
+    #[test]
+    fn extract_error_detail_returns_none_for_output_with_no_result_event() {
+        let stdout = r#"{"type":"system","subtype":"init"}"#;
+        assert_eq!(extract_error_detail(stdout), None);
+    }
 
     #[test]
     fn parse_stream_json_accumulates_usage_across_events() {

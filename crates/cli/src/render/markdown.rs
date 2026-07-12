@@ -65,8 +65,9 @@ pub fn render_markdown(report: &ReviewReport) -> String {
         report.target.diff_stats.files, report.target.diff_stats.additions, report.target.diff_stats.deletions
     ));
     if report.costs.total.input_tokens > 0 || report.costs.total.output_tokens > 0 {
+        let usd = report.costs.total.usd.map(|u| format!(", ${u:.4}")).unwrap_or_default();
         out.push_str(&format!(
-            "- **Cost:** {} input / {} output tokens, {}ms wall time\n",
+            "- **Cost:** {} input / {} output tokens, {}ms wall time{usd}\n",
             report.costs.total.input_tokens, report.costs.total.output_tokens, report.costs.total.wall_ms
         ));
     }

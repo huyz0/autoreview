@@ -184,6 +184,8 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     let mut total_input_tokens = 0u64;
     let mut total_output_tokens = 0u64;
     let mut total_wall_ms = 0u64;
+    let mut total_usd = 0.0f64;
+    let mut any_usd_reported = false;
 
     if plan.specialists.is_empty() {
         println!(
@@ -275,12 +277,16 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
                             total_input_tokens += specialist_result.usage.input_tokens;
                             total_output_tokens += specialist_result.usage.output_tokens;
                             total_wall_ms += specialist_result.wall_ms;
+                            if let Some(usd) = specialist_result.usage.usd {
+                                total_usd += usd;
+                                any_usd_reported = true;
+                            }
                             per_stage_costs.insert(
                                 format!("agent:{aspect}"),
                                 CostEntry {
                                     input_tokens: specialist_result.usage.input_tokens,
                                     output_tokens: specialist_result.usage.output_tokens,
-                                    usd: None,
+                                    usd: specialist_result.usage.usd,
                                     wall_ms: specialist_result.wall_ms,
                                 },
                             );
@@ -336,9 +342,13 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
             total_input_tokens += verify_result.usage.input_tokens;
             total_output_tokens += verify_result.usage.output_tokens;
             total_wall_ms += verify_result.wall_ms;
+            if let Some(usd) = verify_result.usage.usd {
+                total_usd += usd;
+                any_usd_reported = true;
+            }
             per_stage_costs.insert(
                 "verify".to_string(),
-                CostEntry { input_tokens: verify_result.usage.input_tokens, output_tokens: verify_result.usage.output_tokens, usd: None, wall_ms: verify_result.wall_ms },
+                CostEntry { input_tokens: verify_result.usage.input_tokens, output_tokens: verify_result.usage.output_tokens, usd: verify_result.usage.usd, wall_ms: verify_result.wall_ms },
             );
             verify_suppressed = verify_result.suppressed;
         }
@@ -435,7 +445,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
             total: CostEntry {
                 input_tokens: total_input_tokens,
                 output_tokens: total_output_tokens,
-                usd: None,
+                usd: any_usd_reported.then_some(total_usd),
                 wall_ms: total_wall_ms,
             },
             per_stage: per_stage_costs,
