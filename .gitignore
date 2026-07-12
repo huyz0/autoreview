@@ -1,0 +1,5 @@
+/target
+.autoreview/runs/
+.autoreview/history.db
+# Manual smoke-test scratch repo — not read by any test, regenerate locally if needed.
+/fixtures/tiny-diff

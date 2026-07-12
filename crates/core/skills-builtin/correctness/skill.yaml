@@ -1,0 +1,13 @@
+id: correctness
+title: Correctness review
+version: 0.1.0
+categories: [correctness]
+languages: ["*"]
+triggers:
+  always: true
+costClass: moderate
+tools:
+  read: true
+  grep: true
+  bash: ["git log", "git diff", "git blame"]
+outputContract: findings-json-v1

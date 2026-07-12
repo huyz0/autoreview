@@ -1,0 +1,13 @@
+id: design
+title: Design review
+version: 0.1.0
+categories: [design, architecture]
+languages: ["*"]
+triggers:
+  always: true
+costClass: moderate
+tools:
+  read: true
+  grep: true
+  bash: ["git log", "git diff"]
+outputContract: findings-json-v1

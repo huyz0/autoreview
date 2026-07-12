@@ -1,0 +1,8 @@
+[package]
+name = "autoreview-test-support"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+tempfile = "3"

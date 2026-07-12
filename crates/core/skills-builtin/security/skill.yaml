@@ -1,0 +1,19 @@
+id: security
+title: Security review
+version: 0.1.0
+categories: [security]
+languages: ["*"]
+triggers:
+  globs:
+    - "**/auth*/**"
+    - "**/crypto*/**"
+    - "**/*secret*"
+    - "**/payment*/**"
+    - "**/migration*/**"
+  signals: [sensitivePathHit, dependencyChange]
+costClass: expensive
+tools:
+  read: true
+  grep: true
+  bash: ["git log", "git diff"]
+outputContract: findings-json-v1

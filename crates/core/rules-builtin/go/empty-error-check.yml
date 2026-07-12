@@ -1,0 +1,12 @@
+id: go-empty-error-check
+language: Go
+severity: warning
+message: An error is checked but the handling block is empty — the error is silently swallowed instead of being handled, logged, or returned.
+rule:
+  any:
+    - pattern: |
+        if $ERR != nil {
+        }
+    - pattern: |
+        if $INIT; $ERR != nil {
+        }

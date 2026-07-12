@@ -1,0 +1,6 @@
+id: go-no-self-comparison
+language: Go
+severity: warning
+message: Comparing a value to itself is always true; this looks like a mistake (perhaps a typo for a different variable).
+rule:
+  pattern: $A == $A
