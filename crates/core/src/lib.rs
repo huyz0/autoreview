@@ -12,6 +12,7 @@ pub use agents::claude_code::*;
 pub use agents::contract::*;
 pub use analyzers::ast_grep::run_ast_grep;
 pub use analyzers::golangci_lint::run_golangci_lint;
+pub use analyzers::sarif::{ingest_sarif_file, parse_sarif_document};
 pub use config::load_config;
 pub use context::{collect_context, render_context_block, ContextItem};
 pub use report::*;
