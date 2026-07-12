@@ -4,7 +4,7 @@ use std::process::Command;
 
 use autoreview_core::{
     append_event_log, assign_fingerprints, collect_context, collect_diff_facts, compile_skill,
-    dedupe_exact, discover_manifests, events_from_report, load_config, plan_review,
+    dedupe_exact, dedupe_fuzzy, discover_manifests, events_from_report, load_config, plan_review,
     render_context_block, run_ast_grep, run_golangci_lint, run_specialist, to_finding,
     AgentBackend, ClaudeCodeBackend, HistoryStore, InvokeRequest, PlanOverrides, SpecialistStatus,
 };
@@ -326,7 +326,13 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         }
     }
 
-    let mut dedupe_result = dedupe_exact(findings);
+    let exact_result = dedupe_exact(findings);
+    // Fuzzy dedupe runs second, over what exact dedupe left behind — it's
+    // the one that catches a Stage-1 analyzer and a Stage-3 specialist
+    // independently flagging the same underlying issue with different rule
+    // keys/wording, which exact fingerprint matching structurally can't see.
+    let mut dedupe_result = dedupe_fuzzy(exact_result.findings, 3, 0.55);
+    dedupe_result.suppressed.extend(exact_result.suppressed);
     dedupe_result.suppressed.extend(verify_suppressed);
     if !dedupe_result.suppressed.is_empty() {
         println!(
