@@ -111,6 +111,8 @@ fn empty_config_document_parses_to_full_working_defaults() {
     assert_eq!(config.budgets.tiers.deep.max_agents, 6);
     assert!(config.triage.sensitive_paths.iter().any(|p| p == "**/auth*/**"), "sensitive path defaults should include the auth*/** directory form, not just the auth* leaf form");
     assert_eq!(config.storage.fp_block_threshold, 3);
+    assert!(config.verify.enabled);
+    assert_eq!(config.verify.noisy_categories, vec!["style".to_string()]);
 }
 
 #[test]

@@ -6,6 +6,7 @@ pub mod report;
 pub mod skills;
 pub mod storage;
 pub mod triage;
+pub mod verify;
 
 pub use agents::claude_code::*;
 pub use agents::contract::*;
@@ -17,3 +18,4 @@ pub use report::*;
 pub use skills::{compile_skill, discover_manifests, CompiledSkill};
 pub use storage::{append_event_log, events_from_report, feedback_event, EventRecord, FindingLookup, HistoryStore};
 pub use triage::*;
+pub use verify::{run_verify_pass, select_for_verification, verify_finding, VerifyPassResult, VerifyResult};

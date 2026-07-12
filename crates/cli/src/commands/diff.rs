@@ -288,10 +288,49 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         }
     }
 
-    let dedupe_result = dedupe_exact(findings);
+    // Stage 3.5: verify pass. Budget-gated (skipped entirely in quick tier,
+    // per the plan) and skipped when there's nothing this pass would even
+    // look at, so a diff with no high/blocker or noisy-category findings
+    // never pays for a judge call it doesn't need.
+    let mut verify_suppressed = Vec::new();
+    if plan.tier != Tier::Quick && config.verify.enabled && claude_available() {
+        let to_check = autoreview_core::select_for_verification(&findings, &config.verify.noisy_categories).len();
+        if to_check > 0 {
+            println!("\n  verify:         checking {to_check} finding(s) against the diff...");
+            let diff_text = diff_context(&options.repo_root, &options.base_ref, &options.head_ref, &facts.files);
+            let backend = ClaudeCodeBackend::default();
+            let verify_result = autoreview_core::run_verify_pass(
+                &backend,
+                findings,
+                &diff_text,
+                &config.budgets.models.cheap,
+                4,
+                &options.repo_root,
+                &config.verify.noisy_categories,
+            );
+            findings = verify_result.kept;
+            if !verify_result.suppressed.is_empty() {
+                println!("  [verify] refuted {} finding(s):", verify_result.suppressed.len());
+                for s in &verify_result.suppressed {
+                    println!("    - {} ({})", s.finding.title, s.finding.location.path);
+                }
+            }
+            total_input_tokens += verify_result.usage.input_tokens;
+            total_output_tokens += verify_result.usage.output_tokens;
+            total_wall_ms += verify_result.wall_ms;
+            per_stage_costs.insert(
+                "verify".to_string(),
+                CostEntry { input_tokens: verify_result.usage.input_tokens, output_tokens: verify_result.usage.output_tokens, usd: None, wall_ms: verify_result.wall_ms },
+            );
+            verify_suppressed = verify_result.suppressed;
+        }
+    }
+
+    let mut dedupe_result = dedupe_exact(findings);
+    dedupe_result.suppressed.extend(verify_suppressed);
     if !dedupe_result.suppressed.is_empty() {
         println!(
-            "\n  [dedupe] suppressed {} duplicate finding(s)",
+            "\n  [dedupe] suppressed {} duplicate/refuted finding(s)",
             dedupe_result.suppressed.len()
         );
     }

@@ -85,6 +85,10 @@ pub enum SuppressedReason {
     BelowConfidence,
     ShadowRule,
     EmbeddingFpMatch,
+    /// The Stage-3.5 verify pass judged this finding against the diff and
+    /// voted to refute it — see the plan's "grounded generation + separate
+    /// judge" section.
+    Refuted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -283,6 +283,37 @@ impl Default for StorageConfig {
     }
 }
 
+fn default_noisy_categories() -> Vec<String> {
+    vec!["style".to_string()]
+}
+
+/// Config for the Stage-3.5 judge pass (see the plan's prior-art research
+/// section: a separate verifier over generated findings measurably beats
+/// generation alone at killing false positives). Skipped entirely in `quick`
+/// tier by the caller — this only configures *which* findings get judged
+/// when the pass does run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Analyzer categories with a known false-positive history worth a
+    /// second look; agent findings at high/blocker severity are always
+    /// verified regardless of category.
+    #[serde(default = "default_noisy_categories")]
+    pub noisy_categories: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for VerifyConfig {
+    fn default() -> Self {
+        Self { enabled: true, noisy_categories: default_noisy_categories() }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoreviewConfig {
@@ -294,6 +325,8 @@ pub struct AutoreviewConfig {
     pub context: ContextConfig,
     #[serde(default)]
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub verify: VerifyConfig,
 }
 
 impl Default for AutoreviewConfig {
@@ -303,6 +336,7 @@ impl Default for AutoreviewConfig {
             budgets: BudgetsConfig::default(),
             context: ContextConfig::default(),
             storage: StorageConfig::default(),
+            verify: VerifyConfig::default(),
         }
     }
 }
