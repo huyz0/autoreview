@@ -442,6 +442,10 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     std::fs::write(&sarif_path, crate::render::render_sarif(&report))?;
     println!("  sarif written:  {}", sarif_path.display());
 
+    let index_path = run_dir.join("index.md");
+    std::fs::write(&index_path, crate::render::render_index(&report))?;
+    println!("  index written:  {}", index_path.display());
+
     // Storage write path (M1 scope, per the plan): append this run's findings
     // to the local event log and index them in SQLite. Both are best-effort —
     // a failure here must never take down an otherwise-successful review.

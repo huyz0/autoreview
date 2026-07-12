@@ -257,6 +257,12 @@ fn diff_also_writes_a_markdown_report_alongside_the_json_one() {
     let sarif: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&sarif_path).unwrap()).unwrap();
     assert_eq!(sarif["version"], "2.1.0");
     assert_eq!(sarif["runs"][0]["tool"]["driver"]["name"], "autoreview");
+
+    let index_path = json_path.parent().unwrap().join("index.md");
+    assert!(index_path.exists(), "expected index.md alongside report.json at {}", index_path.display());
+    let index = std::fs::read_to_string(&index_path).unwrap();
+    assert!(index.contains("# Review Index"));
+    assert!(index.contains("No findings."));
 }
 
 #[test]

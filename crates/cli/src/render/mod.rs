@@ -1,6 +1,8 @@
+pub mod index;
 pub mod markdown;
 pub mod sarif;
 
+pub use index::render_index;
 pub use markdown::render_markdown;
 pub use sarif::render_sarif;
 
