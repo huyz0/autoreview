@@ -8,8 +8,8 @@ use commands::apply::run_apply;
 use commands::diff::{run_diff, DiffCommandOptions};
 use commands::doctor::run_doctor;
 use commands::feedback::run_feedback;
-use commands::rules::{run_rules_bench, run_rules_mine, run_rules_shadow_log};
-use commands::skills::{run_skills_list, run_skills_mine, run_skills_stub};
+use commands::rules::{run_rules_bench, run_rules_mine, run_rules_review, run_rules_shadow_log};
+use commands::skills::{run_skills_list, run_skills_mine, run_skills_review, run_skills_stub};
 use commands::skills_bench::run_skills_bench;
 use commands::stubs::run_rules_stub;
 
@@ -75,8 +75,16 @@ enum RulesAction {
     Mine,
     /// Bench a candidate rule against its self-test + historical precision
     Bench { cluster_id: String },
-    /// Human review queue for candidate rules
-    Review,
+    /// Human review queue for candidate rules — lists candidates by default;
+    /// --approve moves a candidate to shadow mode, --reject <clusterId> --reason <text> records why
+    Review {
+        #[arg(long)]
+        approve: Option<String>,
+        #[arg(long)]
+        reject: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Inspect recent firings of a shadow-mode rule
     ShadowLog { rule_id: String },
     /// Roll back a promoted/shadow rule to its prior state
@@ -91,8 +99,18 @@ enum SkillsAction {
     Mine,
     /// Replay-bench a skill-edit proposal against the history store
     Bench { aspect: String, proposal_id: String },
-    /// Human review queue for skill-edit proposals
-    Review,
+    /// Human review queue for skill-edit proposals — lists proposals by
+    /// default; --approve <aspect>:<proposalId> applies the proposal's
+    /// drafted line to the skill's repo-local instructions.md override,
+    /// --reject <aspect>:<proposalId> --reason <text> records why
+    Review {
+        #[arg(long)]
+        approve: Option<String>,
+        #[arg(long)]
+        reject: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Roll back a skill to a prior version
     Rollback { aspect: String, version: String },
 }
@@ -157,7 +175,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Rules { action } => match action {
             RulesAction::Mine => run_rules_mine(&repo_root)?,
             RulesAction::Bench { cluster_id } => run_rules_bench(&repo_root, &cluster_id)?,
-            RulesAction::Review => run_rules_stub("review"),
+            RulesAction::Review { approve, reject, reason } => run_rules_review(&repo_root, approve, reject, reason)?,
             RulesAction::ShadowLog { rule_id } => run_rules_shadow_log(&repo_root, &rule_id)?,
             RulesAction::Rollback { rule_id } => run_rules_stub(&format!("rollback {rule_id}")),
         },
@@ -165,7 +183,7 @@ fn main() -> anyhow::Result<()> {
             SkillsAction::List => run_skills_list(&repo_root)?,
             SkillsAction::Mine => run_skills_mine(&repo_root)?,
             SkillsAction::Bench { aspect, proposal_id } => run_skills_bench(&repo_root, &aspect, &proposal_id)?,
-            SkillsAction::Review => run_skills_stub("review"),
+            SkillsAction::Review { approve, reject, reason } => run_skills_review(&repo_root, approve, reject, reason)?,
             SkillsAction::Rollback { aspect, version } => run_skills_stub(&format!("rollback {aspect} {version}")),
         },
     }

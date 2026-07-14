@@ -33,7 +33,7 @@ pub use rule_factory::shadow::{classify_agreement, should_demote, should_promote
 pub use skill_evolution::mine::{draft_negative_guidance, mine_negative_guidance, write_proposal_file as write_skill_proposal_file, NegativeGuidanceSeed};
 pub use skill_evolution::replay::{compare_replay, ReplayComparison};
 pub use rule_factory::mine::{mine_candidates, write_seed_file, CandidateSeed, RepresentativeSnippet};
-pub use skills::{compile_skill, discover_manifests, CompiledSkill};
+pub use skills::{compile_skill, discover_manifests, materialize_builtin_skill_to_disk, CompiledSkill};
 pub use storage::{append_event_log, events_from_report, feedback_event, EventRecord, FindingLookup, FpFeedbackRow, HistoryStore, KnownVerdict, MinedFindingRow};
 pub use triage::*;
 pub use verify::{run_verify_pass, select_for_verification, verify_finding, VerifyPassResult, VerifyResult};

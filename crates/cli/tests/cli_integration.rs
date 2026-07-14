@@ -278,11 +278,23 @@ fn skills_list_reports_the_three_builtin_skills() {
 }
 
 #[test]
-fn rules_review_is_an_explicit_stub_not_silent_or_erroring() {
-    // `mine` graduated out of the stub once the rule-factory mining stage
-    // landed (see `rules_mine_reports_no_findings_on_a_fresh_repo` below) —
-    // `review` still is one, since the draft/bench/human-gate stages it
-    // depends on aren't built yet.
+fn rules_rollback_is_an_explicit_stub_not_silent_or_erroring() {
+    // `mine`/`bench`/`review` all graduated out of the stub as their
+    // pieces of the rule factory landed — `rollback` still is one, since
+    // there's no promotion history to roll back yet.
+    let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+
+    Command::cargo_bin("autoreview")
+        .unwrap()
+        .current_dir(repo.path())
+        .args(["rules", "rollback", "some-rule"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("not implemented yet"));
+}
+
+#[test]
+fn rules_review_reports_no_candidates_on_a_fresh_repo() {
     let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
 
     Command::cargo_bin("autoreview")
@@ -291,7 +303,19 @@ fn rules_review_is_an_explicit_stub_not_silent_or_erroring() {
         .args(["rules", "review"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("not implemented yet"));
+        .stdout(predicate::str::contains("No candidates found"));
+}
+
+#[test]
+fn rules_review_approve_fails_clearly_for_an_unknown_cluster() {
+    let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+
+    Command::cargo_bin("autoreview")
+        .unwrap()
+        .current_dir(repo.path())
+        .args(["rules", "review", "--approve", "no-such-cluster"])
+        .assert()
+        .failure();
 }
 
 #[test]
@@ -328,6 +352,31 @@ fn skills_bench_fails_clearly_when_no_proposal_exists() {
         .unwrap()
         .current_dir(repo.path())
         .args(["skills", "bench", "correctness", "no-such-proposal"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn skills_review_reports_no_proposals_on_a_fresh_repo() {
+    let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+
+    Command::cargo_bin("autoreview")
+        .unwrap()
+        .current_dir(repo.path())
+        .args(["skills", "review"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No skill-evolution proposals found"));
+}
+
+#[test]
+fn skills_review_approve_fails_clearly_for_an_unknown_proposal() {
+    let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+
+    Command::cargo_bin("autoreview")
+        .unwrap()
+        .current_dir(repo.path())
+        .args(["skills", "review", "--approve", "correctness:no-such-proposal"])
         .assert()
         .failure();
 }

@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use autoreview_core::{discover_manifests, draft_negative_guidance, mine_negative_guidance, write_skill_proposal_file, AgentBackend, ClaudeCodeBackend, HistoryStore, LocalLlmBackend, PiBackend};
+use autoreview_core::{discover_manifests, draft_negative_guidance, materialize_builtin_skill_to_disk, mine_negative_guidance, write_skill_proposal_file, AgentBackend, ClaudeCodeBackend, HistoryStore, LocalLlmBackend, PiBackend};
 use autoreview_schema::AgentBackendKind;
 
 use super::history::history_dir_for;
@@ -107,6 +107,116 @@ pub fn run_skills_mine(repo_root: &Path) -> anyhow::Result<()> {
             None => println!("    drafted: (skipped — no agent backend available)"),
         }
     }
-    println!("\n(`skills review` is not yet implemented — these proposals still need a human to review and apply them.)");
+    println!("\n(use `autoreview skills review` to list proposals, or `skills bench <aspect> <proposalId>` to replay-bench one)");
+    Ok(())
+}
+
+/// Extracts the drafted line from a `write_skill_proposal_file`-produced
+/// document — everything after the "## Drafted instruction line" heading.
+fn extract_drafted_line(proposal_text: &str) -> Option<String> {
+    let marker = "## Drafted instruction line\n\n";
+    let start = proposal_text.find(marker)? + marker.len();
+    let line = proposal_text[start..].lines().next()?.trim();
+    if line.is_empty() || line.starts_with('(') {
+        None
+    } else {
+        Some(line.to_string())
+    }
+}
+
+fn skill_proposals_dir(repo_root: &Path, aspect: &str) -> std::path::PathBuf {
+    repo_root.join(".autoreview").join("skills").join(aspect).join("proposals")
+}
+
+/// Every `(aspect, proposalId)` pair with a proposal file on disk, across
+/// every aspect directory under `.autoreview/skills/`.
+fn list_all_proposals(repo_root: &Path) -> Vec<(String, String)> {
+    let skills_dir = repo_root.join(".autoreview").join("skills");
+    let Ok(aspect_entries) = std::fs::read_dir(&skills_dir) else { return Vec::new() };
+    let mut result = Vec::new();
+    for aspect_entry in aspect_entries.filter_map(|e| e.ok()) {
+        let Some(aspect) = aspect_entry.file_name().into_string().ok() else { continue };
+        let proposals_dir = skill_proposals_dir(repo_root, &aspect);
+        let Ok(proposal_entries) = std::fs::read_dir(&proposals_dir) else { continue };
+        for entry in proposal_entries.filter_map(|e| e.ok()) {
+            if entry.path().extension().and_then(|e| e.to_str()) == Some("md") {
+                if let Some(stem) = entry.path().file_stem().and_then(|s| s.to_str()) {
+                    result.push((aspect.clone(), stem.to_string()));
+                }
+            }
+        }
+    }
+    result
+}
+
+/// `autoreview skills review` — the human-approval gate for a skill-
+/// evolution proposal. No args: lists every proposal found across all
+/// aspects. `--approve <aspect>:<proposalId>`: materializes the aspect's
+/// builtin skill to a repo-local override (if none exists yet) and appends
+/// the proposal's drafted line to its `instructions.md` — the actual
+/// prompt-edit landing, version-bumping is left for `skills rollback`
+/// (still a stub) to reason about later. `--reject <aspect>:<proposalId>
+/// --reason <text>`: records why, alongside the proposal file.
+pub fn run_skills_review(repo_root: &Path, approve: Option<String>, reject: Option<String>, reason: Option<String>) -> anyhow::Result<()> {
+    if let Some(spec) = approve {
+        let (aspect, proposal_id) = spec.split_once(':').ok_or_else(|| anyhow::anyhow!("--approve expects <aspect>:<proposalId>"))?;
+        return approve_proposal(repo_root, aspect, proposal_id);
+    }
+    if let Some(spec) = reject {
+        let (aspect, proposal_id) = spec.split_once(':').ok_or_else(|| anyhow::anyhow!("--reject expects <aspect>:<proposalId>"))?;
+        let Some(reason) = reason else {
+            anyhow::bail!("--reject requires --reason \"<why>\"");
+        };
+        return reject_proposal(repo_root, aspect, proposal_id, &reason);
+    }
+
+    let proposals = list_all_proposals(repo_root);
+    if proposals.is_empty() {
+        println!("No skill-evolution proposals found — run `autoreview skills mine` first.");
+        return Ok(());
+    }
+    println!("Skill-evolution proposals pending review:\n");
+    for (aspect, proposal_id) in proposals {
+        let dir = skill_proposals_dir(repo_root, &aspect);
+        let status = if dir.join(format!("{proposal_id}.approved.json")).exists() {
+            "approved"
+        } else if dir.join(format!("{proposal_id}.rejected.json")).exists() {
+            "rejected"
+        } else {
+            "pending"
+        };
+        println!("  {aspect}:{proposal_id}  status={status}");
+    }
+    println!("\n(use --approve <aspect>:<proposalId>, or --reject <aspect>:<proposalId> --reason \"<why>\")");
+    Ok(())
+}
+
+fn approve_proposal(repo_root: &Path, aspect: &str, proposal_id: &str) -> anyhow::Result<()> {
+    let proposal_path = skill_proposals_dir(repo_root, aspect).join(format!("{proposal_id}.md"));
+    let proposal_text = std::fs::read_to_string(&proposal_path).map_err(|_| anyhow::anyhow!("no proposal found at {}", proposal_path.display()))?;
+    let drafted_line = extract_drafted_line(&proposal_text).ok_or_else(|| anyhow::anyhow!("proposal {proposal_id} has no drafted instruction line to apply"))?;
+
+    let disk_dir = materialize_builtin_skill_to_disk(repo_root, aspect)?;
+    let instructions_path = disk_dir.join("instructions.md");
+    let mut instructions = std::fs::read_to_string(&instructions_path).unwrap_or_default();
+    instructions.push_str("\n\n");
+    instructions.push_str(&drafted_line);
+    instructions.push('\n');
+    std::fs::write(&instructions_path, instructions)?;
+
+    let marker_path = skill_proposals_dir(repo_root, aspect).join(format!("{proposal_id}.approved.json"));
+    std::fs::write(&marker_path, serde_json::json!({ "approvedAt": chrono::Utc::now().to_rfc3339(), "appliedLine": drafted_line }).to_string())?;
+    println!("Approved '{aspect}:{proposal_id}' — appended to {}", instructions_path.display());
+    Ok(())
+}
+
+fn reject_proposal(repo_root: &Path, aspect: &str, proposal_id: &str, reason: &str) -> anyhow::Result<()> {
+    let proposal_path = skill_proposals_dir(repo_root, aspect).join(format!("{proposal_id}.md"));
+    if !proposal_path.exists() {
+        anyhow::bail!("no proposal found at {}", proposal_path.display());
+    }
+    let marker_path = skill_proposals_dir(repo_root, aspect).join(format!("{proposal_id}.rejected.json"));
+    std::fs::write(&marker_path, serde_json::json!({ "reason": reason, "rejectedAt": chrono::Utc::now().to_rfc3339() }).to_string())?;
+    println!("Rejected '{aspect}:{proposal_id}': {reason}");
     Ok(())
 }

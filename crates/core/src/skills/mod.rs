@@ -88,6 +88,40 @@ fn find_skill_files(repo_root: &Path, id: &str) -> Option<SkillFiles> {
     BUILTIN_SKILLS.get_dir(id).map(|_| SkillFiles::Embedded(id.to_string()))
 }
 
+/// Materializes a builtin skill's files onto disk under
+/// `.autoreview/skills/<id>/`, if no repo-local override exists there yet —
+/// the first step of `skills review --approve`, since a repo-local
+/// override is whole-skill (per `find_skill_files`'s own disk-vs-embedded
+/// switch on `skill.yaml`'s presence), not a lone `instructions.md` patch.
+/// A no-op (returns the existing dir, doesn't overwrite) if an override is
+/// already there, so re-approving a second proposal for the same aspect
+/// doesn't clobber the first one's edits.
+pub fn materialize_builtin_skill_to_disk(repo_root: &Path, id: &str) -> anyhow::Result<std::path::PathBuf> {
+    let disk_dir = repo_root.join(".autoreview").join("skills").join(id);
+    if disk_dir.join("skill.yaml").exists() {
+        return Ok(disk_dir);
+    }
+    let builtin_dir = BUILTIN_SKILLS.get_dir(id).ok_or_else(|| anyhow::anyhow!("no builtin skill '{id}' to materialize"))?;
+    std::fs::create_dir_all(&disk_dir)?;
+    copy_dir_recursive(builtin_dir, &disk_dir)?;
+    Ok(disk_dir)
+}
+
+fn copy_dir_recursive(dir: &Dir, dest: &Path) -> anyhow::Result<()> {
+    for file in dir.files() {
+        let relative = file.path().strip_prefix(dir.path()).unwrap_or(file.path());
+        let dest_path = dest.join(relative);
+        if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(dest_path, file.contents())?;
+    }
+    for subdir in dir.dirs() {
+        copy_dir_recursive(subdir, dest)?;
+    }
+    Ok(())
+}
+
 /// All skill ids visible to this repo: embedded builtins plus any repo-local
 /// additions under `.autoreview/skills/`, deduplicated (repo-local wins).
 pub fn discover_skill_ids(repo_root: &Path) -> Vec<String> {
@@ -186,5 +220,29 @@ mod tests {
     fn unknown_skill_id_errors_clearly() {
         let err = load_manifest(Path::new("/nonexistent-repo-root"), "does-not-exist").unwrap_err();
         assert!(err.to_string().contains("does-not-exist"));
+    }
+
+    #[test]
+    fn materialize_builtin_skill_to_disk_copies_every_file_and_stays_functionally_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk_dir = materialize_builtin_skill_to_disk(dir.path(), "correctness").unwrap();
+        assert!(disk_dir.join("skill.yaml").exists());
+        assert!(disk_dir.join("instructions.md").exists());
+
+        let builtin = compile_skill(Path::new("/nonexistent-repo-root"), "correctness", Tier::Standard).unwrap();
+        let materialized = compile_skill(dir.path(), "correctness", Tier::Standard).unwrap();
+        assert_eq!(builtin.system_prompt, materialized.system_prompt);
+    }
+
+    #[test]
+    fn materialize_builtin_skill_to_disk_is_a_no_op_when_an_override_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        materialize_builtin_skill_to_disk(dir.path(), "correctness").unwrap();
+        let disk_dir = dir.path().join(".autoreview").join("skills").join("correctness");
+        std::fs::write(disk_dir.join("instructions.md"), "custom edited instructions").unwrap();
+
+        materialize_builtin_skill_to_disk(dir.path(), "correctness").unwrap();
+        let contents = std::fs::read_to_string(disk_dir.join("instructions.md")).unwrap();
+        assert_eq!(contents, "custom edited instructions", "a second materialize call must not overwrite an existing override");
     }
 }
