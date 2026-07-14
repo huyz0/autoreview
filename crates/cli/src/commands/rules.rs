@@ -1,15 +1,16 @@
-//! `autoreview rules mine` — the first two real (non-stub) pieces of the M3
-//! rule factory: clusters recorded agent findings into candidate seeds
-//! (`.autoreview/rules/candidates/<clusterId>/seed.json`), then attempts to
-//! draft an ast-grep rule for each seed via the configured agent backend,
-//! 5x ensemble-agreement filtered (`rule_factory::draft`). Bench/review/
-//! shadow-log/rollback stay stubs (`run_rules_stub`) until their own
-//! infrastructure lands — a drafted candidate here still needs a human to
-//! supply real positive/negative fixtures before it could ever be benched.
+//! `autoreview rules mine`/`rules bench` — the first three real (non-stub)
+//! pieces of the M3 rule factory: clusters recorded agent findings into
+//! candidate seeds (`.autoreview/rules/candidates/<clusterId>/seed.json`),
+//! attempts to draft an ast-grep rule for each seed via the configured
+//! agent backend, 5x ensemble-agreement filtered (`rule_factory::draft`),
+//! and benches a drafted rule against human-supplied fixtures plus a
+//! current-repo FP smoke test (`rule_factory::bench`). Review/shadow-log/
+//! rollback stay stubs (`run_rules_stub`) until their own infrastructure
+//! lands.
 
 use std::process::Command;
 
-use autoreview_core::{draft_candidate, mine_candidates, write_seed_file, AgentBackend, ClaudeCodeBackend, DraftOutcome, HistoryStore, LocalLlmBackend, PiBackend};
+use autoreview_core::{draft_candidate, mine_candidates, run_bench, write_seed_file, AgentBackend, BenchVerdict, ClaudeCodeBackend, DraftOutcome, HistoryStore, LocalLlmBackend, PiBackend};
 use autoreview_schema::AgentBackendKind;
 
 use super::history::history_dir_for;
@@ -89,6 +90,44 @@ pub fn run_rules_mine(repo_root: &std::path::Path) -> anyhow::Result<()> {
             }
         }
     }
-    println!("\n(Bench/review/shadow/promote are not yet implemented — drafted candidates above still need human-supplied fixtures before they could be benched.)");
+    println!("\n(Review/shadow/promote are not yet implemented. Run `autoreview rules bench <clusterId>` on a drafted candidate once you've added tests/positive and tests/negative fixtures under its candidate directory.)");
+    Ok(())
+}
+
+pub fn run_rules_bench(repo_root: &std::path::Path, cluster_id: &str) -> anyhow::Result<()> {
+    let report = run_bench(repo_root, cluster_id)?;
+
+    if let Some(self_test) = &report.self_test {
+        println!(
+            "  self-test: {}/{} positive matched, {}/{} negative matched ({})",
+            self_test.positive_matched,
+            self_test.positive_total,
+            self_test.negative_matched,
+            self_test.negative_total,
+            if self_test.passed() { "passed" } else { "failed" }
+        );
+    } else {
+        println!("  self-test: skipped — no tests/positive or tests/negative fixtures supplied yet");
+    }
+
+    if let Some(fp_smoke) = &report.fp_smoke {
+        println!(
+            "  fp-smoke:  {}/{} sampled repo file(s) matched ({})",
+            fp_smoke.matched_files,
+            fp_smoke.sampled_files,
+            if fp_smoke.passed() { "passed" } else { "failed" }
+        );
+    } else {
+        println!("  fp-smoke:  skipped — no sample files of this rule's language found in the current repo");
+    }
+
+    println!("  historical-precision: skipped — {}", report.historical_precision_skipped_reason);
+
+    match report.verdict {
+        BenchVerdict::Candidate => println!("\nverdict: candidate — ready for `autoreview rules review` (still a stub)"),
+        BenchVerdict::NeedsFixtures => println!("\nverdict: needs-fixtures — add tests/positive/*, tests/negative/* under this candidate's directory, then re-run bench"),
+        BenchVerdict::SelfTestFailed => println!("\nverdict: self-test-failed — the drafted rule doesn't cleanly match its own fixtures yet"),
+        BenchVerdict::FailedFpSmoke => println!("\nverdict: failed-fp-smoke — the rule matches too many unrelated files in this repo"),
+    }
     Ok(())
 }

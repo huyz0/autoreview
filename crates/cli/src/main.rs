@@ -8,7 +8,7 @@ use commands::apply::run_apply;
 use commands::diff::{run_diff, DiffCommandOptions};
 use commands::doctor::run_doctor;
 use commands::feedback::run_feedback;
-use commands::rules::run_rules_mine;
+use commands::rules::{run_rules_bench, run_rules_mine};
 use commands::skills::{run_skills_list, run_skills_stub};
 use commands::stubs::run_rules_stub;
 
@@ -155,7 +155,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Rules { action } => match action {
             RulesAction::Mine => run_rules_mine(&repo_root)?,
-            RulesAction::Bench { cluster_id } => run_rules_stub(&format!("bench {cluster_id}")),
+            RulesAction::Bench { cluster_id } => run_rules_bench(&repo_root, &cluster_id)?,
             RulesAction::Review => run_rules_stub("review"),
             RulesAction::ShadowLog { rule_id } => run_rules_stub(&format!("shadow-log {rule_id}")),
             RulesAction::Rollback { rule_id } => run_rules_stub(&format!("rollback {rule_id}")),

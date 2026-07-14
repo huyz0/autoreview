@@ -308,6 +308,34 @@ fn rules_mine_reports_no_findings_on_a_fresh_repo() {
 }
 
 #[test]
+fn rules_bench_fails_clearly_when_no_rule_has_been_drafted() {
+    let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+
+    Command::cargo_bin("autoreview")
+        .unwrap()
+        .current_dir(repo.path())
+        .args(["rules", "bench", "no-such-cluster"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn rules_bench_reports_needs_fixtures_for_a_drafted_rule_with_no_test_files() {
+    let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+    let candidate_dir = repo.path().join(".autoreview/rules/candidates/c1");
+    std::fs::create_dir_all(&candidate_dir).unwrap();
+    std::fs::write(candidate_dir.join("rule.yaml"), "id: go-example\nlanguage: Go\ncategory: correctness\nseverity: warning\nmessage: m\nrule:\n  pattern: $A == $A\n").unwrap();
+
+    Command::cargo_bin("autoreview")
+        .unwrap()
+        .current_dir(repo.path())
+        .args(["rules", "bench", "c1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("needs-fixtures"));
+}
+
+#[test]
 fn apply_on_an_unknown_id_fails_with_a_clear_message() {
     let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
     Command::cargo_bin("autoreview")
