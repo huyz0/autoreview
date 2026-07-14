@@ -18,7 +18,7 @@ pub struct Usage {
 }
 
 impl Usage {
-    fn add(&mut self, other: &Usage) {
+    pub(crate) fn add(&mut self, other: &Usage) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
         self.usd = match (self.usd, other.usd) {

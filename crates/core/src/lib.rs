@@ -25,6 +25,7 @@ pub use analyzers::sarif::{ingest_sarif_file, parse_sarif_document};
 pub use config::load_config;
 pub use context::{collect_context, render_context_block, ContextItem};
 pub use report::*;
+pub use rule_factory::draft::{draft_candidate, DraftOutcome};
 pub use rule_factory::mine::{mine_candidates, write_seed_file, CandidateSeed, RepresentativeSnippet};
 pub use skills::{compile_skill, discover_manifests, CompiledSkill};
 pub use storage::{append_event_log, events_from_report, feedback_event, EventRecord, FindingLookup, HistoryStore, MinedFindingRow};

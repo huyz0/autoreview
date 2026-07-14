@@ -4,4 +4,5 @@
 //! see this module's `mine` submodule for the clustering algorithm and
 //! `CandidateSeed`'s docs for exactly what "recurring" means here.
 
+pub mod draft;
 pub mod mine;
