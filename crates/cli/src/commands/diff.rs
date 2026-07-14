@@ -175,6 +175,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         Err(err) => println!("  [warn] golangci-lint run failed: {err}"),
     }
     stage1_agent_findings.extend(autoreview_core::run_duplication_check(&options.repo_root, &changed_file_paths));
+    stage1_agent_findings.extend(autoreview_core::run_cross_file_duplication_check(&options.repo_root, &changed_file_paths));
     stage1_agent_findings.extend(autoreview_core::run_complexity_check(&options.repo_root, &changed_file_paths));
     stage1_agent_findings.extend(autoreview_core::run_practices_check(&options.repo_root, &changed_file_paths));
     // Architecture layer check is opt-in: only runs when the repo has a
@@ -193,7 +194,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         .into_iter()
         .map(to_finding)
         .collect();
-    println!("  stage 1:        {stage1_finding_count} deterministic finding(s) (ast-grep + golangci-lint + duplication + complexity + practices + architecture + archgraph)");
+    println!("  stage 1:        {stage1_finding_count} deterministic finding(s) (ast-grep + golangci-lint + duplication + cross-file-duplication + complexity + practices + architecture + archgraph)");
 
     // LLM triage classifier (M2): only consulted when no explicit --tier was
     // given and the heuristic score itself landed within the ambiguity band

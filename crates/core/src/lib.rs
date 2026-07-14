@@ -18,7 +18,7 @@ pub use analyzers::architecture::{load_architecture_config, run_architecture_che
 pub use analyzers::ast_grep::run_ast_grep;
 pub use analyzers::complexity::run_complexity_check;
 pub use analyzers::practices::run_practices_check;
-pub use analyzers::duplication::run_duplication_check;
+pub use analyzers::duplication::{run_cross_file_duplication_check, run_duplication_check};
 pub use analyzers::golangci_lint::run_golangci_lint;
 pub use analyzers::sarif::{ingest_sarif_file, parse_sarif_document};
 pub use config::load_config;

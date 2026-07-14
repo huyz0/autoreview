@@ -87,6 +87,83 @@ pub fn run_duplication_check(repo_root: &std::path::Path, changed_files: &[Strin
         .collect()
 }
 
+/// Cross-file duplication: `detect_duplication_in_file` only ever sees one
+/// file's content, so a jscpd/PMD-CPD-style block copy-pasted across two
+/// *different* files — arguably the more common real case than duplicating
+/// within the same file — is invisible to it. This scans the union of the
+/// given files' normalized line windows for a key that first appeared in a
+/// *different* file than the one it's currently being seen in, and reports
+/// only that cross-file case (same-file repeats stay `detect_duplication_in_file`'s
+/// job, so the two detectors don't double-report the same pair).
+///
+/// Deliberately scoped to the files passed in (the diff's changed files),
+/// not a whole-repo scan — hashing every file in the repo on every review
+/// would turn an incremental diff review into a full-project audit, which
+/// is exactly the scope blow-up the plan's own duplication section already
+/// ruled out for the single-file detector.
+pub fn detect_cross_file_duplication(files: &[(String, String)]) -> Vec<AgentFinding> {
+    let mut first_seen: std::collections::HashMap<String, (String, usize)> = std::collections::HashMap::new();
+    let mut covered_until: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut findings = Vec::new();
+
+    for (path, content) in files {
+        let lines: Vec<&str> = content.lines().collect();
+        if lines.len() < MIN_DUPLICATE_LINES {
+            continue;
+        }
+        for start in 0..=(lines.len() - MIN_DUPLICATE_LINES) {
+            let window = &lines[start..start + MIN_DUPLICATE_LINES];
+            let normalized = normalized_window(window);
+            if normalized.iter().map(|l| l.len()).sum::<usize>() < MIN_MEANINGFUL_CHARS {
+                continue;
+            }
+            let key = normalized.join("\n");
+
+            match first_seen.get(&key) {
+                None => {
+                    first_seen.insert(key, (path.clone(), start));
+                }
+                Some((first_path, first_start)) if first_path != path => {
+                    let already_covered = covered_until.get(path).is_some_and(|&until| start < until);
+                    if !already_covered {
+                        findings.push(AgentFinding {
+                            source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-duplication".to_string(), rule_id: Some("duplicate-code-block-cross-file".to_string()), aspect: None, backend: None },
+                            category: "duplication".to_string(),
+                            severity: Severity::Medium,
+                            confidence: 1.0,
+                            title: format!("Duplicated code block across files ({MIN_DUPLICATE_LINES}+ lines)"),
+                            message: format!("This block duplicates code already at {first_path}:{} — consider extracting a shared function.", first_start + 1),
+                            location: Location { path: path.to_string(), range: LocationRange { start_line: (start + 1) as u32, end_line: Some((start + MIN_DUPLICATE_LINES) as u32), ..Default::default() }, snippet: window.join("\n"), side: Side::New },
+                            related_locations: None,
+                            suggestion: None,
+                            tags: None,
+                            meta: None,
+                            suggested_patch: None,
+                        });
+                        covered_until.insert(path.clone(), start + MIN_DUPLICATE_LINES);
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
+    findings
+}
+
+/// Runs cross-file duplication detection across the changed files that
+/// still exist on disk — the multi-file counterpart to `run_duplication_check`.
+pub fn run_cross_file_duplication_check(repo_root: &std::path::Path, changed_files: &[String]) -> Vec<AgentFinding> {
+    let files: Vec<(String, String)> = changed_files
+        .iter()
+        .filter_map(|path| {
+            let full_path = repo_root.join(path);
+            std::fs::read_to_string(&full_path).ok().map(|content| (path.clone(), content))
+        })
+        .collect();
+    detect_cross_file_duplication(&files)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +231,48 @@ mod tests {
         std::fs::write(dir.path().join("a.rs"), &content).unwrap();
         let findings = run_duplication_check(dir.path(), &["a.rs".to_string()]);
         assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn detect_cross_file_duplication_finds_a_block_shared_across_two_files() {
+        let block = repeated_block();
+        let files = vec![("a.rs".to_string(), format!("fn one() {{\n{block}}}\n")), ("b.rs".to_string(), format!("fn two() {{\n{block}}}\n"))];
+        let findings = detect_cross_file_duplication(&files);
+        assert_eq!(findings.len(), 1, "got: {findings:#?}");
+        assert_eq!(findings[0].location.path, "b.rs");
+        assert!(findings[0].message.contains("a.rs:"));
+    }
+
+    #[test]
+    fn detect_cross_file_duplication_does_not_flag_a_repeat_within_the_same_file() {
+        let block = repeated_block();
+        let content = format!("fn one() {{\n{block}}}\n\nfn two() {{\n{block}}}\n");
+        let files = vec![("a.rs".to_string(), content)];
+        let findings = detect_cross_file_duplication(&files);
+        assert!(findings.is_empty(), "same-file repeats are detect_duplication_in_file's job, not this one's");
+    }
+
+    #[test]
+    fn detect_cross_file_duplication_does_not_flag_distinct_files() {
+        let files = vec![("a.rs".to_string(), "fn one() {\n    println(\"a\");\n}\n".to_string()), ("b.rs".to_string(), "fn two() {\n    println(\"b\");\n}\n".to_string())];
+        let findings = detect_cross_file_duplication(&files);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn run_cross_file_duplication_check_finds_duplication_across_real_files_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let block = repeated_block();
+        std::fs::write(dir.path().join("a.rs"), format!("fn one() {{\n{block}}}\n")).unwrap();
+        std::fs::write(dir.path().join("b.rs"), format!("fn two() {{\n{block}}}\n")).unwrap();
+        let findings = run_cross_file_duplication_check(dir.path(), &["a.rs".to_string(), "b.rs".to_string()]);
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn run_cross_file_duplication_check_skips_files_that_no_longer_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let findings = run_cross_file_duplication_check(dir.path(), &["deleted.rs".to_string()]);
+        assert!(findings.is_empty());
     }
 }
