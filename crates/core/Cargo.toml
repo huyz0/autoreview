@@ -15,6 +15,9 @@ anyhow = "1"
 include_dir = "0.7"
 tempfile = "3"
 rusqlite = { version = "0.32", features = ["bundled"] }
+tree-sitter = "0.26.11"
+tree-sitter-go = "0.25.0"
+tree-sitter-java = "0.23.5"
 
 [dev-dependencies]
 autoreview-test-support = { path = "../test-support" }
