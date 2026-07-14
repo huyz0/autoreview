@@ -12,6 +12,7 @@ pub use agents::claude_code::*;
 pub use agents::contract::*;
 pub use agents::local_llm::{local_llm_available, parse_chat_completion_response, LocalLlmBackend};
 pub use agents::pi::{parse_pi_json_output, PiBackend};
+pub use analyzers::architecture::{load_architecture_config, run_architecture_check};
 pub use analyzers::ast_grep::run_ast_grep;
 pub use analyzers::duplication::run_duplication_check;
 pub use analyzers::golangci_lint::run_golangci_lint;

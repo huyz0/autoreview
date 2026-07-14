@@ -175,12 +175,20 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         Err(err) => println!("  [warn] golangci-lint run failed: {err}"),
     }
     stage1_agent_findings.extend(autoreview_core::run_duplication_check(&options.repo_root, &changed_file_paths));
+    // Architecture layer check is opt-in: only runs when the repo has a
+    // .autoreview/architecture.yaml declaring layers, per the plan ("no sane
+    // generic default for what a repo's layers are").
+    match autoreview_core::load_architecture_config(&options.repo_root.join(".autoreview").join("architecture.yaml")) {
+        Ok(Some(arch_config)) => stage1_agent_findings.extend(autoreview_core::run_architecture_check(&options.repo_root, &changed_file_paths, &arch_config)),
+        Ok(None) => {}
+        Err(err) => println!("  [warn] failed to parse .autoreview/architecture.yaml: {err}"),
+    }
     let stage1_finding_count = stage1_agent_findings.len();
     let stage1_findings: Vec<Finding> = assign_fingerprints(stage1_agent_findings)
         .into_iter()
         .map(to_finding)
         .collect();
-    println!("  stage 1:        {stage1_finding_count} deterministic finding(s) (ast-grep + golangci-lint + duplication)");
+    println!("  stage 1:        {stage1_finding_count} deterministic finding(s) (ast-grep + golangci-lint + duplication + architecture)");
 
     // LLM triage classifier (M2): only consulted when no explicit --tier was
     // given and the heuristic score itself landed within the ambiguity band

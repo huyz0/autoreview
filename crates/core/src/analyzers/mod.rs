@@ -1,3 +1,4 @@
+pub mod architecture;
 pub mod ast_grep;
 pub mod duplication;
 pub mod golangci_lint;
