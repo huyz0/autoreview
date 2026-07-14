@@ -57,13 +57,13 @@ fn collect_rule_categories(dir: &Dir, map: &mut HashMap<String, String>) {
     }
 }
 
-const SOURCE_EXTENSIONS: &[&str] = &["go", "java", "kt", "kts"];
+pub(crate) const SOURCE_EXTENSIONS: &[&str] = &["go", "java", "kt", "kts"];
 
-fn is_relevant_source_file(path: &str) -> bool {
+pub(crate) fn is_relevant_source_file(path: &str) -> bool {
     Path::new(path).extension().and_then(|e| e.to_str()).map(|ext| SOURCE_EXTENSIONS.contains(&ext)).unwrap_or(false)
 }
 
-fn map_severity(sg_severity: &str) -> Severity {
+pub(crate) fn map_severity(sg_severity: &str) -> Severity {
     match sg_severity {
         "error" => Severity::High,
         "warning" => Severity::Medium,
@@ -73,7 +73,7 @@ fn map_severity(sg_severity: &str) -> Severity {
     }
 }
 
-fn title_from_rule_id(rule_id: &str) -> String {
+pub(crate) fn title_from_rule_id(rule_id: &str) -> String {
     rule_id
         .split(['-', '_'])
         .map(|word| {

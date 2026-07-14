@@ -1,12 +1,14 @@
-//! `autoreview rules mine`/`rules bench` — the first three real (non-stub)
-//! pieces of the M3 rule factory: clusters recorded agent findings into
-//! candidate seeds (`.autoreview/rules/candidates/<clusterId>/seed.json`),
-//! attempts to draft an ast-grep rule for each seed via the configured
-//! agent backend, 5x ensemble-agreement filtered (`rule_factory::draft`),
-//! and benches a drafted rule against human-supplied fixtures plus a
-//! current-repo FP smoke test (`rule_factory::bench`). Review/shadow-log/
-//! rollback stay stubs (`run_rules_stub`) until their own infrastructure
-//! lands.
+//! `autoreview rules mine`/`rules bench`/`rules shadow-log` — the first
+//! four real (non-stub) pieces of the M3 rule factory: clusters recorded
+//! agent findings into candidate seeds
+//! (`.autoreview/rules/candidates/<clusterId>/seed.json`), attempts to
+//! draft an ast-grep rule for each seed via the configured agent backend,
+//! 5x ensemble-agreement filtered (`rule_factory::draft`), benches a
+//! drafted rule against human-supplied fixtures plus a current-repo FP
+//! smoke test (`rule_factory::bench`), and lists recent firings of a
+//! shadow/promoted rule for spot-checking (`rule_factory::shadow`, wired
+//! into every `diff` run — see `commands::diff`). Review/rollback stay
+//! stubs (`run_rules_stub`) until their own infrastructure lands.
 
 use std::process::Command;
 
@@ -129,5 +131,36 @@ pub fn run_rules_bench(repo_root: &std::path::Path, cluster_id: &str) -> anyhow:
         BenchVerdict::SelfTestFailed => println!("\nverdict: self-test-failed — the drafted rule doesn't cleanly match its own fixtures yet"),
         BenchVerdict::FailedFpSmoke => println!("\nverdict: failed-fp-smoke — the rule matches too many unrelated files in this repo"),
     }
+    Ok(())
+}
+
+const SHADOW_LOG_LIMIT: u32 = 20;
+
+pub fn run_rules_shadow_log(repo_root: &std::path::Path, rule_id: &str) -> anyhow::Result<()> {
+    let history_dir = history_dir_for(repo_root);
+    let store = HistoryStore::open(&history_dir)?;
+
+    let Some(state) = store.rule_state(rule_id)? else {
+        println!("Rule '{rule_id}' has never fired in shadow/promoted mode on this machine — nothing to show yet.");
+        return Ok(());
+    };
+
+    let distinct_runs = store.distinct_shadow_run_count(rule_id)?;
+    let user_fp_count = store.count_fp_feedback_for_rule(rule_id)?;
+    println!(
+        "rule '{rule_id}': status={}, firings={}, distinct_runs={distinct_runs}, agent_agreed={}, agent_disagreed={}, user_fp_reports={user_fp_count}, tracked_since={}",
+        state.status, state.firings, state.agent_agreed, state.agent_disagreed, state.valid_from
+    );
+
+    let firings = store.recent_shadow_firings(rule_id, SHADOW_LOG_LIMIT)?;
+    if firings.is_empty() {
+        println!("(no firings recorded)");
+        return Ok(());
+    }
+    println!("\nrecent firings (most recent first):");
+    for firing in &firings {
+        println!("  [{}] {}:{} (run {}, {}) — {}", firing.agreement, firing.location_path, firing.location_line, firing.run_id, firing.created_at, firing.fingerprint);
+    }
+    println!("\n(use `autoreview feedback <id> --fp|--tp` on a finding's own id to feed the promotion/demotion gates)");
     Ok(())
 }

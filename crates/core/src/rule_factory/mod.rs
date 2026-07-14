@@ -7,3 +7,4 @@
 pub mod bench;
 pub mod draft;
 pub mod mine;
+pub mod shadow;

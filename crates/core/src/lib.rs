@@ -19,6 +19,7 @@ pub use analyzers::architecture::{load_architecture_config, run_architecture_che
 pub use analyzers::ast_grep::run_ast_grep;
 pub use analyzers::complexity::run_complexity_check;
 pub use analyzers::practices::run_practices_check;
+pub use analyzers::shadow_rules::{discover_shadow_rule_files, run_shadow_rules, ShadowFinding, ShadowRuleFile};
 pub use analyzers::duplication::{run_cross_file_duplication_check, run_duplication_check};
 pub use analyzers::golangci_lint::run_golangci_lint;
 pub use analyzers::sarif::{ingest_sarif_file, parse_sarif_document};
@@ -27,6 +28,7 @@ pub use context::{collect_context, render_context_block, ContextItem};
 pub use report::*;
 pub use rule_factory::bench::{run_bench, BenchReport, BenchVerdict, FpSmokeResult, SelfTestResult};
 pub use rule_factory::draft::{draft_candidate, DraftOutcome};
+pub use rule_factory::shadow::{classify_agreement, should_demote, should_promote, Agreement, AgentFindingRef, PromotionInputs};
 pub use rule_factory::mine::{mine_candidates, write_seed_file, CandidateSeed, RepresentativeSnippet};
 pub use skills::{compile_skill, discover_manifests, CompiledSkill};
 pub use storage::{append_event_log, events_from_report, feedback_event, EventRecord, FindingLookup, HistoryStore, MinedFindingRow};

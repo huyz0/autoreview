@@ -112,6 +112,30 @@ fn diff_context(
 /// A short, model-readable summary of Stage-1 findings for a given category,
 /// so specialists know what's already been flagged deterministically and
 /// don't waste turns re-reporting it (per the plan: "don't re-report lint").
+/// Physically relocates a rule file between `.autoreview/rules/{from,to}/`
+/// on promotion/demotion — best-effort (a failure here doesn't block the
+/// status transition already recorded in the history store, it just means
+/// the on-disk file needs a manual move next time someone looks).
+fn move_shadow_rule_file(repo_root: &Path, rule_id: &str, from: &str, to: &str) {
+    let rule_files = autoreview_core::discover_shadow_rule_files(repo_root);
+    for rule_file in rule_files {
+        if rule_file.status != from {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&rule_file.path) else { continue };
+        if !contents.contains(&format!("id: {rule_id}")) {
+            continue;
+        }
+        let dest_dir = repo_root.join(".autoreview").join("rules").join(to);
+        if std::fs::create_dir_all(&dest_dir).is_err() {
+            continue;
+        }
+        let dest = dest_dir.join(rule_file.path.file_name().unwrap());
+        let _ = std::fs::rename(&rule_file.path, &dest);
+        break;
+    }
+}
+
 fn stage1_summary_for_category(stage1_findings: &[Finding], category: &str) -> String {
     let matching: Vec<&Finding> = stage1_findings
         .iter()
@@ -434,6 +458,70 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     }
 
     let history_dir = history_dir_for(&options.repo_root);
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let run_timestamp = chrono::Utc::now().to_rfc3339();
+
+    // Shadow-mode rules: `.autoreview/rules/{shadow,promoted}/*.yaml`, a
+    // human-curated interim path onto a bench-passed candidate (`rules
+    // review`'s human-approval gate is still a stub). Shadow firings are
+    // suppressed (reason: ShadowRule); promoted ones surface as normal
+    // findings. Every firing is checked for agreement against this run's
+    // own agent findings and recorded, then promotion/demotion gates are
+    // evaluated per rule that fired.
+    match autoreview_core::run_shadow_rules(&options.repo_root, &changed_file_paths) {
+        Ok(shadow_findings) if !shadow_findings.is_empty() => match HistoryStore::open(&history_dir) {
+            Ok(store) => {
+                let agent_locations: Vec<(String, String, u32)> = dedupe_result
+                    .findings
+                    .iter()
+                    .filter(|f| matches!(f.source.kind, autoreview_schema::FindingSourceKind::Agent))
+                    .map(|f| (f.category.clone(), f.location.path.clone(), f.location.range.start_line))
+                    .collect();
+                let agent_refs: Vec<autoreview_core::AgentFindingRef> = agent_locations.iter().map(|(category, path, line)| autoreview_core::AgentFindingRef { category, path, line: *line }).collect();
+
+                let mut fired_rule_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let (raw_findings, statuses): (Vec<_>, Vec<_>) = shadow_findings.into_iter().map(|sf| (sf.finding, (sf.rule_id, sf.status))).unzip();
+                let fingerprinted = assign_fingerprints(raw_findings);
+
+                for (ff, (rule_id, status)) in fingerprinted.into_iter().zip(statuses) {
+                    let finding = to_finding(ff);
+                    fired_rule_ids.insert(rule_id.clone());
+                    store.ensure_rule_tracked(&rule_id, status, &run_timestamp).ok();
+                    let agreement = autoreview_core::classify_agreement(&finding.category, &finding.location.path, finding.location.range.start_line, &agent_refs);
+                    store.record_shadow_firing(&rule_id, &finding.fingerprints.primary, &run_id, &finding.location.path, finding.location.range.start_line, agreement.as_str(), &run_timestamp).ok();
+
+                    if status == "shadow" {
+                        dedupe_result.suppressed.push(autoreview_schema::SuppressedFinding { finding, reason: autoreview_schema::SuppressedReason::ShadowRule });
+                    } else {
+                        dedupe_result.findings.push(finding);
+                    }
+                }
+
+                for rule_id in fired_rule_ids {
+                    let Ok(Some(state)) = store.rule_state(&rule_id) else { continue };
+                    let distinct_runs = store.distinct_shadow_run_count(&rule_id).unwrap_or(0);
+                    let user_fp_count = store.count_fp_feedback_for_rule(&rule_id).unwrap_or(0);
+                    let days_since_valid_from = chrono::DateTime::parse_from_rfc3339(&state.valid_from).map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_days()).unwrap_or(0);
+
+                    if state.status == "shadow" {
+                        let inputs = autoreview_core::PromotionInputs { firings: state.firings, distinct_runs, agent_agreed: state.agent_agreed, agent_disagreed: state.agent_disagreed, user_fp_count, days_since_valid_from };
+                        if autoreview_core::should_promote(&inputs) {
+                            store.set_rule_status(&rule_id, "promoted").ok();
+                            move_shadow_rule_file(&options.repo_root, &rule_id, "shadow", "promoted");
+                            println!("\n  [shadow] rule '{rule_id}' promoted — {} firings across {distinct_runs} runs, {:.0}% agent agreement", state.firings, inputs.agent_agreed as f64 / (inputs.agent_agreed + inputs.agent_disagreed).max(1) as f64 * 100.0);
+                        }
+                    } else if state.status == "promoted" && autoreview_core::should_demote(user_fp_count) {
+                        store.set_rule_status(&rule_id, "shadow").ok();
+                        move_shadow_rule_file(&options.repo_root, &rule_id, "promoted", "shadow");
+                        println!("\n  [shadow] rule '{rule_id}' demoted back to shadow — {user_fp_count} user false-positive report(s)");
+                    }
+                }
+            }
+            Err(err) => println!("  [warn] shadow rules: failed to open history store: {err}"),
+        },
+        Ok(_) => {}
+        Err(err) => println!("  [warn] shadow rules run failed: {err}"),
+    }
 
     // Incremental mode: suppress findings already reported in the most
     // recent prior run on this repo (queried *before* this run's own
@@ -509,7 +597,6 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         println!("\n  (use `autoreview feedback <id> --fp|--tp` to record feedback on a finding above)");
     }
 
-    let run_id = uuid::Uuid::new_v4().to_string();
     let run_dir = history_dir.join("runs").join(&run_id);
     std::fs::create_dir_all(&run_dir)?;
 

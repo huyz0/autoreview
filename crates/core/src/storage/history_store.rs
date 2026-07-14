@@ -101,6 +101,18 @@ impl HistoryStore {
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_embeddings_verdict ON embeddings(verdict);
+
+            CREATE TABLE IF NOT EXISTS shadow_firings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_id TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                location_path TEXT NOT NULL,
+                location_line INTEGER NOT NULL,
+                agreement TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_shadow_firings_rule_id ON shadow_firings(rule_id);
             ",
         )?;
         // Best-effort migration for a pre-existing `findings` table created
@@ -267,6 +279,100 @@ impl HistoryStore {
         Ok(matched.len() as u32)
     }
 
+    /// Registers a rule with the shadow-mode lifecycle table if it isn't
+    /// already tracked — insert-only-once (`INSERT OR IGNORE`), so calling
+    /// this on every shadow firing is safe and idempotent. `initial_status`
+    /// is normally `"shadow"`; a rule already tracked keeps its existing
+    /// status untouched.
+    pub fn ensure_rule_tracked(&self, rule_id: &str, initial_status: &str, valid_from: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO rules (id, status, firings, agent_agreed, agent_disagreed, valid_from) VALUES (?1, ?2, 0, 0, 0, ?3)",
+            rusqlite::params![rule_id, initial_status, valid_from],
+        )?;
+        Ok(())
+    }
+
+    /// Records one shadow/promoted rule firing: appends a row to the
+    /// per-occurrence `shadow_firings` log (for `rules shadow-log`'s
+    /// spot-check listing) and increments the rolled-up counters on the
+    /// `rules` table (for cheap promotion/demotion threshold checks, so
+    /// those don't need a `GROUP BY` scan over every firing on every run).
+    pub fn record_shadow_firing(&self, rule_id: &str, fingerprint: &str, run_id: &str, location_path: &str, location_line: u32, agreement: &str, created_at: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO shadow_firings (rule_id, fingerprint, run_id, location_path, location_line, agreement, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![rule_id, fingerprint, run_id, location_path, location_line, agreement, created_at],
+        )?;
+        let agreed_delta = if agreement == "agreed" { 1 } else { 0 };
+        let disagreed_delta = if agreement == "disagreed" { 1 } else { 0 };
+        self.conn.execute(
+            "UPDATE rules SET firings = firings + 1, agent_agreed = agent_agreed + ?2, agent_disagreed = agent_disagreed + ?3 WHERE id = ?1",
+            rusqlite::params![rule_id, agreed_delta, disagreed_delta],
+        )?;
+        Ok(())
+    }
+
+    /// Current lifecycle state for a tracked rule, or `None` if it's never
+    /// been through `ensure_rule_tracked` (i.e. never fired in shadow mode).
+    pub fn rule_state(&self, rule_id: &str) -> anyhow::Result<Option<RuleState>> {
+        let result = self.conn.query_row(
+            "SELECT status, firings, agent_agreed, agent_disagreed, valid_from FROM rules WHERE id = ?1",
+            [rule_id],
+            |row| {
+                Ok(RuleState {
+                    status: row.get(0)?,
+                    firings: row.get(1)?,
+                    agent_agreed: row.get(2)?,
+                    agent_disagreed: row.get(3)?,
+                    valid_from: row.get(4)?,
+                })
+            },
+        );
+        match result {
+            Ok(state) => Ok(Some(state)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// How many distinct runs a rule has fired in — the plan's promotion
+    /// gate needs both a firing count *and* a distinct-run count, since 20
+    /// firings in one large commit isn't the same evidence as 20 firings
+    /// spread across 20 reviews.
+    pub fn distinct_shadow_run_count(&self, rule_id: &str) -> anyhow::Result<usize> {
+        let count: i64 = self.conn.query_row("SELECT COUNT(DISTINCT run_id) FROM shadow_firings WHERE rule_id = ?1", [rule_id], |row| row.get(0))?;
+        Ok(count as usize)
+    }
+
+    /// Recent firings for a rule, most recent first — the listing
+    /// `rules shadow-log <ruleId>` shows for human spot-checking.
+    pub fn recent_shadow_firings(&self, rule_id: &str, limit: u32) -> anyhow::Result<Vec<ShadowFiringRow>> {
+        let mut stmt = self.conn.prepare("SELECT fingerprint, run_id, location_path, location_line, agreement, created_at FROM shadow_firings WHERE rule_id = ?1 ORDER BY created_at DESC, id DESC LIMIT ?2")?;
+        let rows = stmt.query_map(rusqlite::params![rule_id, limit], |row| {
+            Ok(ShadowFiringRow { fingerprint: row.get(0)?, run_id: row.get(1)?, location_path: row.get(2)?, location_line: row.get(3)?, agreement: row.get(4)?, created_at: row.get(5)? })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Count of `--fp` feedback recorded against any finding attributed to
+    /// this rule — the demotion signal, independent of the shadow-firing
+    /// agreement ratio (a user's own explicit feedback always counts).
+    pub fn count_fp_feedback_for_rule(&self, rule_id: &str) -> anyhow::Result<u32> {
+        Ok(self.conn.query_row("SELECT COUNT(*) FROM feedback WHERE rule_id_or_aspect = ?1 AND verdict = 'fp'", [rule_id], |row| row.get(0))?)
+    }
+
+    /// Flips a rule's lifecycle status in place (`"shadow"` <-> `"promoted"`)
+    /// — the actual state transition `should_promote`/`should_demote`
+    /// gate. Does not touch firing counters; those keep accumulating across
+    /// a promote/demote cycle so agreement history isn't lost on demotion.
+    pub fn set_rule_status(&self, rule_id: &str, status: &str) -> anyhow::Result<()> {
+        self.conn.execute("UPDATE rules SET status = ?2 WHERE id = ?1", rusqlite::params![rule_id, status])?;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub fn count_findings(&self) -> anyhow::Result<i64> {
         Ok(self.conn.query_row("SELECT COUNT(*) FROM findings", [], |row| row.get(0))?)
@@ -304,6 +410,27 @@ pub struct MinedFindingRow {
     pub title: String,
     pub message: String,
     pub run_id: String,
+}
+
+/// A tracked rule's current shadow-mode lifecycle state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleState {
+    pub status: String,
+    pub firings: u32,
+    pub agent_agreed: u32,
+    pub agent_disagreed: u32,
+    pub valid_from: String,
+}
+
+/// One recorded shadow/promoted rule firing, as `rules shadow-log` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShadowFiringRow {
+    pub fingerprint: String,
+    pub run_id: String,
+    pub location_path: String,
+    pub location_line: u32,
+    pub agreement: String,
+    pub created_at: String,
 }
 
 #[cfg(test)]
@@ -486,5 +613,51 @@ mod tests {
         store.record_embedding("a", "fp", &[1.0, 0.0], "2026-07-12T00:00:00Z").unwrap();
         store.record_embedding("a", "fp", &[1.0, 0.01], "2026-07-13T00:00:00Z").unwrap();
         assert_eq!(store.count_similar_embeddings(&[1.0, 0.0], "fp", 0.9).unwrap(), 1);
+    }
+
+    #[test]
+    fn ensure_rule_tracked_is_idempotent_and_does_not_reset_status() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        store.ensure_rule_tracked("go-example", "shadow", "2026-07-01T00:00:00Z").unwrap();
+        store.set_rule_status("go-example", "promoted").unwrap();
+        store.ensure_rule_tracked("go-example", "shadow", "2026-07-01T00:00:00Z").unwrap();
+        let state = store.rule_state("go-example").unwrap().unwrap();
+        assert_eq!(state.status, "promoted");
+    }
+
+    #[test]
+    fn record_shadow_firing_updates_counters_and_appends_a_log_row() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        store.ensure_rule_tracked("go-example", "shadow", "2026-07-01T00:00:00Z").unwrap();
+        store.record_shadow_firing("go-example", "fp1", "run-1", "a.go", 10, "agreed", "2026-07-02T00:00:00Z").unwrap();
+        store.record_shadow_firing("go-example", "fp2", "run-2", "b.go", 20, "disagreed", "2026-07-03T00:00:00Z").unwrap();
+        store.record_shadow_firing("go-example", "fp3", "run-2", "c.go", 30, "no_signal", "2026-07-03T00:00:00Z").unwrap();
+
+        let state = store.rule_state("go-example").unwrap().unwrap();
+        assert_eq!(state.firings, 3);
+        assert_eq!(state.agent_agreed, 1);
+        assert_eq!(state.agent_disagreed, 1);
+        assert_eq!(store.distinct_shadow_run_count("go-example").unwrap(), 2);
+
+        let recent = store.recent_shadow_firings("go-example", 10).unwrap();
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].fingerprint, "fp3", "most recent first");
+    }
+
+    #[test]
+    fn rule_state_is_none_for_an_untracked_rule() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        assert!(store.rule_state("never-fired").unwrap().is_none());
+    }
+
+    #[test]
+    fn count_fp_feedback_for_rule_counts_only_fp_verdicts_for_that_rule() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        store.record_run(&make_report("run-1", vec![make_finding("a")])).unwrap();
+        let lookup = store.find_finding_by_id("f-a").unwrap().unwrap();
+        store.record_feedback("f-a", &lookup, "fp", None, "2026-07-12T00:00:00Z").unwrap();
+        store.record_feedback("f-a", &lookup, "tp", None, "2026-07-13T00:00:00Z").unwrap();
+        assert_eq!(store.count_fp_feedback_for_rule("go-no-self-comparison").unwrap(), 1);
+        assert_eq!(store.count_fp_feedback_for_rule("some-other-rule").unwrap(), 0);
     }
 }
