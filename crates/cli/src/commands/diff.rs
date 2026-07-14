@@ -331,7 +331,16 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
                 Tier::Deep => config.budgets.tiers.deep.max_concurrency,
             } as usize;
 
+            let mut launched_aspects: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            let mut budget_stopped = false;
             for chunk in plan.specialists.chunks(max_concurrency.max(1)) {
+                if autoreview_core::should_stop_for_budget(total_usd, any_usd_reported, options.max_usd) {
+                    budget_stopped = true;
+                    break;
+                }
+                for specialist in chunk {
+                    launched_aspects.insert(specialist.aspect.as_str());
+                }
                 let results: Vec<_> = std::thread::scope(|scope| {
                     let handles: Vec<_> = chunk
                         .iter()
@@ -401,15 +410,34 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
                     }
                 }
             }
+
+            if budget_stopped {
+                let skipped: Vec<&str> = plan.specialists.iter().map(|s| s.aspect.as_str()).filter(|a| !launched_aspects.contains(a)).collect();
+                if !skipped.is_empty() {
+                    println!(
+                        "\n  [budget] stopped after ${total_usd:.4} spent (--max-usd {:.2}) — skipped {} remaining specialist(s): {}",
+                        options.max_usd.unwrap_or(0.0),
+                        skipped.len(),
+                        skipped.join(", ")
+                    );
+                }
+            }
         }
     }
+
+    // Cost-ceiling enforcement also gates the verify pass below: it's a
+    // real cost, and a diff that's already over --max-usd from specialists
+    // alone shouldn't spend more on a judge pass.
+    let over_budget = autoreview_core::should_stop_for_budget(total_usd, any_usd_reported, options.max_usd);
 
     // Stage 3.5: verify pass. Budget-gated (skipped entirely in quick tier,
     // per the plan) and skipped when there's nothing this pass would even
     // look at, so a diff with no high/blocker or noisy-category findings
     // never pays for a judge call it doesn't need.
     let mut verify_suppressed = Vec::new();
-    if plan.tier != Tier::Quick && config.verify.enabled && backend_available(backend_kind, &config) {
+    if over_budget {
+        println!("\n  [budget] skipping verify pass — already at/over --max-usd {:.2}", options.max_usd.unwrap_or(0.0));
+    } else if plan.tier != Tier::Quick && config.verify.enabled && backend_available(backend_kind, &config) {
         let to_check = autoreview_core::select_for_verification(&findings, &config.verify.noisy_categories).len();
         if to_check > 0 {
             println!("\n  verify:         checking {to_check} finding(s) against the diff...");
