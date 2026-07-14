@@ -382,6 +382,19 @@ fn skills_review_approve_fails_clearly_for_an_unknown_proposal() {
 }
 
 #[test]
+fn history_sync_is_a_no_op_when_sync_mode_is_not_git() {
+    let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+
+    Command::cargo_bin("autoreview")
+        .unwrap()
+        .current_dir(repo.path())
+        .args(["history", "sync"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing to sync"));
+}
+
+#[test]
 fn rules_bench_fails_clearly_when_no_rule_has_been_drafted() {
     let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
 

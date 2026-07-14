@@ -677,6 +677,12 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         Err(err) => println!("  [warn] failed to update history index: {err}"),
     }
 
+    // Team sync (opt-in, storage.sync.mode: git): push this run's event log
+    // to the team's sync branch — best-effort by design (see sync_push's own
+    // docs), so a flaky/offline network never fails an otherwise-successful
+    // review.
+    autoreview_core::sync_push(&options.repo_root, &history_dir, &config.storage.sync);
+
     Ok(())
 }
 

@@ -45,3 +45,20 @@ pub fn hostname() -> String {
     }
     "unknown-host".to_string()
 }
+
+/// `autoreview history sync` — manually pulls the team's synced event log
+/// (`storage.sync.mode: git`) onto this machine, on top of the best-effort
+/// push `diff` already does at the end of every run. Useful right after
+/// enabling sync for the first time, or to pull down teammates' signal
+/// without also running a full review.
+pub fn run_history_sync(repo_root: &Path) -> anyhow::Result<()> {
+    let config = autoreview_core::load_config(&repo_root.join(".autoreview").join("config.yaml"))?;
+    if config.storage.sync.mode != autoreview_schema::SyncMode::Git {
+        println!("storage.sync.mode is not \"git\" in .autoreview/config.yaml — nothing to sync.");
+        return Ok(());
+    }
+    let history_dir = history_dir_for(repo_root);
+    let pulled = autoreview_core::sync_pull(repo_root, &history_dir, &config.storage.sync)?;
+    println!("Pulled {pulled} event log file(s) from the team's sync branch ({}).", config.storage.sync.branch);
+    Ok(())
+}

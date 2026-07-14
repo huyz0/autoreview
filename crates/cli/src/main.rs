@@ -8,6 +8,7 @@ use commands::apply::run_apply;
 use commands::diff::{run_diff, DiffCommandOptions};
 use commands::doctor::run_doctor;
 use commands::feedback::run_feedback;
+use commands::history::run_history_sync;
 use commands::rules::{run_rules_bench, run_rules_mine, run_rules_review, run_rules_shadow_log};
 use commands::skills::{run_skills_list, run_skills_mine, run_skills_review, run_skills_stub};
 use commands::skills_bench::run_skills_bench;
@@ -67,6 +68,17 @@ enum Commands {
         #[command(subcommand)]
         action: SkillsAction,
     },
+    /// Manage local run/event history
+    History {
+        #[command(subcommand)]
+        action: HistoryAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum HistoryAction {
+    /// Pull the team's synced event log (storage.sync.mode: git) onto this machine
+    Sync,
 }
 
 #[derive(Subcommand)]
@@ -185,6 +197,9 @@ fn main() -> anyhow::Result<()> {
             SkillsAction::Bench { aspect, proposal_id } => run_skills_bench(&repo_root, &aspect, &proposal_id)?,
             SkillsAction::Review { approve, reject, reason } => run_skills_review(&repo_root, approve, reject, reason)?,
             SkillsAction::Rollback { aspect, version } => run_skills_stub(&format!("rollback {aspect} {version}")),
+        },
+        Commands::History { action } => match action {
+            HistoryAction::Sync => run_history_sync(&repo_root)?,
         },
     }
 
