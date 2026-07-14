@@ -15,6 +15,7 @@ pub use agents::pi::{parse_pi_json_output, PiBackend};
 pub use analyzers::architecture::{load_architecture_config, run_architecture_check};
 pub use analyzers::ast_grep::run_ast_grep;
 pub use analyzers::complexity::run_complexity_check;
+pub use analyzers::practices::run_practices_check;
 pub use analyzers::duplication::run_duplication_check;
 pub use analyzers::golangci_lint::run_golangci_lint;
 pub use analyzers::sarif::{ingest_sarif_file, parse_sarif_document};

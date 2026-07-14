@@ -176,6 +176,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     }
     stage1_agent_findings.extend(autoreview_core::run_duplication_check(&options.repo_root, &changed_file_paths));
     stage1_agent_findings.extend(autoreview_core::run_complexity_check(&options.repo_root, &changed_file_paths));
+    stage1_agent_findings.extend(autoreview_core::run_practices_check(&options.repo_root, &changed_file_paths));
     // Architecture layer check is opt-in: only runs when the repo has a
     // .autoreview/architecture.yaml declaring layers, per the plan ("no sane
     // generic default for what a repo's layers are").
@@ -189,7 +190,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         .into_iter()
         .map(to_finding)
         .collect();
-    println!("  stage 1:        {stage1_finding_count} deterministic finding(s) (ast-grep + golangci-lint + duplication + complexity + architecture)");
+    println!("  stage 1:        {stage1_finding_count} deterministic finding(s) (ast-grep + golangci-lint + duplication + complexity + practices + architecture)");
 
     // LLM triage classifier (M2): only consulted when no explicit --tier was
     // given and the heuristic score itself landed within the ambiguity band
