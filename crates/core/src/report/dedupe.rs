@@ -39,7 +39,7 @@ pub fn dedupe_exact(findings: Vec<Finding>) -> DedupeResult {
 /// catch the case exact-fingerprint dedupe structurally can't: an analyzer
 /// and an agent (or two agents) independently flagging the same underlying
 /// issue with different rule keys/wording.
-fn normalized_shingles(text: &str) -> std::collections::HashSet<String> {
+pub(crate) fn normalized_shingles(text: &str) -> std::collections::HashSet<String> {
     let normalized: String = text.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { ' ' }).collect();
     // Shingle over the whitespace-collapsed character stream (not words) so
     // short titles still produce enough shingles to compare meaningfully.
@@ -51,7 +51,7 @@ fn normalized_shingles(text: &str) -> std::collections::HashSet<String> {
     collapsed_chars.windows(3).map(|w| w.iter().collect()).collect()
 }
 
-fn title_similarity(a: &str, b: &str) -> f64 {
+pub(crate) fn title_similarity(a: &str, b: &str) -> f64 {
     let sa = normalized_shingles(a);
     let sb = normalized_shingles(b);
     if sa.is_empty() || sb.is_empty() {

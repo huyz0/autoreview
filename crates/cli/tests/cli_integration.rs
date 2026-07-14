@@ -278,7 +278,24 @@ fn skills_list_reports_the_three_builtin_skills() {
 }
 
 #[test]
-fn rules_is_an_explicit_stub_not_silent_or_erroring() {
+fn rules_review_is_an_explicit_stub_not_silent_or_erroring() {
+    // `mine` graduated out of the stub once the rule-factory mining stage
+    // landed (see `rules_mine_reports_no_findings_on_a_fresh_repo` below) —
+    // `review` still is one, since the draft/bench/human-gate stages it
+    // depends on aren't built yet.
+    let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+
+    Command::cargo_bin("autoreview")
+        .unwrap()
+        .current_dir(repo.path())
+        .args(["rules", "review"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("not implemented yet"));
+}
+
+#[test]
+fn rules_mine_reports_no_findings_on_a_fresh_repo() {
     let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
 
     Command::cargo_bin("autoreview")
@@ -287,7 +304,7 @@ fn rules_is_an_explicit_stub_not_silent_or_erroring() {
         .args(["rules", "mine"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("not implemented yet"));
+        .stdout(predicate::str::contains("nothing to mine"));
 }
 
 #[test]

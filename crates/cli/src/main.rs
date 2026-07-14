@@ -8,6 +8,7 @@ use commands::apply::run_apply;
 use commands::diff::{run_diff, DiffCommandOptions};
 use commands::doctor::run_doctor;
 use commands::feedback::run_feedback;
+use commands::rules::run_rules_mine;
 use commands::skills::{run_skills_list, run_skills_stub};
 use commands::stubs::run_rules_stub;
 
@@ -55,7 +56,7 @@ enum Commands {
         #[arg(long)]
         note: Option<String>,
     },
-    /// Manage the learned-rule factory (not yet implemented — planned M3)
+    /// Manage the learned-rule factory (mine is implemented; draft/bench/shadow/promote planned M3)
     Rules {
         #[command(subcommand)]
         action: RulesAction,
@@ -152,16 +153,13 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
-        Commands::Rules { action } => {
-            let label = match action {
-                RulesAction::Mine => "mine".to_string(),
-                RulesAction::Bench { cluster_id } => format!("bench {cluster_id}"),
-                RulesAction::Review => "review".to_string(),
-                RulesAction::ShadowLog { rule_id } => format!("shadow-log {rule_id}"),
-                RulesAction::Rollback { rule_id } => format!("rollback {rule_id}"),
-            };
-            run_rules_stub(&label);
-        }
+        Commands::Rules { action } => match action {
+            RulesAction::Mine => run_rules_mine(&repo_root)?,
+            RulesAction::Bench { cluster_id } => run_rules_stub(&format!("bench {cluster_id}")),
+            RulesAction::Review => run_rules_stub("review"),
+            RulesAction::ShadowLog { rule_id } => run_rules_stub(&format!("shadow-log {rule_id}")),
+            RulesAction::Rollback { rule_id } => run_rules_stub(&format!("rollback {rule_id}")),
+        },
         Commands::Skills { action } => match action {
             SkillsAction::List => run_skills_list(&repo_root)?,
             SkillsAction::Mine => run_skills_stub("mine"),

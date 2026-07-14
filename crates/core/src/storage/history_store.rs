@@ -207,6 +207,32 @@ impl HistoryStore {
         Ok(())
     }
 
+    /// All recorded agent-sourced findings (source_kind = "agent"), the
+    /// mining input for the rule factory: analyzer/learned-rule findings
+    /// are already deterministic and have nothing to mine into a new rule.
+    /// Deliberately no distinct-fingerprint dedup here — mining needs every
+    /// occurrence (including repeats across runs) to judge recurrence.
+    pub fn agent_findings_for_mining(&self) -> anyhow::Result<Vec<MinedFindingRow>> {
+        let mut stmt = self.conn.prepare("SELECT fingerprint, category, rule_id, source_tool, title, message, run_id FROM findings WHERE source_kind = 'agent'")?;
+        let rows = stmt.query_map([], |row| {
+            let rule_id: Option<String> = row.get(2)?;
+            let source_tool: String = row.get(3)?;
+            Ok(MinedFindingRow {
+                fingerprint: row.get(0)?,
+                category: row.get(1)?,
+                rule_id_or_aspect: rule_id.unwrap_or(source_tool),
+                title: row.get(4)?,
+                message: row.get(5)?,
+                run_id: row.get(6)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
     /// Records an embedding vector for a piece of feedback (`verdict` is
     /// `"fp"` or `"tp"`), keyed by fingerprint — best-effort input to the
     /// Stage 4 similarity filter. Insert-only, same append-only shape as
@@ -269,6 +295,17 @@ pub struct FindingLookup {
     pub message: String,
 }
 
+/// One recorded agent finding, as the rule-factory miner needs to see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MinedFindingRow {
+    pub fingerprint: String,
+    pub category: String,
+    pub rule_id_or_aspect: String,
+    pub title: String,
+    pub message: String,
+    pub run_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +331,14 @@ mod tests {
             tags: None,
             meta: None,
         }
+    }
+
+    fn make_agent_finding(fingerprint: &str, title: &str, message: &str) -> Finding {
+        let mut finding = make_finding(fingerprint);
+        finding.source = FindingSource { kind: FindingSourceKind::Agent, tool: "claude".into(), rule_id: None, aspect: Some("correctness".into()), backend: None };
+        finding.title = title.to_string();
+        finding.message = message.to_string();
+        finding
     }
 
     fn make_report(run_id: &str, findings: Vec<Finding>) -> ReviewReport {
@@ -408,6 +453,16 @@ mod tests {
         store.record_run(&make_report_at("run-2", vec![make_finding("c")], "2026-07-12T00:00:00Z")).unwrap();
         let fps = store.fingerprints_for_run("run-1").unwrap();
         assert_eq!(fps, std::collections::HashSet::from(["a".to_string(), "b".to_string()]));
+    }
+
+    #[test]
+    fn agent_findings_for_mining_returns_only_agent_sourced_findings() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        store.record_run(&make_report("run-1", vec![make_finding("a"), make_agent_finding("b", "Missing null check", "Parameter x is not null-checked before use")])).unwrap();
+        let mined = store.agent_findings_for_mining().unwrap();
+        assert_eq!(mined.len(), 1);
+        assert_eq!(mined[0].fingerprint, "b");
+        assert_eq!(mined[0].title, "Missing null check");
     }
 
     #[test]

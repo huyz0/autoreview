@@ -3,5 +3,6 @@ pub mod diff;
 pub mod doctor;
 pub mod feedback;
 pub mod history;
+pub mod rules;
 pub mod skills;
 pub mod stubs;
