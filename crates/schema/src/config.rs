@@ -228,6 +228,39 @@ impl Default for LocalLlmConfig {
     }
 }
 
+fn default_embedding_base_url() -> String {
+    "http://localhost:8080/v1".to_string()
+}
+fn default_embedding_model() -> String {
+    "local-embed".to_string()
+}
+fn default_embedding_curl_binary() -> String {
+    "curl".to_string()
+}
+
+/// Settings for the Stage 4 embedding-similarity noise filter — an
+/// OpenAI-compatible `/v1/embeddings` endpoint, same contract llama.cpp's
+/// `llama-server --embedding` mode exposes. Reuses the curl-shell-out
+/// pattern from `LocalLlmConfig` rather than a distinct HTTP client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_embedding_base_url")]
+    pub base_url: String,
+    #[serde(default = "default_embedding_model")]
+    pub model: String,
+    #[serde(default = "default_embedding_curl_binary")]
+    pub curl_binary: String,
+}
+
+impl Default for EmbeddingConfig {
+    fn default() -> Self {
+        Self { enabled: false, base_url: default_embedding_base_url(), model: default_embedding_model(), curl_binary: default_embedding_curl_binary() }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentsConfig {
@@ -240,6 +273,8 @@ pub struct AgentsConfig {
     pub pi_provider: Option<String>,
     #[serde(default)]
     pub local_llm: LocalLlmConfig,
+    #[serde(default)]
+    pub embedding: EmbeddingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

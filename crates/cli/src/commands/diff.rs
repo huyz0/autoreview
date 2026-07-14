@@ -459,6 +459,44 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         }
     }
 
+    // Embedding-similarity noise filter: opt-in (needs a configured embedding
+    // server), and best-effort — an unreachable server just skips the filter
+    // rather than failing the run. Reuses the plan's Greptile-derived rule:
+    // suppress a finding cosine-similar to >= fpBlockThreshold distinct past
+    // `--fp` findings, unless it's also similar to >= tpOverrideThreshold
+    // distinct past `--tp` findings (a recurring real issue shouldn't be
+    // silenced just because it also resembles some noise).
+    if config.agents.embedding.enabled {
+        match HistoryStore::open(&history_dir) {
+            Ok(store) => {
+                let (mut kept, mut suppressed_by_embedding) = (Vec::new(), Vec::new());
+                for finding in dedupe_result.findings.into_iter() {
+                    let text = format!("{} {}", finding.title, finding.message);
+                    let embedding = autoreview_core::fetch_embedding(&config.agents.embedding.base_url, &config.agents.embedding.model, &text, &config.agents.embedding.curl_binary);
+                    let suppress = match embedding {
+                        Ok(embedding) => {
+                            let fp_count = store.count_similar_embeddings(&embedding, "fp", 0.9).unwrap_or(0);
+                            let tp_count = store.count_similar_embeddings(&embedding, "tp", 0.9).unwrap_or(0);
+                            fp_count >= config.storage.fp_block_threshold && tp_count < config.storage.tp_override_threshold
+                        }
+                        Err(_) => false,
+                    };
+                    if suppress {
+                        suppressed_by_embedding.push(finding);
+                    } else {
+                        kept.push(finding);
+                    }
+                }
+                if !suppressed_by_embedding.is_empty() {
+                    println!("\n  [embedding] suppressed {} finding(s) similar to past false positives", suppressed_by_embedding.len());
+                }
+                dedupe_result.findings = kept;
+                dedupe_result.suppressed.extend(suppressed_by_embedding.into_iter().map(|finding| autoreview_schema::SuppressedFinding { finding, reason: autoreview_schema::SuppressedReason::EmbeddingFpMatch }));
+            }
+            Err(err) => println!("  [warn] embedding filter: failed to open history store: {err}"),
+        }
+    }
+
     for finding in &dedupe_result.findings {
         println!(
             "\n  [{:?}] {} ({}) — {}",

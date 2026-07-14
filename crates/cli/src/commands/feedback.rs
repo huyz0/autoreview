@@ -7,7 +7,7 @@
 //! to look up (a miss is an absence, not an event), so it's recorded keyed to
 //! the sha itself.
 
-use autoreview_core::{append_event_log, feedback_event, EventRecord, HistoryStore};
+use autoreview_core::{append_event_log, feedback_event, fetch_embedding, load_config, EventRecord, HistoryStore};
 
 use super::history::{history_dir_for, hostname};
 
@@ -47,6 +47,19 @@ pub fn run_feedback(repo_root: &std::path::Path, id: &str, verdict: &str, note: 
     store.record_feedback(id, &lookup, verdict, note, &timestamp)?;
     let event = feedback_event(&lookup, verdict, "feedback", &host, &timestamp);
     append_event_log(&history_dir, &chrono::Utc::now().format("%Y-%m-%d").to_string(), &host, std::slice::from_ref(&event))?;
+
+    // Best-effort: record an embedding of this finding's text for the Stage
+    // 4 similarity filter, only if a repo has opted in and a server is
+    // configured. Never fails the feedback command itself — a missing/down
+    // embedding server shouldn't block recording an `--fp`/`--tp` verdict.
+    if let Ok(config) = load_config(&repo_root.join(".autoreview").join("config.yaml")) {
+        if config.agents.embedding.enabled {
+            let text = format!("{} {}", lookup.title, lookup.message);
+            if let Ok(embedding) = fetch_embedding(&config.agents.embedding.base_url, &config.agents.embedding.model, &text, &config.agents.embedding.curl_binary) {
+                let _ = store.record_embedding(&lookup.fingerprint, verdict, &embedding, &timestamp);
+            }
+        }
+    }
 
     let verdict_label = match verdict {
         "fp" => "false positive",

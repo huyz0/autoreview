@@ -53,7 +53,9 @@ impl HistoryStore {
                 run_id TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 valid_from TEXT NOT NULL,
-                invalid_at TEXT
+                invalid_at TEXT,
+                title TEXT NOT NULL DEFAULT '',
+                message TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_findings_fingerprint ON findings(fingerprint);
             CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
@@ -90,8 +92,24 @@ impl HistoryStore {
                 invalid_at TEXT,
                 PRIMARY KEY (aspect, version)
             );
+
+            CREATE TABLE IF NOT EXISTS embeddings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fingerprint TEXT NOT NULL,
+                verdict TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_embeddings_verdict ON embeddings(verdict);
             ",
         )?;
+        // Best-effort migration for a pre-existing `findings` table created
+        // before `title`/`message` were added — `CREATE TABLE IF NOT EXISTS`
+        // above is a no-op against an already-existing table, so these
+        // columns need their own add-if-missing step. Errors (column already
+        // present) are expected and ignored.
+        let _ = self.conn.execute("ALTER TABLE findings ADD COLUMN title TEXT NOT NULL DEFAULT ''", []);
+        let _ = self.conn.execute("ALTER TABLE findings ADD COLUMN message TEXT NOT NULL DEFAULT ''", []);
         Ok(())
     }
 
@@ -103,8 +121,8 @@ impl HistoryStore {
         let tx = self.conn.unchecked_transaction()?;
         for finding in &report.findings {
             tx.execute(
-                "INSERT INTO findings (finding_id, fingerprint, category, severity, source_kind, source_tool, rule_id, run_id, created_at, valid_from)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                "INSERT INTO findings (finding_id, fingerprint, category, severity, source_kind, source_tool, rule_id, run_id, created_at, valid_from, title, message)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10, ?11)",
                 rusqlite::params![
                     finding.id,
                     finding.fingerprints.primary,
@@ -115,6 +133,8 @@ impl HistoryStore {
                     finding.source.rule_id,
                     report.run_id,
                     report.created_at,
+                    finding.title,
+                    finding.message,
                 ],
             )?;
         }
@@ -154,7 +174,7 @@ impl HistoryStore {
     /// without the caller having to know those details.
     pub fn find_finding_by_id(&self, finding_id: &str) -> anyhow::Result<Option<FindingLookup>> {
         let result = self.conn.query_row(
-            "SELECT fingerprint, category, severity, rule_id, source_tool
+            "SELECT fingerprint, category, severity, rule_id, source_tool, title, message
              FROM findings WHERE finding_id = ?1 ORDER BY created_at DESC LIMIT 1",
             [finding_id],
             |row| {
@@ -163,6 +183,8 @@ impl HistoryStore {
                     category: row.get(1)?,
                     severity: row.get(2)?,
                     rule_id_or_tool: row.get::<_, Option<String>>(3)?.unwrap_or_else(|| row.get::<_, String>(4).unwrap_or_default()),
+                    title: row.get(5)?,
+                    message: row.get(6)?,
                 })
             },
         );
@@ -183,6 +205,40 @@ impl HistoryStore {
             rusqlite::params![finding_id, lookup.fingerprint, lookup.category, lookup.rule_id_or_tool, lookup.severity, verdict, note, created_at],
         )?;
         Ok(())
+    }
+
+    /// Records an embedding vector for a piece of feedback (`verdict` is
+    /// `"fp"` or `"tp"`), keyed by fingerprint — best-effort input to the
+    /// Stage 4 similarity filter. Insert-only, same append-only shape as
+    /// `record_feedback`; a fingerprint can accumulate multiple embedding
+    /// rows over time (e.g. re-computed with a different model) without
+    /// needing an update path.
+    pub fn record_embedding(&self, fingerprint: &str, verdict: &str, embedding: &[f32], created_at: &str) -> anyhow::Result<()> {
+        let bytes = crate::agents::embedding::embedding_to_bytes(embedding);
+        self.conn.execute(
+            "INSERT INTO embeddings (fingerprint, verdict, embedding, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![fingerprint, verdict, bytes, created_at],
+        )?;
+        Ok(())
+    }
+
+    /// Counts distinct fingerprints, among those recorded with `verdict`,
+    /// whose stored embedding is cosine-similar to `embedding` at or above
+    /// `threshold`. Used by the Stage 4 filter to test both the
+    /// `fpBlockThreshold` and `tpOverrideThreshold` conditions with the same
+    /// query, just a different `verdict`/`threshold` pair.
+    pub fn count_similar_embeddings(&self, embedding: &[f32], verdict: &str, threshold: f64) -> anyhow::Result<u32> {
+        let mut stmt = self.conn.prepare("SELECT fingerprint, embedding FROM embeddings WHERE verdict = ?1")?;
+        let rows = stmt.query_map([verdict], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
+        let mut matched: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for row in rows {
+            let (fingerprint, bytes) = row?;
+            let Ok(stored) = crate::agents::embedding::embedding_from_bytes(&bytes) else { continue };
+            if crate::agents::embedding::cosine_similarity(embedding, &stored) >= threshold {
+                matched.insert(fingerprint);
+            }
+        }
+        Ok(matched.len() as u32)
     }
 
     #[cfg(test)]
@@ -209,6 +265,8 @@ pub struct FindingLookup {
     pub category: String,
     pub severity: String,
     pub rule_id_or_tool: String,
+    pub title: String,
+    pub message: String,
 }
 
 #[cfg(test)]
@@ -350,5 +408,28 @@ mod tests {
         store.record_run(&make_report_at("run-2", vec![make_finding("c")], "2026-07-12T00:00:00Z")).unwrap();
         let fps = store.fingerprints_for_run("run-1").unwrap();
         assert_eq!(fps, std::collections::HashSet::from(["a".to_string(), "b".to_string()]));
+    }
+
+    #[test]
+    fn count_similar_embeddings_counts_only_vectors_above_the_threshold() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        store.record_embedding("a", "fp", &[1.0, 0.0], "2026-07-12T00:00:00Z").unwrap();
+        store.record_embedding("b", "fp", &[0.0, 1.0], "2026-07-12T00:00:00Z").unwrap();
+        assert_eq!(store.count_similar_embeddings(&[1.0, 0.0], "fp", 0.9).unwrap(), 1);
+    }
+
+    #[test]
+    fn count_similar_embeddings_ignores_a_different_verdict() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        store.record_embedding("a", "tp", &[1.0, 0.0], "2026-07-12T00:00:00Z").unwrap();
+        assert_eq!(store.count_similar_embeddings(&[1.0, 0.0], "fp", 0.9).unwrap(), 0);
+    }
+
+    #[test]
+    fn count_similar_embeddings_counts_each_matching_fingerprint_once() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        store.record_embedding("a", "fp", &[1.0, 0.0], "2026-07-12T00:00:00Z").unwrap();
+        store.record_embedding("a", "fp", &[1.0, 0.01], "2026-07-13T00:00:00Z").unwrap();
+        assert_eq!(store.count_similar_embeddings(&[1.0, 0.0], "fp", 0.9).unwrap(), 1);
     }
 }

@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn feedback_event_carries_the_looked_up_fields_and_the_verdict() {
         use crate::storage::FindingLookup;
-        let lookup = FindingLookup { fingerprint: "abc".into(), category: "correctness".into(), severity: "medium".into(), rule_id_or_tool: "go-no-self-comparison".into() };
+        let lookup = FindingLookup { fingerprint: "abc".into(), category: "correctness".into(), severity: "medium".into(), rule_id_or_tool: "go-no-self-comparison".into(), title: "t".into(), message: "m".into() };
         let event = feedback_event(&lookup, "fp", "feedback", "host1", "2026-07-12T00:00:00Z");
         assert_eq!(event.finding_fingerprint, "abc");
         assert_eq!(event.category, "correctness");
