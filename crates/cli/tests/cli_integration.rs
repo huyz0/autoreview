@@ -308,6 +308,19 @@ fn rules_mine_reports_no_findings_on_a_fresh_repo() {
 }
 
 #[test]
+fn skills_mine_reports_nothing_to_mine_on_a_fresh_repo() {
+    let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+
+    Command::cargo_bin("autoreview")
+        .unwrap()
+        .current_dir(repo.path())
+        .args(["skills", "mine"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing to mine"));
+}
+
+#[test]
 fn rules_bench_fails_clearly_when_no_rule_has_been_drafted() {
     let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
 

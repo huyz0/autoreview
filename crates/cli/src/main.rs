@@ -9,7 +9,7 @@ use commands::diff::{run_diff, DiffCommandOptions};
 use commands::doctor::run_doctor;
 use commands::feedback::run_feedback;
 use commands::rules::{run_rules_bench, run_rules_mine, run_rules_shadow_log};
-use commands::skills::{run_skills_list, run_skills_stub};
+use commands::skills::{run_skills_list, run_skills_mine, run_skills_stub};
 use commands::stubs::run_rules_stub;
 
 #[derive(Parser)]
@@ -61,7 +61,7 @@ enum Commands {
         #[command(subcommand)]
         action: RulesAction,
     },
-    /// Manage review skills (list is implemented; mining/eval planned M3)
+    /// Manage review skills (list and mine are implemented; bench/review/rollback planned M3)
     Skills {
         #[command(subcommand)]
         action: SkillsAction,
@@ -162,7 +162,7 @@ fn main() -> anyhow::Result<()> {
         },
         Commands::Skills { action } => match action {
             SkillsAction::List => run_skills_list(&repo_root)?,
-            SkillsAction::Mine => run_skills_stub("mine"),
+            SkillsAction::Mine => run_skills_mine(&repo_root)?,
             SkillsAction::Bench { aspect, proposal_id } => run_skills_stub(&format!("bench {aspect} {proposal_id}")),
             SkillsAction::Review => run_skills_stub("review"),
             SkillsAction::Rollback { aspect, version } => run_skills_stub(&format!("rollback {aspect} {version}")),

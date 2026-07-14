@@ -70,7 +70,9 @@ impl HistoryStore {
                 severity TEXT NOT NULL,
                 verdict TEXT NOT NULL,
                 note TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                message TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_feedback_finding_id ON feedback(finding_id);
 
@@ -122,6 +124,8 @@ impl HistoryStore {
         // present) are expected and ignored.
         let _ = self.conn.execute("ALTER TABLE findings ADD COLUMN title TEXT NOT NULL DEFAULT ''", []);
         let _ = self.conn.execute("ALTER TABLE findings ADD COLUMN message TEXT NOT NULL DEFAULT ''", []);
+        let _ = self.conn.execute("ALTER TABLE feedback ADD COLUMN title TEXT NOT NULL DEFAULT ''", []);
+        let _ = self.conn.execute("ALTER TABLE feedback ADD COLUMN message TEXT NOT NULL DEFAULT ''", []);
         Ok(())
     }
 
@@ -212,11 +216,28 @@ impl HistoryStore {
     /// of the original finding row, only a new fact recorded alongside it.
     pub fn record_feedback(&self, finding_id: &str, lookup: &FindingLookup, verdict: &str, note: Option<&str>, created_at: &str) -> anyhow::Result<()> {
         self.conn.execute(
-            "INSERT INTO feedback (finding_id, fingerprint, category, rule_id_or_aspect, severity, verdict, note, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![finding_id, lookup.fingerprint, lookup.category, lookup.rule_id_or_tool, lookup.severity, verdict, note, created_at],
+            "INSERT INTO feedback (finding_id, fingerprint, category, rule_id_or_aspect, severity, verdict, note, created_at, title, message)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![finding_id, lookup.fingerprint, lookup.category, lookup.rule_id_or_tool, lookup.severity, verdict, note, created_at, lookup.title, lookup.message],
         )?;
         Ok(())
+    }
+
+    /// `--fp` feedback rows that carry a human-supplied `--note`, per
+    /// category — skill evolution's channel 2 input (repeated `--fp`
+    /// feedback with the human's own stated reason). Feedback without a
+    /// note is excluded: an unexplained "this was wrong" has no thread for
+    /// negative-guidance drafting to work from.
+    pub fn fp_feedback_with_notes(&self) -> anyhow::Result<Vec<FpFeedbackRow>> {
+        let mut stmt = self.conn.prepare("SELECT category, rule_id_or_aspect, title, message, note FROM feedback WHERE verdict = 'fp' AND note IS NOT NULL AND note != ''")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(FpFeedbackRow { category: row.get(0)?, rule_id_or_aspect: row.get(1)?, title: row.get(2)?, message: row.get(3)?, note: row.get(4)? })
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
     }
 
     /// All recorded agent-sourced findings (source_kind = "agent"), the
@@ -431,6 +452,17 @@ pub struct ShadowFiringRow {
     pub location_line: u32,
     pub agreement: String,
     pub created_at: String,
+}
+
+/// One `--fp` feedback row with a human-supplied note — skill evolution's
+/// raw mining input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FpFeedbackRow {
+    pub category: String,
+    pub rule_id_or_aspect: String,
+    pub title: String,
+    pub message: String,
+    pub note: String,
 }
 
 #[cfg(test)]
@@ -659,5 +691,21 @@ mod tests {
         store.record_feedback("f-a", &lookup, "tp", None, "2026-07-13T00:00:00Z").unwrap();
         assert_eq!(store.count_fp_feedback_for_rule("go-no-self-comparison").unwrap(), 1);
         assert_eq!(store.count_fp_feedback_for_rule("some-other-rule").unwrap(), 0);
+    }
+
+    #[test]
+    fn fp_feedback_with_notes_excludes_unnoted_and_non_fp_feedback() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        store.record_run(&make_report("run-1", vec![make_finding("a"), make_finding("b"), make_finding("c")])).unwrap();
+        let a = store.find_finding_by_id("f-a").unwrap().unwrap();
+        let b = store.find_finding_by_id("f-b").unwrap().unwrap();
+        let c = store.find_finding_by_id("f-c").unwrap().unwrap();
+        store.record_feedback("f-a", &a, "fp", Some("intentional pattern here"), "2026-07-12T00:00:00Z").unwrap();
+        store.record_feedback("f-b", &b, "fp", None, "2026-07-12T00:00:00Z").unwrap();
+        store.record_feedback("f-c", &c, "tp", Some("real bug"), "2026-07-12T00:00:00Z").unwrap();
+
+        let rows = store.fp_feedback_with_notes().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].note, "intentional pattern here");
     }
 }
