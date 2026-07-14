@@ -1,0 +1,9 @@
+[package]
+name = "autoreview-archgraph"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+tempfile = "3"

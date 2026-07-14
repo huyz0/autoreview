@@ -1,4 +1,5 @@
 pub mod architecture;
+pub mod archgraph_check;
 pub mod ast_grep;
 pub mod complexity;
 pub mod duplication;
