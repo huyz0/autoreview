@@ -321,6 +321,18 @@ fn skills_mine_reports_nothing_to_mine_on_a_fresh_repo() {
 }
 
 #[test]
+fn skills_bench_fails_clearly_when_no_proposal_exists() {
+    let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+
+    Command::cargo_bin("autoreview")
+        .unwrap()
+        .current_dir(repo.path())
+        .args(["skills", "bench", "correctness", "no-such-proposal"])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn rules_bench_fails_clearly_when_no_rule_has_been_drafted() {
     let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
 

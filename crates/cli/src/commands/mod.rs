@@ -5,4 +5,5 @@ pub mod feedback;
 pub mod history;
 pub mod rules;
 pub mod skills;
+pub mod skills_bench;
 pub mod stubs;

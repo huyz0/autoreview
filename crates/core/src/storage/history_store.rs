@@ -240,6 +240,41 @@ impl HistoryStore {
         Ok(result)
     }
 
+    /// Known-outcome findings for one recorded run — a replay corpus entry
+    /// for the skill-evolution bench harness: joins that run's findings
+    /// against any feedback recorded against them, so a replay can check
+    /// "did the candidate skill still flag (or stop flagging) the thing a
+    /// human already told us was a false/true positive."
+    pub fn known_verdicts_for_run(&self, run_id: &str) -> anyhow::Result<Vec<KnownVerdict>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.title, f.message, f.fingerprint, fb.verdict
+             FROM findings f JOIN feedback fb ON fb.fingerprint = f.fingerprint
+             WHERE f.run_id = ?1",
+        )?;
+        let rows = stmt.query_map([run_id], |row| Ok(KnownVerdict { title: row.get(0)?, message: row.get(1)?, fingerprint: row.get(2)?, verdict: row.get(3)? }))?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Distinct `(run_id, base_ref, head_ref)` triples for runs that have
+    /// at least one known verdict — the replay corpus's candidate list,
+    /// before the caller filters down to ones actually reachable via git
+    /// worktree (old runs whose refs no longer exist get skipped there).
+    pub fn runs_with_known_verdicts(&self) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT f.run_id FROM findings f JOIN feedback fb ON fb.fingerprint = f.fingerprint",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
     /// All recorded agent-sourced findings (source_kind = "agent"), the
     /// mining input for the rule factory: analyzer/learned-rule findings
     /// are already deterministic and have nothing to mine into a new rule.
@@ -463,6 +498,16 @@ pub struct FpFeedbackRow {
     pub title: String,
     pub message: String,
     pub note: String,
+}
+
+/// One finding from a past run with a known human verdict — the ground
+/// truth a replay bench compares a candidate skill's output against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownVerdict {
+    pub title: String,
+    pub message: String,
+    pub fingerprint: String,
+    pub verdict: String,
 }
 
 #[cfg(test)]
@@ -707,5 +752,30 @@ mod tests {
         let rows = store.fp_feedback_with_notes().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].note, "intentional pattern here");
+    }
+
+    #[test]
+    fn known_verdicts_for_run_joins_findings_with_their_feedback() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        store.record_run(&make_report("run-1", vec![make_finding("a"), make_finding("b")])).unwrap();
+        let a = store.find_finding_by_id("f-a").unwrap().unwrap();
+        store.record_feedback("f-a", &a, "fp", None, "2026-07-12T00:00:00Z").unwrap();
+
+        let known = store.known_verdicts_for_run("run-1").unwrap();
+        assert_eq!(known.len(), 1, "only 'a' has feedback recorded");
+        assert_eq!(known[0].fingerprint, "a");
+        assert_eq!(known[0].verdict, "fp");
+    }
+
+    #[test]
+    fn runs_with_known_verdicts_returns_only_runs_with_feedback() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        store.record_run(&make_report("run-1", vec![make_finding("a")])).unwrap();
+        store.record_run(&make_report("run-2", vec![make_finding("b")])).unwrap();
+        let a = store.find_finding_by_id("f-a").unwrap().unwrap();
+        store.record_feedback("f-a", &a, "tp", None, "2026-07-12T00:00:00Z").unwrap();
+
+        let runs = store.runs_with_known_verdicts().unwrap();
+        assert_eq!(runs, vec!["run-1".to_string()]);
     }
 }

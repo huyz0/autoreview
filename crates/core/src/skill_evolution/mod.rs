@@ -9,3 +9,4 @@
 //! today, not an indexed table) are not yet wired in.
 
 pub mod mine;
+pub mod replay;
