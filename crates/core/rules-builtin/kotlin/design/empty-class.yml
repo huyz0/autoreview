@@ -1,0 +1,9 @@
+id: kotlin-empty-class
+language: Kotlin
+category: design
+severity: warning
+message: An empty class body with no properties or functions is likely leftover scaffolding from a refactor, or a stub that was never finished — remove it or give it a purpose.
+rule:
+  any:
+    - pattern: "class $NAME {}"
+    - pattern: "class $NAME() {}"

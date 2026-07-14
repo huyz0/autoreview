@@ -1,0 +1,11 @@
+id: java-empty-class
+language: Java
+category: design
+severity: warning
+message: An empty class body with no fields or methods is likely leftover scaffolding from a refactor, or a stub that was never finished — remove it or give it a purpose.
+rule:
+  any:
+    - pattern: "class $NAME {}"
+    - pattern: "public class $NAME {}"
+    - pattern: "final class $NAME {}"
+    - pattern: "public final class $NAME {}"

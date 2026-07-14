@@ -1,0 +1,16 @@
+id: java-public-mutable-static-field
+language: Java
+category: design
+severity: warning
+message: A public, non-final static field is global mutable state reachable and modifiable from anywhere in the codebase — encapsulate it behind an accessor, or make it final if it's actually a constant.
+rule:
+  any:
+    - pattern:
+        context: "class Wrapper { $MODS $TYPE $NAME = $VAL; }"
+        selector: field_declaration
+    - pattern:
+        context: "class Wrapper { $MODS $TYPE $NAME; }"
+        selector: field_declaration
+constraints:
+  MODS:
+    regex: "^public static$"

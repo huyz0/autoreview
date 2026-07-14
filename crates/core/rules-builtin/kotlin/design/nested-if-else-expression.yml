@@ -1,0 +1,7 @@
+id: kotlin-nested-if-else-expression
+language: Kotlin
+category: design
+severity: warning
+message: An if/else expression nested inside another if/else's else branch (Kotlin's ternary equivalent) is hard to read at a glance — prefer a when expression or extracting a named helper function for each branch.
+rule:
+  pattern: "if ($A) $B else if ($C) $D else $E"

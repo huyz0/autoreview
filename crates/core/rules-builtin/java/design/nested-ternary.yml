@@ -1,0 +1,7 @@
+id: java-nested-ternary
+language: Java
+category: design
+severity: warning
+message: A ternary nested inside another ternary is hard to read at a glance — prefer an if/else chain or extracting a named helper method for each branch.
+rule:
+  pattern: "$A ? $B : ($C ? $D : $E)"

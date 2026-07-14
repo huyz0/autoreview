@@ -1,0 +1,14 @@
+id: java-catch-and-rethrow-generic
+language: Java
+category: design
+severity: warning
+message: Catching a specific exception and rethrowing it wrapped in a generic RuntimeException discards the original exception's type — callers lose the ability to catch/handle the specific failure mode. Prefer a more specific custom exception, or don't wrap at all.
+rule:
+  pattern:
+    context: |
+      try {
+        $$$BODY
+      } catch ($EXC $VAR) {
+        throw new RuntimeException($$$ARGS);
+      }
+    selector: try_statement
