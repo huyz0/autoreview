@@ -443,10 +443,20 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         // approximate (no type resolution) rules — ast-grep rules declaring
         // `semantic: true`, plus the symindex heuristic rules (message-chain/
         // feature-envy/data-clump aren't YAML-declared, so they're unioned
-        // in directly) — always get a Stage 3.5 confirmation regardless of
-        // their own severity/category, on top of the noisy-category selection.
+        // in directly), plus the hand-rolled excessive-comment-padding check
+        // (also not YAML-declared — it's a practices.rs line scan) — always
+        // get a Stage 3.5 confirmation regardless of their own severity/
+        // category, on top of the noisy-category selection. Padding-comment
+        // in particular is a syntactic proxy (comment volume vs. body
+        // volume) for a semantic claim ("this comment is stale/no longer
+        // useful") it can't verify on its own, so it needs the LLM check.
         let mut semantic_ids = autoreview_core::semantic_rule_ids();
-        semantic_ids.extend(["message-chain".to_string(), "feature-envy".to_string(), "data-clump".to_string()]);
+        semantic_ids.extend([
+            "message-chain".to_string(),
+            "feature-envy".to_string(),
+            "data-clump".to_string(),
+            "excessive-comment-padding".to_string(),
+        ]);
 
         let to_check = autoreview_core::select_for_verification(&findings, &config.verify.noisy_categories, &semantic_ids).len();
         if to_check > 0 {

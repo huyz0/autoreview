@@ -38,7 +38,7 @@ const CONTROL_KEYWORDS: &[&str] = &["if", "for", "while", "switch", "select", "c
 /// line (the common "brace on same line as signature" style in all three
 /// languages), and excludes lines that are actually control-flow statements
 /// or type declarations that happen to also end in `) {` or `{`.
-fn opens_function(trimmed: &str) -> Option<&str> {
+pub(crate) fn opens_function(trimmed: &str) -> Option<&str> {
     if !trimmed.ends_with('{') {
         return None;
     }

@@ -185,6 +185,72 @@ fn detect_todo_without_ticket(path: &str, content: &str, language: PracticesLang
     findings
 }
 
+/// Fowler's "Comments" smell, the padding variant: a comment block sitting
+/// directly above a method that's wildly disproportionate to the method
+/// body it documents. Distinguishing a genuinely *stale* comment (one that
+/// no longer matches the code) needs semantic understanding this line-scan
+/// can't provide, so this only catches the syntactic proxy the session's
+/// prior pass flagged as tractable — comment volume vastly exceeding the
+/// code volume is itself a maintenance smell (it's either padding that
+/// should be trimmed or a sign the method needs splitting up, not more
+/// prose). Reuses `complexity::opens_function`'s same brace-style heuristic
+/// so both scanners treat function boundaries identically.
+fn detect_padding_comment(path: &str, content: &str, language: PracticesLanguage) -> Vec<AgentFinding> {
+    use super::complexity::opens_function;
+
+    const MIN_COMMENT_LINES: usize = 10;
+    const RATIO: usize = 3;
+
+    let prefix = line_comment_prefix(language);
+    let lines: Vec<&str> = content.lines().collect();
+    let mut findings = Vec::new();
+
+    let mut idx = 0usize;
+    while idx < lines.len() {
+        let trimmed = lines[idx].trim();
+        if trimmed.strip_prefix(prefix).is_some() {
+            let comment_start = idx;
+            let mut j = idx;
+            while j < lines.len() && lines[j].trim().strip_prefix(prefix).is_some() {
+                j += 1;
+            }
+            let comment_len = j - comment_start;
+
+            if j < lines.len() && opens_function(lines[j].trim()).is_some() && comment_len >= MIN_COMMENT_LINES {
+                // Measure the function body by brace depth from its opening line.
+                let mut depth = 0i32;
+                let mut body_end = j;
+                for (k, l) in lines.iter().enumerate().skip(j) {
+                    depth += l.matches('{').count() as i32;
+                    depth -= l.matches('}').count() as i32;
+                    if depth == 0 {
+                        body_end = k;
+                        break;
+                    }
+                }
+                let body_len = body_end - j + 1;
+
+                if comment_len > RATIO * body_len {
+                    findings.push(make_finding(
+                        "excessive-comment-padding",
+                        path,
+                        (comment_start + 1) as u32,
+                        j as u32,
+                        format!("Comment block ({comment_len} lines) is disproportionate to the method it documents ({body_len} lines)"),
+                        "This comment block is far longer than the method it precedes, which often means it's stale/padding rather than useful documentation, or a sign the method itself has grown too complex to explain briefly. Trim it to what's still accurate, or split the method.".to_string(),
+                        lines[comment_start..j].join("\n"),
+                    ));
+                }
+            }
+            idx = j.max(idx + 1);
+        } else {
+            idx += 1;
+        }
+    }
+
+    findings
+}
+
 fn detect_wildcard_imports(path: &str, content: &str) -> Vec<AgentFinding> {
     let mut findings = Vec::new();
     for (idx, raw_line) in content.lines().enumerate() {
@@ -217,6 +283,7 @@ pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<Ag
 
             let mut findings = detect_commented_out_code(path, &content, language);
             findings.extend(detect_todo_without_ticket(path, &content, language));
+            findings.extend(detect_padding_comment(path, &content, language));
             if language == PracticesLanguage::JavaOrKotlin {
                 findings.extend(detect_wildcard_imports(path, &content));
             }
@@ -279,6 +346,38 @@ mod tests {
         let content = "func f() {\n\t// fixme this is broken\n}\n";
         let findings = detect_todo_without_ticket("main.go", content, PracticesLanguage::Go);
         assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn flags_a_comment_block_wildly_disproportionate_to_its_method() {
+        let mut lines = vec!["// line".to_string(); 12];
+        lines.push("func f() {".to_string());
+        lines.push("\treturn".to_string());
+        lines.push("}".to_string());
+        let content = lines.join("\n");
+        let findings = detect_padding_comment("main.go", &content, PracticesLanguage::Go);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("excessive-comment-padding"));
+    }
+
+    #[test]
+    fn does_not_flag_a_reasonably_sized_doc_comment() {
+        let content = "// f does something.\n// It takes no args.\nfunc f() {\n\treturn\n}\n";
+        let findings = detect_padding_comment("main.go", content, PracticesLanguage::Go);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn does_not_flag_a_long_comment_over_a_long_method() {
+        let mut lines = vec!["// line".to_string(); 12];
+        lines.push("func f() {".to_string());
+        for _ in 0..40 {
+            lines.push("\tdoWork()".to_string());
+        }
+        lines.push("}".to_string());
+        let content = lines.join("\n");
+        let findings = detect_padding_comment("main.go", &content, PracticesLanguage::Go);
+        assert!(findings.is_empty());
     }
 
     #[test]
