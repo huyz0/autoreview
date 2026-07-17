@@ -4,6 +4,7 @@ members = [
     "crates/schema",
     "crates/core",
     "crates/archgraph",
+    "crates/symindex",
     "crates/cli",
     "crates/test-support",
 ]

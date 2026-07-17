@@ -167,6 +167,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "autoreview-symindex"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "tree-sitter",
+ "tree-sitter-go",
+ "tree-sitter-java",
+]
+
+[[package]]
 name = "autoreview-test-support"
 version = "0.1.0"
 dependencies = [
