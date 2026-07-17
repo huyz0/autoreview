@@ -18,7 +18,7 @@ pub use agents::local_llm::{local_llm_available, parse_chat_completion_response,
 pub use agents::pi::{parse_pi_json_output, PiBackend};
 pub use analyzers::archgraph_check::run_archgraph_check;
 pub use analyzers::architecture::{load_architecture_config, run_architecture_check};
-pub use analyzers::ast_grep::run_ast_grep;
+pub use analyzers::ast_grep::{run_ast_grep, semantic_rule_ids};
 pub use analyzers::clippy::run_clippy;
 pub use analyzers::complexity::run_complexity_check;
 pub use analyzers::practices::run_practices_check;

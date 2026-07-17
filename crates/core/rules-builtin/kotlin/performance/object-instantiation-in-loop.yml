@@ -1,6 +1,7 @@
 id: kotlin-object-instantiation-in-loop
 language: Kotlin
 category: performance
+semantic: true
 severity: warning
 message: An object is constructed on every loop iteration — if it's stateless/reusable (a formatter, a parser, a compiled pattern), hoist the construction outside the loop so it only happens once.
 rule:

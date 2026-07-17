@@ -1,6 +1,7 @@
 id: java-nested-loop-linear-search
 language: Java
 category: performance
+semantic: true
 severity: warning
 message: A nested loop compares an outer element against every inner element by field equality — this is O(n*m). Build a Map keyed by the comparison field before the loop and look it up in O(1) instead.
 rule:

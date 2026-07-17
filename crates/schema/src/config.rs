@@ -374,7 +374,12 @@ impl Default for StorageConfig {
 }
 
 fn default_noisy_categories() -> Vec<String> {
-    vec!["style".to_string()]
+    // "design"/"performance" cover the symindex heuristic rules
+    // (message-chain, feature-envy, data-clump) and the nested-loop/
+    // object-in-loop rules — the pack's first non-type-resolved,
+    // higher-false-positive-rate deterministic rules, so they get a
+    // cheap-model double-check by default rather than only on request.
+    vec!["style".to_string(), "design".to_string(), "performance".to_string()]
 }
 
 /// Config for the Stage-3.5 judge pass (see the plan's prior-art research

@@ -28,16 +28,20 @@ struct VerdictJson {
 }
 
 /// Selects the findings this pass should re-check: agent findings at
-/// high/blocker severity (the plan's stated target), plus analyzer findings
-/// from configured noisy categories. Everything else passes through
-/// unexamined — this pass is deliberately narrow, not a second full review.
-pub fn select_for_verification<'a>(findings: &'a [Finding], noisy_categories: &[String]) -> Vec<&'a Finding> {
+/// high/blocker severity (the plan's stated target), analyzer findings from
+/// configured noisy categories, and any finding from a rule explicitly
+/// marked `semantic: true` (syntactically precise, semantically
+/// approximate — always double-checked regardless of its own
+/// severity/category). Everything else passes through unexamined — this
+/// pass is deliberately narrow, not a second full review.
+pub fn select_for_verification<'a>(findings: &'a [Finding], noisy_categories: &[String], semantic_rule_ids: &std::collections::HashSet<String>) -> Vec<&'a Finding> {
     findings
         .iter()
         .filter(|f| {
             let is_high_severity_agent = matches!(f.source.kind, FindingSourceKind::Agent) && matches!(f.severity, Severity::Blocker | Severity::High);
             let is_noisy_analyzer = matches!(f.source.kind, FindingSourceKind::Analyzer) && noisy_categories.iter().any(|c| c == &f.category);
-            is_high_severity_agent || is_noisy_analyzer
+            let is_semantic_rule = f.source.rule_id.as_deref().is_some_and(|id| semantic_rule_ids.contains(id));
+            is_high_severity_agent || is_noisy_analyzer || is_semantic_rule
         })
         .collect()
 }
@@ -107,8 +111,8 @@ pub struct VerifyPassResult {
 /// passes through untouched. Findings are matched by id (stable within one
 /// run) rather than re-filtering, so the selection logic and the
 /// keep/suppress split can never disagree about which findings were checked.
-pub fn run_verify_pass(backend: &dyn AgentBackend, findings: Vec<Finding>, diff_text: &str, model: &str, max_turns: u32, cwd: &Path, noisy_categories: &[String]) -> VerifyPassResult {
-    let to_verify: std::collections::HashSet<String> = select_for_verification(&findings, noisy_categories).into_iter().map(|f| f.id.clone()).collect();
+pub fn run_verify_pass(backend: &dyn AgentBackend, findings: Vec<Finding>, diff_text: &str, model: &str, max_turns: u32, cwd: &Path, noisy_categories: &[String], semantic_rule_ids: &std::collections::HashSet<String>) -> VerifyPassResult {
+    let to_verify: std::collections::HashSet<String> = select_for_verification(&findings, noisy_categories, semantic_rule_ids).into_iter().map(|f| f.id.clone()).collect();
 
     let mut kept = Vec::with_capacity(findings.len());
     let mut suppressed = Vec::new();
@@ -168,7 +172,7 @@ mod tests {
             make_finding("b", FindingSourceKind::Agent, "correctness", Severity::Blocker),
             make_finding("c", FindingSourceKind::Agent, "correctness", Severity::Medium),
         ];
-        let selected: Vec<&str> = select_for_verification(&findings, &[]).into_iter().map(|f| f.id.as_str()).collect();
+        let selected: Vec<&str> = select_for_verification(&findings, &[], &std::collections::HashSet::new()).into_iter().map(|f| f.id.as_str()).collect();
         assert_eq!(selected, vec!["a", "b"]);
     }
 
@@ -178,7 +182,21 @@ mod tests {
             make_finding("a", FindingSourceKind::Analyzer, "style", Severity::Low),
             make_finding("b", FindingSourceKind::Analyzer, "correctness", Severity::Low),
         ];
-        let selected: Vec<&str> = select_for_verification(&findings, &["style".to_string()]).into_iter().map(|f| f.id.as_str()).collect();
+        let selected: Vec<&str> =
+            select_for_verification(&findings, &["style".to_string()], &std::collections::HashSet::new()).into_iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(selected, vec!["a"]);
+    }
+
+    #[test]
+    fn selects_a_finding_whose_rule_is_marked_semantic_regardless_of_category_or_severity() {
+        let findings = vec![
+            make_finding("a", FindingSourceKind::Analyzer, "performance", Severity::Low),
+            make_finding("b", FindingSourceKind::Analyzer, "performance", Severity::Low),
+        ];
+        let mut findings = findings;
+        findings[0].source.rule_id = Some("go-nested-loop-linear-search".to_string());
+        let semantic: std::collections::HashSet<String> = ["go-nested-loop-linear-search".to_string()].into_iter().collect();
+        let selected: Vec<&str> = select_for_verification(&findings, &[], &semantic).into_iter().map(|f| f.id.as_str()).collect();
         assert_eq!(selected, vec!["a"]);
     }
 
@@ -200,7 +218,7 @@ mod tests {
     fn a_refute_verdict_suppresses_the_finding() {
         let backend = ScriptedBackend { responses: RefCell::new(vec![Ok("```json\n{\"keep\": false, \"reason\": \"snippet doesn't match the diff\"}\n```".to_string())]) };
         let findings = vec![make_finding("a", FindingSourceKind::Agent, "correctness", Severity::High)];
-        let result = run_verify_pass(&backend, findings, "diff text", "haiku", 2, Path::new("/repo"), &[]);
+        let result = run_verify_pass(&backend, findings, "diff text", "haiku", 2, Path::new("/repo"), &[], &std::collections::HashSet::new());
         assert!(result.kept.is_empty());
         assert_eq!(result.suppressed.len(), 1);
         assert!(matches!(result.suppressed[0].reason, SuppressedReason::Refuted));
@@ -211,7 +229,7 @@ mod tests {
     fn a_keep_verdict_leaves_the_finding_in_place() {
         let backend = ScriptedBackend { responses: RefCell::new(vec![Ok("```json\n{\"keep\": true, \"reason\": \"confirmed\"}\n```".to_string())]) };
         let findings = vec![make_finding("a", FindingSourceKind::Agent, "correctness", Severity::High)];
-        let result = run_verify_pass(&backend, findings, "diff text", "haiku", 2, Path::new("/repo"), &[]);
+        let result = run_verify_pass(&backend, findings, "diff text", "haiku", 2, Path::new("/repo"), &[], &std::collections::HashSet::new());
         assert_eq!(result.kept.len(), 1);
         assert!(result.suppressed.is_empty());
     }
@@ -220,7 +238,7 @@ mod tests {
     fn findings_outside_the_selection_are_never_invoked_on() {
         let backend = ScriptedBackend { responses: RefCell::new(vec![]) };
         let findings = vec![make_finding("a", FindingSourceKind::Agent, "correctness", Severity::Medium)];
-        let result = run_verify_pass(&backend, findings, "diff text", "haiku", 2, Path::new("/repo"), &[]);
+        let result = run_verify_pass(&backend, findings, "diff text", "haiku", 2, Path::new("/repo"), &[], &std::collections::HashSet::new());
         assert_eq!(result.kept.len(), 1);
         assert_eq!(result.checked, 0);
     }
@@ -229,7 +247,7 @@ mod tests {
     fn an_invoke_failure_fails_open_and_keeps_the_finding() {
         let backend = ScriptedBackend { responses: RefCell::new(vec![]) };
         let findings = vec![make_finding("a", FindingSourceKind::Agent, "correctness", Severity::Blocker)];
-        let result = run_verify_pass(&backend, findings, "diff text", "haiku", 2, Path::new("/repo"), &[]);
+        let result = run_verify_pass(&backend, findings, "diff text", "haiku", 2, Path::new("/repo"), &[], &std::collections::HashSet::new());
         assert_eq!(result.kept.len(), 1);
         assert!(result.suppressed.is_empty());
     }
@@ -238,7 +256,7 @@ mod tests {
     fn a_malformed_verdict_response_fails_open_and_keeps_the_finding() {
         let backend = ScriptedBackend { responses: RefCell::new(vec![Ok("no json here".to_string())]) };
         let findings = vec![make_finding("a", FindingSourceKind::Agent, "correctness", Severity::Blocker)];
-        let result = run_verify_pass(&backend, findings, "diff text", "haiku", 2, Path::new("/repo"), &[]);
+        let result = run_verify_pass(&backend, findings, "diff text", "haiku", 2, Path::new("/repo"), &[], &std::collections::HashSet::new());
         assert_eq!(result.kept.len(), 1);
         assert!(result.suppressed.is_empty());
     }

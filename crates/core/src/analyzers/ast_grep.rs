@@ -27,6 +27,17 @@ struct RuleCategoryMeta {
     id: String,
     #[serde(default = "default_category")]
     category: String,
+    /// Marks a rule as a "semantic rule" candidate: syntactically precise
+    /// but semantically approximate (no type resolution, no dataflow) —
+    /// higher false-positive risk than a plain deterministic rule, so its
+    /// findings always get a Stage 3.5 cheap-LLM confirmation pass
+    /// regardless of severity/category, rather than only when its whole
+    /// category happens to be marked noisy. This is the two-pass design:
+    /// Stage 1 (syntactic) narrows to a specific finding + line/snippet,
+    /// then only that finding (not the whole codebase) is handed to the
+    /// verifier to confirm or refute.
+    #[serde(default)]
+    semantic: bool,
 }
 
 /// Builds a `ruleId -> category` lookup by parsing every embedded rule file
@@ -54,6 +65,33 @@ fn collect_rule_categories(dir: &Dir, map: &mut HashMap<String, String>) {
     }
     for subdir in dir.dirs() {
         collect_rule_categories(subdir, map);
+    }
+}
+
+/// The set of builtin rule ids declaring `semantic: true` — see
+/// `RuleCategoryMeta::semantic`'s docs for what that means and why.
+pub fn semantic_rule_ids() -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    collect_semantic_rule_ids(&BUILTIN_RULES, &mut set);
+    set
+}
+
+fn collect_semantic_rule_ids(dir: &Dir, set: &mut std::collections::HashSet<String>) {
+    for file in dir.files() {
+        let is_yaml = file.path().extension().is_some_and(|ext| ext == "yml" || ext == "yaml");
+        if !is_yaml {
+            continue;
+        }
+        if let Some(contents) = file.contents_utf8() {
+            if let Ok(meta) = serde_yaml::from_str::<RuleCategoryMeta>(contents) {
+                if meta.semantic {
+                    set.insert(meta.id);
+                }
+            }
+        }
+    }
+    for subdir in dir.dirs() {
+        collect_semantic_rule_ids(subdir, set);
     }
 }
 
@@ -308,6 +346,15 @@ mod tests {
         assert_eq!(categories.get("kotlin-avoid-not-null-assertion").map(String::as_str), Some("correctness"));
         assert_eq!(categories.get("go-hardcoded-credential").map(String::as_str), Some("security"));
         assert!(categories.len() >= 33, "expected at least the 6 correctness + 27 security builtin rules to declare a category, got {}: {categories:?}", categories.len());
+    }
+
+    #[test]
+    fn semantic_rule_ids_reads_rules_declaring_semantic_true() {
+        let ids = semantic_rule_ids();
+        assert!(ids.contains("go-nested-loop-linear-search"));
+        assert!(ids.contains("java-object-instantiation-in-loop"));
+        assert!(ids.contains("go-unclosed-http-response-body"));
+        assert!(!ids.contains("go-no-self-comparison"), "a plain rule with no semantic: true field must not be included");
     }
 
     #[test]

@@ -112,7 +112,7 @@ fn empty_config_document_parses_to_full_working_defaults() {
     assert!(config.triage.sensitive_paths.iter().any(|p| p == "**/auth*/**"), "sensitive path defaults should include the auth*/** directory form, not just the auth* leaf form");
     assert_eq!(config.storage.fp_block_threshold, 3);
     assert!(config.verify.enabled);
-    assert_eq!(config.verify.noisy_categories, vec!["style".to_string()]);
+    assert_eq!(config.verify.noisy_categories, vec!["style".to_string(), "design".to_string(), "performance".to_string()]);
     assert_eq!(config.agents.backend, autoreview_schema::AgentBackendKind::ClaudeCode);
     assert_eq!(config.agents.local_llm.base_url, "http://localhost:8080/v1");
     assert_eq!(config.agents.local_llm.model, "local-model");

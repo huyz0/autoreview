@@ -1,6 +1,7 @@
 id: go-unclosed-http-response-body
 language: Go
 category: performance
+semantic: true
 severity: warning
 message: An http.Response is obtained but its Body is never deferred-closed. This leaks the underlying connection (and its read/write goroutines) even if the body is never read — always `defer resp.Body.Close()` right after checking the error.
 rule:

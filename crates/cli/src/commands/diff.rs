@@ -439,7 +439,16 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     if over_budget {
         println!("\n  [budget] skipping verify pass — already at/over --max-usd {:.2}", options.max_usd.unwrap_or(0.0));
     } else if plan.tier != Tier::Quick && config.verify.enabled && backend_available(backend_kind, &config) {
-        let to_check = autoreview_core::select_for_verification(&findings, &config.verify.noisy_categories).len();
+        // "Semantic rules": syntactically precise but semantically
+        // approximate (no type resolution) rules — ast-grep rules declaring
+        // `semantic: true`, plus the symindex heuristic rules (message-chain/
+        // feature-envy/data-clump aren't YAML-declared, so they're unioned
+        // in directly) — always get a Stage 3.5 confirmation regardless of
+        // their own severity/category, on top of the noisy-category selection.
+        let mut semantic_ids = autoreview_core::semantic_rule_ids();
+        semantic_ids.extend(["message-chain".to_string(), "feature-envy".to_string(), "data-clump".to_string()]);
+
+        let to_check = autoreview_core::select_for_verification(&findings, &config.verify.noisy_categories, &semantic_ids).len();
         if to_check > 0 {
             println!("\n  verify:         checking {to_check} finding(s) against the diff...");
             let diff_text = diff_context(&options.repo_root, &options.base_ref, &options.head_ref, &facts.files);
@@ -452,6 +461,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
                 4,
                 &options.repo_root,
                 &config.verify.noisy_categories,
+                &semantic_ids,
             );
             findings = verify_result.kept;
             if !verify_result.suppressed.is_empty() {
