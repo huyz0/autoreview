@@ -3,27 +3,35 @@
 //! type, per its own module docs, so that mapping lives here (same
 //! separation as `archgraph_check.rs` vs `autoreview-archgraph`).
 //!
-//! Phase 3 of the cross-file symbol index plan: wires only Message Chains,
-//! deliberately the smallest slice, to validate the whole plumbing
-//! (crate -> mapping layer -> Stage 1) before Feature Envy and Data Clumps
-//! build on top in later phases, extending this same file.
+//! Phase 3 wired Message Chains (the smallest slice, to validate the whole
+//! plumbing first); Phase 4 adds Feature Envy on the same shape. Data
+//! Clumps lands in a later phase, extending this same file.
 //!
 //! Deliberately diff-relevant, not a whole-repo audit dump: the index is
-//! built over the *entire* repo (a chain can't be meaningfully scoped to
-//! one file — well, chains actually can be, but the index itself is built
-//! whole-repo per the plan's own scoping decision so later phases sharing
-//! this same index construction get cross-file visibility), but this only
-//! reports a chain anchored in a file the current diff actually touched.
+//! built over the *entire* repo (per the plan's whole-repo-always scoping
+//! decision — Feature Envy inherently needs to see the envied type's own
+//! file, not just the envious method's file), but this only reports a
+//! result anchored in a file the current diff actually touched.
 
 use std::collections::HashSet;
 use std::path::Path;
 
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
+use autoreview_symindex::SymbolIndex;
 
 /// Fowler's own illustrative example (`a.b().c().d()`) is depth 3 — that's
 /// the threshold, not an arbitrarily higher bar, since a shorter chain is
 /// often unremarkable delegation.
 const MIN_CHAIN_DEPTH: usize = 3;
+
+/// A method needs at least this many accesses to a single foreign type
+/// before Feature Envy is even considered — below this, it's ordinary,
+/// unremarkable collaboration, not envy.
+const MIN_FOREIGN_ACCESSES: usize = 3;
+/// ...and that count must exceed the method's own-field access count by at
+/// least this much, so a method that's genuinely balanced between its own
+/// state and a collaborator's doesn't trip the check.
+const FEATURE_ENVY_MARGIN: i64 = 2;
 
 fn path_str(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
@@ -40,13 +48,16 @@ pub fn run_symindex_check(repo_root: &Path, changed_files: &[String]) -> Vec<Age
     if relevant_changed.is_empty() {
         return Vec::new();
     }
-
-    let index = autoreview_symindex::build_index(repo_root);
-    let chains = autoreview_symindex::find_message_chains(&index, MIN_CHAIN_DEPTH);
-
     let changed_set: HashSet<&String> = relevant_changed.into_iter().collect();
 
-    chains.into_iter().filter(|c| changed_set.contains(&path_str(&c.file))).map(chain_to_finding).collect()
+    let index = autoreview_symindex::build_index(repo_root);
+
+    let chains = autoreview_symindex::find_message_chains(&index, MIN_CHAIN_DEPTH);
+    let envy = autoreview_symindex::find_feature_envy(&index, MIN_FOREIGN_ACCESSES, FEATURE_ENVY_MARGIN);
+
+    let mut findings: Vec<AgentFinding> = chains.into_iter().filter(|c| changed_set.contains(&path_str(&c.file))).map(chain_to_finding).collect();
+    findings.extend(envy.into_iter().filter(|e| changed_set.contains(&path_str(&e.file))).map(|e| envy_to_finding(&index, e)));
+    findings
 }
 
 fn chain_to_finding(chain: autoreview_symindex::ChainFinding) -> AgentFinding {
@@ -64,6 +75,40 @@ fn chain_to_finding(chain: autoreview_symindex::ChainFinding) -> AgentFinding {
         ),
         location: Location { path, range: LocationRange { start_line: chain.line, ..Default::default() }, snippet: chain_text, side: Side::New },
         related_locations: None,
+        suggestion: None,
+        tags: None,
+        meta: None,
+        suggested_patch: None,
+    }
+}
+
+/// Populates `related_locations` with the envied type's own declaration
+/// site (when it's found elsewhere in the index) — a deliberate
+/// improvement over `archgraph_check.rs`'s own precedent of only naming
+/// related locations in message-text prose, since `AgentFinding` already
+/// has a structured field for exactly this.
+fn envy_to_finding(index: &SymbolIndex, envy: autoreview_symindex::FeatureEnvyFinding) -> AgentFinding {
+    let path = path_str(&envy.file);
+    let related_locations = index.find_type(&envy.envied_type).map(|t| {
+        vec![Location {
+            path: path_str(&t.file),
+            range: LocationRange { start_line: t.start_line, ..Default::default() },
+            snippet: envy.envied_type.clone(),
+            side: Side::New,
+        }]
+    });
+    AgentFinding {
+        source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-symindex".to_string(), rule_id: Some("feature-envy".to_string()), aspect: None, backend: None },
+        category: "design".to_string(),
+        severity: Severity::Low,
+        confidence: 1.0,
+        title: "Possible Feature Envy".to_string(),
+        message: format!(
+            "`{}.{}` accesses `{}` {} times (via a parameter) versus {} access(es) to its own fields — it may belong on `{}` instead (Fowler's Feature Envy smell). Heuristic, name-based match — parameter types aren't resolved against imports, and only direct parameter accesses are counted (not locals reassigned from a parameter/field), so this may under- or over-count; Kotlin files aren't covered (tree-sitter-kotlin is incompatible with this project's pinned tree-sitter version).",
+            envy.owner_type, envy.method, envy.envied_type, envy.envied_access_count, envy.own_access_count, envy.envied_type
+        ),
+        location: Location { path, range: LocationRange { start_line: envy.line, ..Default::default() }, snippet: format!("{}.{}", envy.owner_type, envy.method), side: Side::New },
+        related_locations,
         suggestion: None,
         tags: None,
         meta: None,
@@ -131,5 +176,50 @@ mod tests {
         write_file(dir.path(), "widget.go", "package main\n\ntype Widget struct{}\n\nfunc (w *Widget) Chain() string {\n\treturn w.Sub().GetCity().ToUpperCase()\n}\n");
         let findings = run_symindex_check(dir.path(), &["widget.go".to_string()]);
         assert_eq!(findings.len(), 1, "got: {findings:#?}");
+    }
+
+    #[test]
+    fn reports_a_cross_file_feature_envy_that_touches_a_changed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "Widget.java",
+            "class Widget {\n    int quantity;\n    int total(Customer c) {\n        int a = c.getBalance();\n        int b = c.getFee();\n        int d = c.getTax();\n        return a + b + d;\n    }\n}\n",
+        );
+        write_file(dir.path(), "Customer.java", "class Customer {\n    int balance;\n}\n");
+
+        let findings = run_symindex_check(dir.path(), &["Widget.java".to_string()]);
+        let envy: Vec<_> = findings.iter().filter(|f| f.source.rule_id.as_deref() == Some("feature-envy")).collect();
+        assert_eq!(envy.len(), 1, "got: {findings:#?}");
+        assert_eq!(envy[0].category, "design");
+        assert!(envy[0].message.contains("Customer"));
+        // The envied type's own declaration lives in a *different* file
+        // than the one the diff touched — proving the index really is
+        // built whole-repo, not scoped to changed_files, while the
+        // *reporting* still only fires because Widget.java (the envious
+        // method's own file) is in the diff.
+        let related = envy[0].related_locations.as_ref().expect("expected related_locations to be populated");
+        assert_eq!(related[0].path, "Customer.java");
+    }
+
+    #[test]
+    fn does_not_report_feature_envy_below_the_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "Widget.java", "class Widget {\n    int total(Customer c) {\n        return c.getBalance();\n    }\n}\n");
+        let findings = run_symindex_check(dir.path(), &["Widget.java".to_string()]);
+        assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("feature-envy")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_report_feature_envy_the_diff_never_touches() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "Widget.java",
+            "class Widget {\n    int total(Customer c) {\n        int a = c.getBalance();\n        int b = c.getFee();\n        int d = c.getTax();\n        return a + b + d;\n    }\n}\n",
+        );
+        write_file(dir.path(), "Unrelated.java", "class Unrelated {\n    void f() {}\n}\n");
+        let findings = run_symindex_check(dir.path(), &["Unrelated.java".to_string()]);
+        assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("feature-envy")));
     }
 }

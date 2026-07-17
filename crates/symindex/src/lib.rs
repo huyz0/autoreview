@@ -23,7 +23,7 @@ pub mod queries;
 use std::path::{Path, PathBuf};
 
 pub use model::{AccessRef, CallChain, ForeignAccessRef, MethodDecl, NamedSlot, SymbolIndex, TypeDecl};
-pub use queries::{find_message_chains, ChainFinding};
+pub use queries::{find_feature_envy, find_message_chains, ChainFinding, FeatureEnvyFinding};
 
 /// Same skip-list as `autoreview-archgraph`'s own whole-repo walk — this
 /// crate deliberately doesn't depend on archgraph (staying a pure,
