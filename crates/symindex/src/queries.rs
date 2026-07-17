@@ -5,10 +5,10 @@
 //! prebuilt map. Independently unit-testable from hand-constructed
 //! `SymbolIndex` values — no parsing involved.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
-use crate::model::SymbolIndex;
+use crate::model::{MethodDecl, NamedSlot, SymbolIndex};
 
 /// One message-chain finding: a call chain at or above the reporting
 /// threshold, anchored at the method it was found in.
@@ -90,6 +90,89 @@ pub fn find_feature_envy(index: &SymbolIndex, min_foreign_accesses: usize, margi
                     envied_access_count,
                     own_access_count: own_count,
                 });
+            }
+        }
+    }
+    findings
+}
+
+/// Whether Data Clumps are compared across the whole index or only within
+/// methods sharing the same directory — see the plan's own scope decision
+/// (whole-index is the shipped default: maximizes recall, since a clump
+/// shared between e.g. a controller and a service in different packages is
+/// often the more interesting refactor case).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClumpScope {
+    WholeIndex,
+    SameDirectory,
+}
+
+/// One method that participates in a data clump.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClumpMember {
+    pub owner_type: String,
+    pub method: String,
+    pub file: PathBuf,
+    pub line: u32,
+}
+
+/// A recurring group of parameters (the clump itself) plus every distinct
+/// method it was found in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DataClumpFinding {
+    pub signature: Vec<NamedSlot>,
+    pub methods: Vec<ClumpMember>,
+}
+
+fn signature_key(window: &[NamedSlot]) -> String {
+    window.iter().map(|s| format!("{}:{}", s.name, s.type_text)).collect::<Vec<_>>().join(",")
+}
+
+fn scope_key(method: &MethodDecl, scope: ClumpScope) -> String {
+    match scope {
+        ClumpScope::WholeIndex => String::new(),
+        ClumpScope::SameDirectory => method.file.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+    }
+}
+
+/// Data Clumps: an identical ordered, contiguous subsequence (length
+/// `min_len`) of parameter `(name, type)` pairs recurring across
+/// `min_methods` distinct methods (deduped by `(owner_type, name, file)`,
+/// so two overlapping windows within the same method's own parameter list
+/// don't inflate its count). A method with a longer parameter list can
+/// contribute more than one candidate window (e.g. a 5-param method has
+/// three length-3 windows); each window is judged as its own signature.
+pub fn find_data_clumps(index: &SymbolIndex, min_len: usize, min_methods: usize, scope: ClumpScope) -> Vec<DataClumpFinding> {
+    let mut scoped_groups: BTreeMap<String, Vec<&MethodDecl>> = BTreeMap::new();
+    for method in index.methods() {
+        scoped_groups.entry(scope_key(method, scope)).or_default().push(method);
+    }
+
+    let mut findings = Vec::new();
+    for methods in scoped_groups.into_values() {
+        let mut by_signature: BTreeMap<String, Vec<(&MethodDecl, &[NamedSlot])>> = BTreeMap::new();
+        for method in &methods {
+            if method.params.len() < min_len {
+                continue;
+            }
+            for window in method.params.windows(min_len) {
+                by_signature.entry(signature_key(window)).or_default().push((method, window));
+            }
+        }
+
+        for occurrences in by_signature.into_values() {
+            let mut seen: HashSet<(String, String, PathBuf)> = HashSet::new();
+            let mut members = Vec::new();
+            let mut signature: Option<Vec<NamedSlot>> = None;
+            for (method, window) in occurrences {
+                let key = (method.owner_type.clone(), method.name.clone(), method.file.clone());
+                if seen.insert(key) {
+                    members.push(ClumpMember { owner_type: method.owner_type.clone(), method: method.name.clone(), file: method.file.clone(), line: method.start_line });
+                    signature.get_or_insert_with(|| window.to_vec());
+                }
+            }
+            if members.len() >= min_methods {
+                findings.push(DataClumpFinding { signature: signature.unwrap_or_default(), methods: members });
             }
         }
     }
@@ -219,5 +302,92 @@ mod tests {
     fn a_method_with_no_foreign_accesses_reports_nothing() {
         let index = index_with_method(method_with_accesses(5, &[]));
         assert!(find_feature_envy(&index, 3, 2).is_empty());
+    }
+
+    fn method_with_params(owner_type: &str, file: &str, name: &str, params: &[(&str, &str)]) -> MethodDecl {
+        MethodDecl {
+            name: name.to_string(),
+            owner_type: owner_type.to_string(),
+            file: PathBuf::from(file),
+            start_line: 1,
+            end_line: 2,
+            params: params.iter().map(|(n, t)| NamedSlot { name: n.to_string(), type_text: t.to_string() }).collect(),
+            return_type_text: None,
+            own_field_accesses: vec![],
+            foreign_accesses: vec![],
+            chains: vec![],
+        }
+    }
+
+    fn index_with_methods(methods: Vec<MethodDecl>) -> SymbolIndex {
+        let mut types: Vec<TypeDecl> = Vec::new();
+        for m in methods {
+            if let Some(t) = types.iter_mut().find(|t| t.name == m.owner_type && t.file == m.file) {
+                t.methods.push(m);
+            } else {
+                types.push(TypeDecl { name: m.owner_type.clone(), file: m.file.clone(), start_line: 1, fields: vec![], methods: vec![m] });
+            }
+        }
+        SymbolIndex { types }
+    }
+
+    const CLUMP: &[(&str, &str)] = &[("name", "String"), ("id", "int"), ("active", "bool")];
+
+    #[test]
+    fn a_clump_recurring_across_min_methods_is_reported() {
+        let index = index_with_methods(vec![
+            method_with_params("A", "a.java", "one", CLUMP),
+            method_with_params("B", "b.java", "two", CLUMP),
+            method_with_params("C", "c.java", "three", CLUMP),
+        ]);
+        let findings = find_data_clumps(&index, 3, 3, ClumpScope::WholeIndex);
+        assert_eq!(findings.len(), 1, "got: {findings:#?}");
+        assert_eq!(findings[0].methods.len(), 3);
+    }
+
+    #[test]
+    fn a_clump_below_min_methods_is_not_reported() {
+        let index = index_with_methods(vec![method_with_params("A", "a.java", "one", CLUMP), method_with_params("B", "b.java", "two", CLUMP)]);
+        assert!(find_data_clumps(&index, 3, 3, ClumpScope::WholeIndex).is_empty());
+    }
+
+    #[test]
+    fn whole_index_scope_finds_a_clump_split_across_directories() {
+        let index = index_with_methods(vec![
+            method_with_params("A", "pkg1/a.java", "one", CLUMP),
+            method_with_params("B", "pkg2/b.java", "two", CLUMP),
+            method_with_params("C", "pkg3/c.java", "three", CLUMP),
+        ]);
+        assert_eq!(find_data_clumps(&index, 3, 3, ClumpScope::WholeIndex).len(), 1);
+    }
+
+    #[test]
+    fn same_directory_scope_does_not_find_a_clump_split_across_directories() {
+        let index = index_with_methods(vec![
+            method_with_params("A", "pkg1/a.java", "one", CLUMP),
+            method_with_params("B", "pkg2/b.java", "two", CLUMP),
+            method_with_params("C", "pkg3/c.java", "three", CLUMP),
+        ]);
+        assert!(find_data_clumps(&index, 3, 3, ClumpScope::SameDirectory).is_empty());
+    }
+
+    #[test]
+    fn same_directory_scope_finds_a_clump_confined_to_one_directory() {
+        let index = index_with_methods(vec![
+            method_with_params("A", "pkg1/a.java", "one", CLUMP),
+            method_with_params("B", "pkg1/b.java", "two", CLUMP),
+            method_with_params("C", "pkg1/c.java", "three", CLUMP),
+        ]);
+        assert_eq!(find_data_clumps(&index, 3, 3, ClumpScope::SameDirectory).len(), 1);
+    }
+
+    #[test]
+    fn a_method_shorter_than_min_len_never_contributes_a_window() {
+        let index = index_with_methods(vec![
+            method_with_params("A", "a.java", "one", &[("x", "int"), ("y", "int")]),
+            method_with_params("B", "b.java", "two", &[("x", "int"), ("y", "int")]),
+            method_with_params("C", "c.java", "three", &[("x", "int"), ("y", "int")]),
+        ]);
+        assert!(find_data_clumps(&index, 3, 3, ClumpScope::WholeIndex).is_empty());
     }
 }

@@ -4,8 +4,9 @@
 //! separation as `archgraph_check.rs` vs `autoreview-archgraph`).
 //!
 //! Phase 3 wired Message Chains (the smallest slice, to validate the whole
-//! plumbing first); Phase 4 adds Feature Envy on the same shape. Data
-//! Clumps lands in a later phase, extending this same file.
+//! plumbing first); Phase 4 added Feature Envy; Phase 5 adds Data Clumps —
+//! all three on the same bail-empty/whole-repo-build/diff-scope-filter
+//! shape.
 //!
 //! Deliberately diff-relevant, not a whole-repo audit dump: the index is
 //! built over the *entire* repo (per the plan's whole-repo-always scoping
@@ -33,6 +34,13 @@ const MIN_FOREIGN_ACCESSES: usize = 3;
 /// state and a collaborator's doesn't trip the check.
 const FEATURE_ENVY_MARGIN: i64 = 2;
 
+/// A recurring parameter group needs at least this many params before it's
+/// distinctive enough to be worth flagging (a 1- or 2-param match is too
+/// common to be meaningful) and must recur across at least this many
+/// distinct methods.
+const MIN_CLUMP_LEN: usize = 3;
+const MIN_CLUMP_METHODS: usize = 3;
+
 fn path_str(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
@@ -54,9 +62,11 @@ pub fn run_symindex_check(repo_root: &Path, changed_files: &[String]) -> Vec<Age
 
     let chains = autoreview_symindex::find_message_chains(&index, MIN_CHAIN_DEPTH);
     let envy = autoreview_symindex::find_feature_envy(&index, MIN_FOREIGN_ACCESSES, FEATURE_ENVY_MARGIN);
+    let clumps = autoreview_symindex::find_data_clumps(&index, MIN_CLUMP_LEN, MIN_CLUMP_METHODS, autoreview_symindex::ClumpScope::WholeIndex);
 
     let mut findings: Vec<AgentFinding> = chains.into_iter().filter(|c| changed_set.contains(&path_str(&c.file))).map(chain_to_finding).collect();
     findings.extend(envy.into_iter().filter(|e| changed_set.contains(&path_str(&e.file))).map(|e| envy_to_finding(&index, e)));
+    findings.extend(clumps.iter().filter_map(|c| clump_to_finding(c, &changed_set)));
     findings
 }
 
@@ -114,6 +124,44 @@ fn envy_to_finding(index: &SymbolIndex, envy: autoreview_symindex::FeatureEnvyFi
         meta: None,
         suggested_patch: None,
     }
+}
+
+/// A data clump has no single "file" (it spans multiple methods, often
+/// multiple files) — anchors the finding at whichever member method
+/// actually lives in a changed file (mirroring `archgraph_check.rs`'s own
+/// anchor-at-a-changed-file convention for a multi-location result), and
+/// lists every other member as a `related_locations` entry. Returns `None`
+/// if no member touches a changed file at all (nothing to anchor on).
+fn clump_to_finding(clump: &autoreview_symindex::DataClumpFinding, changed_set: &HashSet<&String>) -> Option<AgentFinding> {
+    let anchor = clump.methods.iter().find(|m| changed_set.contains(&path_str(&m.file)))?;
+
+    let related_locations: Vec<Location> = clump
+        .methods
+        .iter()
+        .filter(|m| !(m.owner_type == anchor.owner_type && m.method == anchor.method && m.file == anchor.file))
+        .map(|m| Location { path: path_str(&m.file), range: LocationRange { start_line: m.line, ..Default::default() }, snippet: format!("{}.{}", m.owner_type, m.method), side: Side::New })
+        .collect();
+
+    let signature_text = clump.signature.iter().map(|s| format!("{}: {}", s.name, s.type_text)).collect::<Vec<_>>().join(", ");
+    let methods_text = clump.methods.iter().map(|m| format!("{}.{}", m.owner_type, m.method)).collect::<Vec<_>>().join(", ");
+
+    Some(AgentFinding {
+        source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-symindex".to_string(), rule_id: Some("data-clump".to_string()), aspect: None, backend: None },
+        category: "design".to_string(),
+        severity: Severity::Low,
+        confidence: 1.0,
+        title: "Recurring parameter group (Data Clump)".to_string(),
+        message: format!(
+            "The parameter group ({signature_text}) appears identically across {} methods: {methods_text}. Consider consolidating these into their own small object (Fowler's Data Clumps smell). Heuristic, name-based match — parameter types aren't resolved against imports, so a coincidentally identical group in genuinely unrelated code could be a false positive; Kotlin files aren't covered (tree-sitter-kotlin is incompatible with this project's pinned tree-sitter version).",
+            clump.methods.len()
+        ),
+        location: Location { path: path_str(&anchor.file), range: LocationRange { start_line: anchor.line, ..Default::default() }, snippet: signature_text, side: Side::New },
+        related_locations: if related_locations.is_empty() { None } else { Some(related_locations) },
+        suggestion: None,
+        tags: None,
+        meta: None,
+        suggested_patch: None,
+    })
 }
 
 #[cfg(test)]
@@ -221,5 +269,45 @@ mod tests {
         write_file(dir.path(), "Unrelated.java", "class Unrelated {\n    void f() {}\n}\n");
         let findings = run_symindex_check(dir.path(), &["Unrelated.java".to_string()]);
         assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("feature-envy")));
+    }
+
+    #[test]
+    fn reports_a_data_clump_recurring_across_three_files_anchored_at_the_changed_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let sig = "String name, int id, boolean active";
+        write_file(dir.path(), "A.java", &format!("class A {{\n    void one({sig}) {{}}\n}}\n"));
+        write_file(dir.path(), "B.java", &format!("class B {{\n    void two({sig}) {{}}\n}}\n"));
+        write_file(dir.path(), "C.java", &format!("class C {{\n    void three({sig}) {{}}\n}}\n"));
+
+        let findings = run_symindex_check(dir.path(), &["A.java".to_string()]);
+        let clumps: Vec<_> = findings.iter().filter(|f| f.source.rule_id.as_deref() == Some("data-clump")).collect();
+        assert_eq!(clumps.len(), 1, "got: {findings:#?}");
+        assert_eq!(clumps[0].location.path, "A.java");
+        let related = clumps[0].related_locations.as_ref().expect("expected related_locations");
+        assert_eq!(related.len(), 2, "expected B and C as related locations, got: {related:#?}");
+    }
+
+    #[test]
+    fn does_not_report_a_data_clump_the_diff_never_touches() {
+        let dir = tempfile::tempdir().unwrap();
+        let sig = "String name, int id, boolean active";
+        write_file(dir.path(), "A.java", &format!("class A {{\n    void one({sig}) {{}}\n}}\n"));
+        write_file(dir.path(), "B.java", &format!("class B {{\n    void two({sig}) {{}}\n}}\n"));
+        write_file(dir.path(), "C.java", &format!("class C {{\n    void three({sig}) {{}}\n}}\n"));
+        write_file(dir.path(), "Unrelated.java", "class Unrelated {\n    void f() {}\n}\n");
+
+        let findings = run_symindex_check(dir.path(), &["Unrelated.java".to_string()]);
+        assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("data-clump")));
+    }
+
+    #[test]
+    fn does_not_report_a_data_clump_below_the_min_methods_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let sig = "String name, int id, boolean active";
+        write_file(dir.path(), "A.java", &format!("class A {{\n    void one({sig}) {{}}\n}}\n"));
+        write_file(dir.path(), "B.java", &format!("class B {{\n    void two({sig}) {{}}\n}}\n"));
+
+        let findings = run_symindex_check(dir.path(), &["A.java".to_string()]);
+        assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("data-clump")));
     }
 }
