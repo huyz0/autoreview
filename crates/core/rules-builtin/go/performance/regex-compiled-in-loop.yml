@@ -1,0 +1,15 @@
+id: go-regex-compiled-in-loop
+language: Go
+category: performance
+severity: warning
+message: A regular expression is compiled on every loop iteration — hoist regexp.MustCompile/regexp.Compile outside the loop (or to a package-level var) so it only compiles once.
+rule:
+  any:
+    - pattern:
+        context: "func w() { $R := regexp.MustCompile($$$ARGS) }"
+        selector: short_var_declaration
+      inside: { kind: for_statement, stopBy: end }
+    - pattern:
+        context: "func w() { $R := regexp.Compile($$$ARGS) }"
+        selector: short_var_declaration
+      inside: { kind: for_statement, stopBy: end }

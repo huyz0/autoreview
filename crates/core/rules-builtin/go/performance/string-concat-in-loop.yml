@@ -1,0 +1,9 @@
+id: go-string-concat-in-loop
+language: Go
+category: performance
+severity: warning
+message: Building a string via repeated `+` concatenation inside a loop is quadratic — use strings.Builder instead.
+rule:
+  pattern:
+    context: "func w() { for $INIT; $COND; $POST { $S = $S + $X } }"
+    selector: for_statement

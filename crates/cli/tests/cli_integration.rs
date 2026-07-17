@@ -266,7 +266,7 @@ fn diff_also_writes_a_markdown_report_alongside_the_json_one() {
 }
 
 #[test]
-fn skills_list_reports_the_three_builtin_skills() {
+fn skills_list_reports_all_builtin_skills() {
     let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
     let mut cmd = Command::cargo_bin("autoreview").unwrap();
     cmd.current_dir(repo.path()).args(["skills", "list"]);
@@ -274,7 +274,8 @@ fn skills_list_reports_the_three_builtin_skills() {
         .success()
         .stdout(predicate::str::contains("correctness"))
         .stdout(predicate::str::contains("security"))
-        .stdout(predicate::str::contains("design"));
+        .stdout(predicate::str::contains("design"))
+        .stdout(predicate::str::contains("performance"));
 }
 
 #[test]

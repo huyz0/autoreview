@@ -1,0 +1,10 @@
+id: java-regex-compiled-in-loop
+language: Java
+category: performance
+severity: warning
+message: A regular expression is compiled on every loop iteration — hoist Pattern.compile outside the loop (or to a static field) so it only compiles once.
+rule:
+  pattern:
+    context: "class W { void w() { $T $R = Pattern.compile($$$ARGS); } }"
+    selector: local_variable_declaration
+  inside: { kind: for_statement, stopBy: end }

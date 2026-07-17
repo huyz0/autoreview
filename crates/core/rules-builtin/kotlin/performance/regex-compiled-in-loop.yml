@@ -1,0 +1,10 @@
+id: kotlin-regex-compiled-in-loop
+language: Kotlin
+category: performance
+severity: warning
+message: A regular expression is constructed on every loop iteration — hoist the Regex(...) outside the loop (or to a companion-object/top-level val) so it only compiles once.
+rule:
+  pattern:
+    context: "class W { fun w() { val $R = Regex($$$ARGS) } }"
+    selector: property_declaration
+  inside: { kind: for_statement, stopBy: end }

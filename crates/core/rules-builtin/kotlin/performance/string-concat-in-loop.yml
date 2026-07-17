@@ -1,0 +1,12 @@
+id: kotlin-string-concat-in-loop
+language: Kotlin
+category: performance
+severity: warning
+message: Building a string via repeated `+` concatenation inside a loop is quadratic — use a StringBuilder instead.
+rule:
+  pattern:
+    context: "class W { fun w() { $S = $S + $X } }"
+    selector: assignment
+  inside:
+    kind: for_statement
+    stopBy: end

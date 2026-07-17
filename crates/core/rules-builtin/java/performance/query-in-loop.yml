@@ -1,0 +1,15 @@
+id: java-query-in-loop
+language: Java
+category: performance
+severity: warning
+message: A database query/lookup is issued inside a loop (N+1 query pattern) — batch this into a single query (e.g. findAllById/IN clause) outside the loop instead of round-tripping once per iteration.
+rule:
+  any:
+    - pattern:
+        context: "class W { void w() { $T $R = $STMT.executeQuery($$$ARGS); } }"
+        selector: local_variable_declaration
+      inside: { kind: for_statement, stopBy: end }
+    - pattern:
+        context: "class W { void w() { $T $R = $REPO.findById($$$ARGS); } }"
+        selector: local_variable_declaration
+      inside: { kind: for_statement, stopBy: end }

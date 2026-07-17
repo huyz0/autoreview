@@ -181,14 +181,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn discovers_all_three_builtin_skills() {
+    fn discovers_all_builtin_skills() {
         let ids = discover_skill_ids(Path::new("/nonexistent-repo-root"));
-        assert_eq!(ids, vec!["correctness".to_string(), "design".to_string(), "security".to_string()]);
+        assert_eq!(ids, vec!["correctness".to_string(), "design".to_string(), "performance".to_string(), "security".to_string()]);
     }
 
     #[test]
     fn loads_manifest_for_each_builtin_skill() {
-        for id in ["correctness", "security", "design"] {
+        for id in ["correctness", "security", "design", "performance"] {
             let manifest = load_manifest(Path::new("/nonexistent-repo-root"), id).unwrap();
             assert_eq!(manifest.id, id);
         }

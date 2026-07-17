@@ -1,0 +1,19 @@
+id: performance
+title: Performance review
+version: 0.1.0
+categories: [performance]
+languages: ["*"]
+triggers:
+  globs:
+    - "**/repository*/**"
+    - "**/dao*/**"
+    - "**/*query*"
+    - "**/service*/**"
+    - "**/handler*/**"
+    - "**/controller*/**"
+costClass: moderate
+tools:
+  read: true
+  grep: true
+  bash: ["git log", "git diff"]
+outputContract: findings-json-v1

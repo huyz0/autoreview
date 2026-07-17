@@ -1,0 +1,12 @@
+id: java-string-concat-in-loop
+language: Java
+category: performance
+severity: warning
+message: Building a string via repeated `+` concatenation inside a loop is quadratic (each `+` allocates a new String) — use StringBuilder instead.
+rule:
+  pattern:
+    context: "class W { void w() { $S = $S + $X; } }"
+    selector: assignment_expression
+  inside:
+    kind: for_statement
+    stopBy: end
