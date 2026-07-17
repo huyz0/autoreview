@@ -1,3 +1,4 @@
+pub mod go;
 pub mod java;
 
 use std::path::Path;
@@ -8,6 +9,7 @@ use crate::model::TypeDecl;
 /// `autoreview-core`'s `patch_check.rs::language_for_extension`.
 fn language_for_extension(extension: &str) -> Option<tree_sitter::Language> {
     match extension {
+        "go" => Some(tree_sitter_go::LANGUAGE.into()),
         "java" => Some(tree_sitter_java::LANGUAGE.into()),
         _ => None,
     }
@@ -30,6 +32,7 @@ pub fn extract_file(file: &Path, content: &str) -> Vec<TypeDecl> {
     let Some(tree) = parser.parse(content, None) else { return Vec::new() };
 
     match extension {
+        "go" => go::extract_types(&tree, content.as_bytes(), file),
         "java" => java::extract_types(&tree, content.as_bytes(), file),
         _ => Vec::new(),
     }
@@ -43,6 +46,13 @@ mod tests {
     #[test]
     fn extracts_java_types_by_extension() {
         let types = extract_file(&PathBuf::from("Widget.java"), "class Widget {\n    int x;\n}\n");
+        assert_eq!(types.len(), 1);
+        assert_eq!(types[0].name, "Widget");
+    }
+
+    #[test]
+    fn extracts_go_types_by_extension() {
+        let types = extract_file(&PathBuf::from("widget.go"), "package main\n\ntype Widget struct {\n\tX int\n}\n");
         assert_eq!(types.len(), 1);
         assert_eq!(types[0].name, "Widget");
     }
