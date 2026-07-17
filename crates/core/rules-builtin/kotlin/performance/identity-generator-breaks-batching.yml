@@ -1,0 +1,7 @@
+id: kotlin-identity-generator-breaks-batching
+language: Kotlin
+category: performance
+severity: warning
+message: GenerationType.IDENTITY disables Hibernate/JPA insert batching (the ID must round-trip to the DB before the entity is fully saved) — use GenerationType.SEQUENCE if batched inserts matter for this table.
+rule:
+  pattern: "@GeneratedValue(strategy = GenerationType.IDENTITY)"

@@ -1,0 +1,19 @@
+id: kotlin-boxed-primitive-array
+language: Kotlin
+category: performance
+severity: warning
+message: "Array<T> for a primitive type boxes every element — use the specialized array type (IntArray, LongArray, DoubleArray, BooleanArray, etc.) to avoid the boxing overhead."
+rule:
+  any:
+    - pattern:
+        context: "class W { val x: Array<Int> = arrayOf() }"
+        selector: user_type
+    - pattern:
+        context: "class W { val x: Array<Long> = arrayOf() }"
+        selector: user_type
+    - pattern:
+        context: "class W { val x: Array<Double> = arrayOf() }"
+        selector: user_type
+    - pattern:
+        context: "class W { val x: Array<Boolean> = arrayOf() }"
+        selector: user_type

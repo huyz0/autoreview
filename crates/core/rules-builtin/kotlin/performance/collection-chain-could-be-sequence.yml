@@ -1,0 +1,15 @@
+id: kotlin-collection-chain-could-be-sequence
+language: Kotlin
+category: performance
+severity: warning
+message: Chaining multiple filter/map calls on a List allocates one intermediate list per step — use .asSequence() before the chain (and .toList()/.toSet() after) to process elements lazily in one pass instead.
+rule:
+  any:
+    - pattern: "$X.filter { $$$A }.map { $$$B }"
+    - pattern: "$X.map { $$$A }.filter { $$$B }"
+    - pattern: "$X.filter { $$$A }.filter { $$$B }"
+    - pattern: "$X.map { $$$A }.map { $$$B }"
+constraints:
+  X:
+    not:
+      regex: "asSequence"

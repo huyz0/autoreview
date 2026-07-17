@@ -1,0 +1,12 @@
+id: kotlin-object-instantiation-in-loop
+language: Kotlin
+category: performance
+severity: warning
+message: An object is constructed on every loop iteration — if it's stateless/reusable (a formatter, a parser, a compiled pattern), hoist the construction outside the loop so it only happens once.
+rule:
+  pattern:
+    context: "class W { fun w() { val $V = $C($$$ARGS) } }"
+    selector: property_declaration
+  inside:
+    kind: for_statement
+    stopBy: end

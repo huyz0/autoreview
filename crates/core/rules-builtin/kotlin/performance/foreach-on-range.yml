@@ -1,0 +1,9 @@
+id: kotlin-foreach-on-range
+language: Kotlin
+category: performance
+severity: warning
+message: "forEach on a numeric range boxes each element and allocates a lambda call per iteration — use a plain `for (i in a..b)` loop instead, which the compiler lowers to a primitive loop with no allocation."
+rule:
+  any:
+    - pattern: "($A..$B).forEach { $$$BODY }"
+    - pattern: "($A until $B).forEach { $$$BODY }"

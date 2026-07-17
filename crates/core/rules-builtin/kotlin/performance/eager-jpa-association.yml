@@ -1,0 +1,9 @@
+id: kotlin-eager-jpa-association
+language: Kotlin
+category: performance
+severity: warning
+message: "@ManyToOne/@OneToOne default to FetchType.EAGER in JPA, silently loading the related entity every time this one loads — declare fetch = FetchType.LAZY unless the association is genuinely always needed."
+rule:
+  any:
+    - pattern: "@ManyToOne"
+    - pattern: "@OneToOne"
