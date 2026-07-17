@@ -1,0 +1,22 @@
+id: go-resource-not-closed
+language: Go
+category: performance
+semantic: true
+severity: warning
+message: "A file handle (os.Open/os.Create) has no defer'd Close() anywhere in this function. This may leak the file descriptor. (Heuristic: doesn't trace conditional/early-return paths precisely, so it's flagged for a semantic check rather than reported outright.)"
+rule:
+  any:
+    - pattern:
+        context: "func w() { $F, $ERR := os.Open($$$ARGS) }"
+        selector: short_var_declaration
+      not:
+        precedes:
+          pattern: "defer $F.Close()"
+          stopBy: end
+    - pattern:
+        context: "func w() { $F, $ERR := os.Create($$$ARGS) }"
+        selector: short_var_declaration
+      not:
+        precedes:
+          pattern: "defer $F.Close()"
+          stopBy: end

@@ -1,0 +1,13 @@
+id: kotlin-loop-invariant-serialization
+language: Kotlin
+category: performance
+semantic: true
+severity: warning
+message: "An ObjectMapper.writeValueAsString-style call runs inside a loop — if its argument doesn't change per iteration, serialize it once before the loop and reuse the string. (Heuristic: this rule can't prove the argument is actually loop-invariant, so it's flagged for a semantic check rather than reported outright.)"
+rule:
+  pattern:
+    context: "class W { fun w() { val $S = $MAPPER.writeValueAsString($ARG) } }"
+    selector: property_declaration
+  inside:
+    kind: for_statement
+    stopBy: end
