@@ -18,10 +18,12 @@
 
 pub mod extract;
 pub mod model;
+pub mod queries;
 
 use std::path::{Path, PathBuf};
 
 pub use model::{AccessRef, CallChain, ForeignAccessRef, MethodDecl, NamedSlot, SymbolIndex, TypeDecl};
+pub use queries::{find_message_chains, ChainFinding};
 
 /// Same skip-list as `autoreview-archgraph`'s own whole-repo walk — this
 /// crate deliberately doesn't depend on archgraph (staying a pure,
@@ -72,7 +74,11 @@ pub fn build_index(repo_root: &Path) -> SymbolIndex {
             continue;
         }
         let Ok(content) = std::fs::read_to_string(file) else { continue };
-        types.extend(extract::extract_file(file, &content));
+        // TypeDecl.file must be repo-relative — callers (the diff-scoped
+        // mapping layer in autoreview-core) compare it against
+        // git-diff-relative changed-file paths.
+        let rel_file = file.strip_prefix(repo_root).unwrap_or(file);
+        types.extend(extract::extract_file(rel_file, &content));
     }
 
     SymbolIndex { types }
@@ -123,5 +129,14 @@ mod tests {
     fn build_index_on_an_empty_repo_returns_an_empty_index() {
         let dir = tempfile::tempdir().unwrap();
         assert!(build_index(dir.path()).types.is_empty());
+    }
+
+    #[test]
+    fn type_decl_file_paths_are_repo_relative_not_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "internal/a/widget.go", "package a\n\ntype Widget struct {\n\tX int\n}\n");
+        let index = build_index(dir.path());
+        let widget = index.find_type("Widget").unwrap();
+        assert_eq!(widget.file, Path::new("internal/a/widget.go"));
     }
 }

@@ -143,6 +143,7 @@ dependencies = [
  "anyhow",
  "autoreview-archgraph",
  "autoreview-schema",
+ "autoreview-symindex",
  "autoreview-test-support",
  "globset",
  "include_dir",

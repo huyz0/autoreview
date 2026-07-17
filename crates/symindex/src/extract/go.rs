@@ -22,7 +22,7 @@ use std::path::Path;
 
 use tree_sitter::Node;
 
-use crate::model::{AccessRef, ForeignAccessRef, MethodDecl, NamedSlot, TypeDecl};
+use crate::model::{AccessRef, CallChain, ForeignAccessRef, MethodDecl, NamedSlot, TypeDecl};
 
 fn text<'a>(node: Node, source: &'a [u8]) -> &'a str {
     node.utf8_text(source).unwrap_or("")
@@ -150,8 +150,10 @@ fn extract_method(node: Node, source: &[u8], file: &Path) -> Option<(String, Met
     // structs are collected in separate passes, joined by owner-type name).
     let mut own_field_accesses = Vec::new();
     let mut foreign_accesses = Vec::new();
+    let mut chains = Vec::new();
     if let Some(body) = node.child_by_field_name("body") {
         walk_accesses(body, source, receiver_name.as_deref(), &params, &mut own_field_accesses, &mut foreign_accesses);
+        walk_chains(body, source, &mut chains);
     }
 
     Some((
@@ -166,7 +168,7 @@ fn extract_method(node: Node, source: &[u8], file: &Path) -> Option<(String, Met
             return_type_text,
             own_field_accesses,
             foreign_accesses,
-            chains: Vec::new(),
+            chains,
         },
     ))
 }
@@ -197,6 +199,77 @@ fn walk_accesses(node: Node, source: &[u8], receiver_name: Option<&str>, params:
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         walk_accesses(child, source, receiver_name, params, own, foreign);
+    }
+}
+
+/// Finds every maximal call chain: a `call_expression` whose `function` is
+/// a `selector_expression` (i.e. a method call, not a plain function call
+/// like `foo()`) is a chain root unless it's nested one level inside a
+/// longer chain already — i.e. its parent is the `operand` of a
+/// `selector_expression` that is itself the `function` of an *outer*
+/// `call_expression` (Go's grammar alternates `call_expression` and
+/// `selector_expression` per link, unlike Java's single `method_invocation`
+/// node per link — see the module docs).
+fn walk_chains(node: Node, source: &[u8], out: &mut Vec<CallChain>) {
+    if node.kind() == "call_expression" {
+        if let Some(function) = node.child_by_field_name("function") {
+            if function.kind() == "selector_expression" && !is_inner_chain_link(node) {
+                out.push(build_chain(node, source));
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_chains(child, source, out);
+    }
+}
+
+fn is_inner_chain_link(call: Node) -> bool {
+    let Some(parent_selector) = call.parent() else { return false };
+    if parent_selector.kind() != "selector_expression" {
+        return false;
+    }
+    let Some(operand) = parent_selector.child_by_field_name("operand") else { return false };
+    if operand.id() != call.id() {
+        return false;
+    }
+    parent_selector
+        .parent()
+        .and_then(|grandparent| if grandparent.kind() == "call_expression" { grandparent.child_by_field_name("function") } else { None })
+        .map(|f| f.id() == parent_selector.id())
+        .unwrap_or(false)
+}
+
+/// Unwraps `call_expression { function: selector_expression { operand: ... } }`
+/// links down to a root that isn't itself a method-call, collecting member
+/// names in root-to-tip order.
+fn build_chain(node: Node, source: &[u8]) -> CallChain {
+    let line = line_of(node);
+    let mut member_names_rev = Vec::new();
+    let mut current = node;
+    loop {
+        if current.kind() != "call_expression" {
+            member_names_rev.reverse();
+            return CallChain { root_text: text(current, source).to_string(), depth: member_names_rev.len(), line, member_names: member_names_rev };
+        }
+        let Some(function) = current.child_by_field_name("function") else {
+            member_names_rev.reverse();
+            return CallChain { root_text: text(current, source).to_string(), depth: member_names_rev.len(), line, member_names: member_names_rev };
+        };
+        if function.kind() != "selector_expression" {
+            // A plain function call, e.g. `foo()` — not a method-chain link.
+            member_names_rev.reverse();
+            return CallChain { root_text: text(function, source).to_string(), depth: member_names_rev.len(), line, member_names: member_names_rev };
+        }
+        let field_text = function.child_by_field_name("field").map(|f| text(f, source).to_string()).unwrap_or_default();
+        member_names_rev.push(field_text);
+        match function.child_by_field_name("operand") {
+            Some(operand) => current = operand,
+            None => {
+                member_names_rev.reverse();
+                return CallChain { root_text: String::new(), depth: member_names_rev.len(), line, member_names: member_names_rev };
+            }
+        }
     }
 }
 
@@ -286,5 +359,24 @@ mod tests {
         let types = extract("package main\n\ntype W struct{ X int }\n\nfunc Standalone() int { return 1 }\n");
         assert_eq!(types.len(), 1);
         assert!(types[0].methods.is_empty());
+    }
+
+    #[test]
+    fn a_message_chain_is_recorded_as_a_single_maximal_chain_not_split_into_shorter_ones() {
+        let types = extract("package main\n\ntype W struct{}\n\nfunc (w *W) Chain() string {\n\treturn w.Sub().GetCity().ToUpperCase()\n}\n");
+        let chains = &types[0].methods[0].chains;
+        assert_eq!(chains.len(), 1, "expected exactly one maximal chain, got {chains:?}");
+        assert_eq!(chains[0].root_text, "w");
+        assert_eq!(chains[0].depth, 3);
+        assert_eq!(chains[0].member_names, vec!["Sub".to_string(), "GetCity".to_string(), "ToUpperCase".to_string()]);
+    }
+
+    #[test]
+    fn a_lone_method_call_is_a_depth_one_chain() {
+        let types = extract("package main\n\ntype W struct{}\n\nfunc (w *W) F(c *Customer) {\n\tc.GetBalance()\n}\n");
+        let chains = &types[0].methods[0].chains;
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains[0].depth, 1);
+        assert_eq!(chains[0].root_text, "c");
     }
 }

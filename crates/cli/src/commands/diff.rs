@@ -217,12 +217,13 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     // archgraph (Tier 2): Go-only whole-repo import-cycle detection, a
     // no-op for non-Go-module repos or diffs that touch no .go files.
     stage1_agent_findings.extend(autoreview_core::run_archgraph_check(&options.repo_root, &changed_file_paths));
+    stage1_agent_findings.extend(autoreview_core::run_symindex_check(&options.repo_root, &changed_file_paths));
     let stage1_finding_count = stage1_agent_findings.len();
     let stage1_findings: Vec<Finding> = assign_fingerprints(stage1_agent_findings)
         .into_iter()
         .map(to_finding)
         .collect();
-    println!("  stage 1:        {stage1_finding_count} deterministic finding(s) (ast-grep + golangci-lint + clippy + duplication + cross-file-duplication + complexity + practices + architecture + archgraph)");
+    println!("  stage 1:        {stage1_finding_count} deterministic finding(s) (ast-grep + golangci-lint + clippy + duplication + cross-file-duplication + complexity + practices + architecture + archgraph + symindex)");
 
     // LLM triage classifier (M2): only consulted when no explicit --tier was
     // given and the heuristic score itself landed within the ambiguity band

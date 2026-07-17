@@ -8,3 +8,4 @@ pub mod practices;
 pub mod shadow_rules;
 pub mod golangci_lint;
 pub mod sarif;
+pub mod symindex_check;

@@ -32,6 +32,7 @@ fn run_pipeline(repo_root: &std::path::Path, base: &str, head: &str) -> (Vec<aut
     let mut stage1 = Vec::new();
     stage1.extend(run_ast_grep(repo_root, &changed_paths).unwrap());
     stage1.extend(run_golangci_lint(repo_root, &changed_paths).unwrap());
+    stage1.extend(autoreview_core::run_symindex_check(repo_root, &changed_paths));
     let stage1_count = stage1.len();
     let stage1_findings: Vec<_> = assign_fingerprints(stage1).into_iter().map(to_finding).collect();
 
@@ -119,4 +120,29 @@ fn a_deleted_file_in_the_diff_does_not_break_the_pipeline() {
     // No specific assertion on findings content — the point is that this
     // completes at all rather than erroring out on the deleted path.
     let _ = findings;
+}
+
+#[test]
+fn seeded_message_chain_surfaces_through_the_real_pipeline() {
+    if !ast_grep_available() {
+        eprintln!("skipping: ast-grep not on PATH");
+        return;
+    }
+
+    let repo = init_repo_with_diff(
+        &[("Widget.java", "class Widget {\n    void f() {}\n}\n")],
+        &[(
+            "Widget.java",
+            "class Widget {\n    Owner owner;\n\n    String chain() {\n        return owner.getAddress().getCity().toUpperCase();\n    }\n}\n",
+        )],
+        "add a method with a long message chain",
+    );
+
+    let (findings, _plan) = run_pipeline(repo.path(), "main~1", "main");
+
+    assert!(
+        findings.iter().any(|f| f.source.rule_id.as_deref() == Some("message-chain")),
+        "expected the seeded message chain to be caught; findings were: {:?}",
+        findings.iter().map(|f| f.source.rule_id.clone()).collect::<Vec<_>>()
+    );
 }

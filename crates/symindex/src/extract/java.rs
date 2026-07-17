@@ -20,7 +20,7 @@ use std::path::Path;
 
 use tree_sitter::Node;
 
-use crate::model::{AccessRef, ForeignAccessRef, MethodDecl, NamedSlot, TypeDecl};
+use crate::model::{AccessRef, CallChain, ForeignAccessRef, MethodDecl, NamedSlot, TypeDecl};
 
 fn text<'a>(node: Node, source: &'a [u8]) -> &'a str {
     node.utf8_text(source).unwrap_or("")
@@ -111,8 +111,10 @@ fn extract_method(node: Node, source: &[u8], file: &Path, owner_type: &str, fiel
 
     let mut own_field_accesses = Vec::new();
     let mut foreign_accesses = Vec::new();
+    let mut chains = Vec::new();
     if let Some(body) = node.child_by_field_name("body") {
         walk_accesses(body, source, fields, &params, &mut own_field_accesses, &mut foreign_accesses);
+        walk_chains(body, source, &mut chains);
     }
 
     Some(MethodDecl {
@@ -125,7 +127,7 @@ fn extract_method(node: Node, source: &[u8], file: &Path, owner_type: &str, fiel
         return_type_text,
         own_field_accesses,
         foreign_accesses,
-        chains: Vec::new(), // chain-walking lands in a later phase
+        chains,
     })
 }
 
@@ -166,6 +168,56 @@ fn walk_accesses(node: Node, source: &[u8], fields: &[NamedSlot], params: &[Name
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         walk_accesses(child, source, fields, params, own, foreign);
+    }
+}
+
+/// Finds every maximal call chain in a method body: a `method_invocation`
+/// node is a chain *root* (the outermost link) unless its parent is itself
+/// a `method_invocation` whose `object` is this node — in that case it's an
+/// inner link of a longer chain already covered when the outer node is
+/// visited, so it's skipped here to avoid double-counting the same chain
+/// as multiple shorter ones.
+fn walk_chains(node: Node, source: &[u8], out: &mut Vec<CallChain>) {
+    if node.kind() == "method_invocation" {
+        let is_inner_link = node
+            .parent()
+            .and_then(|p| if p.kind() == "method_invocation" { p.child_by_field_name("object") } else { None })
+            .map(|object| object.id() == node.id())
+            .unwrap_or(false);
+        if !is_inner_link {
+            out.push(build_chain(node, source));
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_chains(child, source, out);
+    }
+}
+
+/// Unwraps a chain of `method_invocation.object` links starting at `node`
+/// (the outermost call) down to its root expression (an identifier,
+/// `this`, or anything else that isn't itself a call), collecting member
+/// names in root-to-tip order.
+fn build_chain(node: Node, source: &[u8]) -> CallChain {
+    let line = line_of(node);
+    let mut member_names_rev = Vec::new();
+    let mut current = node;
+    loop {
+        if current.kind() != "method_invocation" {
+            member_names_rev.reverse();
+            return CallChain { root_text: text(current, source).to_string(), depth: member_names_rev.len(), line, member_names: member_names_rev };
+        }
+        let name_text = current.child_by_field_name("name").map(|n| text(n, source).to_string()).unwrap_or_default();
+        member_names_rev.push(name_text);
+        match current.child_by_field_name("object") {
+            Some(object) => current = object,
+            None => {
+                // An implicit-`this` call with no explicit object, e.g. a
+                // bare `foo()` invoking a method on the enclosing instance.
+                member_names_rev.reverse();
+                return CallChain { root_text: "this".to_string(), depth: member_names_rev.len(), line, member_names: member_names_rev };
+            }
+        }
     }
 }
 
@@ -273,5 +325,30 @@ mod tests {
         assert_eq!(types.len(), 1);
         assert!(types[0].fields.is_empty());
         assert!(types[0].methods.is_empty());
+    }
+
+    #[test]
+    fn a_message_chain_is_recorded_as_a_single_maximal_chain_not_split_into_shorter_ones() {
+        let types = extract("class W {\n    Owner owner;\n    String f() {\n        return owner.getAddress().getCity().toUpperCase();\n    }\n}\n");
+        let chains = &types[0].methods[0].chains;
+        assert_eq!(chains.len(), 1, "expected exactly one maximal chain, got {chains:?}");
+        assert_eq!(chains[0].root_text, "owner");
+        assert_eq!(chains[0].depth, 3);
+        assert_eq!(chains[0].member_names, vec!["getAddress".to_string(), "getCity".to_string(), "toUpperCase".to_string()]);
+    }
+
+    #[test]
+    fn a_lone_method_call_is_a_depth_one_chain() {
+        let types = extract("class W {\n    void f(Customer c) {\n        c.getBalance();\n    }\n}\n");
+        let chains = &types[0].methods[0].chains;
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains[0].depth, 1);
+        assert_eq!(chains[0].root_text, "c");
+    }
+
+    #[test]
+    fn two_independent_calls_in_the_same_method_produce_two_separate_chains() {
+        let types = extract("class W {\n    void f(Customer c, Widget w) {\n        c.getBalance();\n        w.getQuantity();\n    }\n}\n");
+        assert_eq!(types[0].methods[0].chains.len(), 2);
     }
 }
