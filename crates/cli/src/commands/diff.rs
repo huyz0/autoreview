@@ -467,6 +467,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
             "duplicate-string-literal".to_string(),
             "swallowed-exception".to_string(),
             "iterator-err-not-checked".to_string(),
+            "double-checked-locking-no-volatile".to_string(),
         ]);
 
         let to_check = autoreview_core::select_for_verification(&findings, &config.verify.noisy_categories, &semantic_ids).len();

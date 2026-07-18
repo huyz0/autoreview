@@ -707,6 +707,81 @@ fn detect_iterator_err_not_checked(path: &str, content: &str) -> Vec<AgentFindin
     findings
 }
 
+/// Extracts VAR from a line shaped like `if (VAR == null) {` (allowing
+/// `!= null` negation is deliberately excluded — DCL only ever guards on
+/// `== null`). Tolerant of extra whitespace but not other conditions
+/// combined via `&&`/`||`, to stay precise about matching only the exact
+/// null-check shape DCL needs.
+fn double_checked_locking_guard_var(trimmed: &str) -> Option<&str> {
+    let rest = trimmed.strip_prefix("if")?.trim_start();
+    let rest = rest.strip_prefix('(')?;
+    let close = rest.find(')')?;
+    let cond = rest[..close].trim();
+    let var = cond.strip_suffix("== null")?.trim();
+    if var.is_empty() || !var.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') {
+        return None;
+    }
+    Some(var)
+}
+
+/// Flags the classic lazy-singleton double-checked-locking shape (null
+/// check, `synchronized` block, re-check, assign) where the guarded field
+/// isn't declared `volatile` — without it, JIT/CPU reordering can let
+/// another thread observe a non-null reference to a partially-constructed
+/// object (the canonical JSR-133 hazard). Java only: Kotlin idiomatically
+/// uses `by lazy { }`, which is already synchronized correctly.
+fn detect_double_checked_locking_without_volatile(path: &str, content: &str) -> Vec<AgentFinding> {
+    if !path.ends_with(".java") {
+        return Vec::new();
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let mut findings = Vec::new();
+    for (idx, raw_line) in lines.iter().enumerate() {
+        let trimmed = raw_line.trim();
+        let Some(var) = double_checked_locking_guard_var(trimmed) else { continue };
+
+        let window = |from: usize, span: usize| lines.iter().skip(from).take(span).map(|l| l.trim());
+
+        let Some(sync_offset) = window(idx + 1, 5).position(|l| l.contains("synchronized")) else { continue };
+        let sync_idx = idx + 1 + sync_offset;
+
+        let Some(recheck_offset) = window(sync_idx + 1, 5).position(|l| double_checked_locking_guard_var(l) == Some(var)) else { continue };
+        let recheck_idx = sync_idx + 1 + recheck_offset;
+
+        let assign_needle = format!("{var} =");
+        let assigns = window(recheck_idx + 1, 5).any(|l| l.starts_with(&assign_needle) && !l.starts_with(&format!("{var} ==")));
+        if !assigns {
+            continue;
+        }
+
+        // Confirm the field is declared elsewhere in the file without `volatile`.
+        let field_name = var.rsplit('.').next().unwrap_or(var);
+        let is_declared_non_volatile = content.lines().any(|l| {
+            let l = l.trim();
+            l.ends_with(';')
+                && !l.contains("volatile")
+                && !l.starts_with("//")
+                && (l.contains(&format!(" {field_name};")) || l.contains(&format!(" {field_name} =")))
+                && !l.starts_with("if")
+                && !l.starts_with("return")
+                && !l.starts_with(field_name)
+                && !l.contains('(')
+        });
+        if is_declared_non_volatile {
+            findings.push(make_finding(
+                "double-checked-locking-no-volatile",
+                path,
+                (idx + 1) as u32,
+                (recheck_idx + 1) as u32,
+                format!("Double-checked locking on `{var}` without `volatile`"),
+                format!("This looks like the double-checked-locking lazy-init pattern guarding `{var}`, but `{field_name}` isn't declared `volatile`. Without it, JIT/CPU instruction reordering can let another thread observe a non-null reference to a partially-constructed object through this field (the canonical JSR-133 double-checked-locking hazard). Add `volatile` to `{field_name}`'s declaration, or replace this pattern with a simpler holder-class/`enum` singleton."),
+                trimmed.to_string(),
+            ));
+        }
+    }
+    findings
+}
+
 /// Runs all Track 4 checks against one changed file's current content.
 pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
     changed_files
@@ -727,6 +802,7 @@ pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<Ag
                 findings.extend(detect_unused_private_method(path, &content));
                 findings.extend(detect_duplicate_string_literals(path, &content));
                 findings.extend(detect_swallowed_exception(path, &content));
+                findings.extend(detect_double_checked_locking_without_volatile(path, &content));
             }
             if language == PracticesLanguage::Go {
                 findings.extend(detect_iterator_err_not_checked(path, &content));
@@ -1044,6 +1120,21 @@ mod tests {
     fn does_not_flag_ordinary_source() {
         let content = "func f() {\n\treturn 1\n}\n";
         let findings = detect_bidi_control_character("main.go", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn flags_double_checked_locking_without_volatile() {
+        let content = "public class Singleton {\n    private static Singleton instance;\n\n    public static Singleton getInstance() {\n        if (instance == null) {\n            synchronized (Singleton.class) {\n                if (instance == null) {\n                    instance = new Singleton();\n                }\n            }\n        }\n        return instance;\n    }\n}\n";
+        let findings = detect_double_checked_locking_without_volatile("Singleton.java", content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("double-checked-locking-no-volatile"));
+    }
+
+    #[test]
+    fn does_not_flag_double_checked_locking_with_volatile() {
+        let content = "public class Singleton {\n    private static volatile Singleton instance;\n\n    public static Singleton getInstance() {\n        if (instance == null) {\n            synchronized (Singleton.class) {\n                if (instance == null) {\n                    instance = new Singleton();\n                }\n            }\n        }\n        return instance;\n    }\n}\n";
+        let findings = detect_double_checked_locking_without_volatile("Singleton.java", content);
         assert!(findings.is_empty());
     }
 
