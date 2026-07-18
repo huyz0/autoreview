@@ -1,0 +1,16 @@
+id: java-magic-number
+language: Java
+category: design
+semantic: true
+severity: warning
+message: "This comparison uses an unnamed numeric literal — its meaning (a threshold? a limit? a special sentinel?) isn't obvious from the code alone. Extract it to a named constant. (Deliberately scoped to comparisons only, and excludes 0/1/2/10/100/1000 — the values common enough to not need a name — to keep this check's false-positive rate low.)"
+rule:
+  kind: binary_expression
+  all:
+    - any:
+        - has: {field: right, kind: decimal_integer_literal}
+        - has: {field: left, kind: decimal_integer_literal}
+    - not:
+        any:
+          - has: {field: right, kind: decimal_integer_literal, regex: ^-?(0|1|2|10|100|1000)$}
+          - has: {field: left, kind: decimal_integer_literal, regex: ^-?(0|1|2|10|100|1000)$}

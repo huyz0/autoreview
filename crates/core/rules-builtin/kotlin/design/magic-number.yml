@@ -1,0 +1,14 @@
+id: kotlin-magic-number
+language: Kotlin
+category: design
+semantic: true
+severity: warning
+message: "This comparison uses an unnamed numeric literal — its meaning (a threshold? a limit? a special sentinel?) isn't obvious from the code alone. Extract it to a named constant. (Deliberately scoped to comparisons only, and excludes 0/1/2/10/100/1000 — the values common enough to not need a name — to keep this check's false-positive rate low.)"
+rule:
+  kind: comparison_expression
+  all:
+    - has: {kind: integer_literal}
+    - not:
+        has:
+          kind: integer_literal
+          regex: ^-?(0|1|2|10|100|1000)$
