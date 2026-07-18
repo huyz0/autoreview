@@ -16,6 +16,13 @@ const DEFAULT_MAX_METHOD_LINES: usize = 80;
 const DEFAULT_MAX_PARAMS: usize = 5;
 const DEFAULT_MAX_NESTING: usize = 4;
 const DEFAULT_MAX_CLASS_MEMBERS: usize = 20;
+/// Fowler's Switch Statements smell doesn't give a specific arm count, so
+/// this follows the same style as the other thresholds here: conservative
+/// enough that a legitimately large, unavoidable dispatch (a state machine,
+/// a protocol opcode table) doesn't get flagged constantly, while still
+/// catching the "this should probably be polymorphism/a lookup table"
+/// cases the smell is about.
+const DEFAULT_MAX_SWITCH_CASES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComplexityLanguage {
@@ -99,6 +106,12 @@ struct OpenSpan {
 enum SpanKind {
     Function { name_hint: String, param_count: usize, max_nesting: usize },
     Class { member_count: usize },
+    /// Go/Java `switch` only (deliberately not Kotlin's `when`: its arms use
+    /// a bare `->` with no keyword prefix, which is indistinguishable from a
+    /// lambda expression by this line-scan — counting them would be a
+    /// meaningfully higher false-positive risk than the keyword-anchored
+    /// `case`/`default` lines Go/Java use).
+    Switch { case_count: usize },
 }
 
 fn make_finding(rule_id: &str, path: &str, start_line: u32, end_line: u32, title: String, message: String) -> AgentFinding {
@@ -131,6 +144,12 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
         let line_no = idx + 1;
         let trimmed = raw_line.trim();
 
+        if let Some(OpenSpan { kind: SpanKind::Switch { case_count }, start_depth, .. }) = stack.last_mut() {
+            if depth == *start_depth + 1 && (trimmed.starts_with("case ") || trimmed == "default:" || trimmed.starts_with("default:")) {
+                *case_count += 1;
+            }
+        }
+
         if let Some(param_list) = opens_function(trimmed) {
             // A class member's method body sits one level inside its
             // enclosing class span — count it there before pushing our own.
@@ -159,6 +178,9 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
                 if let Some(OpenSpan { kind: SpanKind::Function { max_nesting, .. }, start_depth, .. }) = stack.last_mut() {
                     let relative = (depth - *start_depth + 1).max(0) as usize;
                     *max_nesting = (*max_nesting).max(relative);
+                }
+                if trimmed.split_whitespace().next() == Some("switch") {
+                    stack.push(OpenSpan { start_line: line_no, start_depth: depth, kind: SpanKind::Switch { case_count: 0 } });
                 }
             }
             depth += 1;
@@ -217,6 +239,18 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
                                 line_no as u32,
                                 format!("Large class ({member_count} methods)"),
                                 format!("This class defines {member_count} methods (over the {DEFAULT_MAX_CLASS_MEMBERS}-method threshold) — a class this large is often doing more than one job; consider splitting it by responsibility."),
+                            ));
+                        }
+                    }
+                    SpanKind::Switch { case_count } => {
+                        if case_count > DEFAULT_MAX_SWITCH_CASES {
+                            findings.push(make_finding(
+                                "large-switch",
+                                path,
+                                span.start_line as u32,
+                                line_no as u32,
+                                format!("Large switch statement ({case_count} cases)"),
+                                format!("This switch statement has {case_count} cases (over the {DEFAULT_MAX_SWITCH_CASES}-case threshold, Fowler's Switch Statements smell) — if the cases dispatch on an object's type/kind, consider polymorphism (a method per type) or a lookup table instead."),
                             ));
                         }
                     }
@@ -316,6 +350,49 @@ mod tests {
         let content = "public class Small {\n    void method1() {\n        int x = 1;\n    }\n    void method2() {\n        int x = 2;\n    }\n}\n";
         let findings = detect_complexity_in_file("Small.java", content, ComplexityLanguage::JavaOrKotlin);
         assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("god-class")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_large_switch_statement_in_go() {
+        let mut content = String::from("func doIt(x int) {\n\tswitch x {\n");
+        for i in 0..10 {
+            content.push_str(&format!("\tcase {i}:\n\t\tprintln({i})\n"));
+        }
+        content.push_str("\t}\n}\n");
+        let findings = detect_complexity_in_file("main.go", &content, ComplexityLanguage::Go);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("large-switch")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_small_switch_statement_in_go() {
+        let content = "func doIt(x int) {\n\tswitch x {\n\tcase 1:\n\t\tprintln(1)\n\tcase 2:\n\t\tprintln(2)\n\tdefault:\n\t\tprintln(0)\n\t}\n}\n";
+        let findings = detect_complexity_in_file("main.go", content, ComplexityLanguage::Go);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("large-switch")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_large_switch_statement_in_java() {
+        let mut content = String::from("public class Big {\n    void doIt(int x) {\n        switch (x) {\n");
+        for i in 0..10 {
+            content.push_str(&format!("        case {i}:\n            System.out.println({i});\n            break;\n"));
+        }
+        content.push_str("        }\n    }\n}\n");
+        let findings = detect_complexity_in_file("Big.java", &content, ComplexityLanguage::JavaOrKotlin);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("large-switch")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_kotlin_when_expressions_as_a_switch() {
+        // Deliberate scope decision: Kotlin's `when` arms use a bare `->`
+        // with no keyword, indistinguishable from a lambda by this line
+        // scan — see the SpanKind::Switch doc comment.
+        let mut content = String::from("fun doIt(x: Int) {\n    when (x) {\n");
+        for i in 0..10 {
+            content.push_str(&format!("        {i} -> println({i})\n"));
+        }
+        content.push_str("    }\n}\n");
+        let findings = detect_complexity_in_file("Big.kt", &content, ComplexityLanguage::JavaOrKotlin);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("large-switch")), "got: {findings:#?}");
     }
 
     #[test]
