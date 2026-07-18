@@ -518,6 +518,89 @@ fn detect_duplicate_string_literals(path: &str, content: &str) -> Vec<AgentFindi
     findings
 }
 
+/// The catch variable's declared name from a `catch (...)` line — Java
+/// `catch (Type varname) {`, Kotlin `catch (varname: Type) {`. Returns
+/// `None` for anything else (including the already-covered `catch
+/// (Exception e) { }` empty-body case, which this function doesn't try to
+/// distinguish from a real swallow — that's the caller's job).
+fn catch_variable_name(trimmed: &str) -> Option<&str> {
+    // The catch clause commonly follows the try/prior-catch block's closing
+    // brace on the same line (`} catch (...) {`), not just a bare `catch (`
+    // at the start of the line.
+    let trimmed = trimmed.trim_start_matches('}').trim_start();
+    let rest = trimmed.strip_prefix("catch (").or_else(|| trimmed.strip_prefix("catch("))?;
+    let inner = rest.split(')').next()?.trim();
+    if let Some((var, _type)) = inner.split_once(':') {
+        // Kotlin: `varname: Type`
+        Some(var.trim())
+    } else {
+        // Java: `Type varname` (possibly `Type1 | Type2 varname` for
+        // multi-catch — the variable name is still the last token either way)
+        inner.split_whitespace().next_back()
+    }
+}
+
+/// detekt's SwallowedException / Sonar S1166: a catch block that does
+/// *something*, but never actually references the exception it caught —
+/// broader than `empty-catch-block` (a non-empty body that logs a bare
+/// "operation failed" string with no exception detail is just as blind to
+/// the real cause as an empty one). Implemented as a hand-rolled brace-scan
+/// rather than an ast-grep rule: this needs to check whether the catch
+/// variable's *name* (captured dynamically per catch block) appears
+/// anywhere in its own body, which requires a metavariable to be
+/// substituted into a second match — ast-grep's relational sub-rules
+/// (`has`/`not`) don't reliably propagate a captured metavariable's text
+/// into a nested pattern/regex in the version this project uses (the same
+/// limitation hit and worked around differently while building
+/// `rethrow-caught-exception-unchanged` earlier this batch).
+fn detect_swallowed_exception(path: &str, content: &str) -> Vec<AgentFinding> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut findings = Vec::new();
+
+    let mut idx = 0usize;
+    while idx < lines.len() {
+        let trimmed = lines[idx].trim();
+        if let Some(var_name) = catch_variable_name(trimmed) {
+            if trimmed.ends_with('{') {
+                // Brace-match the catch body starting after this line — the
+                // catch line's own leading `}` (closing the prior try/catch
+                // block, when it shares a line like `} catch (...) {`) must
+                // not be counted here, or it cancels out against this
+                // line's own opening `{` and ends the "body" before it
+                // starts. Start counting from depth 1 (this line's `{`
+                // already opened the catch body) at the *next* line.
+                let mut depth = 1i32;
+                let mut body_end = lines.len().saturating_sub(1);
+                for (k, l) in lines.iter().enumerate().skip(idx + 1) {
+                    depth += l.matches('{').count() as i32;
+                    depth -= l.matches('}').count() as i32;
+                    if depth == 0 {
+                        body_end = k;
+                        break;
+                    }
+                }
+                let body_lines = &lines[idx + 1..body_end];
+                let body_is_blank = body_lines.iter().all(|l| l.trim().is_empty());
+                let var_referenced = body_lines.iter().any(|l| contains_whole_word(l, var_name));
+
+                if !body_is_blank && !var_referenced {
+                    findings.push(make_finding(
+                        "swallowed-exception",
+                        path,
+                        (idx + 1) as u32,
+                        (body_end + 1) as u32,
+                        format!("Swallowed exception ({var_name} never referenced)"),
+                        format!("This catch block does something, but never references `{var_name}` — whatever it logs/does has no actual detail about the exception it caught, so debugging the real failure later is just as hard as if the catch block were empty. Reference `{var_name}` (log it, rethrow it, include its message) or make the block genuinely empty with a comment explaining why it's safe to ignore."),
+                        trimmed.to_string(),
+                    ));
+                }
+            }
+        }
+        idx += 1;
+    }
+    findings
+}
+
 fn detect_wildcard_imports(path: &str, content: &str) -> Vec<AgentFinding> {
     let mut findings = Vec::new();
     for (idx, raw_line) in content.lines().enumerate() {
@@ -557,6 +640,7 @@ pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<Ag
                 findings.extend(detect_unused_private_field(path, &content));
                 findings.extend(detect_unused_private_method(path, &content));
                 findings.extend(detect_duplicate_string_literals(path, &content));
+                findings.extend(detect_swallowed_exception(path, &content));
             }
             Some(findings)
         })
@@ -780,6 +864,36 @@ mod tests {
         let content = "class S {\n    void a() { log(\"-\"); }\n    void b() { log(\"-\"); }\n    void c() { log(\"-\"); }\n}\n";
         let findings = detect_duplicate_string_literals("S.java", content);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn flags_a_catch_block_that_never_references_the_exception() {
+        let content = "class S {\n    void a() {\n        try {\n            risky();\n        } catch (IOException e) {\n            log(\"operation failed\");\n        }\n    }\n}\n";
+        let findings = detect_swallowed_exception("S.java", content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("swallowed-exception"));
+    }
+
+    #[test]
+    fn does_not_flag_a_catch_block_that_references_the_exception() {
+        let content = "class S {\n    void a() {\n        try {\n            risky();\n        } catch (IOException e) {\n            log(\"operation failed\", e);\n        }\n    }\n}\n";
+        let findings = detect_swallowed_exception("S.java", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn does_not_flag_an_empty_catch_block_as_swallowed() {
+        // Already covered by the separate empty-catch-block ast-grep rule.
+        let content = "class S {\n    void a() {\n        try {\n            risky();\n        } catch (IOException e) {\n        }\n    }\n}\n";
+        let findings = detect_swallowed_exception("S.java", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn flags_a_kotlin_catch_block_that_never_references_the_exception() {
+        let content = "class S {\n    fun a() {\n        try {\n            risky()\n        } catch (e: IOException) {\n            log(\"operation failed\")\n        }\n    }\n}\n";
+        let findings = detect_swallowed_exception("S.kt", content);
+        assert_eq!(findings.len(), 1);
     }
 
     #[test]
