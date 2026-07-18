@@ -1,0 +1,22 @@
+id: kotlin-suspend-call-in-finally-without-noncancellable
+language: Kotlin
+category: design
+severity: warning
+semantic: true
+message: "This `finally` block calls a suspending function directly. Once the surrounding coroutine is already cancelled, a plain suspending call in `finally` can be skipped instead of run — wrap cleanup that must always happen in `withContext(NonCancellable) { }`."
+rule:
+  kind: finally_block
+  has:
+    stopBy: end
+    kind: call_expression
+  not:
+    has:
+      stopBy: end
+      kind: simple_identifier
+      regex: ^NonCancellable$
+  inside:
+    stopBy: end
+    kind: function_declaration
+    has:
+      stopBy: end
+      regex: ^suspend$

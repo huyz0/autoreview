@@ -646,6 +646,67 @@ fn detect_bidi_control_character(path: &str, content: &str) -> Vec<AgentFinding>
     findings
 }
 
+/// Flags `for X.Next() { }` iteration loops that never check `X.Err()`
+/// afterward — the sql.Rows/similar cursor convention where the loop just
+/// stops silently on error instead of surfacing it.
+fn detect_iterator_err_not_checked(path: &str, content: &str) -> Vec<AgentFinding> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut findings = Vec::new();
+    let mut idx = 0;
+    while idx < lines.len() {
+        let trimmed = lines[idx].trim();
+        if let Some(rest) = trimmed.strip_prefix("for ") {
+            if let Some(dot) = rest.find(".Next()") {
+                let recv = rest[..dot].trim();
+                let is_identifier = !recv.is_empty() && recv.chars().all(|c| c.is_alphanumeric() || c == '_') && recv.chars().next().is_some_and(|c| !c.is_ascii_digit());
+                if is_identifier {
+                    let mut depth = 0i32;
+                    let mut saw_open = false;
+                    let mut end_idx = idx;
+                    for (k, l) in lines.iter().enumerate().skip(idx) {
+                        depth += l.matches('{').count() as i32;
+                        depth -= l.matches('}').count() as i32;
+                        if l.contains('{') {
+                            saw_open = true;
+                        }
+                        if saw_open && depth == 0 {
+                            end_idx = k;
+                            break;
+                        }
+                    }
+                    let needle = format!("{recv}.Err(");
+                    let mut found = false;
+                    let mut fn_depth = 0i32;
+                    for l in lines.iter().skip(end_idx + 1) {
+                        if l.contains(&needle) {
+                            found = true;
+                            break;
+                        }
+                        fn_depth += l.matches('{').count() as i32;
+                        fn_depth -= l.matches('}').count() as i32;
+                        if fn_depth < 0 {
+                            break;
+                        }
+                    }
+                    if !found {
+                        findings.push(make_finding(
+                            "iterator-err-not-checked",
+                            path,
+                            (idx + 1) as u32,
+                            (end_idx + 1) as u32,
+                            format!("`{recv}.Next()` loop never checks `{recv}.Err()`"),
+                            format!("Iterating with `for {recv}.Next() {{ }}` and never checking `{recv}.Err()` afterward hides errors that terminated the loop early (e.g. a dropped connection mid-scan for `sql.Rows`) — the loop just silently stops instead of surfacing the failure. Check `{recv}.Err()` right after the loop."),
+                            trimmed.to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        idx += 1;
+    }
+    findings
+}
+
 /// Runs all Track 4 checks against one changed file's current content.
 pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
     changed_files
@@ -666,6 +727,9 @@ pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<Ag
                 findings.extend(detect_unused_private_method(path, &content));
                 findings.extend(detect_duplicate_string_literals(path, &content));
                 findings.extend(detect_swallowed_exception(path, &content));
+            }
+            if language == PracticesLanguage::Go {
+                findings.extend(detect_iterator_err_not_checked(path, &content));
             }
             Some(findings)
         })
@@ -980,6 +1044,21 @@ mod tests {
     fn does_not_flag_ordinary_source() {
         let content = "func f() {\n\treturn 1\n}\n";
         let findings = detect_bidi_control_character("main.go", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn flags_a_rows_next_loop_that_never_checks_err() {
+        let content = "func f(db *sql.DB) {\n\trows, _ := db.Query(\"x\")\n\tdefer rows.Close()\n\tfor rows.Next() {\n\t}\n}\n";
+        let findings = detect_iterator_err_not_checked("main.go", content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("iterator-err-not-checked"));
+    }
+
+    #[test]
+    fn does_not_flag_a_rows_next_loop_that_checks_err_afterward() {
+        let content = "func f(db *sql.DB) {\n\trows, _ := db.Query(\"x\")\n\tdefer rows.Close()\n\tfor rows.Next() {\n\t}\n\tif err := rows.Err(); err != nil {\n\t\tpanic(err)\n\t}\n}\n";
+        let findings = detect_iterator_err_not_checked("main.go", content);
         assert!(findings.is_empty());
     }
 }
