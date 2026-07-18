@@ -622,6 +622,30 @@ fn detect_wildcard_imports(path: &str, content: &str) -> Vec<AgentFinding> {
     findings
 }
 
+const BIDI_CONTROL_CHARS: [char; 9] =
+    ['\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}'];
+
+/// Flags Unicode bidirectional control characters in source — the "Trojan
+/// Source" attack class, where an invisible reorder character makes code
+/// display differently than it compiles/runs.
+fn detect_bidi_control_character(path: &str, content: &str) -> Vec<AgentFinding> {
+    let mut findings = Vec::new();
+    for (idx, line) in content.lines().enumerate() {
+        if line.chars().any(|c| BIDI_CONTROL_CHARS.contains(&c)) {
+            findings.push(make_finding(
+                "bidi-control-character",
+                path,
+                (idx + 1) as u32,
+                (idx + 1) as u32,
+                "Unicode bidirectional control character in source".to_string(),
+                "This line contains a Unicode bidirectional control character (e.g. U+202E RIGHT-TO-LEFT OVERRIDE). These are invisible in most editors but can make source code display in an order different from how it actually compiles/executes — the \"Trojan Source\" attack class. Remove it unless there's a deliberate, reviewed reason for it (e.g. an RTL string literal, which should use an explicit escape instead).".to_string(),
+                line.trim().to_string(),
+            ));
+        }
+    }
+    findings
+}
+
 /// Runs all Track 4 checks against one changed file's current content.
 pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
     changed_files
@@ -634,6 +658,7 @@ pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<Ag
             let mut findings = detect_commented_out_code(path, &content, language);
             findings.extend(detect_todo_without_ticket(path, &content, language));
             findings.extend(detect_padding_comment(path, &content, language));
+            findings.extend(detect_bidi_control_character(path, &content));
             if language == PracticesLanguage::JavaOrKotlin {
                 findings.extend(detect_wildcard_imports(path, &content));
                 findings.extend(detect_unused_import(path, &content));
@@ -940,6 +965,21 @@ mod tests {
     fn run_practices_check_skips_files_that_no_longer_exist() {
         let dir = tempfile::tempdir().unwrap();
         let findings = run_practices_check(dir.path(), &["deleted.go".to_string()]);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn flags_a_right_to_left_override_character() {
+        let content = "func f() {\n\t// admin\u{202E} \u{202D}rekcah\n}\n";
+        let findings = detect_bidi_control_character("main.go", content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("bidi-control-character"));
+    }
+
+    #[test]
+    fn does_not_flag_ordinary_source() {
+        let content = "func f() {\n\treturn 1\n}\n";
+        let findings = detect_bidi_control_character("main.go", content);
         assert!(findings.is_empty());
     }
 }
