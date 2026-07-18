@@ -1,0 +1,7 @@
+id: java-print-stack-trace
+language: Java
+category: correctness
+severity: warning
+message: "`printStackTrace()` writes to stderr instead of going through the application's real logging — it's easy to lose in production (no log level, no aggregation, no structured context). Use a logger instead."
+rule:
+  pattern: $EXC.printStackTrace()

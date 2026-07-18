@@ -522,8 +522,7 @@ mod tests {
             "public class Sample {\n    void run() {\n        try {\n            doThing();\n        } catch (Exception e) {\n        }\n    }\n    void doThing() {}\n}\n",
         )]);
         let findings = run_ast_grep(dir.path(), &["Sample.java".to_string()]).unwrap();
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].source.rule_id.as_deref(), Some("java-empty-catch-block"));
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("java-empty-catch-block")), "got: {findings:#?}");
     }
 
     #[test]

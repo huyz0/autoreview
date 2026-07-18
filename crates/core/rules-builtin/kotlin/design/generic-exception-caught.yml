@@ -1,0 +1,10 @@
+id: kotlin-generic-exception-caught
+language: Kotlin
+category: design
+severity: warning
+message: Catching a broad exception type (`Exception`/`Throwable`) hides which specific failure modes this code actually expects and can accidentally swallow unrelated bugs (NPEs, programming errors) alongside the real failure it's meant to handle. Catch the specific exception type(s) this call can actually throw instead.
+rule:
+  kind: catch_block
+  has:
+    kind: user_type
+    regex: ^(Exception|Throwable)$

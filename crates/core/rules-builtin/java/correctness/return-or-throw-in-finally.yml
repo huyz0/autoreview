@@ -1,0 +1,12 @@
+id: java-return-or-throw-in-finally
+language: Java
+category: correctness
+severity: warning
+message: A `return`/`throw` inside a `finally` block silently discards whatever the `try` block was doing — including swallowing any exception it threw — which is almost always surprising and unintended. Move this out of `finally`, or make the override explicit and well-commented if it's genuinely intentional.
+rule:
+  kind: finally_clause
+  has:
+    stopBy: end
+    any:
+      - kind: return_statement
+      - kind: throw_statement

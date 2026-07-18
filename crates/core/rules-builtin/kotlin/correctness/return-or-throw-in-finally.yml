@@ -1,0 +1,10 @@
+id: kotlin-return-or-throw-in-finally
+language: Kotlin
+category: correctness
+severity: warning
+message: A `return`/`throw` (or `break`/`continue`) inside a `finally` block silently discards whatever the `try` block was doing — including swallowing any exception it threw — which is almost always surprising and unintended. Move this out of `finally`, or make the override explicit and well-commented if it's genuinely intentional.
+rule:
+  kind: finally_block
+  has:
+    stopBy: end
+    kind: jump_expression

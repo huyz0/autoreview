@@ -1,0 +1,21 @@
+id: kotlin-equals-without-hashcode
+language: Kotlin
+category: correctness
+severity: warning
+message: This class overrides `equals()` but not `hashCode()` — breaks the equals/hashCode contract, so instances silently behave incorrectly in `HashMap`/`HashSet`/any hash-based collection. Add a matching `hashCode()` override, or use a `data class` if this is meant to be a plain value holder.
+rule:
+  kind: class_declaration
+  all:
+    - has:
+        stopBy: end
+        kind: function_declaration
+        has:
+          kind: simple_identifier
+          regex: ^equals$
+    - not:
+        has:
+          stopBy: end
+          kind: function_declaration
+          has:
+            kind: simple_identifier
+            regex: ^hashCode$
