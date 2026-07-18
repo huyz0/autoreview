@@ -334,6 +334,105 @@ fn contains_whole_word(haystack: &str, word: &str) -> bool {
     false
 }
 
+/// A `private` field/method is only reachable from within its own file's
+/// class — unlike `unused-import`, this doesn't need symindex's cross-file
+/// index at all, single-file line-scanning is the *correct* scope, not
+/// just a cheaper approximation. Real false-positive risk this one carries
+/// that unused-import doesn't: reflection-based frameworks (Jackson/Gson
+/// serialization, JPA entities, JUnit `@Test`-annotated private helpers
+/// invoked by test runners) reference private members by name only in
+/// configuration/annotations elsewhere, sometimes not in this file's text
+/// at all — marked `semantic: true`-equivalent in `diff.rs`'s hardcoded
+/// union for exactly that reason.
+///
+/// Deliberately simple field-declaration parsing (one declarator per line,
+/// no comma-separated multi-name declarations) — same restraint as this
+/// file's existing wildcard-import scan.
+fn detect_unused_private_field(path: &str, content: &str) -> Vec<AgentFinding> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut findings = Vec::new();
+
+    for (idx, raw_line) in lines.iter().enumerate() {
+        let trimmed = raw_line.trim();
+        if !contains_whole_word(trimmed, "private") || trimmed.ends_with('{') || trimmed.ends_with('}') {
+            continue;
+        }
+
+        if trimmed.contains('(') {
+            continue; // a method declaration, not a field — handled separately
+        }
+
+        let name: Option<&str> = if let Some((_, after_keyword)) = trimmed.split_once("val ").or_else(|| trimmed.split_once("var ")) {
+            // Kotlin: `private val NAME: TYPE = ...` / `private var NAME = ...`
+            Some(after_keyword.split(&[':', '='][..]).next().unwrap_or(after_keyword).trim())
+        } else if trimmed.ends_with(';') {
+            // Java: `private [modifiers] TYPE NAME [= ...];`
+            let body = trimmed.trim_end_matches(';');
+            let head = body.split('=').next().unwrap_or(body).trim();
+            head.split_whitespace().next_back()
+        } else {
+            None
+        };
+
+        let Some(name) = name.filter(|n| !n.is_empty() && n.chars().all(|c| c.is_alphanumeric() || c == '_')) else { continue };
+
+        let used_elsewhere = lines.iter().enumerate().any(|(other_idx, other_line)| other_idx != idx && contains_whole_word(other_line, name));
+        if !used_elsewhere {
+            findings.push(make_finding(
+                "unused-private-field",
+                path,
+                (idx + 1) as u32,
+                (idx + 1) as u32,
+                format!("Unused private field ({name})"),
+                format!("`{name}` is declared `private` but never referenced anywhere else in this file — dead state, or a sign this field was meant to be used and isn't yet. Heuristic: reflection-based frameworks (serialization, JPA, some test runners) can reference private members without a textual match, so this is flagged for a semantic check rather than reported outright."),
+                trimmed.to_string(),
+            ));
+        }
+    }
+    findings
+}
+
+/// Same reasoning as `detect_unused_private_field`, for methods. Doesn't
+/// exclude the method's own body from the "used elsewhere" search, so a
+/// private method that only calls itself recursively and is otherwise
+/// unused won't be flagged — a false negative, the conservative direction.
+fn detect_unused_private_method(path: &str, content: &str) -> Vec<AgentFinding> {
+    use super::complexity::{function_name, opens_function};
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut findings = Vec::new();
+
+    for (idx, raw_line) in lines.iter().enumerate() {
+        let trimmed = raw_line.trim();
+        if !contains_whole_word(trimmed, "private") || opens_function(trimmed).is_none() {
+            continue;
+        }
+        let Some(name) = function_name(trimmed) else { continue };
+        // Constructors share their name with the class — a class always
+        // "uses" its own constructor implicitly (instantiation happens
+        // elsewhere, often in another file), so skip name-matches that
+        // look like a capitalized type name to avoid flagging every
+        // private constructor as unused.
+        if name.chars().next().is_some_and(|c| c.is_uppercase()) {
+            continue;
+        }
+
+        let used_elsewhere = lines.iter().enumerate().any(|(other_idx, other_line)| other_idx != idx && contains_whole_word(other_line, name));
+        if !used_elsewhere {
+            findings.push(make_finding(
+                "unused-private-method",
+                path,
+                (idx + 1) as u32,
+                (idx + 1) as u32,
+                format!("Unused private method ({name})"),
+                format!("`{name}` is declared `private` but never called anywhere else in this file — dead code. Heuristic: reflection-based frameworks (some test runners, serialization callbacks) can invoke private methods without a textual match, so this is flagged for a semantic check rather than reported outright."),
+                trimmed.to_string(),
+            ));
+        }
+    }
+    findings
+}
+
 fn detect_wildcard_imports(path: &str, content: &str) -> Vec<AgentFinding> {
     let mut findings = Vec::new();
     for (idx, raw_line) in content.lines().enumerate() {
@@ -370,6 +469,8 @@ pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<Ag
             if language == PracticesLanguage::JavaOrKotlin {
                 findings.extend(detect_wildcard_imports(path, &content));
                 findings.extend(detect_unused_import(path, &content));
+                findings.extend(detect_unused_private_field(path, &content));
+                findings.extend(detect_unused_private_method(path, &content));
             }
             Some(findings)
         })
@@ -505,6 +606,64 @@ mod tests {
     fn checks_the_alias_for_a_kotlin_aliased_import() {
         let content = "import com.example.Foo as Bar\n\nclass S {\n    val x: Bar? = null\n}\n";
         let findings = detect_unused_import("S.kt", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn flags_an_unused_private_field_in_java() {
+        let content = "public class S {\n    private int x;\n\n    int getY() { return 1; }\n}\n";
+        let findings = detect_unused_private_field("S.java", content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("unused-private-field"));
+    }
+
+    #[test]
+    fn does_not_flag_a_used_private_field_in_java() {
+        let content = "public class S {\n    private int x;\n\n    int getX() { return x; }\n}\n";
+        let findings = detect_unused_private_field("S.java", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn does_not_flag_a_public_field_as_unused() {
+        let content = "public class S {\n    public int x;\n}\n";
+        let findings = detect_unused_private_field("S.java", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn flags_an_unused_private_field_in_kotlin() {
+        let content = "class S {\n    private val x: Int = 0\n\n    fun getY(): Int = 1\n}\n";
+        let findings = detect_unused_private_field("S.kt", content);
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn does_not_flag_a_used_private_field_in_kotlin() {
+        let content = "class S {\n    private val x: Int = 0\n\n    fun getX(): Int = x\n}\n";
+        let findings = detect_unused_private_field("S.kt", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn flags_an_unused_private_method_in_java() {
+        let content = "public class S {\n    private void helper() {\n    }\n    public void run() {\n    }\n}\n";
+        let findings = detect_unused_private_method("S.java", content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("unused-private-method"));
+    }
+
+    #[test]
+    fn does_not_flag_a_called_private_method_in_java() {
+        let content = "public class S {\n    private void helper() {\n    }\n    public void run() {\n        helper();\n    }\n}\n";
+        let findings = detect_unused_private_method("S.java", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn does_not_flag_a_private_constructor_as_an_unused_method() {
+        let content = "public class Utils {\n    private Utils() {\n    }\n    public static int f() {\n        return 1;\n    }\n}\n";
+        let findings = detect_unused_private_method("Utils.java", content);
         assert!(findings.is_empty());
     }
 

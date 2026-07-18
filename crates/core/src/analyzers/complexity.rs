@@ -89,7 +89,7 @@ pub(crate) fn opens_function(trimmed: &str) -> Option<&str> {
 /// `opens_function` already validated) — the last identifier before the
 /// parameter list, e.g. `"public String getName()"` -> `"getName"`. Used
 /// only for the Data Class check's naming-convention heuristic.
-fn function_name(trimmed: &str) -> Option<&str> {
+pub(crate) fn function_name(trimmed: &str) -> Option<&str> {
     if !trimmed.ends_with('{') {
         return None;
     }
