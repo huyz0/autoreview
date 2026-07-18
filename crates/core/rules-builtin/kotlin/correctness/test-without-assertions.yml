@@ -1,0 +1,16 @@
+id: kotlin-test-without-assertions
+language: Kotlin
+category: correctness
+severity: warning
+message: This `@Test` function has no assertion (assert*, verify, fail) — it will always pass regardless of what the code under test does, giving false confidence. Add an assertion, or remove the test if it's no longer needed.
+rule:
+  all:
+    - kind: function_declaration
+    - has:
+        stopBy: end
+        regex: ^@Test
+    - not:
+        has:
+          stopBy: end
+          kind: call_expression
+          regex: ^(assert\w*|verify|fail)\(

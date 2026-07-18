@@ -1,0 +1,17 @@
+id: java-test-without-assertions
+language: Java
+category: correctness
+severity: warning
+message: This `@Test` method has no assertion (assert*, verify, fail) — it will always pass regardless of what the code under test does, giving false confidence. Add an assertion, or remove the test if it's no longer needed.
+rule:
+  all:
+    - kind: method_declaration
+    - has:
+        stopBy: end
+        kind: marker_annotation
+        regex: Test
+    - not:
+        has:
+          stopBy: end
+          kind: method_invocation
+          regex: (assert\w*|verify|fail)\(

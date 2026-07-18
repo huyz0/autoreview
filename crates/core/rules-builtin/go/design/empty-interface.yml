@@ -1,0 +1,7 @@
+id: go-empty-interface
+language: Go
+category: design
+severity: warning
+message: A named interface with no methods is identical to `any`/`interface{}` and adds no type information — it's usually leftover scaffolding from a refactor or a stub that was never finished. Either add methods, or use `any` directly instead of a named alias for it.
+rule:
+  pattern: "type $NAME interface {}"

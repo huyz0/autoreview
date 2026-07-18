@@ -279,6 +279,125 @@ mod tests {
     }
 
     #[test]
+    fn finds_a_named_empty_interface_in_go() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let dir = write_repo(&[("main.go", "package main\n\ntype Marker interface {\n}\n")]);
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("go-empty-interface"));
+        assert_eq!(findings[0].category, "design");
+    }
+
+    #[test]
+    fn does_not_flag_a_go_interface_with_methods() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let dir = write_repo(&[("main.go", "package main\n\ntype Reader interface {\n\tRead(p []byte) (int, error)\n}\n")]);
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("go-empty-interface")));
+    }
+
+    #[test]
+    fn finds_a_go_test_with_no_assertions() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let dir = write_repo(&[("main_test.go", "package main\n\nimport \"testing\"\n\nfunc TestNothing(t *testing.T) {\n\tx := doSomething()\n\t_ = x\n}\n")]);
+        let findings = run_ast_grep(dir.path(), &["main_test.go".to_string()]).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("go-test-without-assertions"));
+    }
+
+    #[test]
+    fn does_not_flag_a_go_test_with_a_real_assertion() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let dir = write_repo(&[(
+            "main_test.go",
+            "package main\n\nimport \"testing\"\n\nfunc TestGood(t *testing.T) {\n\tif got := doSomething(); got != 5 {\n\t\tt.Errorf(\"got %d\", got)\n\t}\n}\n",
+        )]);
+        let findings = run_ast_grep(dir.path(), &["main_test.go".to_string()]).unwrap();
+        assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("go-test-without-assertions")));
+    }
+
+    #[test]
+    fn does_not_flag_a_non_test_function_named_test_something() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let dir = write_repo(&[("main.go", "package main\n\nfunc TestingHelperNotATest() int {\n\treturn 1\n}\n")]);
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("go-test-without-assertions")));
+    }
+
+    #[test]
+    fn finds_a_java_test_with_no_assertions() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let dir = write_repo(&[(
+            "FooTest.java",
+            "import org.junit.Test;\n\npublic class FooTest {\n    @Test\n    public void testNothing() {\n        int x = doSomething();\n    }\n}\n",
+        )]);
+        let findings = run_ast_grep(dir.path(), &["FooTest.java".to_string()]).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("java-test-without-assertions"));
+    }
+
+    #[test]
+    fn does_not_flag_a_java_test_with_a_real_assertion() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let dir = write_repo(&[(
+            "FooTest.java",
+            "import org.junit.Test;\nimport static org.junit.Assert.assertEquals;\n\npublic class FooTest {\n    @Test\n    public void testGood() {\n        assertEquals(5, doSomething());\n    }\n}\n",
+        )]);
+        let findings = run_ast_grep(dir.path(), &["FooTest.java".to_string()]).unwrap();
+        assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("java-test-without-assertions")));
+    }
+
+    #[test]
+    fn finds_a_kotlin_test_with_no_assertions() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let dir = write_repo(&[(
+            "FooTest.kt",
+            "import org.junit.Test\n\nclass FooTest {\n    @Test\n    fun testNothing() {\n        val x = doSomething()\n    }\n}\n",
+        )]);
+        let findings = run_ast_grep(dir.path(), &["FooTest.kt".to_string()]).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("kotlin-test-without-assertions"));
+    }
+
+    #[test]
+    fn does_not_flag_a_kotlin_test_with_a_real_assertion() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let dir = write_repo(&[(
+            "FooTest.kt",
+            "import org.junit.Test\nimport org.junit.Assert.assertEquals\n\nclass FooTest {\n    @Test\n    fun testGood() {\n        assertEquals(5, doSomething())\n    }\n}\n",
+        )]);
+        let findings = run_ast_grep(dir.path(), &["FooTest.kt".to_string()]).unwrap();
+        assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("kotlin-test-without-assertions")));
+    }
+
+    #[test]
     fn finds_a_real_empty_error_check_in_go() {
         if !ast_grep_available() {
             eprintln!("skipping: ast-grep not on PATH");
