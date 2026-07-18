@@ -79,6 +79,16 @@ fn apply(facts: &Facts, stmt: &Stmt) -> Facts {
         Stmt::Assign { lhs, .. } => {
             out.insert(lhs.clone(), Binding::Ambiguous);
         }
+        // The self-append shape (`v = append(v, ...)`) doesn't disturb
+        // `v`'s existing reslice binding — that's exactly the pattern
+        // this rule is checking. Any other call assigned to a variable
+        // (including `append` assigned to something other than one of
+        // its own arguments, which isn't the self-append shape) kills
+        // the binding same as a generic reassignment would.
+        Stmt::Call { assigned_to: Some(v), .. } if is_self_append(stmt) == Some(v.as_str()) => {}
+        Stmt::Call { assigned_to: Some(v), .. } => {
+            out.insert(v.clone(), Binding::Ambiguous);
+        }
         _ => {}
     }
     Facts(out)

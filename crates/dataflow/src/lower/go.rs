@@ -30,19 +30,38 @@ fn classify_rhs(node: Node, source: &[u8]) -> RhsShape {
                 RhsShape::Unknown
             }
         }
-        "identifier" => {
-            let t = text(node, source);
-            if t == "nil" { RhsShape::NilLiteral } else { RhsShape::Var(t.to_string()) }
-        }
+        // `nil` is its own grammar node kind, not an `identifier` (verified
+        // via `--debug-query=ast`) — distinct from a regular identifier
+        // that happens to be named `nil` (which can't occur; `nil` is a
+        // predeclared identifier, but the parser still tokenizes the
+        // literal itself under this dedicated kind).
+        "nil" => RhsShape::NilLiteral,
+        "identifier" => RhsShape::Var(text(node, source).to_string()),
         _ => RhsShape::Unknown,
     }
 }
 
+/// Lowers a call expression's arguments to the flat identifier list
+/// `Stmt::Call` carries (non-identifier arguments, e.g. literals or
+/// nested expressions, are simply omitted — rules that need to check
+/// "is this variable passed as an argument" only care about the
+/// identifier ones).
+fn call_arg_identifiers(call: Node, source: &[u8]) -> Vec<String> {
+    call.child_by_field_name("arguments")
+        .map(|args| {
+            let mut cursor = args.walk();
+            args.named_children(&mut cursor).filter(|n| n.kind() == "identifier").map(|n| text(n, source).to_string()).collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Lowers a `left := right` / `left = right` shaped statement (both
 /// `short_var_declaration` and `assignment_statement` use the same
-/// `left`/`right` field names in this grammar) into a `Stmt`, handling
-/// the `x = append(x, ...)` special case as a `Stmt::Call` rather than a
-/// generic assign, since the rules need to see it as a call.
+/// `left`/`right` field names in this grammar) into a `Stmt`. Any call
+/// expression on the right (not just `append`) lowers to `Stmt::Call`
+/// rather than a generic `Assign` — rules that need interprocedural
+/// resolution (e.g. `typed-nil-interface-return`) need to see the call
+/// target, not just "this variable was reassigned to something unknown".
 fn lower_assign_like(node: Node, source: &[u8]) -> Stmt {
     let (Some(left), Some(right)) = (node.child_by_field_name("left"), node.child_by_field_name("right")) else {
         return Stmt::Other(text(node, source).to_string());
@@ -62,21 +81,85 @@ fn lower_assign_like(node: Node, source: &[u8]) -> Stmt {
     let rhs_node = right.named_child(0).unwrap();
 
     if rhs_node.kind() == "call_expression" {
+        // Only a bare `name(...)` call is resolvable to a `CallTarget`;
+        // a method/selector call (`recv.name(...)`) has no simple target
+        // text worth carrying yet (no receiver-type resolution exists),
+        // so it falls back to `Stmt::Assign { rhs: Unknown }` below.
         if let Some(func) = rhs_node.child_by_field_name("function") {
-            if text(func, source) == "append" {
-                let args = rhs_node
-                    .child_by_field_name("arguments")
-                    .map(|args| {
-                        let mut cursor = args.walk();
-                        args.named_children(&mut cursor).filter(|n| n.kind() == "identifier").map(|n| text(n, source).to_string()).collect()
-                    })
-                    .unwrap_or_default();
-                return Stmt::Call { target: crate::cfg::CallTarget::Named("append".to_string()), args, assigned_to: Some(lhs) };
+            if func.kind() == "identifier" {
+                let name = text(func, source).to_string();
+                let args = call_arg_identifiers(rhs_node, source);
+                return Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(lhs) };
             }
         }
     }
 
     Stmt::Assign { lhs, rhs: classify_rhs(rhs_node, source) }
+}
+
+/// Lowers `var x *T` (no initializer — starts out nil) or `var x *T =
+/// expr` into a `Stmt`. Only the single-spec, single-name case is
+/// modeled, same precision-over-generality tradeoff as
+/// `lower_assign_like`.
+fn lower_var_declaration(node: Node, source: &[u8]) -> Stmt {
+    let mut cursor = node.walk();
+    let specs: Vec<Node> = node.named_children(&mut cursor).filter(|n| n.kind() == "var_spec").collect();
+    if specs.len() != 1 {
+        return Stmt::Other(text(node, source).to_string());
+    }
+    let spec = specs[0];
+    let (Some(name_node), Some(type_node)) = (spec.child_by_field_name("name"), spec.child_by_field_name("type")) else {
+        return Stmt::Other(text(node, source).to_string());
+    };
+    let lhs = text(name_node, source).to_string();
+
+    if let Some(value) = spec.child_by_field_name("value") {
+        return Stmt::Assign { lhs, rhs: classify_rhs(value, source) };
+    }
+
+    // No initializer: a declared-but-unassigned pointer starts out nil;
+    // anything else (a slice, a struct, an int, ...) starts out its
+    // zero value, which this rule set doesn't currently need to model.
+    if type_node.kind() == "pointer_type" {
+        Stmt::Assign { lhs, rhs: RhsShape::NilLiteral }
+    } else {
+        Stmt::Other(text(node, source).to_string())
+    }
+}
+
+/// Does this function's declared result include a trailing `error`
+/// (`func f() error` or `func f() (..., error)`)? Grammar shapes
+/// verified via `--debug-query=ast`: a single unnamed result is a bare
+/// `result: type_identifier`; a multi-value result is `result:
+/// parameter_list` with one `parameter_declaration` per value.
+pub fn function_returns_error(fn_node: Node, source: &[u8]) -> bool {
+    let Some(result) = fn_node.child_by_field_name("result") else { return false };
+    match result.kind() {
+        "type_identifier" => text(result, source) == "error",
+        "parameter_list" => {
+            let mut cursor = result.walk();
+            result
+                .named_children(&mut cursor)
+                .filter(|n| n.kind() == "parameter_declaration")
+                .last()
+                .and_then(|last| last.child_by_field_name("type"))
+                .is_some_and(|ty| ty.kind() == "type_identifier" && text(ty, source) == "error")
+        }
+        _ => false,
+    }
+}
+
+/// Does this function's declared result look like a single, unnamed
+/// pointer type (`func f() *T`)? Returns the pointee type's text (`T`)
+/// if so — used to key `FunctionSummary`s by the function's own name for
+/// same-file/same-package interprocedural lookups.
+pub fn function_returns_pointer(fn_node: Node) -> bool {
+    fn_node.child_by_field_name("result").is_some_and(|r| r.kind() == "pointer_type")
+}
+
+/// The function's own name (`func Name(...) ...`).
+pub fn function_name(fn_node: Node, source: &[u8]) -> Option<String> {
+    fn_node.child_by_field_name("name").map(|n| text(n, source).to_string())
 }
 
 /// Lowers one function/method body into a `Cfg`. `fn_node` must be a
@@ -126,10 +209,20 @@ fn lower_statement(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: Node
             cfg.nodes[current].stmts.push(lower_assign_like(stmt, source));
             current
         }
+        "var_declaration" => {
+            cfg.nodes[current].stmts.push(lower_var_declaration(stmt, source));
+            current
+        }
         "return_statement" => {
+            // `return_statement`'s value sits inside an `expression_list`
+            // child (not a named field, and not the identifier directly)
+            // — `return x` is `return_statement -> expression_list ->
+            // identifier`. Only the single-value case is modeled, same
+            // as everywhere else in this lowering.
             let value = stmt
-                .child_by_field_name("value")
-                .or_else(|| stmt.named_child(0))
+                .named_child(0)
+                .filter(|list| list.kind() == "expression_list" && list.named_child_count() == 1)
+                .and_then(|list| list.named_child(0))
                 .filter(|n| n.kind() == "identifier")
                 .map(|n| text(n, source).to_string());
             cfg.nodes[current].stmts.push(Stmt::Return { value });
@@ -152,16 +245,45 @@ fn lower_statement(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: Node
     }
 }
 
-fn lower_if(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {
-    // The condition expression itself isn't modeled as a `Stmt` yet (no
-    // current rule needs branch-condition facts) — recorded as `Other`
-    // text on the branch point for line-number/debug fidelity.
-    if let Some(cond) = stmt.child_by_field_name("condition") {
-        cfg.nodes[current].stmts.push(Stmt::Other(format!("if {}", text(cond, source))));
+/// Recognizes `var != nil` / `nil != var` (and the `==` counterpart) —
+/// the only condition shape any current rule needs a `Stmt::Guard` for.
+/// Anything else (compound conditions, non-nil comparisons, etc.) yields
+/// `None`; the condition still gets recorded as `Stmt::Other` text
+/// regardless, so no information is lost, just not specially modeled.
+fn recognize_nil_guard(cond: Node, source: &[u8]) -> Option<(String, crate::cfg::GuardOp)> {
+    if cond.kind() != "binary_expression" {
+        return None;
     }
+    let (left, right) = (cond.child_by_field_name("left")?, cond.child_by_field_name("right")?);
+    let (var_node, op_text) = match (left.kind(), right.kind()) {
+        ("identifier", "nil") => (left, text(cond, source)),
+        ("nil", "identifier") => (right, text(cond, source)),
+        _ => return None,
+    };
+    let op = if op_text.contains("!=") {
+        crate::cfg::GuardOp::NotEqual
+    } else if op_text.contains("==") {
+        crate::cfg::GuardOp::Equal
+    } else {
+        return None;
+    };
+    Some((text(var_node, source).to_string(), op))
+}
+
+fn lower_if(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {
+    // The condition expression itself isn't modeled as a `Stmt` beyond
+    // the nil-guard case below — recorded as `Other` text on the branch
+    // point for line-number/debug fidelity regardless.
+    let nil_guard = stmt.child_by_field_name("condition").and_then(|cond| {
+        cfg.nodes[current].stmts.push(Stmt::Other(format!("if {}", text(cond, source))));
+        recognize_nil_guard(cond, source)
+    });
 
     let true_start = cfg.push_node(stmt.start_position().row as u32 + 1);
     cfg.edges.push((current, true_start, EdgeKind::True));
+    if let Some((var, op)) = &nil_guard {
+        cfg.nodes[true_start].stmts.push(Stmt::Guard { var: var.clone(), op: *op, against: crate::cfg::GuardAgainst::Nil });
+    }
     let true_end = if let Some(consequence) = stmt.child_by_field_name("consequence") { lower_block(cfg, consequence, source, true_start) } else { true_start };
 
     let false_end = if let Some(alt) = stmt.child_by_field_name("alternative") {
@@ -239,5 +361,56 @@ mod tests {
     fn lowers_a_for_loop_with_a_back_edge() {
         let cfg = lower("package p\nfunc f() {\n\tfor i := 0; i < 3; i++ {\n\t\tx := i\n\t\t_ = x\n\t}\n}\n");
         assert!(cfg.edges.iter().any(|(_, _, kind)| *kind == EdgeKind::Loop));
+    }
+
+    #[test]
+    fn return_statement_carries_its_value_identifier() {
+        // Regression test: `return_statement`'s value sits inside an
+        // `expression_list` child, not directly as the identifier — an
+        // earlier version of this lowering always produced `value: None`.
+        let cfg = lower("package p\nfunc f() int {\n\tx := 1\n\treturn x\n}\n");
+        assert!(cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Return { value: Some(v) } if v == "x"))), "got: {:#?}", cfg.nodes);
+    }
+
+    #[test]
+    fn lowers_an_uninitialized_pointer_var_declaration_as_nil() {
+        let cfg = lower("package p\nfunc f() *T {\n\tvar e *T\n\treturn e\n}\n");
+        assert!(cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Assign { lhs, rhs: RhsShape::NilLiteral } if lhs == "e"))), "got: {:#?}", cfg.nodes);
+    }
+
+    #[test]
+    fn recognizes_a_call_assigned_to_a_variable_as_a_call_target() {
+        let cfg = lower("package p\nfunc f() *T {\n\te := helper()\n\treturn e\n}\n");
+        assert!(
+            cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), assigned_to: Some(a), .. } if name == "helper" && a == "e"))),
+            "got: {:#?}",
+            cfg.nodes
+        );
+    }
+
+    #[test]
+    fn recognizes_a_not_equal_nil_guard() {
+        let cfg = lower("package p\nfunc f() error {\n\tvar e *T\n\tif e != nil {\n\t\treturn e\n\t}\n\treturn nil\n}\n");
+        assert!(
+            cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Guard { var, op: crate::cfg::GuardOp::NotEqual, .. } if var == "e"))),
+            "got: {:#?}",
+            cfg.nodes
+        );
+    }
+
+    #[test]
+    fn function_metadata_helpers_recognize_error_and_pointer_returns() {
+        let mut parser = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Go).unwrap();
+        let src = "package p\nfunc a() error { return nil }\nfunc b() (int, error) { return 0, nil }\nfunc c() *T { return nil }\nfunc d() int { return 0 }\n";
+        let tree = parser.parse(src, None).unwrap();
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+        let fns: Vec<_> = root.named_children(&mut cursor).filter(|n| n.kind() == "function_declaration").collect();
+        assert!(function_returns_error(fns[0], src.as_bytes()));
+        assert!(function_returns_error(fns[1], src.as_bytes()));
+        assert!(!function_returns_error(fns[2], src.as_bytes()));
+        assert!(function_returns_pointer(fns[2]));
+        assert!(!function_returns_pointer(fns[0]));
+        assert_eq!(function_name(fns[2], src.as_bytes()).as_deref(), Some("c"));
     }
 }

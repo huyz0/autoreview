@@ -3,16 +3,27 @@
 //! symindex`: the dataflow crate has no knowledge of the schema's
 //! `Finding` type, so that mapping lives here.
 //!
-//! Phase 3 of the dataflow rollout: Go-only, one rule
-//! (`append-shared-backing-array`), a drop-in replacement for the
-//! text-heuristic version previously in `analyzers::practices` — same
-//! rule id, so this is not new rule surface, just a sounder
-//! implementation. `run_practices_check`'s Go branch no longer calls the
-//! old `detect_append_shared_backing_array` for this reason.
+//! Phase 3 added Go's `append-shared-backing-array`; Phase 4 adds
+//! `typed-nil-interface-return` — both drop-in replacements for
+//! text-heuristic versions previously in `analyzers::practices` (same
+//! rule ids, so this is not new rule surface, just sounder
+//! implementations). `run_practices_check`'s Go branch no longer calls
+//! either old heuristic for this reason.
+//!
+//! `typed-nil-interface-return`'s interprocedural call resolution is
+//! same-file only (see `autoreview_dataflow::rules::
+//! go_typed_nil_interface_return`'s module docs for the two-pass design)
+//! — a call to a function resolvable in the SymbolIndex but declared in
+//! a different file of the same package is currently treated as an
+//! unknown boundary (not flagged), same as a call to a genuinely
+//! external package. Extending resolution to same-package-different-file
+//! via `autoreview_symindex::SymbolIndex` is a tracked follow-up, not
+//! done in this pass.
 
+use std::collections::HashMap;
 use std::path::Path;
 
-use autoreview_dataflow::rules::go_append_shared_backing_array;
+use autoreview_dataflow::rules::{go_append_shared_backing_array, go_typed_nil_interface_return};
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
 fn make_finding(rule_id: &str, path: &str, line: u32, title: String, message: String) -> AgentFinding {
@@ -66,9 +77,50 @@ fn run_append_shared_backing_array(path: &str, content: &str) -> Vec<AgentFindin
     findings
 }
 
+fn run_typed_nil_interface_return(path: &str, content: &str) -> Vec<AgentFinding> {
+    let Some(mut parser) = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Go) else { return Vec::new() };
+    let Some(tree) = parser.parse(content, None) else { return Vec::new() };
+    let source = content.as_bytes();
+    let functions = go_functions(&tree);
+
+    // Pass 1: same-file summaries for every pointer-returning function.
+    let mut summaries: HashMap<String, bool> = HashMap::new();
+    for fn_node in &functions {
+        if autoreview_dataflow::lower::go::function_returns_pointer(*fn_node) {
+            if let Some(name) = autoreview_dataflow::lower::go::function_name(*fn_node, source) {
+                let cfg = autoreview_dataflow::lower::go::lower_function(source, *fn_node);
+                summaries.insert(name, go_typed_nil_interface_return::compute_summary(&cfg));
+            }
+        }
+    }
+
+    // Pass 2: check every function declaring an `error` return against
+    // those summaries.
+    let mut findings = Vec::new();
+    for fn_node in &functions {
+        if !autoreview_dataflow::lower::go::function_returns_error(*fn_node, source) {
+            continue;
+        }
+        let cfg = autoreview_dataflow::lower::go::lower_function(source, *fn_node);
+        for hit in go_typed_nil_interface_return::check(&cfg, &summaries) {
+            findings.push(make_finding(
+                "typed-nil-interface-return",
+                path,
+                hit.source_line,
+                format!("Returning typed pointer `{}` where an `error` is expected", hit.var),
+                format!(
+                    "This function declares an `error` return, but returns `{}` — a pointer variable that may be nil (either declared locally with no initializer, or assigned from a call to a function whose own return path can produce a nil pointer) — directly instead of an `error`-typed value. An `error` interface value holding a nil `*T` is itself non-nil (interfaces are a `(type, value)` pair internally), so a caller's `if err != nil` check passes even when `{}` is nil and nothing actually went wrong. Return a literal `nil` when there's no error, or explicitly convert: `if {} != nil {{ return {} }}; return nil`.",
+                    hit.var, hit.var, hit.var, hit.var
+                ),
+            ));
+        }
+    }
+    findings
+}
+
 /// Runs all dataflow-powered checks against one changed file's current
-/// content. Go-only for now (Phase 3); Java/Kotlin land once their
-/// lowering passes do (Phase 5/6).
+/// content. Go-only for now (Phase 3/4); Java/Kotlin land once their
+/// lowering passes do (Phase 6/7).
 pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
     changed_files
         .iter()
@@ -76,7 +128,9 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String]) -> Vec<Age
         .filter_map(|path| {
             let full_path = repo_root.join(path);
             let content = std::fs::read_to_string(&full_path).ok()?;
-            Some(run_append_shared_backing_array(path, &content))
+            let mut findings = run_append_shared_backing_array(path, &content);
+            findings.extend(run_typed_nil_interface_return(path, &content));
+            Some(findings)
         })
         .flatten()
         .collect()
@@ -105,6 +159,45 @@ mod tests {
         .unwrap();
         let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
         assert!(findings.is_empty(), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_same_function_typed_nil_return() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.go"),
+            "package main\n\nfunc do() error {\n\tvar e *myError\n\tif somethingBad {\n\t\te = &myError{}\n\t}\n\treturn e\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("typed-nil-interface-return")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_an_interprocedural_typed_nil_return_across_two_functions_in_the_same_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.go"),
+            "package main\n\nfunc helper() *myError {\n\tvar e *myError\n\treturn e\n}\n\nfunc Do() error {\n\te := helper()\n\treturn e\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        assert!(
+            findings.iter().any(|f| f.source.rule_id.as_deref() == Some("typed-nil-interface-return")),
+            "got: {findings:#?} — same-function-only heuristic couldn't have caught this"
+        );
+    }
+
+    #[test]
+    fn does_not_flag_the_guarded_idiom_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.go"),
+            "package main\n\nfunc do() error {\n\tvar e *myError\n\tif somethingBad {\n\t\te = &myError{}\n\t}\n\tif e != nil {\n\t\treturn e\n\t}\n\treturn nil\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("typed-nil-interface-return")), "got: {findings:#?}");
     }
 
     #[test]
