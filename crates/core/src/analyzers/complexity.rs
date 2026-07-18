@@ -23,6 +23,10 @@ const DEFAULT_MAX_CLASS_MEMBERS: usize = 20;
 /// catching the "this should probably be polymorphism/a lookup table"
 /// cases the smell is about.
 const DEFAULT_MAX_SWITCH_CASES: usize = 8;
+/// A class needs at least this many trivial-accessor-shaped methods before
+/// Data Class is even considered — a 1- or 2-method match (e.g. a real
+/// class that happens to have one getter) is too common to be meaningful.
+const MIN_DATA_CLASS_ACCESSORS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComplexityLanguage {
@@ -61,6 +65,21 @@ pub(crate) fn opens_function(trimmed: &str) -> Option<&str> {
         return None;
     }
     Some(&before_brace[open_paren + 1..close_paren])
+}
+
+/// Extracts a method's name from its declaration line (the same shape
+/// `opens_function` already validated) — the last identifier before the
+/// parameter list, e.g. `"public String getName()"` -> `"getName"`. Used
+/// only for the Data Class check's naming-convention heuristic.
+fn function_name(trimmed: &str) -> Option<&str> {
+    if !trimmed.ends_with('{') {
+        return None;
+    }
+    let before_brace = trimmed[..trimmed.len() - 1].trim_end();
+    let close_paren = before_brace.rfind(')')?;
+    let open_paren = before_brace[..close_paren].rfind('(')?;
+    let head = before_brace[..open_paren].trim();
+    head.split_whitespace().next_back()
 }
 
 fn opens_class(trimmed: &str) -> bool {
@@ -105,7 +124,12 @@ struct OpenSpan {
 
 enum SpanKind {
     Function { name_hint: String, param_count: usize, max_nesting: usize },
-    Class { member_count: usize },
+    /// `is_java` (not Kotlin) gates the Data Class check: Kotlin has
+    /// first-class `data class` support, an intentional, encouraged
+    /// language feature, not a smell — flagging it would be actively wrong
+    /// for idiomatic Kotlin. Data Class is fundamentally a JavaBean-era
+    /// Java pattern (manual getters/setters where a `record` would do).
+    Class { member_count: usize, trivial_accessor_count: usize, is_java: bool },
     /// Go/Java `switch` only (deliberately not Kotlin's `when`: its arms use
     /// a bare `->` with no keyword prefix, which is indistinguishable from a
     /// lambda expression by this line-scan — counting them would be a
@@ -153,7 +177,7 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
         if let Some(param_list) = opens_function(trimmed) {
             // A class member's method body sits one level inside its
             // enclosing class span — count it there before pushing our own.
-            if let Some(OpenSpan { kind: SpanKind::Class { member_count }, start_depth, .. }) = stack.last_mut() {
+            if let Some(OpenSpan { kind: SpanKind::Class { member_count, .. }, start_depth, .. }) = stack.last_mut() {
                 // A class's own body content lives one level deeper than
                 // its `start_depth` (recorded *before* its opening brace
                 // incremented `depth`) — so a direct member sits at
@@ -168,7 +192,11 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
         }
 
         if language == ComplexityLanguage::JavaOrKotlin && opens_class(trimmed) {
-            stack.push(OpenSpan { start_line: line_no, start_depth: depth, kind: SpanKind::Class { member_count: 0 } });
+            stack.push(OpenSpan {
+                start_line: line_no,
+                start_depth: depth,
+                kind: SpanKind::Class { member_count: 0, trivial_accessor_count: 0, is_java: path.ends_with(".java") },
+            });
             depth += 1;
             continue;
         }
@@ -228,9 +256,23 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
                                 format!("This function/method nests control-flow blocks {max_nesting} levels deep (over the {DEFAULT_MAX_NESTING}-level threshold) — consider early returns/guard clauses or extracting the innermost blocks into their own functions."),
                             ));
                         }
-                        let _ = name_hint;
+                        // Trivial-accessor detection for the enclosing
+                        // class's Data Class check: a short (<=3 line)
+                        // getX/setX/isX method. Checked here (at the
+                        // method's own close, once its line count is known)
+                        // rather than at push time.
+                        if let Some(OpenSpan { kind: SpanKind::Class { trivial_accessor_count, is_java: true, .. }, start_depth, .. }) = stack.last_mut() {
+                            if depth == *start_depth + 1 && line_count as usize <= 3 {
+                                let is_accessor_name = function_name(&name_hint)
+                                    .map(|n| n.starts_with("get") || n.starts_with("set") || n.starts_with("is"))
+                                    .unwrap_or(false);
+                                if is_accessor_name {
+                                    *trivial_accessor_count += 1;
+                                }
+                            }
+                        }
                     }
-                    SpanKind::Class { member_count } => {
+                    SpanKind::Class { member_count, trivial_accessor_count, is_java } => {
                         if member_count > DEFAULT_MAX_CLASS_MEMBERS {
                             findings.push(make_finding(
                                 "god-class",
@@ -239,6 +281,16 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
                                 line_no as u32,
                                 format!("Large class ({member_count} methods)"),
                                 format!("This class defines {member_count} methods (over the {DEFAULT_MAX_CLASS_MEMBERS}-method threshold) — a class this large is often doing more than one job; consider splitting it by responsibility."),
+                            ));
+                        }
+                        if is_java && member_count >= MIN_DATA_CLASS_ACCESSORS && trivial_accessor_count == member_count {
+                            findings.push(make_finding(
+                                "data-class",
+                                path,
+                                span.start_line as u32,
+                                line_no as u32,
+                                format!("Possible Data Class ({member_count} trivial accessors, no other behavior)"),
+                                format!("Every method in this class ({member_count} of them) is a short get/set/is accessor — the class holds data but no behavior (Fowler's Data Class smell). Heuristic — a DTO/value holder is often intentional, so confirm this actually needs behavior before restructuring; if it's genuinely just data, a Java `record` may be a better fit than manual accessors."),
                             ));
                         }
                     }
@@ -393,6 +445,36 @@ mod tests {
         content.push_str("    }\n}\n");
         let findings = detect_complexity_in_file("Big.kt", &content, ComplexityLanguage::JavaOrKotlin);
         assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("large-switch")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_data_class_in_java() {
+        let content = "public class Point {\n    private int x;\n    private int y;\n    private String label;\n\n    public int getX() {\n        return x;\n    }\n    public void setX(int x) {\n        this.x = x;\n    }\n    public int getY() {\n        return y;\n    }\n    public void setY(int y) {\n        this.y = y;\n    }\n    public String getLabel() {\n        return label;\n    }\n}\n";
+        let findings = detect_complexity_in_file("Point.java", content, ComplexityLanguage::JavaOrKotlin);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("data-class")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_class_with_real_behavior_as_a_data_class() {
+        let content = "public class Account {\n    private int balance;\n\n    public int getBalance() {\n        return balance;\n    }\n    public void deposit(int amount) {\n        balance += amount;\n        notifyListeners();\n        log(\"deposit\");\n    }\n    public void withdraw(int amount) {\n        balance -= amount;\n    }\n}\n";
+        let findings = detect_complexity_in_file("Account.java", content, ComplexityLanguage::JavaOrKotlin);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("data-class")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_kotlin_data_class_as_the_data_class_smell() {
+        // Kotlin's `data class` is an intentional, blessed language
+        // feature, not the JavaBean-era smell — this rule is Java-only.
+        let content = "class Point {\n    fun getX(): Int {\n        return x\n    }\n    fun getY(): Int {\n        return y\n    }\n    fun getZ(): Int {\n        return z\n    }\n}\n";
+        let findings = detect_complexity_in_file("Point.kt", content, ComplexityLanguage::JavaOrKotlin);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("data-class")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_small_number_of_accessors_as_a_data_class() {
+        let content = "public class Pair {\n    private int a;\n    private int b;\n\n    public int getA() {\n        return a;\n    }\n    public int getB() {\n        return b;\n    }\n}\n";
+        let findings = detect_complexity_in_file("Pair.java", content, ComplexityLanguage::JavaOrKotlin);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("data-class")), "got: {findings:#?}");
     }
 
     #[test]

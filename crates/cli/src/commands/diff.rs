@@ -459,6 +459,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
             "data-clump".to_string(),
             "excessive-comment-padding".to_string(),
             "divergent-change".to_string(),
+            "data-class".to_string(),
         ]);
 
         let to_check = autoreview_core::select_for_verification(&findings, &config.verify.noisy_categories, &semantic_ids).len();
