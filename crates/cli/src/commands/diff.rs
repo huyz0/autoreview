@@ -461,6 +461,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
             "divergent-change".to_string(),
             "data-class".to_string(),
             "refused-bequest".to_string(),
+            "unused-import".to_string(),
         ]);
 
         let to_check = autoreview_core::select_for_verification(&findings, &config.verify.noisy_categories, &semantic_ids).len();

@@ -251,6 +251,89 @@ fn detect_padding_comment(path: &str, content: &str, language: PracticesLanguage
     findings
 }
 
+/// A near-universal check across every tool researched for the rule-pack
+/// gap analysis (Checkstyle UnusedImports, detekt UnusedImport, Sonar
+/// S1128) that this project had zero coverage of. Single-file syntactic:
+/// an import's simple name (the last `.`-segment) must appear as a whole
+/// word somewhere else in the file, or it's unused. Deliberately skips
+/// wildcard imports (already covered by `detect_wildcard_imports`, and
+/// there's no single "simple name" to search for), static/Kotlin
+/// extension-function imports with an `as` alias (search for the alias
+/// instead — same reasoning, just a different name to look for), and
+/// annotation-only imports used purely for their side effect on
+/// `@Target`-adjacent processors are not special-cased since those still
+/// use their simple name at the annotation site (`@MyAnnotation`), so the
+/// generic whole-word search already covers them correctly.
+fn detect_unused_import(path: &str, content: &str) -> Vec<AgentFinding> {
+    let mut findings = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
+
+    for (idx, raw_line) in lines.iter().enumerate() {
+        let trimmed = raw_line.trim();
+        let Some(rest) = trimmed.strip_prefix("import ") else { continue };
+        let rest = rest.trim_end_matches(';').trim();
+        if rest.ends_with(".*") || rest.starts_with("static ") {
+            continue;
+        }
+
+        let simple_name = if let Some((_, alias)) = rest.rsplit_once(" as ") {
+            alias.trim()
+        } else {
+            rest.rsplit('.').next().unwrap_or(rest).trim()
+        };
+        if simple_name.is_empty() {
+            continue;
+        }
+
+        let used_elsewhere = lines.iter().enumerate().any(|(other_idx, other_line)| {
+            if other_idx == idx {
+                return false;
+            }
+            contains_whole_word(other_line, simple_name)
+        });
+
+        if !used_elsewhere {
+            findings.push(make_finding(
+                "unused-import",
+                path,
+                (idx + 1) as u32,
+                (idx + 1) as u32,
+                format!("Unused import ({simple_name})"),
+                format!("`{simple_name}` is imported but never referenced anywhere else in this file — dead code that adds noise to the file's real dependency list."),
+                trimmed.to_string(),
+            ));
+        }
+    }
+    findings
+}
+
+/// Whole-word substring search — a plain `contains` would also match
+/// `simple_name` as a substring of a longer identifier (e.g. `Foo` inside
+/// `FooBar`), which isn't a real usage.
+fn contains_whole_word(haystack: &str, word: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let word_bytes = word.as_bytes();
+    if word_bytes.is_empty() {
+        return false;
+    }
+    let is_word_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(word) {
+        let abs = start + pos;
+        let before_ok = abs == 0 || !is_word_char(bytes[abs - 1]);
+        let after_idx = abs + word_bytes.len();
+        let after_ok = after_idx >= bytes.len() || !is_word_char(bytes[after_idx]);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + 1;
+        if start >= haystack.len() {
+            break;
+        }
+    }
+    false
+}
+
 fn detect_wildcard_imports(path: &str, content: &str) -> Vec<AgentFinding> {
     let mut findings = Vec::new();
     for (idx, raw_line) in content.lines().enumerate() {
@@ -286,6 +369,7 @@ pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<Ag
             findings.extend(detect_padding_comment(path, &content, language));
             if language == PracticesLanguage::JavaOrKotlin {
                 findings.extend(detect_wildcard_imports(path, &content));
+                findings.extend(detect_unused_import(path, &content));
             }
             Some(findings)
         })
@@ -377,6 +461,50 @@ mod tests {
         lines.push("}".to_string());
         let content = lines.join("\n");
         let findings = detect_padding_comment("main.go", &content, PracticesLanguage::Go);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn flags_an_unused_import_in_java() {
+        let content = "import java.util.List;\n\npublic class S {\n    int x;\n}\n";
+        let findings = detect_unused_import("S.java", content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("unused-import"));
+    }
+
+    #[test]
+    fn does_not_flag_a_used_import_in_java() {
+        let content = "import java.util.List;\n\npublic class S {\n    List<String> items;\n}\n";
+        let findings = detect_unused_import("S.java", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn does_not_flag_a_wildcard_import_as_unused() {
+        let content = "import java.util.*;\n\npublic class S {}\n";
+        let findings = detect_unused_import("S.java", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn does_not_flag_a_static_import_as_unused() {
+        let content = "import static java.util.Collections.emptyList;\n\npublic class S {}\n";
+        let findings = detect_unused_import("S.java", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn flags_only_the_simple_name_not_a_substring_match() {
+        // "Foo" imported but only "FooBar" appears elsewhere — not a real usage.
+        let content = "import com.example.Foo;\n\npublic class S {\n    FooBar x;\n}\n";
+        let findings = detect_unused_import("S.java", content);
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn checks_the_alias_for_a_kotlin_aliased_import() {
+        let content = "import com.example.Foo as Bar\n\nclass S {\n    val x: Bar? = null\n}\n";
+        let findings = detect_unused_import("S.kt", content);
         assert!(findings.is_empty());
     }
 
