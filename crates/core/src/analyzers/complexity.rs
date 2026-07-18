@@ -45,6 +45,11 @@ const DEFAULT_MAX_CYCLOMATIC_COMPLEXITY: usize = 10;
 /// metrics here (Checkstyle/detekt's own ReturnCount default is also
 /// single digits).
 const DEFAULT_MAX_RETURNS: usize = 4;
+/// detekt's CognitiveComplexMethod default (not on-by-default upstream,
+/// but this is the threshold it documents) — cognitive complexity grows
+/// faster than cyclomatic complexity for nested code, so its threshold is
+/// noticeably higher than `DEFAULT_MAX_CYCLOMATIC_COMPLEXITY`.
+const DEFAULT_MAX_COGNITIVE_COMPLEXITY: usize = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComplexityLanguage {
@@ -105,6 +110,23 @@ fn opens_class(trimmed: &str) -> bool {
     trimmed.ends_with('{') && words.iter().any(|w| *w == "class")
 }
 
+fn opens_interface(trimmed: &str) -> bool {
+    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    trimmed.ends_with('{') && words.iter().any(|w| *w == "interface")
+}
+
+/// Heuristic: does this line look like an abstract method signature inside
+/// an interface body (no braces, just `name(...);`)? Distinct from
+/// `opens_function`, which requires a same-line opening brace — interface
+/// members are usually just a signature ending in `;`.
+fn is_abstract_member_signature(trimmed: &str) -> bool {
+    if !trimmed.ends_with(';') || trimmed.starts_with("//") || trimmed.starts_with('@') {
+        return false;
+    }
+    let Some(open_paren) = trimmed.find('(') else { return false };
+    trimmed[..open_paren].trim().chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_')
+}
+
 /// The class's own name, for the Utility Class check's constructor-name
 /// match — the token immediately after the `class` keyword.
 fn class_name(trimmed: &str) -> Option<&str> {
@@ -149,7 +171,7 @@ struct OpenSpan {
 }
 
 enum SpanKind {
-    Function { name_hint: String, param_count: usize, max_nesting: usize, branch_count: usize, return_count: usize },
+    Function { name_hint: String, param_count: usize, max_nesting: usize, branch_count: usize, return_count: usize, cognitive_score: usize },
     /// `is_java` (not Kotlin) gates the Data Class check: Kotlin has
     /// first-class `data class` support, an intentional, encouraged
     /// language feature, not a smell — flagging it would be actively wrong
@@ -170,6 +192,11 @@ enum SpanKind {
     /// meaningfully higher false-positive risk than the keyword-anchored
     /// `case`/`default` lines Go/Java use).
     Switch { case_count: usize },
+    /// A member is either an abstract signature (`foo();`, counted per-line
+    /// as the scan passes over it — it has no body/brace to trigger on) or
+    /// a default/static method with a body (counted the same way a Class
+    /// span counts its methods, at push time in the `opens_function` arm).
+    Interface { member_count: usize },
 }
 
 fn make_finding(rule_id: &str, path: &str, start_line: u32, end_line: u32, title: String, message: String) -> AgentFinding {
@@ -208,6 +235,12 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
             }
         }
 
+        if let Some(OpenSpan { kind: SpanKind::Interface { member_count }, start_depth, .. }) = stack.last_mut() {
+            if depth == *start_depth + 1 && is_abstract_member_signature(trimmed) {
+                *member_count += 1;
+            }
+        }
+
         if let Some(param_list) = opens_function(trimmed) {
             // A class member's method body sits one level inside its
             // enclosing class span — count it there before pushing our own.
@@ -224,17 +257,22 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
                             *has_private_constructor = true;
                         }
                     } else {
-                        *saw_any_method = true;
+    *saw_any_method = true;
                         if !trimmed.contains("static") {
                             *all_methods_static = false;
                         }
                     }
                 }
             }
+            if let Some(OpenSpan { kind: SpanKind::Interface { member_count }, start_depth, .. }) = stack.last_mut() {
+                if depth == *start_depth + 1 {
+                    *member_count += 1;
+                }
+            }
             stack.push(OpenSpan {
                 start_line: line_no,
                 start_depth: depth,
-                kind: SpanKind::Function { name_hint: trimmed.to_string(), param_count: count_params(param_list), max_nesting: 0, branch_count: 0, return_count: 0 },
+                kind: SpanKind::Function { name_hint: trimmed.to_string(), param_count: count_params(param_list), max_nesting: 0, branch_count: 0, return_count: 0, cognitive_score: 0 },
             });
             depth += 1;
             continue;
@@ -258,6 +296,12 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
             continue;
         }
 
+        if language == ComplexityLanguage::JavaOrKotlin && opens_interface(trimmed) {
+            stack.push(OpenSpan { start_line: line_no, start_depth: depth, kind: SpanKind::Interface { member_count: 0 } });
+            depth += 1;
+            continue;
+        }
+
         if trimmed == "return" || trimmed.starts_with("return ") || trimmed.starts_with("return;") || trimmed.starts_with("return(") {
             // A `return` inside a `switch` sits under a Switch span, not
             // directly under its enclosing Function span (Switch spans are
@@ -270,10 +314,15 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
 
         if trimmed.ends_with('{') {
             if opens_control_block(trimmed) {
-                if let Some(OpenSpan { kind: SpanKind::Function { max_nesting, branch_count, .. }, start_depth, .. }) = stack.last_mut() {
+                if let Some(OpenSpan { kind: SpanKind::Function { max_nesting, branch_count, cognitive_score, .. }, start_depth, .. }) = stack.last_mut() {
                     let relative = (depth - *start_depth + 1).max(0) as usize;
                     *max_nesting = (*max_nesting).max(relative);
                     *branch_count += 1;
+                    // Cognitive Complexity (Sonar's metric): each nested
+                    // control structure costs 1 base increment plus its
+                    // nesting depth, so deeply nested branches compound
+                    // instead of adding linearly like cyclomatic complexity.
+                    *cognitive_score += relative;
                 }
                 if trimmed.split_whitespace().next() == Some("switch") {
                     stack.push(OpenSpan { start_line: line_no, start_depth: depth, kind: SpanKind::Switch { case_count: 0 } });
@@ -291,7 +340,7 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
                 }
                 let span = stack.pop().unwrap();
                 match span.kind {
-                    SpanKind::Function { name_hint, param_count, max_nesting, branch_count, return_count } => {
+                    SpanKind::Function { name_hint, param_count, max_nesting, branch_count, return_count, cognitive_score } => {
                         let end_line = line_no as u32;
                         let line_count = end_line - span.start_line as u32;
                         let cyclomatic_complexity = branch_count + 1;
@@ -303,6 +352,16 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
                                 end_line,
                                 format!("High cyclomatic complexity ({cyclomatic_complexity})"),
                                 format!("This function/method has an estimated cyclomatic complexity of {cyclomatic_complexity} (over the {DEFAULT_MAX_CYCLOMATIC_COMPLEXITY}-threshold) — {branch_count} branch point(s) plus the base path. Consider extracting some of its branches into named helper functions, or replacing a long if/else-if chain with a lookup table or polymorphism."),
+                            ));
+                        }
+                        if cognitive_score > DEFAULT_MAX_COGNITIVE_COMPLEXITY {
+                            findings.push(make_finding(
+                                "cognitive-complexity",
+                                path,
+                                span.start_line as u32,
+                                end_line,
+                                format!("High cognitive complexity ({cognitive_score})"),
+                                format!("This function/method has an estimated cognitive complexity of {cognitive_score} (over the {DEFAULT_MAX_COGNITIVE_COMPLEXITY}-threshold, detekt's CognitiveComplexMethod) — unlike cyclomatic complexity, nested control structures compound this score instead of adding linearly, so it tracks how hard the function is to hold in your head better than branch count alone. Consider flattening nesting with early returns/guard clauses, or extracting inner blocks into named helpers."),
                             ));
                         }
                         if return_count > DEFAULT_MAX_RETURNS {
@@ -393,6 +452,19 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
                             ));
                         }
                     }
+                    SpanKind::Interface { member_count } => {
+                        const MAX_INTERFACE_MEMBERS: usize = 10;
+                        if member_count > MAX_INTERFACE_MEMBERS {
+                            findings.push(make_finding(
+                                "complex-interface",
+                                path,
+                                span.start_line as u32,
+                                line_no as u32,
+                                format!("Complex interface ({member_count} members)"),
+                                format!("This interface declares {member_count} members (over the {MAX_INTERFACE_MEMBERS}-member threshold, detekt's ComplexInterface) — an interface this large is likely handling more than one responsibility. Consider splitting it into smaller, more focused interfaces."),
+                            ));
+                        }
+                    }
                     SpanKind::Switch { case_count } => {
                         if case_count > DEFAULT_MAX_SWITCH_CASES {
                             findings.push(make_finding(
@@ -455,6 +527,29 @@ mod tests {
         let content = "func doIt(x int) {\n\tif x > 0 {\n\t\tprintln(x)\n\t}\n}\n";
         let findings = detect_complexity_in_file("main.go", content, ComplexityLanguage::Go);
         assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("cyclomatic-complexity")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_high_cognitive_complexity_in_go() {
+        let mut content = String::from("func doIt(x int) {\n");
+        for i in 0..6 {
+            content.push_str(&"\t".repeat(i + 1));
+            content.push_str(&format!("if x == {i} {{\n"));
+        }
+        for i in (0..6).rev() {
+            content.push_str(&"\t".repeat(i + 1));
+            content.push_str("}\n");
+        }
+        content.push_str("}\n");
+        let findings = detect_complexity_in_file("main.go", &content, ComplexityLanguage::Go);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("cognitive-complexity")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_low_cognitive_complexity_in_go() {
+        let content = "func doIt(x int) {\n\tif x > 0 {\n\t\tprintln(x)\n\t}\n}\n";
+        let findings = detect_complexity_in_file("main.go", content, ComplexityLanguage::Go);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("cognitive-complexity")), "got: {findings:#?}");
     }
 
     #[test]
@@ -548,6 +643,24 @@ mod tests {
         let content = "public class Small {\n    void method1() {\n        int x = 1;\n    }\n    void method2() {\n        int x = 2;\n    }\n}\n";
         let findings = detect_complexity_in_file("Small.java", content, ComplexityLanguage::JavaOrKotlin);
         assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("god-class")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_complex_interface_in_java() {
+        let mut content = String::from("public interface Big {\n");
+        for i in 0..11 {
+            content.push_str(&format!("    void method{i}();\n"));
+        }
+        content.push_str("}\n");
+        let findings = detect_complexity_in_file("Big.java", &content, ComplexityLanguage::JavaOrKotlin);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("complex-interface")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_small_interface_in_java() {
+        let content = "public interface Small {\n    void method1();\n    void method2();\n}\n";
+        let findings = detect_complexity_in_file("Small.java", content, ComplexityLanguage::JavaOrKotlin);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("complex-interface")), "got: {findings:#?}");
     }
 
     #[test]
