@@ -47,10 +47,8 @@ fn path_str(path: &Path) -> String {
 
 /// Runs the symbol-index queries over the whole repo and reports only
 /// results anchored in a file the current diff touched. Returns an empty
-/// list (not an error) when the diff touches no `.go`/`.java` file — this
-/// is Go/Java-only, per the crate's own scoping (Kotlin's tree-sitter
-/// grammar is pinned incompatibly, same constraint already documented in
-/// `patch_check.rs`).
+/// list (not an error) when the diff touches no `.go`/`.java`/`.kt`/`.kts`
+/// file.
 pub fn run_symindex_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
     run_symindex_check_with_tier4(repo_root, changed_files, false)
 }
@@ -66,7 +64,7 @@ pub fn run_symindex_check(repo_root: &Path, changed_files: &[String]) -> Vec<Age
 /// the tool run produces no data at all (no `go` on `PATH`, non-Go repo,
 /// build failure), this is identical to the flag being off.
 pub fn run_symindex_check_with_tier4(repo_root: &Path, changed_files: &[String], tier4_go_enabled: bool) -> Vec<AgentFinding> {
-    let relevant_changed: Vec<&String> = changed_files.iter().filter(|f| f.ends_with(".go") || f.ends_with(".java")).collect();
+    let relevant_changed: Vec<&String> = changed_files.iter().filter(|f| f.ends_with(".go") || f.ends_with(".java") || f.ends_with(".kt") || f.ends_with(".kts")).collect();
     if relevant_changed.is_empty() {
         return Vec::new();
     }
@@ -102,7 +100,7 @@ fn chain_to_finding(chain: autoreview_symindex::ChainFinding) -> AgentFinding {
         confidence: 1.0,
         title: "Long message chain".to_string(),
         message: format!(
-            "`{chain_text}` in `{}.{}` chains {} calls deep off a single expression. Each link couples this code to the internal structure of every intermediate object (Fowler's Message Chains smell / Law of Demeter) — consider adding a method on the immediate collaborator that hides the chain. Heuristic, name-based match — not resolved against imports/types, so a coincidentally similar-looking chain could be a false positive; Kotlin files aren't covered (tree-sitter-kotlin is incompatible with this project's pinned tree-sitter version).",
+            "`{chain_text}` in `{}.{}` chains {} calls deep off a single expression. Each link couples this code to the internal structure of every intermediate object (Fowler's Message Chains smell / Law of Demeter) — consider adding a method on the immediate collaborator that hides the chain. Heuristic, name-based match — not resolved against imports/types, so a coincidentally similar-looking chain could be a false positive.",
             chain.owner_type, chain.method, chain.depth
         ),
         location: Location { path, range: LocationRange { start_line: chain.line, ..Default::default() }, snippet: chain_text, side: Side::New },
@@ -141,7 +139,7 @@ fn envy_to_finding(index: &SymbolIndex, envy: autoreview_symindex::FeatureEnvyFi
             side: Side::New,
         }]
     });
-    let heuristic_caveat = "Heuristic, name-based match — parameter types aren't resolved against imports, and only direct parameter accesses are counted (not locals reassigned from a parameter/field), so this may under- or over-count; Kotlin files aren't covered (tree-sitter-kotlin is incompatible with this project's pinned tree-sitter version).";
+    let heuristic_caveat = "Heuristic, name-based match — parameter types aren't resolved against imports, and only direct parameter accesses are counted (not locals reassigned from a parameter/field), so this may under- or over-count.";
     let (message_suffix, confidence) = match tier4_verdict {
         Some(autoreview_symindex::Tier4Verdict::Confirmed) => (
             " Confirmed by real type-checking (Tier 4: golang.org/x/tools/go/packages) — this isn't just a name-based guess.".to_string(),
@@ -194,7 +192,7 @@ fn clump_to_finding(clump: &autoreview_symindex::DataClumpFinding, changed_set: 
         confidence: 1.0,
         title: "Recurring parameter group (Data Clump)".to_string(),
         message: format!(
-            "The parameter group ({signature_text}) appears identically across {} methods: {methods_text}. Consider consolidating these into their own small object (Fowler's Data Clumps smell). Heuristic, name-based match — parameter types aren't resolved against imports, so a coincidentally identical group in genuinely unrelated code could be a false positive; Kotlin files aren't covered (tree-sitter-kotlin is incompatible with this project's pinned tree-sitter version).",
+            "The parameter group ({signature_text}) appears identically across {} methods: {methods_text}. Consider consolidating these into their own small object (Fowler's Data Clumps smell). Heuristic, name-based match — parameter types aren't resolved against imports, so a coincidentally identical group in genuinely unrelated code could be a false positive.",
             clump.methods.len()
         ),
         location: Location { path: path_str(&anchor.file), range: LocationRange { start_line: anchor.line, ..Default::default() }, snippet: signature_text, side: Side::New },
@@ -445,5 +443,39 @@ mod tests {
 
         let findings = run_symindex_check(dir.path(), &["Unrelated.java".to_string()]);
         assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("refused-bequest")));
+    }
+
+    #[test]
+    fn reports_a_kotlin_message_chain_that_touches_a_changed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "Widget.kt",
+            "class Widget {\n    var owner: Owner? = null\n    fun chain(): String {\n        return owner!!.getAddress().getCity().uppercase()\n    }\n}\n",
+        );
+        let findings = run_symindex_check(dir.path(), &["Widget.kt".to_string()]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("message-chain")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn reports_kotlin_feature_envy_that_touches_a_changed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "Widget.kt",
+            "class Widget {\n    fun envy(c: Customer): Int {\n        return c.getBalance() + c.getBalance() + c.getBalance()\n    }\n}\n",
+        );
+        let findings = run_symindex_check(dir.path(), &["Widget.kt".to_string()]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("feature-envy")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn reports_a_kotlin_refused_bequest_that_touches_a_changed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "Base.kt", "class Base {\n    fun save() {\n        println(\"saving\")\n    }\n}\n");
+        write_file(dir.path(), "Sub.kt", "class Sub : Base() {\n    fun save() {\n        TODO()\n    }\n}\n");
+
+        let findings = run_symindex_check(dir.path(), &["Sub.kt".to_string()]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("refused-bequest")), "got: {findings:#?}");
     }
 }

@@ -7,9 +7,12 @@
 //! "Cross-file symbol index" section for the tiered rationale (a real
 //! compiler-frontend backend is future work, not attempted here).
 //!
-//! Kotlin is out of scope: `tree-sitter-kotlin` pins an incompatible
-//! `tree-sitter` version (see `autoreview-core`'s `patch_check.rs` for the
-//! same, previously-documented constraint). This crate covers Go and Java.
+//! Covers Go, Java, and Kotlin. Kotlin was originally out of scope — the
+//! stale `tree-sitter-kotlin` crate pins an incompatible `tree-sitter`
+//! version — but `tree-sitter-kotlin-ng` (the actively-maintained
+//! `tree-sitter-grammars` org fork) builds cleanly against the same
+//! `tree-sitter` version Go/Java already use; see `extract/kotlin.rs`'s
+//! module docs for the grammar differences that shaped its extraction.
 //!
 //! Mirrors `autoreview-archgraph`'s own separation of concerns: a pure
 //! data-structure + query library with no dependency on `autoreview-schema`
@@ -50,7 +53,7 @@ fn walk_source_files(dir: &Path, out: &mut Vec<PathBuf>) {
             }
             walk_source_files(&path, out);
         } else {
-            let is_relevant = matches!(path.extension().and_then(|e| e.to_str()), Some("go") | Some("java"));
+            let is_relevant = matches!(path.extension().and_then(|e| e.to_str()), Some("go") | Some("java") | Some("kt") | Some("kts"));
             if is_relevant {
                 out.push(path);
             }
@@ -58,7 +61,7 @@ fn walk_source_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Builds the whole-repo symbol index — every `.go`/`.java` file under
+/// Builds the whole-repo symbol index — every `.go`/`.java`/`.kt`/`.kts` file under
 /// `repo_root`, unconditionally, not scoped to a diff's changed files (a
 /// cross-file smell is invisible if only one side of it is indexed). See
 /// the plan's "whole-repo, always" scoping decision for why this differs
