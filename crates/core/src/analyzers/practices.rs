@@ -1136,6 +1136,93 @@ fn detect_typed_nil_interface_return(path: &str, content: &str) -> Vec<AgentFind
     findings
 }
 
+/// Extracts `(SUB, FULL)` from a re-slice declaration like
+/// `sub := full[a:b]` — only the simple-identifier-sliced-by-simple-
+/// identifier-or-literal-bounds shape, to stay precise.
+fn go_reslice_decl(trimmed: &str) -> Option<(&str, &str)> {
+    let assign_pos = trimmed.find(":=")?;
+    let (lhs, rhs) = trimmed.split_at(assign_pos);
+    let sub = lhs.trim();
+    let rhs = rhs[2..].trim();
+    let is_identifier = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_');
+    if !is_identifier(sub) {
+        return None;
+    }
+    let open = rhs.find('[')?;
+    let full = rhs[..open].trim();
+    let close = rhs.rfind(']')?;
+    if close < open || !rhs[open + 1..close].contains(':') {
+        return None;
+    }
+    is_identifier(full).then_some((sub, full))
+}
+
+/// Flags `sub = append(sub, ...)` where `sub` came from re-slicing
+/// another slice (`sub := full[a:b]`) and that original slice (`full`) is
+/// still referenced later in the same function — `append` may silently
+/// reuse and overwrite the shared backing array when `sub`'s capacity
+/// allows it, corrupting data `full` still references. A narrow,
+/// same-function heuristic (no true capacity/escape analysis).
+fn detect_append_shared_backing_array(path: &str, content: &str) -> Vec<AgentFinding> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut findings = Vec::new();
+    let mut idx = 0;
+    while idx < lines.len() {
+        let trimmed = lines[idx].trim();
+        if !trimmed.starts_with("func ") || !trimmed.ends_with('{') {
+            idx += 1;
+            continue;
+        }
+
+        let mut depth = 1i32;
+        let mut end_idx = idx;
+        for (k, l) in lines.iter().enumerate().skip(idx + 1) {
+            depth += l.matches('{').count() as i32;
+            depth -= l.matches('}').count() as i32;
+            if depth <= 0 {
+                end_idx = k;
+                break;
+            }
+        }
+
+        let mut reslices: Vec<(&str, &str)> = Vec::new();
+        let mut found: Option<(&str, &str, usize)> = None;
+        for k in (idx + 1)..end_idx {
+            let lt = lines[k].trim();
+            if let Some(pair) = go_reslice_decl(lt) {
+                reslices.push(pair);
+            }
+            if found.is_none() {
+                for (sub, full) in &reslices {
+                    let needle = format!("{sub} = append({sub},");
+                    if lt.starts_with(&needle) {
+                        let full_used_later = lines[(k + 1)..end_idx].iter().any(|later| contains_identifier(later.trim(), full));
+                        if full_used_later {
+                            found = Some((sub, full, k));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some((sub, full, append_idx)) = found {
+            findings.push(make_finding(
+                "append-shared-backing-array",
+                path,
+                (idx + 1) as u32,
+                (append_idx + 1) as u32,
+                format!("`{sub} = append({sub}, ...)` may overwrite `{full}`'s backing array"),
+                format!("`{sub}` was created by re-slicing `{full}` (`{sub} := {full}[...]`), and `{full}` is still used later in this function. `append({sub}, ...)` may reuse `{sub}`'s shared backing array when there's spare capacity, silently overwriting memory `{full}` still references — a classic source of data corruption that only shows up once the slices' contents diverge from what's expected. Use `{sub} := append([]T{{}}, {full}[a:b]...)` (or `copy`) to force a fresh backing array if `{full}` needs to stay untouched, or restructure so `{sub}` doesn't outlive its use."),
+                lines[append_idx].trim().to_string(),
+            ));
+        }
+
+        idx = end_idx + 1;
+    }
+    findings
+}
+
 /// Runs all Track 4 checks against one changed file's current content.
 pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
     let go_pre_1_22 = go_module_targets_pre_1_22(repo_root);
@@ -1163,6 +1250,7 @@ pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<Ag
             if language == PracticesLanguage::Go {
                 findings.extend(detect_iterator_err_not_checked(path, &content));
                 findings.extend(detect_typed_nil_interface_return(path, &content));
+                findings.extend(detect_append_shared_backing_array(path, &content));
                 if go_pre_1_22 {
                     findings.extend(detect_loopvar_capture(path, &content));
                     findings.extend(detect_loopvar_address_capture(path, &content));
@@ -1518,6 +1606,21 @@ mod tests {
     fn does_not_flag_a_foreach_that_only_reads() {
         let content = "class Foo {\n    void f(java.util.List<String> items) {\n        for (String item : items) {\n            System.out.println(item);\n        }\n    }\n}\n";
         let findings = detect_concurrent_modification_during_foreach("Foo.java", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn flags_append_that_may_overwrite_a_reused_slices_backing_array() {
+        let content = "func f(full []int) []int {\n\tsub := full[2:4]\n\tsub = append(sub, 9)\n\tprintln(full[0])\n\treturn sub\n}\n";
+        let findings = detect_append_shared_backing_array("main.go", content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("append-shared-backing-array"));
+    }
+
+    #[test]
+    fn does_not_flag_append_when_the_original_slice_is_not_reused() {
+        let content = "func f(full []int) []int {\n\tsub := full[2:4]\n\tsub = append(sub, 9)\n\treturn sub\n}\n";
+        let findings = detect_append_shared_backing_array("main.go", content);
         assert!(findings.is_empty());
     }
 

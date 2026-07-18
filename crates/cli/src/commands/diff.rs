@@ -472,6 +472,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
             "loopvar-capture-pre-1.22".to_string(),
             "loopvar-address-pre-1.22".to_string(),
             "typed-nil-interface-return".to_string(),
+            "append-shared-backing-array".to_string(),
         ]);
 
         let to_check = autoreview_core::select_for_verification(&findings, &config.verify.noisy_categories, &semantic_ids).len();
