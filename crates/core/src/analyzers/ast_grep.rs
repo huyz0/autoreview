@@ -295,6 +295,29 @@ mod tests {
     }
 
     #[test]
+    fn finds_unreachable_code_after_a_return_in_go() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let dir = write_repo(&[("main.go", "package main\n\nfunc f(x int) int {\n\treturn x\n\tprintln(\"unreachable\")\n}\n")]);
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("go-unreachable-code"));
+    }
+
+    #[test]
+    fn does_not_flag_go_code_after_a_return_inside_an_if_block() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let dir = write_repo(&[("main.go", "package main\n\nfunc f(x int) int {\n\tif x > 0 {\n\t\treturn x\n\t}\n\treturn 0\n}\n")]);
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("go-unreachable-code")));
+    }
+
+    #[test]
     fn finds_a_named_empty_interface_in_go() {
         if !ast_grep_available() {
             eprintln!("skipping: ast-grep not on PATH");
@@ -353,6 +376,52 @@ mod tests {
         let dir = write_repo(&[("main.go", "package main\n\nfunc TestingHelperNotATest() int {\n\treturn 1\n}\n")]);
         let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
         assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("go-test-without-assertions")));
+    }
+
+    #[test]
+    fn finds_unreachable_code_after_a_throw_in_java() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let dir = write_repo(&[("Foo.java", "public class Foo {\n    void g() {\n        throw new RuntimeException(\"boom\");\n        System.out.println(\"dead\");\n    }\n}\n")]);
+        let findings = run_ast_grep(dir.path(), &["Foo.java".to_string()]).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("java-unreachable-code"));
+    }
+
+    #[test]
+    fn does_not_flag_java_code_after_a_return_inside_an_if_block() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let dir = write_repo(&[("Foo.java", "public class Foo {\n    int k(int x) {\n        if (x > 0) {\n            return x;\n        }\n        return 0;\n    }\n}\n")]);
+        let findings = run_ast_grep(dir.path(), &["Foo.java".to_string()]).unwrap();
+        assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("java-unreachable-code")));
+    }
+
+    #[test]
+    fn finds_unreachable_code_after_exitprocess_in_kotlin() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let dir = write_repo(&[("Foo.kt", "class Foo {\n    fun h(x: Int) {\n        exitProcess(1)\n        println(\"dead2\")\n    }\n}\n")]);
+        let findings = run_ast_grep(dir.path(), &["Foo.kt".to_string()]).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("kotlin-unreachable-code"));
+    }
+
+    #[test]
+    fn does_not_flag_kotlin_code_after_a_return_inside_an_if_block() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let dir = write_repo(&[("Foo.kt", "class Foo {\n    fun k(x: Int): Int {\n        if (x > 0) {\n            return x\n        }\n        return 0\n    }\n}\n")]);
+        let findings = run_ast_grep(dir.path(), &["Foo.kt".to_string()]).unwrap();
+        assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("kotlin-unreachable-code")));
     }
 
     #[test]

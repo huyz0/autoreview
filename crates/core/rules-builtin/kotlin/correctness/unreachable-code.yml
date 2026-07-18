@@ -1,0 +1,19 @@
+id: kotlin-unreachable-code
+language: Kotlin
+category: correctness
+severity: warning
+message: This statement immediately follows a return/throw/System.exit/exitProcess in the same block — it can never execute. Remove it, or move it before the terminating statement if it was meant to run first.
+rule:
+  any:
+    - kind: call_expression
+    - kind: property_declaration
+    - kind: if_expression
+    - kind: for_statement
+    - kind: while_statement
+    - kind: jump_expression
+  follows:
+    stopBy: neighbor
+    any:
+      - kind: jump_expression
+      - kind: call_expression
+        regex: ^(System\.exit|exitProcess)\(
