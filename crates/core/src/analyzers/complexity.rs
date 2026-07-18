@@ -27,6 +27,10 @@ const DEFAULT_MAX_SWITCH_CASES: usize = 8;
 /// Data Class is even considered — a 1- or 2-method match (e.g. a real
 /// class that happens to have one getter) is too common to be meaningful.
 const MIN_DATA_CLASS_ACCESSORS: usize = 3;
+/// A class needs at least this many static methods before Utility Class
+/// is worth flagging — a single static helper on an otherwise-instantiable
+/// class is normal and not what this smell is about.
+const MIN_UTILITY_CLASS_STATIC_METHODS: usize = 2;
 /// Cyclomatic complexity = decision points + 1. This counts only
 /// control-block openings (if/for/while/switch/catch/case, already
 /// detected by `opens_control_block`/case-line scanning elsewhere in this
@@ -101,6 +105,14 @@ fn opens_class(trimmed: &str) -> bool {
     trimmed.ends_with('{') && words.iter().any(|w| *w == "class")
 }
 
+/// The class's own name, for the Utility Class check's constructor-name
+/// match — the token immediately after the `class` keyword.
+fn class_name(trimmed: &str) -> Option<&str> {
+    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    let idx = words.iter().position(|w| *w == "class")?;
+    words.get(idx + 1).map(|s| s.trim_end_matches('{').trim())
+}
+
 fn opens_control_block(trimmed: &str) -> bool {
     if !trimmed.ends_with('{') {
         return false;
@@ -143,7 +155,15 @@ enum SpanKind {
     /// language feature, not a smell — flagging it would be actively wrong
     /// for idiomatic Kotlin. Data Class is fundamentally a JavaBean-era
     /// Java pattern (manual getters/setters where a `record` would do).
-    Class { member_count: usize, trivial_accessor_count: usize, is_java: bool },
+    Class {
+        member_count: usize,
+        trivial_accessor_count: usize,
+        is_java: bool,
+        name: String,
+        saw_any_method: bool,
+        all_methods_static: bool,
+        has_private_constructor: bool,
+    },
     /// Go/Java `switch` only (deliberately not Kotlin's `when`: its arms use
     /// a bare `->` with no keyword prefix, which is indistinguishable from a
     /// lambda expression by this line-scan — counting them would be a
@@ -191,13 +211,24 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
         if let Some(param_list) = opens_function(trimmed) {
             // A class member's method body sits one level inside its
             // enclosing class span — count it there before pushing our own.
-            if let Some(OpenSpan { kind: SpanKind::Class { member_count, .. }, start_depth, .. }) = stack.last_mut() {
+            if let Some(OpenSpan { kind: SpanKind::Class { member_count, name, saw_any_method, all_methods_static, has_private_constructor, .. }, start_depth, .. }) = stack.last_mut() {
                 // A class's own body content lives one level deeper than
                 // its `start_depth` (recorded *before* its opening brace
                 // incremented `depth`) — so a direct member sits at
                 // `start_depth + 1`, not `start_depth` itself.
                 if depth == *start_depth + 1 {
                     *member_count += 1;
+                    let is_constructor = function_name(trimmed).map(|n| n == name.as_str()).unwrap_or(false);
+                    if is_constructor {
+                        if trimmed.contains("private") {
+                            *has_private_constructor = true;
+                        }
+                    } else {
+                        *saw_any_method = true;
+                        if !trimmed.contains("static") {
+                            *all_methods_static = false;
+                        }
+                    }
                 }
             }
             stack.push(OpenSpan {
@@ -213,7 +244,15 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
             stack.push(OpenSpan {
                 start_line: line_no,
                 start_depth: depth,
-                kind: SpanKind::Class { member_count: 0, trivial_accessor_count: 0, is_java: path.ends_with(".java") },
+                kind: SpanKind::Class {
+                    member_count: 0,
+                    trivial_accessor_count: 0,
+                    is_java: path.ends_with(".java"),
+                    name: class_name(trimmed).unwrap_or_default().to_string(),
+                    saw_any_method: false,
+                    all_methods_static: true,
+                    has_private_constructor: false,
+                },
             });
             depth += 1;
             continue;
@@ -322,7 +361,7 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
                             }
                         }
                     }
-                    SpanKind::Class { member_count, trivial_accessor_count, is_java } => {
+                    SpanKind::Class { member_count, trivial_accessor_count, is_java, saw_any_method, all_methods_static, has_private_constructor, .. } => {
                         if member_count > DEFAULT_MAX_CLASS_MEMBERS {
                             findings.push(make_finding(
                                 "god-class",
@@ -341,6 +380,16 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
                                 line_no as u32,
                                 format!("Possible Data Class ({member_count} trivial accessors, no other behavior)"),
                                 format!("Every method in this class ({member_count} of them) is a short get/set/is accessor — the class holds data but no behavior (Fowler's Data Class smell). Heuristic — a DTO/value holder is often intentional, so confirm this actually needs behavior before restructuring; if it's genuinely just data, a Java `record` may be a better fit than manual accessors."),
+                            ));
+                        }
+                        if is_java && saw_any_method && all_methods_static && !has_private_constructor && member_count >= MIN_UTILITY_CLASS_STATIC_METHODS {
+                            findings.push(make_finding(
+                                "utility-class-public-constructor",
+                                path,
+                                span.start_line as u32,
+                                line_no as u32,
+                                "Utility class with a public constructor".to_string(),
+                                "Every method in this class is static and there's no private constructor — this class can be misleadingly instantiated even though instances have no purpose (Checkstyle's HideUtilityClassConstructor / detekt's UtilityClassWithPublicConstructor). Add a private no-arg constructor, or make the class `final` with all-static access if it's meant purely as a namespace.".to_string(),
                             ));
                         }
                     }
@@ -542,6 +591,27 @@ mod tests {
         content.push_str("    }\n}\n");
         let findings = detect_complexity_in_file("Big.kt", &content, ComplexityLanguage::JavaOrKotlin);
         assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("large-switch")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_utility_class_with_a_public_constructor() {
+        let content = "public class StringUtils {\n    public static String reverse(String s) {\n        return s;\n    }\n    public static boolean isBlank(String s) {\n        return s.isEmpty();\n    }\n}\n";
+        let findings = detect_complexity_in_file("StringUtils.java", content, ComplexityLanguage::JavaOrKotlin);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("utility-class-public-constructor")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_utility_class_with_a_private_constructor() {
+        let content = "public class StringUtils {\n    private StringUtils() {\n    }\n    public static String reverse(String s) {\n        return s;\n    }\n    public static boolean isBlank(String s) {\n        return s.isEmpty();\n    }\n}\n";
+        let findings = detect_complexity_in_file("StringUtils.java", content, ComplexityLanguage::JavaOrKotlin);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("utility-class-public-constructor")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_class_with_a_mix_of_static_and_instance_methods() {
+        let content = "public class Widget {\n    public static Widget create() {\n        return new Widget();\n    }\n    public int size() {\n        return 1;\n    }\n}\n";
+        let findings = detect_complexity_in_file("Widget.java", content, ComplexityLanguage::JavaOrKotlin);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("utility-class-public-constructor")), "got: {findings:#?}");
     }
 
     #[test]
