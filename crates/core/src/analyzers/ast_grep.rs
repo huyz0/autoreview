@@ -279,6 +279,22 @@ mod tests {
     }
 
     #[test]
+    fn finds_a_gob_decode_of_untrusted_input_in_go() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let dir = write_repo(&[(
+            "main.go",
+            "package main\n\nimport \"encoding/gob\"\n\nfunc handle(body []byte) {\n\tvar v MyType\n\tgob.NewDecoder(body).Decode(&v)\n}\n",
+        )]);
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("go-insecure-deserialization"));
+        assert_eq!(findings[0].category, "security");
+    }
+
+    #[test]
     fn finds_a_named_empty_interface_in_go() {
         if !ast_grep_available() {
             eprintln!("skipping: ast-grep not on PATH");

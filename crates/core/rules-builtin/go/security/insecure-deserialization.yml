@@ -1,0 +1,7 @@
+id: go-insecure-deserialization
+language: Go
+category: security
+severity: warning
+message: Decoding with encoding/gob has no size/depth limits — feeding it untrusted input (a network request body, an uploaded file) risks unbounded memory/CPU allocation (a decompression-bomb-style DoS), and gob has no allowlist mechanism to restrict which types get instantiated. If the source isn't fully trusted, validate/limit it before decoding, or use a schema-constrained format instead.
+rule:
+  pattern: gob.NewDecoder($SRC).Decode($DST)
