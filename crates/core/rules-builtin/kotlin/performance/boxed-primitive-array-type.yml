@@ -1,0 +1,16 @@
+id: kotlin-boxed-primitive-array-type
+language: Kotlin
+category: performance
+severity: info
+message: "`Array<Int>` (and other `Array<PrimitiveType>`) boxes every element instead of storing them unboxed — use the dedicated primitive array type (`IntArray`, `LongArray`, `DoubleArray`, etc.) to avoid the boxing overhead."
+rule:
+  kind: user_type
+  all:
+    - has: {kind: type_identifier, regex: ^Array$}
+    - has:
+        stopBy: end
+        kind: type_arguments
+        has:
+          stopBy: end
+          kind: type_identifier
+          regex: ^(Int|Long|Short|Byte|Float|Double|Boolean|Char)$

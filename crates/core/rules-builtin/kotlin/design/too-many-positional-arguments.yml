@@ -1,0 +1,9 @@
+id: kotlin-too-many-positional-arguments
+language: Kotlin
+category: design
+severity: info
+message: "This call passes 4+ positional arguments — at that point it's easy to swap two same-typed arguments without the compiler catching it. Use named arguments for clarity once a call has more than a few positional parameters."
+rule:
+  any:
+    - pattern: $F($A, $B, $C, $D)
+    - pattern: $F($A, $B, $C, $D, $$$MORE)
