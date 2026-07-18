@@ -218,6 +218,8 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     // no-op for non-Go-module repos or diffs that touch no .go files.
     stage1_agent_findings.extend(autoreview_core::run_archgraph_check(&options.repo_root, &changed_file_paths));
     stage1_agent_findings.extend(autoreview_core::run_symindex_check(&options.repo_root, &changed_file_paths));
+    stage1_agent_findings.extend(autoreview_core::detect_shotgun_surgery(&facts.files));
+    stage1_agent_findings.extend(autoreview_core::run_divergent_change_check(&options.repo_root, &changed_file_paths));
     let stage1_finding_count = stage1_agent_findings.len();
     let stage1_findings: Vec<Finding> = assign_fingerprints(stage1_agent_findings)
         .into_iter()
@@ -456,6 +458,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
             "feature-envy".to_string(),
             "data-clump".to_string(),
             "excessive-comment-padding".to_string(),
+            "divergent-change".to_string(),
         ]);
 
         let to_check = autoreview_core::select_for_verification(&findings, &config.verify.noisy_categories, &semantic_ids).len();

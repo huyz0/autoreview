@@ -1,6 +1,7 @@
 pub mod architecture;
 pub mod archgraph_check;
 pub mod ast_grep;
+pub mod churn;
 pub mod clippy;
 pub mod complexity;
 pub mod duplication;
