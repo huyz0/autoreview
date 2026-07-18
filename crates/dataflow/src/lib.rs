@@ -25,6 +25,7 @@
 pub mod cfg;
 pub mod lattice;
 pub mod lower;
+pub mod rules;
 pub mod solver;
 
 pub use cfg::{Cfg, CfgNode, EdgeKind, Stmt};

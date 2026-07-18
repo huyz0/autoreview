@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 autoreview-langsupport = { path = "../langsupport" }
 autoreview-symindex = { path = "../symindex" }
+tree-sitter.workspace = true
+tree-sitter-go.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

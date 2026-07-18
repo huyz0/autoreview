@@ -218,6 +218,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     // no-op for non-Go-module repos or diffs that touch no .go files.
     stage1_agent_findings.extend(autoreview_core::run_archgraph_check(&options.repo_root, &changed_file_paths));
     stage1_agent_findings.extend(autoreview_core::run_symindex_check_with_tier4(&options.repo_root, &changed_file_paths, config.symindex.tier4_go));
+    stage1_agent_findings.extend(autoreview_core::run_dataflow_check(&options.repo_root, &changed_file_paths));
     stage1_agent_findings.extend(autoreview_core::detect_shotgun_surgery(&facts.files));
     stage1_agent_findings.extend(autoreview_core::run_divergent_change_check(&options.repo_root, &changed_file_paths));
     let stage1_finding_count = stage1_agent_findings.len();

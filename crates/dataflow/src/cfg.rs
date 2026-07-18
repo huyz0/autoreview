@@ -53,7 +53,12 @@ pub enum Stmt {
     Call { target: CallTarget, args: Vec<VarId>, assigned_to: Option<VarId> },
     Guard { var: VarId, op: GuardOp, against: GuardAgainst },
     ClosureCapture { captured: Vec<VarId>, kind: ClosureKind },
-    Other,
+    /// Anything not specifically recognized above. Keeps the statement's
+    /// raw source text so a rule can still fall back to a textual
+    /// whole-word reference check (e.g. "is `full` mentioned here at
+    /// all?") without this crate needing a dedicated `Stmt` variant for
+    /// every possible use-site shape.
+    Other(String),
 }
 
 #[derive(Debug, Clone)]

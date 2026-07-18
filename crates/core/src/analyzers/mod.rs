@@ -4,6 +4,7 @@ pub mod ast_grep;
 pub mod churn;
 pub mod clippy;
 pub mod complexity;
+pub mod dataflow_check;
 pub mod duplication;
 pub mod practices;
 pub mod shadow_rules;
