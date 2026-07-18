@@ -19,11 +19,13 @@
 pub mod extract;
 pub mod model;
 pub mod queries;
+pub mod tier4;
 
 use std::path::{Path, PathBuf};
 
 pub use model::{AccessRef, CallChain, ForeignAccessRef, MethodDecl, NamedSlot, SymbolIndex, TypeDecl};
 pub use queries::{find_data_clumps, find_feature_envy, find_message_chains, ChainFinding, ClumpMember, ClumpScope, DataClumpFinding, FeatureEnvyFinding};
+pub use tier4::{confirm_feature_envy, run_tier4_go, Tier4Access, Tier4Verdict};
 
 /// Same skip-list as `autoreview-archgraph`'s own whole-repo walk — this
 /// crate deliberately doesn't depend on archgraph (staying a pure,

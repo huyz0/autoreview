@@ -52,6 +52,20 @@ fn path_str(path: &Path) -> String {
 /// grammar is pinned incompatibly, same constraint already documented in
 /// `patch_check.rs`).
 pub fn run_symindex_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
+    run_symindex_check_with_tier4(repo_root, changed_files, false)
+}
+
+/// Same as `run_symindex_check`, plus an opt-in Tier 4 real-semantic pass
+/// (see SESSION_NOTES.md follow-up #3 / `autoreview_symindex::tier4`'s own
+/// docs) over Feature Envy findings when `tier4_go_enabled` is set: shells
+/// out to the companion Go tool to type-check the repo for real, then
+/// annotates each Feature Envy finding as type-confirmed, contradicted (and
+/// dropped — a real type-checker disagreeing with the heuristic is strong
+/// enough evidence to suppress it outright, not just soften it), or left
+/// alone when no Tier 4 data is available for that method. Fails soft: if
+/// the tool run produces no data at all (no `go` on `PATH`, non-Go repo,
+/// build failure), this is identical to the flag being off.
+pub fn run_symindex_check_with_tier4(repo_root: &Path, changed_files: &[String], tier4_go_enabled: bool) -> Vec<AgentFinding> {
     let relevant_changed: Vec<&String> = changed_files.iter().filter(|f| f.ends_with(".go") || f.ends_with(".java")).collect();
     if relevant_changed.is_empty() {
         return Vec::new();
@@ -64,8 +78,14 @@ pub fn run_symindex_check(repo_root: &Path, changed_files: &[String]) -> Vec<Age
     let envy = autoreview_symindex::find_feature_envy(&index, MIN_FOREIGN_ACCESSES, FEATURE_ENVY_MARGIN);
     let clumps = autoreview_symindex::find_data_clumps(&index, MIN_CLUMP_LEN, MIN_CLUMP_METHODS, autoreview_symindex::ClumpScope::WholeIndex);
 
+    let tier4_records = if tier4_go_enabled { autoreview_symindex::run_tier4_go(repo_root) } else { None };
+
     let mut findings: Vec<AgentFinding> = chains.into_iter().filter(|c| changed_set.contains(&path_str(&c.file))).map(chain_to_finding).collect();
-    findings.extend(envy.into_iter().filter(|e| changed_set.contains(&path_str(&e.file))).map(|e| envy_to_finding(&index, e)));
+    findings.extend(
+        envy.into_iter()
+            .filter(|e| changed_set.contains(&path_str(&e.file)))
+            .filter_map(|e| envy_to_finding_with_tier4(&index, e, tier4_records.as_deref())),
+    );
     findings.extend(clumps.iter().filter_map(|c| clump_to_finding(c, &changed_set)));
     findings
 }
@@ -97,7 +117,19 @@ fn chain_to_finding(chain: autoreview_symindex::ChainFinding) -> AgentFinding {
 /// improvement over `archgraph_check.rs`'s own precedent of only naming
 /// related locations in message-text prose, since `AgentFinding` already
 /// has a structured field for exactly this.
-fn envy_to_finding(index: &SymbolIndex, envy: autoreview_symindex::FeatureEnvyFinding) -> AgentFinding {
+/// Tier 4-aware wrapper around Feature Envy's finding conversion. Returns
+/// `None` when Tier 4 data is available for this method and it flatly
+/// contradicts the heuristic — real type information is strong enough
+/// evidence to drop the finding rather than merely flag it as unconfirmed.
+fn envy_to_finding_with_tier4(index: &SymbolIndex, envy: autoreview_symindex::FeatureEnvyFinding, tier4_records: Option<&[autoreview_symindex::Tier4Access]>) -> Option<AgentFinding> {
+    let verdict = tier4_records.map(|records| autoreview_symindex::confirm_feature_envy(records, &envy));
+    if verdict == Some(autoreview_symindex::Tier4Verdict::Contradicted) {
+        return None;
+    }
+    Some(envy_to_finding(index, envy, verdict))
+}
+
+fn envy_to_finding(index: &SymbolIndex, envy: autoreview_symindex::FeatureEnvyFinding, tier4_verdict: Option<autoreview_symindex::Tier4Verdict>) -> AgentFinding {
     let path = path_str(&envy.file);
     let related_locations = index.find_type(&envy.envied_type).map(|t| {
         vec![Location {
@@ -107,14 +139,22 @@ fn envy_to_finding(index: &SymbolIndex, envy: autoreview_symindex::FeatureEnvyFi
             side: Side::New,
         }]
     });
+    let heuristic_caveat = "Heuristic, name-based match — parameter types aren't resolved against imports, and only direct parameter accesses are counted (not locals reassigned from a parameter/field), so this may under- or over-count; Kotlin files aren't covered (tree-sitter-kotlin is incompatible with this project's pinned tree-sitter version).";
+    let (message_suffix, confidence) = match tier4_verdict {
+        Some(autoreview_symindex::Tier4Verdict::Confirmed) => (
+            " Confirmed by real type-checking (Tier 4: golang.org/x/tools/go/packages) — this isn't just a name-based guess.".to_string(),
+            1.0,
+        ),
+        _ => (format!(" {heuristic_caveat}"), 1.0),
+    };
     AgentFinding {
         source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-symindex".to_string(), rule_id: Some("feature-envy".to_string()), aspect: None, backend: None },
         category: "design".to_string(),
         severity: Severity::Low,
-        confidence: 1.0,
+        confidence,
         title: "Possible Feature Envy".to_string(),
         message: format!(
-            "`{}.{}` accesses `{}` {} times (via a parameter) versus {} access(es) to its own fields — it may belong on `{}` instead (Fowler's Feature Envy smell). Heuristic, name-based match — parameter types aren't resolved against imports, and only direct parameter accesses are counted (not locals reassigned from a parameter/field), so this may under- or over-count; Kotlin files aren't covered (tree-sitter-kotlin is incompatible with this project's pinned tree-sitter version).",
+            "`{}.{}` accesses `{}` {} times (via a parameter) versus {} access(es) to its own fields — it may belong on `{}` instead (Fowler's Feature Envy smell).{message_suffix}",
             envy.owner_type, envy.method, envy.envied_type, envy.envied_access_count, envy.own_access_count, envy.envied_type
         ),
         location: Location { path, range: LocationRange { start_line: envy.line, ..Default::default() }, snippet: format!("{}.{}", envy.owner_type, envy.method), side: Side::New },
@@ -309,5 +349,55 @@ mod tests {
 
         let findings = run_symindex_check(dir.path(), &["A.java".to_string()]);
         assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("data-clump")));
+    }
+
+    fn sample_envy() -> autoreview_symindex::FeatureEnvyFinding {
+        autoreview_symindex::FeatureEnvyFinding {
+            file: std::path::PathBuf::from("self.go"),
+            line: 1,
+            owner_type: "Self".to_string(),
+            method: "Envious".to_string(),
+            envied_type: "Other".to_string(),
+            envied_access_count: 3,
+            own_access_count: 0,
+        }
+    }
+
+    fn sample_index() -> SymbolIndex {
+        SymbolIndex { types: Vec::new() }
+    }
+
+    #[test]
+    fn envy_finding_carries_no_tier4_caveat_language_when_no_records_available() {
+        let finding = envy_to_finding_with_tier4(&sample_index(), sample_envy(), None).unwrap();
+        assert_eq!(finding.confidence, 1.0);
+        assert!(finding.message.contains("Heuristic, name-based match"));
+    }
+
+    #[test]
+    fn envy_finding_is_marked_confirmed_when_tier4_agrees() {
+        let records = vec![autoreview_symindex::Tier4Access {
+            file: "self.go".to_string(),
+            line: 1,
+            method: "Envious".to_string(),
+            receiver_type: "fixture.Self".to_string(),
+            accessed_ident: "Get".to_string(),
+            accessed_type: "fixture.Other".to_string(),
+        }];
+        let finding = envy_to_finding_with_tier4(&sample_index(), sample_envy(), Some(&records)).unwrap();
+        assert!(finding.message.contains("Confirmed by real type-checking"));
+    }
+
+    #[test]
+    fn envy_finding_is_dropped_when_tier4_contradicts_it() {
+        let records = vec![autoreview_symindex::Tier4Access {
+            file: "self.go".to_string(),
+            line: 1,
+            method: "Envious".to_string(),
+            receiver_type: "fixture.Self".to_string(),
+            accessed_ident: "Get".to_string(),
+            accessed_type: "fixture.SomethingElse".to_string(),
+        }];
+        assert!(envy_to_finding_with_tier4(&sample_index(), sample_envy(), Some(&records)).is_none());
     }
 }

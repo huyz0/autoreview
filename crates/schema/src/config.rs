@@ -409,6 +409,21 @@ impl Default for VerifyConfig {
     }
 }
 
+/// Opt-in Tier 4 real-semantic backend for `autoreview-symindex` (see
+/// SESSION_NOTES.md follow-up #3): layered *on top of* the default
+/// heuristic tree-sitter tier, not a replacement — off by default because
+/// it shells out to a real Go toolchain (`go run`, which needs network
+/// access the first time to resolve `golang.org/x/tools/go/packages`) and
+/// only type-checks cleanly-building repos. Java's equivalent
+/// (JavaParser + javaparser-symbol-solver) needs Maven dependency
+/// resolution and is deliberately not built yet — this only covers Go.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SymindexConfig {
+    #[serde(default)]
+    pub tier4_go: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoreviewConfig {
@@ -424,6 +439,8 @@ pub struct AutoreviewConfig {
     pub verify: VerifyConfig,
     #[serde(default)]
     pub agents: AgentsConfig,
+    #[serde(default)]
+    pub symindex: SymindexConfig,
 }
 
 impl Default for AutoreviewConfig {
@@ -435,6 +452,7 @@ impl Default for AutoreviewConfig {
             storage: StorageConfig::default(),
             verify: VerifyConfig::default(),
             agents: AgentsConfig::default(),
+            symindex: SymindexConfig::default(),
         }
     }
 }

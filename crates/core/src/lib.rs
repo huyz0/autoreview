@@ -27,7 +27,7 @@ pub use analyzers::shadow_rules::{discover_shadow_rule_files, run_shadow_rules, 
 pub use analyzers::duplication::{run_cross_file_duplication_check, run_duplication_check};
 pub use analyzers::golangci_lint::run_golangci_lint;
 pub use analyzers::sarif::{ingest_sarif_file, parse_sarif_document};
-pub use analyzers::symindex_check::run_symindex_check;
+pub use analyzers::symindex_check::{run_symindex_check, run_symindex_check_with_tier4};
 pub use config::load_config;
 pub use context::{collect_context, render_context_block, ContextItem};
 pub use patch_check::parses_cleanly;
