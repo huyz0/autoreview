@@ -7,6 +7,8 @@ edition.workspace = true
 autoreview-schema = { path = "../schema" }
 autoreview-archgraph = { path = "../archgraph" }
 autoreview-symindex = { path = "../symindex" }
+autoreview-langsupport = { path = "../langsupport" }
+autoreview-dataflow = { path = "../dataflow" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -16,10 +18,10 @@ anyhow = "1"
 include_dir = "0.7"
 tempfile = "3"
 rusqlite = { version = "0.32", features = ["bundled"] }
-tree-sitter = "0.26.11"
-tree-sitter-go = "0.25.0"
-tree-sitter-java = "0.23.5"
-tree-sitter-kotlin-ng = "1.1.0"
+tree-sitter.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-java.workspace = true
+tree-sitter-kotlin-ng.workspace = true
 
 [dev-dependencies]
 autoreview-test-support = { path = "../test-support" }

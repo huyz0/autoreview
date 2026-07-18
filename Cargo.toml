@@ -5,6 +5,8 @@ members = [
     "crates/core",
     "crates/archgraph",
     "crates/symindex",
+    "crates/langsupport",
+    "crates/dataflow",
     "crates/cli",
     "crates/test-support",
 ]
@@ -12,6 +14,12 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+
+[workspace.dependencies]
+tree-sitter = "0.26.11"
+tree-sitter-go = "0.25.0"
+tree-sitter-java = "0.23.5"
+tree-sitter-kotlin-ng = "1.1.0"
 
 [profile.release]
 lto = true

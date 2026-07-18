@@ -1,0 +1,11 @@
+[package]
+name = "autoreview-dataflow"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+autoreview-langsupport = { path = "../langsupport" }
+autoreview-symindex = { path = "../symindex" }
+
+[dev-dependencies]
+tempfile = "3"

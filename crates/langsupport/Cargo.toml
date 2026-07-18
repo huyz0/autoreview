@@ -1,5 +1,5 @@
 [package]
-name = "autoreview-symindex"
+name = "autoreview-langsupport"
 version.workspace = true
 edition.workspace = true
 
@@ -8,6 +8,3 @@ tree-sitter.workspace = true
 tree-sitter-go.workspace = true
 tree-sitter-java.workspace = true
 tree-sitter-kotlin-ng.workspace = true
-
-[dev-dependencies]
-tempfile = "3"

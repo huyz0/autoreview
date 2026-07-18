@@ -142,6 +142,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "autoreview-archgraph",
+ "autoreview-dataflow",
+ "autoreview-langsupport",
  "autoreview-schema",
  "autoreview-symindex",
  "autoreview-test-support",
@@ -153,6 +155,25 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "tempfile",
+ "tree-sitter",
+ "tree-sitter-go",
+ "tree-sitter-java",
+ "tree-sitter-kotlin-ng",
+]
+
+[[package]]
+name = "autoreview-dataflow"
+version = "0.1.0"
+dependencies = [
+ "autoreview-langsupport",
+ "autoreview-symindex",
+ "tempfile",
+]
+
+[[package]]
+name = "autoreview-langsupport"
+version = "0.1.0"
+dependencies = [
  "tree-sitter",
  "tree-sitter-go",
  "tree-sitter-java",
