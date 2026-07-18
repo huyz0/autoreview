@@ -1,0 +1,17 @@
+id: java-resource-not-closed
+language: Java
+category: performance
+semantic: true
+severity: warning
+message: "A closeable resource (stream/connection/statement) is created outside a try-with-resources block. This may leak the underlying file descriptor/socket/connection. (Heuristic: doesn't trace whether it's closed manually later in the method, so it's flagged for a semantic check rather than reported outright.)"
+rule:
+  pattern:
+    context: "void w() { $TYPE $VAR = new $CTOR($$$ARGS); }"
+    selector: local_variable_declaration
+  not:
+    inside:
+      stopBy: end
+      kind: try_with_resources_statement
+constraints:
+  TYPE:
+    regex: (InputStream|OutputStream|Reader|Writer|Socket|Connection|Statement|ResultSet|Channel)$

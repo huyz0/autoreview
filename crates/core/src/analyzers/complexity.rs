@@ -27,6 +27,20 @@ const DEFAULT_MAX_SWITCH_CASES: usize = 8;
 /// Data Class is even considered — a 1- or 2-method match (e.g. a real
 /// class that happens to have one getter) is too common to be meaningful.
 const MIN_DATA_CLASS_ACCESSORS: usize = 3;
+/// Cyclomatic complexity = decision points + 1. This counts only
+/// control-block openings (if/for/while/switch/catch/case, already
+/// detected by `opens_control_block`/case-line scanning elsewhere in this
+/// file) as decision points — deliberately not `&&`/`||`/`?:`, which would
+/// need real expression parsing to count without false positives from
+/// string literals or comments containing those characters. This
+/// under-counts true cyclomatic complexity somewhat, the same conservative
+/// direction as this file's other line-scan-based heuristics.
+const DEFAULT_MAX_CYCLOMATIC_COMPLEXITY: usize = 10;
+/// A method with many return points is often doing too much conditional
+/// branching to be followed easily — same threshold family as the other
+/// metrics here (Checkstyle/detekt's own ReturnCount default is also
+/// single digits).
+const DEFAULT_MAX_RETURNS: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComplexityLanguage {
@@ -123,7 +137,7 @@ struct OpenSpan {
 }
 
 enum SpanKind {
-    Function { name_hint: String, param_count: usize, max_nesting: usize },
+    Function { name_hint: String, param_count: usize, max_nesting: usize, branch_count: usize, return_count: usize },
     /// `is_java` (not Kotlin) gates the Data Class check: Kotlin has
     /// first-class `data class` support, an intentional, encouraged
     /// language feature, not a smell — flagging it would be actively wrong
@@ -186,7 +200,11 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
                     *member_count += 1;
                 }
             }
-            stack.push(OpenSpan { start_line: line_no, start_depth: depth, kind: SpanKind::Function { name_hint: trimmed.to_string(), param_count: count_params(param_list), max_nesting: 0 } });
+            stack.push(OpenSpan {
+                start_line: line_no,
+                start_depth: depth,
+                kind: SpanKind::Function { name_hint: trimmed.to_string(), param_count: count_params(param_list), max_nesting: 0, branch_count: 0, return_count: 0 },
+            });
             depth += 1;
             continue;
         }
@@ -201,11 +219,22 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
             continue;
         }
 
+        if trimmed == "return" || trimmed.starts_with("return ") || trimmed.starts_with("return;") || trimmed.starts_with("return(") {
+            // A `return` inside a `switch` sits under a Switch span, not
+            // directly under its enclosing Function span (Switch spans are
+            // pushed onto the stack same as Function/Class) — walk up to
+            // the nearest Function span rather than assuming it's on top.
+            if let Some(OpenSpan { kind: SpanKind::Function { return_count, .. }, .. }) = stack.iter_mut().rev().find(|s| matches!(s.kind, SpanKind::Function { .. })) {
+                *return_count += 1;
+            }
+        }
+
         if trimmed.ends_with('{') {
             if opens_control_block(trimmed) {
-                if let Some(OpenSpan { kind: SpanKind::Function { max_nesting, .. }, start_depth, .. }) = stack.last_mut() {
+                if let Some(OpenSpan { kind: SpanKind::Function { max_nesting, branch_count, .. }, start_depth, .. }) = stack.last_mut() {
                     let relative = (depth - *start_depth + 1).max(0) as usize;
                     *max_nesting = (*max_nesting).max(relative);
+                    *branch_count += 1;
                 }
                 if trimmed.split_whitespace().next() == Some("switch") {
                     stack.push(OpenSpan { start_line: line_no, start_depth: depth, kind: SpanKind::Switch { case_count: 0 } });
@@ -223,9 +252,30 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
                 }
                 let span = stack.pop().unwrap();
                 match span.kind {
-                    SpanKind::Function { name_hint, param_count, max_nesting } => {
+                    SpanKind::Function { name_hint, param_count, max_nesting, branch_count, return_count } => {
                         let end_line = line_no as u32;
                         let line_count = end_line - span.start_line as u32;
+                        let cyclomatic_complexity = branch_count + 1;
+                        if cyclomatic_complexity > DEFAULT_MAX_CYCLOMATIC_COMPLEXITY {
+                            findings.push(make_finding(
+                                "cyclomatic-complexity",
+                                path,
+                                span.start_line as u32,
+                                end_line,
+                                format!("High cyclomatic complexity ({cyclomatic_complexity})"),
+                                format!("This function/method has an estimated cyclomatic complexity of {cyclomatic_complexity} (over the {DEFAULT_MAX_CYCLOMATIC_COMPLEXITY}-threshold) — {branch_count} branch point(s) plus the base path. Consider extracting some of its branches into named helper functions, or replacing a long if/else-if chain with a lookup table or polymorphism."),
+                            ));
+                        }
+                        if return_count > DEFAULT_MAX_RETURNS {
+                            findings.push(make_finding(
+                                "too-many-returns",
+                                path,
+                                span.start_line as u32,
+                                end_line,
+                                format!("Too many return points ({return_count})"),
+                                format!("This function/method has {return_count} separate `return` statements (over the {DEFAULT_MAX_RETURNS}-threshold) — that many exit points makes it hard to reason about every path through the function. Consider consolidating logic or extracting some branches into their own functions."),
+                            ));
+                        }
                         if line_count as usize > DEFAULT_MAX_METHOD_LINES {
                             findings.push(make_finding(
                                 "long-method",
@@ -338,6 +388,53 @@ mod tests {
         assert_eq!(count_params("a int"), 1);
         assert_eq!(count_params("a int, b string"), 2);
         assert_eq!(count_params("a []int, b map[string]int, c func(int, int) bool"), 3);
+    }
+
+    #[test]
+    fn flags_high_cyclomatic_complexity_in_go() {
+        let mut content = String::from("func doIt(x int) {\n");
+        for i in 0..11 {
+            content.push_str(&format!("\tif x == {i} {{\n\t\tprintln({i})\n\t}}\n"));
+        }
+        content.push_str("}\n");
+        let findings = detect_complexity_in_file("main.go", &content, ComplexityLanguage::Go);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("cyclomatic-complexity")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_low_cyclomatic_complexity_in_go() {
+        let content = "func doIt(x int) {\n\tif x > 0 {\n\t\tprintln(x)\n\t}\n}\n";
+        let findings = detect_complexity_in_file("main.go", content, ComplexityLanguage::Go);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("cyclomatic-complexity")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_too_many_returns_in_go() {
+        let mut content = String::from("func doIt(x int) int {\n");
+        for i in 0..5 {
+            content.push_str(&format!("\tif x == {i} {{\n\t\treturn {i}\n\t}}\n"));
+        }
+        content.push_str("\treturn -1\n}\n");
+        let findings = detect_complexity_in_file("main.go", &content, ComplexityLanguage::Go);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("too-many-returns")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_few_returns_in_go() {
+        let content = "func doIt(x int) int {\n\tif x > 0 {\n\t\treturn 1\n\t}\n\treturn 0\n}\n";
+        let findings = detect_complexity_in_file("main.go", content, ComplexityLanguage::Go);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("too-many-returns")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn counts_returns_inside_a_switch_toward_the_enclosing_function_not_the_switch_span() {
+        let mut content = String::from("func doIt(x int) int {\n\tswitch x {\n");
+        for i in 0..5 {
+            content.push_str(&format!("\tcase {i}:\n\t\treturn {i}\n"));
+        }
+        content.push_str("\t}\n\treturn -1\n}\n");
+        let findings = detect_complexity_in_file("main.go", &content, ComplexityLanguage::Go);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("too-many-returns")), "got: {findings:#?}");
     }
 
     #[test]

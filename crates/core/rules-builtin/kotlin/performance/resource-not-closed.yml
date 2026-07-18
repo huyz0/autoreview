@@ -1,0 +1,13 @@
+id: kotlin-resource-not-closed
+language: Kotlin
+category: performance
+semantic: true
+severity: warning
+message: "A closeable resource (stream/connection/statement) is constructed and bound to a variable instead of wrapped in `.use { }` (Kotlin's structured-close idiom). This may leak the underlying file descriptor/socket/connection. (Heuristic: doesn't trace whether it's closed manually later in the function, so it's flagged for a semantic check rather than reported outright.)"
+rule:
+  pattern:
+    context: "fun w() { val $VAR = $CTOR($$$ARGS) }"
+    selector: property_declaration
+constraints:
+  CTOR:
+    regex: (InputStream|OutputStream|Reader|Writer|Socket|Connection|Statement|ResultSet|Channel)$
