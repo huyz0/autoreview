@@ -1,0 +1,13 @@
+id: kotlin-spread-operator-in-loop
+language: Kotlin
+category: performance
+severity: info
+message: "The spread operator (`*array`) copies the whole array before the call — doing that on every loop iteration is wasted allocation. Hoist the copy out of the loop, or restructure the call to avoid the spread."
+rule:
+  kind: spread_expression
+  inside:
+    stopBy: end
+    any:
+      - kind: for_statement
+      - kind: while_statement
+      - kind: do_while_statement

@@ -1,0 +1,15 @@
+id: kotlin-unnecessary-temporary-instantiation
+language: Kotlin
+category: performance
+severity: info
+message: "Constructing a boxed wrapper (`Integer`/`Long`/`Short`/`Byte`/`Float`/`Double`/`Boolean`/`Character`) just to immediately call `.toString()` allocates a throwaway object for no reason — call `.toString()` (or the primitive's own conversion) on the value directly."
+rule:
+  any:
+    - pattern: Integer($X).toString()
+    - pattern: Long($X).toString()
+    - pattern: Short($X).toString()
+    - pattern: Byte($X).toString()
+    - pattern: Float($X).toString()
+    - pattern: Double($X).toString()
+    - pattern: Boolean($X).toString()
+    - pattern: Character($X).toString()
