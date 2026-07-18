@@ -1,0 +1,14 @@
+id: java-string-equality-with-eq
+language: Java
+category: correctness
+severity: warning
+message: Comparing a String against a string literal with `==`/`!=` compares object identity, not content — two equal strings can still fail this check unless they happen to be interned. Use `.equals()` instead.
+rule:
+  any:
+    - pattern: $A == $STR
+    - pattern: $A != $STR
+    - pattern: $STR == $A
+    - pattern: $STR != $A
+constraints:
+  STR:
+    kind: string_literal

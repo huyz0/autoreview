@@ -1,0 +1,14 @@
+id: kotlin-suspend-swallowed-by-runcatching
+language: Kotlin
+category: design
+severity: warning
+semantic: true
+message: "A suspending call inside `runCatching { }` also catches `CancellationException` — swallowing structured-concurrency cancellation instead of letting it propagate. Rethrow `CancellationException` explicitly, or move the suspending call outside `runCatching`."
+rule:
+  pattern: runCatching { $$$BODY }
+  inside:
+    stopBy: end
+    kind: function_declaration
+    has:
+      stopBy: end
+      regex: ^suspend$

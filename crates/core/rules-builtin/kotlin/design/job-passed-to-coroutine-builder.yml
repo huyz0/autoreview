@@ -1,0 +1,15 @@
+id: kotlin-job-passed-to-coroutine-builder
+language: Kotlin
+category: design
+severity: warning
+message: "Passing a `Job`/`SupervisorJob()` directly to `launch`/`async` makes the new coroutine a sibling of the enclosing scope's job instead of a child — it silently breaks structured concurrency (the new coroutine won't be cancelled when the parent scope is). Don't pass a `Job` as a builder argument; if you need a separate lifecycle, create a separate `CoroutineScope`."
+rule:
+  any:
+    - pattern: launch(Job()) { $$$BODY }
+    - pattern: launch(SupervisorJob()) { $$$BODY }
+    - pattern: async(Job()) { $$$BODY }
+    - pattern: async(SupervisorJob()) { $$$BODY }
+    - pattern: $SCOPE.launch(Job()) { $$$BODY }
+    - pattern: $SCOPE.launch(SupervisorJob()) { $$$BODY }
+    - pattern: $SCOPE.async(Job()) { $$$BODY }
+    - pattern: $SCOPE.async(SupervisorJob()) { $$$BODY }
