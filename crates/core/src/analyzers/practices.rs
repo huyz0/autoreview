@@ -990,6 +990,69 @@ fn detect_loopvar_capture(path: &str, content: &str) -> Vec<AgentFinding> {
     findings
 }
 
+/// Flags `&loopVar` (taking a reference to a `for ... := range` loop
+/// variable) directly inside that loop's own body, on Go modules
+/// targeting a pre-1.22 Go version — before 1.22, every reference ends
+/// up pointing at the same shared variable, so a slice/map of these
+/// pointers ends up holding N copies of the final iteration's value
+/// instead of each iteration's own value. Subtler than the closure-
+/// capture case since it compiles cleanly and often passes casual
+/// testing (the bug only shows up once you dereference after the loop).
+fn detect_loopvar_address_capture(path: &str, content: &str) -> Vec<AgentFinding> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut findings = Vec::new();
+    let mut idx = 0;
+    while idx < lines.len() {
+        let trimmed = lines[idx].trim();
+        let vars = range_loop_vars(trimmed);
+        if vars.is_empty() {
+            idx += 1;
+            continue;
+        }
+
+        let mut depth = 1i32;
+        let mut end_idx = idx;
+        let mut shadowed: Vec<&str> = Vec::new();
+        let mut found: Option<(&str, usize)> = None;
+        for (k, l) in lines.iter().enumerate().skip(idx + 1) {
+            let lt = l.trim();
+            for v in &vars {
+                if lt == format!("{v} := {v}") {
+                    shadowed.push(v.as_str());
+                }
+            }
+            if found.is_none() {
+                for v in &vars {
+                    if !shadowed.contains(&v.as_str()) && contains_identifier(lt, &format!("&{v}")) {
+                        found = Some((v.as_str(), k));
+                    }
+                }
+            }
+            depth += l.matches('{').count() as i32;
+            depth -= l.matches('}').count() as i32;
+            if depth <= 0 {
+                end_idx = k;
+                break;
+            }
+        }
+
+        if let Some((var, ref_idx)) = found {
+            findings.push(make_finding(
+                "loopvar-address-pre-1.22",
+                path,
+                (idx + 1) as u32,
+                (ref_idx + 1) as u32,
+                format!("Address of loop variable `{var}` taken on a pre-1.22 Go module"),
+                format!("This takes `&{var}` inside the loop that declares `{var}`, and `go.mod` targets a Go version before 1.22. Before 1.22, `for`/`range` loop variables have per-loop (not per-iteration) scope — every `&{var}` taken across iterations points at the same shared variable, so a slice/map built from these pointers ends up holding N copies of the loop's final value instead of each iteration's own value. This compiles cleanly and often passes casual testing since the bug only shows up when the collected pointers are dereferenced later. Shadow the variable first (`{var} := {var}`) before taking its address, or upgrade the module's Go version."),
+                lines[ref_idx].trim().to_string(),
+            ));
+        }
+
+        idx = end_idx + 1;
+    }
+    findings
+}
+
 /// Runs all Track 4 checks against one changed file's current content.
 pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
     let go_pre_1_22 = go_module_targets_pre_1_22(repo_root);
@@ -1018,6 +1081,7 @@ pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<Ag
                 findings.extend(detect_iterator_err_not_checked(path, &content));
                 if go_pre_1_22 {
                     findings.extend(detect_loopvar_capture(path, &content));
+                    findings.extend(detect_loopvar_address_capture(path, &content));
                 }
             }
             Some(findings)
@@ -1392,6 +1456,21 @@ mod tests {
     fn does_not_flag_a_goroutine_passed_the_variable_as_a_parameter() {
         let content = "func f(items []string) {\n\tfor _, item := range items {\n\t\tgo func(item string) {\n\t\t\tprintln(item)\n\t\t}(item)\n\t}\n}\n";
         let findings = detect_loopvar_capture("main.go", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn flags_the_address_of_a_loop_variable_pre_1_22() {
+        let content = "func f(items []string) []*string {\n\tvar out []*string\n\tfor _, item := range items {\n\t\tout = append(out, &item)\n\t}\n\treturn out\n}\n";
+        let findings = detect_loopvar_address_capture("main.go", content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("loopvar-address-pre-1.22"));
+    }
+
+    #[test]
+    fn does_not_flag_a_shadowed_address_of_a_loop_variable() {
+        let content = "func f(items []string) []*string {\n\tvar out []*string\n\tfor _, item := range items {\n\t\titem := item\n\t\tout = append(out, &item)\n\t}\n\treturn out\n}\n";
+        let findings = detect_loopvar_address_capture("main.go", content);
         assert!(findings.is_empty());
     }
 
