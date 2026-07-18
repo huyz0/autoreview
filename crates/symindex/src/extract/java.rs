@@ -52,9 +52,39 @@ fn collect_classes(node: Node, source: &[u8], file: &Path, out: &mut Vec<TypeDec
     }
 }
 
+/// Extracts the raw `extends` target's name from a `class_declaration`'s
+/// `superclass` field (a `superclass` node wrapping `extends` + a type
+/// node) — unresolved against imports, same restraint as everything else
+/// in this model.
+fn extract_superclass(node: Node, source: &[u8]) -> Option<String> {
+    let superclass = node.child_by_field_name("superclass")?;
+    let mut cursor = superclass.walk();
+    let result = superclass.named_children(&mut cursor).next().map(|t| text(t, source).to_string());
+    result
+}
+
+/// A method body is "trivial" (Refused Bequest's syntactic signal) when
+/// it's empty, or its only statement is a `throw` mentioning
+/// `UnsupportedOperationException`/`NotImplementedError` — the two shapes
+/// that mean "this override refuses to do what the parent contract expects"
+/// rather than "this override happens to be short."
+fn is_trivial_body(body: Node, source: &[u8]) -> bool {
+    let mut cursor = body.walk();
+    let statements: Vec<Node> = body.named_children(&mut cursor).collect();
+    match statements.as_slice() {
+        [] => true,
+        [only] if only.kind() == "throw_statement" => {
+            let t = text(*only, source);
+            t.contains("UnsupportedOperationException") || t.contains("NotImplementedError")
+        }
+        _ => false,
+    }
+}
+
 fn extract_class(node: Node, source: &[u8], file: &Path) -> Option<TypeDecl> {
     let name_node = node.child_by_field_name("name")?;
     let name = text(name_node, source).to_string();
+    let superclass = extract_superclass(node, source);
     let body = node.child_by_field_name("body")?;
 
     // Fields first, in a separate pass, so a method declared before a field
@@ -88,7 +118,7 @@ fn extract_class(node: Node, source: &[u8], file: &Path) -> Option<TypeDecl> {
         }
     }
 
-    Some(TypeDecl { name, file: file.to_path_buf(), start_line: line_of(node), fields, methods })
+    Some(TypeDecl { name, file: file.to_path_buf(), start_line: line_of(node), fields, methods, superclass })
 }
 
 fn extract_method(node: Node, source: &[u8], file: &Path, owner_type: &str, fields: &[NamedSlot]) -> Option<MethodDecl> {
@@ -112,9 +142,11 @@ fn extract_method(node: Node, source: &[u8], file: &Path, owner_type: &str, fiel
     let mut own_field_accesses = Vec::new();
     let mut foreign_accesses = Vec::new();
     let mut chains = Vec::new();
+    let mut trivial_body = false;
     if let Some(body) = node.child_by_field_name("body") {
         walk_accesses(body, source, fields, &params, &mut own_field_accesses, &mut foreign_accesses);
         walk_chains(body, source, &mut chains);
+        trivial_body = is_trivial_body(body, source);
     }
 
     Some(MethodDecl {
@@ -128,6 +160,7 @@ fn extract_method(node: Node, source: &[u8], file: &Path, owner_type: &str, fiel
         own_field_accesses,
         foreign_accesses,
         chains,
+        is_trivial_body: trivial_body,
     })
 }
 
@@ -350,5 +383,41 @@ mod tests {
     fn two_independent_calls_in_the_same_method_produce_two_separate_chains() {
         let types = extract("class W {\n    void f(Customer c, Widget w) {\n        c.getBalance();\n        w.getQuantity();\n    }\n}\n");
         assert_eq!(types[0].methods[0].chains.len(), 2);
+    }
+
+    #[test]
+    fn extracts_the_superclass_name() {
+        let types = extract("class Sub extends Base {\n}\n");
+        assert_eq!(types[0].superclass.as_deref(), Some("Base"));
+    }
+
+    #[test]
+    fn a_class_with_no_extends_clause_has_no_superclass() {
+        let types = extract("class Standalone {\n}\n");
+        assert_eq!(types[0].superclass, None);
+    }
+
+    #[test]
+    fn an_empty_method_body_is_a_trivial_body() {
+        let types = extract("class Sub extends Base {\n    void save() {\n    }\n}\n");
+        assert!(types[0].methods[0].is_trivial_body);
+    }
+
+    #[test]
+    fn a_lone_unsupported_operation_throw_is_a_trivial_body() {
+        let types = extract("class Sub extends Base {\n    void save() {\n        throw new UnsupportedOperationException();\n    }\n}\n");
+        assert!(types[0].methods[0].is_trivial_body);
+    }
+
+    #[test]
+    fn a_real_method_body_is_not_trivial() {
+        let types = extract("class Sub extends Base {\n    void save() {\n        this.persist();\n    }\n}\n");
+        assert!(!types[0].methods[0].is_trivial_body);
+    }
+
+    #[test]
+    fn a_throw_of_something_other_than_unsupported_is_not_trivial() {
+        let types = extract("class Sub extends Base {\n    void save() {\n        throw new IllegalStateException(\"bad\");\n    }\n}\n");
+        assert!(!types[0].methods[0].is_trivial_body);
     }
 }

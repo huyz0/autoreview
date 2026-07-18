@@ -179,6 +179,48 @@ pub fn find_data_clumps(index: &SymbolIndex, min_len: usize, min_methods: usize,
     findings
 }
 
+/// One Refused Bequest finding: a subclass method that overrides a
+/// same-named parent method but refuses to actually implement it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RefusedBequestFinding {
+    pub file: PathBuf,
+    pub line: u32,
+    pub owner_type: String,
+    pub superclass: String,
+    pub method: String,
+}
+
+/// Refused Bequest (Java only — Go has no class inheritance): a subclass
+/// method whose body is empty or just throws
+/// `UnsupportedOperationException`/`NotImplementedError`, overriding a
+/// same-named method the parent actually declares. Requires the
+/// superclass to be present *in this index* (i.e. in-repo, not an external
+/// library) — a same-named method match against an unresolved external
+/// type wouldn't be a confirmed override, just a name coincidence, so this
+/// deliberately under-reports rather than guess at library inheritance.
+pub fn find_refused_bequest(index: &SymbolIndex) -> Vec<RefusedBequestFinding> {
+    let mut findings = Vec::new();
+    for sub in &index.types {
+        let Some(super_name) = &sub.superclass else { continue };
+        let Some(parent) = index.find_type(super_name) else { continue };
+        for method in &sub.methods {
+            if !method.is_trivial_body {
+                continue;
+            }
+            if parent.methods.iter().any(|pm| pm.name == method.name) {
+                findings.push(RefusedBequestFinding {
+                    file: method.file.clone(),
+                    line: method.start_line,
+                    owner_type: sub.name.clone(),
+                    superclass: super_name.clone(),
+                    method: method.name.clone(),
+                });
+            }
+        }
+    }
+    findings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,11 +244,12 @@ mod tests {
                 line: 5,
                 member_names: (0..depth).map(|i| format!("m{i}")).collect(),
             }],
+            is_trivial_body: false,
         }
     }
 
     fn index_with_method(method: MethodDecl) -> SymbolIndex {
-        SymbolIndex { types: vec![TypeDecl { name: "Widget".to_string(), file: PathBuf::from("Widget.java"), start_line: 1, fields: vec![], methods: vec![method] }] }
+        SymbolIndex { types: vec![TypeDecl { name: "Widget".to_string(), file: PathBuf::from("Widget.java"), start_line: 1, fields: vec![], methods: vec![method], superclass: None }] }
     }
 
     #[test]
@@ -256,6 +299,7 @@ mod tests {
             own_field_accesses,
             foreign_accesses,
             chains: vec![],
+            is_trivial_body: false,
         }
     }
 
@@ -316,6 +360,7 @@ mod tests {
             own_field_accesses: vec![],
             foreign_accesses: vec![],
             chains: vec![],
+            is_trivial_body: false,
         }
     }
 
@@ -325,7 +370,7 @@ mod tests {
             if let Some(t) = types.iter_mut().find(|t| t.name == m.owner_type && t.file == m.file) {
                 t.methods.push(m);
             } else {
-                types.push(TypeDecl { name: m.owner_type.clone(), file: m.file.clone(), start_line: 1, fields: vec![], methods: vec![m] });
+                types.push(TypeDecl { name: m.owner_type.clone(), file: m.file.clone(), start_line: 1, fields: vec![], methods: vec![m], superclass: None });
             }
         }
         SymbolIndex { types }
@@ -389,5 +434,100 @@ mod tests {
             method_with_params("C", "c.java", "three", &[("x", "int"), ("y", "int")]),
         ]);
         assert!(find_data_clumps(&index, 3, 3, ClumpScope::WholeIndex).is_empty());
+    }
+
+    fn trivial_method(owner_type: &str, name: &str) -> MethodDecl {
+        MethodDecl {
+            name: name.to_string(),
+            owner_type: owner_type.to_string(),
+            file: PathBuf::from("Sub.java"),
+            start_line: 5,
+            end_line: 6,
+            params: vec![],
+            return_type_text: None,
+            own_field_accesses: vec![],
+            foreign_accesses: vec![],
+            chains: vec![],
+            is_trivial_body: true,
+        }
+    }
+
+    fn real_method(owner_type: &str, name: &str) -> MethodDecl {
+        MethodDecl { is_trivial_body: false, ..trivial_method(owner_type, name) }
+    }
+
+    #[test]
+    fn flags_a_trivial_override_of_a_real_parent_method() {
+        let index = SymbolIndex {
+            types: vec![
+                TypeDecl { name: "Base".to_string(), file: PathBuf::from("Base.java"), start_line: 1, fields: vec![], methods: vec![real_method("Base", "save")], superclass: None },
+                TypeDecl {
+                    name: "Sub".to_string(),
+                    file: PathBuf::from("Sub.java"),
+                    start_line: 1,
+                    fields: vec![],
+                    methods: vec![trivial_method("Sub", "save")],
+                    superclass: Some("Base".to_string()),
+                },
+            ],
+        };
+        let findings = find_refused_bequest(&index);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].owner_type, "Sub");
+        assert_eq!(findings[0].superclass, "Base");
+        assert_eq!(findings[0].method, "save");
+    }
+
+    #[test]
+    fn does_not_flag_a_real_override_with_a_real_body() {
+        let index = SymbolIndex {
+            types: vec![
+                TypeDecl { name: "Base".to_string(), file: PathBuf::from("Base.java"), start_line: 1, fields: vec![], methods: vec![real_method("Base", "save")], superclass: None },
+                TypeDecl {
+                    name: "Sub".to_string(),
+                    file: PathBuf::from("Sub.java"),
+                    start_line: 1,
+                    fields: vec![],
+                    methods: vec![real_method("Sub", "save")],
+                    superclass: Some("Base".to_string()),
+                },
+            ],
+        };
+        assert!(find_refused_bequest(&index).is_empty());
+    }
+
+    #[test]
+    fn does_not_flag_a_trivial_method_that_isnt_actually_an_override() {
+        let index = SymbolIndex {
+            types: vec![
+                TypeDecl { name: "Base".to_string(), file: PathBuf::from("Base.java"), start_line: 1, fields: vec![], methods: vec![real_method("Base", "load")], superclass: None },
+                TypeDecl {
+                    name: "Sub".to_string(),
+                    file: PathBuf::from("Sub.java"),
+                    start_line: 1,
+                    fields: vec![],
+                    methods: vec![trivial_method("Sub", "save")],
+                    superclass: Some("Base".to_string()),
+                },
+            ],
+        };
+        assert!(find_refused_bequest(&index).is_empty());
+    }
+
+    #[test]
+    fn does_not_flag_a_trivial_method_when_the_superclass_isnt_in_the_index() {
+        // The superclass is an external/library type we didn't parse —
+        // can't confirm a real override, so this deliberately under-reports.
+        let index = SymbolIndex {
+            types: vec![TypeDecl {
+                name: "Sub".to_string(),
+                file: PathBuf::from("Sub.java"),
+                start_line: 1,
+                fields: vec![],
+                methods: vec![trivial_method("Sub", "save")],
+                superclass: Some("ExternalBase".to_string()),
+            }],
+        };
+        assert!(find_refused_bequest(&index).is_empty());
     }
 }

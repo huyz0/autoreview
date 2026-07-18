@@ -77,6 +77,7 @@ pub fn run_symindex_check_with_tier4(repo_root: &Path, changed_files: &[String],
     let chains = autoreview_symindex::find_message_chains(&index, MIN_CHAIN_DEPTH);
     let envy = autoreview_symindex::find_feature_envy(&index, MIN_FOREIGN_ACCESSES, FEATURE_ENVY_MARGIN);
     let clumps = autoreview_symindex::find_data_clumps(&index, MIN_CLUMP_LEN, MIN_CLUMP_METHODS, autoreview_symindex::ClumpScope::WholeIndex);
+    let refused_bequests = autoreview_symindex::find_refused_bequest(&index);
 
     let tier4_records = if tier4_go_enabled { autoreview_symindex::run_tier4_go(repo_root) } else { None };
 
@@ -87,6 +88,7 @@ pub fn run_symindex_check_with_tier4(repo_root: &Path, changed_files: &[String],
             .filter_map(|e| envy_to_finding_with_tier4(&index, e, tier4_records.as_deref())),
     );
     findings.extend(clumps.iter().filter_map(|c| clump_to_finding(c, &changed_set)));
+    findings.extend(refused_bequests.into_iter().filter(|r| changed_set.contains(&path_str(&r.file))).map(refused_bequest_to_finding));
     findings
 }
 
@@ -202,6 +204,27 @@ fn clump_to_finding(clump: &autoreview_symindex::DataClumpFinding, changed_set: 
         meta: None,
         suggested_patch: None,
     })
+}
+
+fn refused_bequest_to_finding(rb: autoreview_symindex::RefusedBequestFinding) -> AgentFinding {
+    let path = path_str(&rb.file);
+    AgentFinding {
+        source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-symindex".to_string(), rule_id: Some("refused-bequest".to_string()), aspect: None, backend: None },
+        category: "design".to_string(),
+        severity: Severity::Low,
+        confidence: 1.0,
+        title: "Possible Refused Bequest".to_string(),
+        message: format!(
+            "`{}.{}` overrides `{}.{}` but its body is empty or just throws UnsupportedOperationException/NotImplementedError — this subclass refuses part of its parent's contract (Fowler's Refused Bequest smell). Consider whether `{}` should really extend `{}`, or whether the parent method belongs on a narrower interface `{}` can actually fulfill.",
+            rb.owner_type, rb.method, rb.superclass, rb.method, rb.owner_type, rb.superclass, rb.owner_type
+        ),
+        location: Location { path, range: LocationRange { start_line: rb.line, ..Default::default() }, snippet: format!("{}.{}", rb.owner_type, rb.method), side: Side::New },
+        related_locations: None,
+        suggestion: None,
+        tags: None,
+        meta: None,
+        suggested_patch: None,
+    }
 }
 
 #[cfg(test)]
@@ -399,5 +422,28 @@ mod tests {
             accessed_type: "fixture.SomethingElse".to_string(),
         }];
         assert!(envy_to_finding_with_tier4(&sample_index(), sample_envy(), Some(&records)).is_none());
+    }
+
+    #[test]
+    fn reports_a_refused_bequest_that_touches_a_changed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "Base.java", "class Base {\n    void save() {\n        System.out.println(\"saving\");\n    }\n}\n");
+        write_file(dir.path(), "Sub.java", "class Sub extends Base {\n    void save() {\n        throw new UnsupportedOperationException();\n    }\n}\n");
+
+        let findings = run_symindex_check(dir.path(), &["Sub.java".to_string()]);
+        assert_eq!(findings.len(), 1, "got: {findings:#?}");
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("refused-bequest"));
+        assert_eq!(findings[0].category, "design");
+    }
+
+    #[test]
+    fn does_not_report_a_refused_bequest_the_diff_never_touches() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "Base.java", "class Base {\n    void save() {\n        System.out.println(\"saving\");\n    }\n}\n");
+        write_file(dir.path(), "Sub.java", "class Sub extends Base {\n    void save() {\n        throw new UnsupportedOperationException();\n    }\n}\n");
+        write_file(dir.path(), "Unrelated.java", "class Unrelated {\n    void f() {}\n}\n");
+
+        let findings = run_symindex_check(dir.path(), &["Unrelated.java".to_string()]);
+        assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("refused-bequest")));
     }
 }

@@ -26,6 +26,10 @@ pub struct TypeDecl {
     pub start_line: u32,
     pub fields: Vec<NamedSlot>,
     pub methods: Vec<MethodDecl>,
+    /// Java only (Go has no class inheritance) — the raw `extends` target's
+    /// name, unresolved against imports. `None` for Go types and for Java
+    /// classes with no explicit superclass.
+    pub superclass: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,6 +45,11 @@ pub struct MethodDecl {
     pub own_field_accesses: Vec<AccessRef>,
     pub foreign_accesses: Vec<ForeignAccessRef>,
     pub chains: Vec<CallChain>,
+    /// True when the method body is empty, or its only statement is a
+    /// `throw` whose text mentions `UnsupportedOperationException` or
+    /// `NotImplementedError` — the two syntactic shapes Refused Bequest
+    /// looks for. Java only.
+    pub is_trivial_body: bool,
 }
 
 /// A bare identifier or `this.x` (Java) / receiver-name `.x` (Go) reference
