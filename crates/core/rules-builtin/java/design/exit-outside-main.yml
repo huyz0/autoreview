@@ -1,0 +1,14 @@
+id: java-exit-outside-main
+language: Java
+category: design
+severity: warning
+message: "`System.exit()` terminates the entire JVM process — calling it from anywhere other than the application's `main` entry point is a surprising, hard-to-test side effect buried deep in a call stack (a library or helper method killing the whole process is rarely what a caller expects). Throw an exception or return an error instead, and let `main` decide whether to exit."
+rule:
+  pattern: System.exit($CODE)
+  not:
+    inside:
+      stopBy: end
+      kind: method_declaration
+      has:
+        field: name
+        regex: ^main$

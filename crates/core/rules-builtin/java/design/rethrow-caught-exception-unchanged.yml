@@ -1,0 +1,14 @@
+id: java-rethrow-caught-exception-unchanged
+language: Java
+category: design
+severity: warning
+message: This catch block constructs a *new* exception of the same type instead of rethrowing (or wrapping) the one it caught — the original stack trace and cause chain are discarded, making the real failure point untraceable. Pass the caught exception as the cause, or rethrow it directly.
+rule:
+  pattern:
+    context: |
+      try {
+        $$$BODY
+      } catch ($EXC $VAR) {
+        throw new $EXC($MSG);
+      }
+    selector: try_statement

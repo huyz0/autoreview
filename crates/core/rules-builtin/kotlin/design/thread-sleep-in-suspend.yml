@@ -1,0 +1,13 @@
+id: kotlin-thread-sleep-in-suspend
+language: Kotlin
+category: design
+severity: warning
+message: "`Thread.sleep()` inside a suspend function blocks the entire underlying thread, not just this one coroutine — on a shared dispatcher (like `Dispatchers.Default`), that can stall every other coroutine sharing that thread. Use `kotlinx.coroutines.delay()` instead, which suspends without blocking the thread."
+rule:
+  pattern: Thread.sleep($MS)
+  inside:
+    stopBy: end
+    kind: function_declaration
+    has:
+      stopBy: end
+      regex: ^suspend$

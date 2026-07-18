@@ -1,0 +1,9 @@
+id: java-no-standard-streams
+language: Java
+category: design
+severity: warning
+message: "Writing to `System.out`/`System.err` bypasses the application's real logging (no log level, no aggregation, no structured context) and is usually leftover debug output. Use a logger instead."
+rule:
+  any:
+    - pattern: System.out.$METHOD($$$ARGS)
+    - pattern: System.err.$METHOD($$$ARGS)

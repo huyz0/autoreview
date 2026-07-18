@@ -1,0 +1,7 @@
+id: kotlin-no-jodatime
+language: Kotlin
+category: design
+severity: warning
+message: Joda-Time is in maintenance mode — its own documentation recommends migrating to `java.time` (java.time.*, Java 8+) or `kotlinx-datetime`, which superseded it as the standard date/time API. Avoid introducing new Joda-Time usage.
+rule:
+  pattern: import org.joda.time.$X

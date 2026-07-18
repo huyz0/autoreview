@@ -1,0 +1,7 @@
+id: java-no-jodatime
+language: Java
+category: design
+severity: warning
+message: Joda-Time is in maintenance mode — its own documentation recommends migrating to `java.time` (java.time.*, Java 8+), which superseded it as the standard date/time API. Avoid introducing new Joda-Time usage in a codebase that can target Java 8+.
+rule:
+  pattern: import org.joda.time.$X;

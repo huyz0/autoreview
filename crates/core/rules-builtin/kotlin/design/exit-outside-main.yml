@@ -1,0 +1,16 @@
+id: kotlin-exit-outside-main
+language: Kotlin
+category: design
+severity: warning
+message: "`exitProcess()`/`System.exit()` terminates the entire JVM process — calling it from anywhere other than the application's `main` entry point is a surprising, hard-to-test side effect buried deep in a call stack (a library or helper function killing the whole process is rarely what a caller expects). Throw an exception or return an error instead, and let `main` decide whether to exit."
+rule:
+  any:
+    - pattern: exitProcess($CODE)
+    - pattern: System.exit($CODE)
+  not:
+    inside:
+      stopBy: end
+      kind: function_declaration
+      has:
+        kind: simple_identifier
+        regex: ^main$

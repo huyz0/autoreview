@@ -386,8 +386,7 @@ mod tests {
         }
         let dir = write_repo(&[("Foo.java", "public class Foo {\n    void g() {\n        throw new RuntimeException(\"boom\");\n        System.out.println(\"dead\");\n    }\n}\n")]);
         let findings = run_ast_grep(dir.path(), &["Foo.java".to_string()]).unwrap();
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].source.rule_id.as_deref(), Some("java-unreachable-code"));
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("java-unreachable-code")), "got: {findings:#?}");
     }
 
     #[test]
@@ -409,8 +408,7 @@ mod tests {
         }
         let dir = write_repo(&[("Foo.kt", "class Foo {\n    fun h(x: Int) {\n        exitProcess(1)\n        println(\"dead2\")\n    }\n}\n")]);
         let findings = run_ast_grep(dir.path(), &["Foo.kt".to_string()]).unwrap();
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].source.rule_id.as_deref(), Some("kotlin-unreachable-code"));
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("kotlin-unreachable-code")), "got: {findings:#?}");
     }
 
     #[test]

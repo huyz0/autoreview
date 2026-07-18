@@ -1,0 +1,11 @@
+id: kotlin-global-coroutine-scope
+language: Kotlin
+category: design
+severity: warning
+message: "`GlobalScope.launch`/`async` ties this coroutine to the whole application's lifetime — it isn't cancelled when the surrounding component (activity, request, test) is, which leaks coroutines and makes structured cancellation impossible. Launch from a scope tied to the actual owning lifecycle instead (`viewModelScope`, `coroutineScope { }`, an injected `CoroutineScope`, etc.)."
+rule:
+  any:
+    - pattern: GlobalScope.launch { $$$BODY }
+    - pattern: GlobalScope.async { $$$BODY }
+    - pattern: GlobalScope.launch($$$ARGS)
+    - pattern: GlobalScope.async($$$ARGS)

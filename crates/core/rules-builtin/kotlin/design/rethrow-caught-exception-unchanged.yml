@@ -1,0 +1,16 @@
+id: kotlin-rethrow-caught-exception-unchanged
+language: Kotlin
+category: design
+severity: warning
+message: This catch block constructs a *new* exception of the same type instead of rethrowing (or wrapping) the one it caught — the original stack trace and cause chain are discarded, making the real failure point untraceable. Pass the caught exception as the cause, or rethrow it directly.
+rule:
+  pattern:
+    context: |
+      fun f() {
+        try {
+          $$$BODY
+        } catch (e: $EXC) {
+          throw $EXC($MSG)
+        }
+      }
+    selector: try_expression

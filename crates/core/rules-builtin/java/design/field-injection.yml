@@ -1,0 +1,11 @@
+id: java-field-injection
+language: Java
+category: design
+severity: warning
+message: "`@Autowired` on a field hides the class's real dependencies (they're not visible from the constructor signature), makes the class impossible to instantiate without a DI container, and allows constructing it in a partially-initialized state. Use constructor injection instead."
+rule:
+  kind: field_declaration
+  has:
+    stopBy: end
+    kind: marker_annotation
+    regex: Autowired

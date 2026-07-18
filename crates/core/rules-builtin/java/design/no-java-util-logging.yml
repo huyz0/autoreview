@@ -1,0 +1,7 @@
+id: java-no-java-util-logging
+language: Java
+category: design
+severity: warning
+message: "`java.util.logging` is verbose and inconsistent with most JVM ecosystems' logging conventions. Use SLF4J (or whatever logging facade the rest of the codebase already uses) instead, so log output stays consistent and configurable in one place."
+rule:
+  pattern: import java.util.logging.$X;

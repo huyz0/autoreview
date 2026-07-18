@@ -1,0 +1,10 @@
+id: kotlin-field-injection
+language: Kotlin
+category: design
+severity: warning
+message: "`@Autowired` on a property hides the class's real dependencies (they're not visible from the constructor signature), makes the class impossible to instantiate without a DI container, and allows constructing it in a partially-initialized state. Use constructor injection instead."
+rule:
+  kind: property_declaration
+  has:
+    stopBy: end
+    regex: ^@Autowired

@@ -1,0 +1,11 @@
+id: java-equals-avoid-null
+language: Java
+category: correctness
+severity: warning
+message: "Calling `.equals()` on a variable risks a `NullPointerException` if it's null. Put the string literal on the left instead (`\"hello\".equals(x)`), which is null-safe regardless of `x`."
+rule:
+  kind: method_invocation
+  all:
+    - has: {field: name, regex: ^equals$}
+    - has: {field: object, kind: identifier}
+    - has: {field: arguments, has: {kind: string_literal}}
