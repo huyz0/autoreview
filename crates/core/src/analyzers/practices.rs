@@ -433,6 +433,91 @@ fn detect_unused_private_method(path: &str, content: &str) -> Vec<AgentFinding> 
     findings
 }
 
+/// Extracts every double-quoted string literal's inner text from one line
+/// — a plain char-scanner (not regex) so escaped quotes (`\"`) inside a
+/// literal don't prematurely end it. Doesn't distinguish a real string
+/// literal from a quoted character inside a line comment (`// say "hi"`),
+/// which would double-count occurrences appearing only in comments — a
+/// narrow, low-impact over-count, not a false-positive-inducing one (it
+/// only makes an already-duplicated literal look *more* duplicated).
+fn extract_string_literals(line: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '"' {
+            let mut j = i + 1;
+            let mut buf = String::new();
+            let mut closed = false;
+            while j < chars.len() {
+                if chars[j] == '\\' && j + 1 < chars.len() {
+                    buf.push(chars[j]);
+                    buf.push(chars[j + 1]);
+                    j += 2;
+                    continue;
+                }
+                if chars[j] == '"' {
+                    closed = true;
+                    break;
+                }
+                buf.push(chars[j]);
+                j += 1;
+            }
+            if closed {
+                literals.push(buf);
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    literals
+}
+
+/// Checkstyle MultipleStringLiterals / detekt StringLiteralDuplication /
+/// Sonar S1192 — 3-tool agreement, and this project had no coverage of it
+/// at all. The same literal repeated across a file should be a named
+/// constant; a typo in one copy silently diverges from the others.
+/// Skips short literals (empty string, single-character strings like
+/// separators/format specifiers) — too common to be meaningful, matching
+/// this project's existing precision-over-recall bias for length-gated
+/// checks elsewhere in this file. Marked semantic (hardcoded union in
+/// `diff.rs`) since `extract_string_literals` can't distinguish a real
+/// literal from quoted text inside a comment, which can inflate the count.
+fn detect_duplicate_string_literals(path: &str, content: &str) -> Vec<AgentFinding> {
+    const MIN_LITERAL_LEN: usize = 4;
+    const MIN_OCCURRENCES: usize = 3;
+
+    let mut occurrences: std::collections::BTreeMap<String, Vec<u32>> = std::collections::BTreeMap::new();
+    for (idx, raw_line) in content.lines().enumerate() {
+        for literal in extract_string_literals(raw_line) {
+            if literal.chars().count() < MIN_LITERAL_LEN {
+                continue;
+            }
+            occurrences.entry(literal).or_default().push((idx + 1) as u32);
+        }
+    }
+
+    let mut findings = Vec::new();
+    for (literal, lines) in occurrences {
+        if lines.len() < MIN_OCCURRENCES {
+            continue;
+        }
+        let first_line = lines[0];
+        let other_lines = lines[1..].iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ");
+        findings.push(make_finding(
+            "duplicate-string-literal",
+            path,
+            first_line,
+            first_line,
+            format!("Duplicated string literal ({} occurrences)", lines.len()),
+            format!("The string literal \"{literal}\" appears {} times in this file (also at line(s) {other_lines}) — a typo in one copy silently diverges from the others. Extract it to a named constant.", lines.len()),
+            format!("\"{literal}\""),
+        ));
+    }
+    findings
+}
+
 fn detect_wildcard_imports(path: &str, content: &str) -> Vec<AgentFinding> {
     let mut findings = Vec::new();
     for (idx, raw_line) in content.lines().enumerate() {
@@ -471,6 +556,7 @@ pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<Ag
                 findings.extend(detect_unused_import(path, &content));
                 findings.extend(detect_unused_private_field(path, &content));
                 findings.extend(detect_unused_private_method(path, &content));
+                findings.extend(detect_duplicate_string_literals(path, &content));
             }
             Some(findings)
         })
@@ -664,6 +750,35 @@ mod tests {
     fn does_not_flag_a_private_constructor_as_an_unused_method() {
         let content = "public class Utils {\n    private Utils() {\n    }\n    public static int f() {\n        return 1;\n    }\n}\n";
         let findings = detect_unused_private_method("Utils.java", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn extracts_string_literals_from_a_line_handling_escaped_quotes() {
+        let literals = extract_string_literals(r#"log("say \"hi\"") + other("second")"#);
+        assert_eq!(literals, vec![r#"say \"hi\""#, "second"]);
+    }
+
+    #[test]
+    fn flags_a_string_literal_repeated_three_or_more_times() {
+        let content = "class S {\n    void a() { log(\"connection-refused\"); }\n    void b() { log(\"connection-refused\"); }\n    void c() { log(\"connection-refused\"); }\n}\n";
+        let findings = detect_duplicate_string_literals("S.java", content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("duplicate-string-literal"));
+        assert_eq!(findings[0].location.range.start_line, 2);
+    }
+
+    #[test]
+    fn does_not_flag_a_literal_repeated_only_twice() {
+        let content = "class S {\n    void a() { log(\"connection-refused\"); }\n    void b() { log(\"connection-refused\"); }\n}\n";
+        let findings = detect_duplicate_string_literals("S.java", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn does_not_flag_short_literals_even_if_repeated() {
+        let content = "class S {\n    void a() { log(\"-\"); }\n    void b() { log(\"-\"); }\n    void c() { log(\"-\"); }\n}\n";
+        let findings = detect_duplicate_string_literals("S.java", content);
         assert!(findings.is_empty());
     }
 
