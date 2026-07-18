@@ -1,0 +1,13 @@
+id: java-ignored-file-operation-result
+language: Java
+category: correctness
+severity: warning
+semantic: true
+message: "`File.delete()`/`mkdir()`/`mkdirs()`/`renameTo()`/`createNewFile()` return `false` on failure instead of throwing — calling one as a bare statement silently discards that signal, so a failed delete/rename/mkdir looks identical to a successful one. Check the boolean result (or use `java.nio.file.Files`, which throws `IOException` instead)."
+rule:
+  any:
+    - pattern: $RECV.delete();
+    - pattern: $RECV.mkdir();
+    - pattern: $RECV.mkdirs();
+    - pattern: $RECV.renameTo($TARGET);
+    - pattern: $RECV.createNewFile();
