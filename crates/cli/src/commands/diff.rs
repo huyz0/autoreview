@@ -468,6 +468,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
             "swallowed-exception".to_string(),
             "iterator-err-not-checked".to_string(),
             "double-checked-locking-no-volatile".to_string(),
+            "concurrent-modification-during-foreach".to_string(),
         ]);
 
         let to_check = autoreview_core::select_for_verification(&findings, &config.verify.noisy_categories, &semantic_ids).len();

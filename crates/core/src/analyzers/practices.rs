@@ -782,6 +782,79 @@ fn detect_double_checked_locking_without_volatile(path: &str, content: &str) -> 
     findings
 }
 
+/// Extracts the iterated collection expression from a Java for-each header
+/// (`for (Type item : collection) {`), or `None` if the line isn't that
+/// shape or the collection expression isn't a simple identifier/field
+/// access (keeps the check precise — no attempt to handle method-call
+/// collection expressions like `for (X x : getItems())`, since there's no
+/// single receiver to check mutation calls against).
+fn foreach_collection(trimmed: &str) -> Option<&str> {
+    let before_brace = trimmed.strip_suffix('{')?.trim_end();
+    let rest = before_brace.strip_prefix("for")?.trim_start();
+    let inner = rest.strip_prefix('(')?.strip_suffix(')')?;
+    let colon_pos = inner.rfind(':')?;
+    let collection = inner[colon_pos + 1..].trim();
+    let is_simple = !collection.is_empty() && collection.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.');
+    is_simple.then_some(collection)
+}
+
+/// Flags `collection.add()/remove()/clear()` called on the same collection
+/// a Java for-each loop is iterating — throws `ConcurrentModificationException`
+/// at runtime (the collection's `modCount` is checked on every `Iterator.next()`).
+/// Skips collections whose declaration looks like a concurrent-safe type
+/// (`CopyOnWriteArrayList`, `ConcurrentHashMap`, a `Blocking*` queue) since
+/// mutating those during iteration is fine by design.
+fn detect_concurrent_modification_during_foreach(path: &str, content: &str) -> Vec<AgentFinding> {
+    if !path.ends_with(".java") {
+        return Vec::new();
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let mut findings = Vec::new();
+    for (idx, raw_line) in lines.iter().enumerate() {
+        let trimmed = raw_line.trim();
+        let Some(collection) = foreach_collection(trimmed) else { continue };
+
+        let is_concurrent_safe = content
+            .lines()
+            .any(|l| l.contains(collection) && (l.contains("CopyOnWrite") || l.contains("Concurrent") || l.contains("Blocking")));
+        if is_concurrent_safe {
+            continue;
+        }
+
+        let mut depth = 1i32;
+        let mut mutation_line: Option<usize> = None;
+        for (k, l) in lines.iter().enumerate().skip(idx + 1) {
+            depth += l.matches('{').count() as i32;
+            depth -= l.matches('}').count() as i32;
+            if depth <= 0 {
+                break;
+            }
+            for suffix in [".add(", ".remove(", ".clear("] {
+                if l.contains(&format!("{collection}{suffix}")) {
+                    mutation_line = Some(k);
+                    break;
+                }
+            }
+            if mutation_line.is_some() {
+                break;
+            }
+        }
+
+        if let Some(mut_idx) = mutation_line {
+            findings.push(make_finding(
+                "concurrent-modification-during-foreach",
+                path,
+                (idx + 1) as u32,
+                (mut_idx + 1) as u32,
+                format!("`{collection}` structurally modified during its own for-each iteration"),
+                format!("This loop calls a structural mutation method on `{collection}` (`add`/`remove`/`clear`) while iterating it directly — `ArrayList`/`HashMap`-family collections track a modification count and throw `ConcurrentModificationException` from the next `Iterator.next()` call after a structural change. Use `Iterator.remove()` (via an explicit iterator) instead, collect items to remove/add into a separate collection and apply them after the loop, or use a `CopyOnWriteArrayList`/`ConcurrentHashMap` if concurrent-safe iteration is genuinely needed."),
+                trimmed.to_string(),
+            ));
+        }
+    }
+    findings
+}
+
 /// Runs all Track 4 checks against one changed file's current content.
 pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
     changed_files
@@ -803,6 +876,7 @@ pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<Ag
                 findings.extend(detect_duplicate_string_literals(path, &content));
                 findings.extend(detect_swallowed_exception(path, &content));
                 findings.extend(detect_double_checked_locking_without_volatile(path, &content));
+                findings.extend(detect_concurrent_modification_during_foreach(path, &content));
             }
             if language == PracticesLanguage::Go {
                 findings.extend(detect_iterator_err_not_checked(path, &content));
@@ -1135,6 +1209,28 @@ mod tests {
     fn does_not_flag_double_checked_locking_with_volatile() {
         let content = "public class Singleton {\n    private static volatile Singleton instance;\n\n    public static Singleton getInstance() {\n        if (instance == null) {\n            synchronized (Singleton.class) {\n                if (instance == null) {\n                    instance = new Singleton();\n                }\n            }\n        }\n        return instance;\n    }\n}\n";
         let findings = detect_double_checked_locking_without_volatile("Singleton.java", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn flags_a_list_mutated_during_its_own_foreach() {
+        let content = "class Foo {\n    void f(java.util.List<String> items) {\n        for (String item : items) {\n            if (item.isEmpty()) {\n                items.remove(item);\n            }\n        }\n    }\n}\n";
+        let findings = detect_concurrent_modification_during_foreach("Foo.java", content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("concurrent-modification-during-foreach"));
+    }
+
+    #[test]
+    fn does_not_flag_a_copy_on_write_list_mutated_during_foreach() {
+        let content = "class Foo {\n    void f() {\n        java.util.List<String> items = new CopyOnWriteArrayList<>();\n        for (String item : items) {\n            items.remove(item);\n        }\n    }\n}\n";
+        let findings = detect_concurrent_modification_during_foreach("Foo.java", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn does_not_flag_a_foreach_that_only_reads() {
+        let content = "class Foo {\n    void f(java.util.List<String> items) {\n        for (String item : items) {\n            System.out.println(item);\n        }\n    }\n}\n";
+        let findings = detect_concurrent_modification_during_foreach("Foo.java", content);
         assert!(findings.is_empty());
     }
 
