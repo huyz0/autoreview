@@ -855,8 +855,144 @@ fn detect_concurrent_modification_during_foreach(path: &str, content: &str) -> V
     findings
 }
 
+/// Reads `go.mod`'s `go` directive and reports whether the module targets
+/// a pre-1.22 Go version — before 1.22, `for`/`range` loop variables have
+/// per-loop (not per-iteration) scope, so a closure capturing one by
+/// reference sees every iteration's final value instead of its own.
+/// Defaults to `false` (don't flag) when `go.mod` is missing or
+/// unparseable, since a false "pre-1.22" assumption would misfire on
+/// current code — precision over recall.
+fn go_module_targets_pre_1_22(repo_root: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(repo_root.join("go.mod")) else { return false };
+    for line in content.lines() {
+        let Some(version) = line.trim().strip_prefix("go ") else { continue };
+        let mut parts = version.trim().split('.');
+        let Some(major) = parts.next().and_then(|p| p.parse::<u32>().ok()) else { return false };
+        let minor_digits: String = parts.next().unwrap_or("").chars().take_while(|c| c.is_ascii_digit()).collect();
+        let minor = minor_digits.parse::<u32>().unwrap_or(0);
+        return major < 1 || (major == 1 && minor < 22);
+    }
+    false
+}
+
+fn range_loop_vars(trimmed: &str) -> Vec<String> {
+    let Some(before_brace) = trimmed.strip_suffix('{') else { return Vec::new() };
+    let before_brace = before_brace.trim_end();
+    let Some(rest) = before_brace.strip_prefix("for") else { return Vec::new() };
+    let rest = rest.trim_start();
+    let Some(assign_pos) = rest.find(":=") else { return Vec::new() };
+    let (vars_part, after) = rest.split_at(assign_pos);
+    if !after[2..].trim_start().starts_with("range") {
+        return Vec::new();
+    }
+    vars_part
+        .split(',')
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && v != "_" && v.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        .collect()
+}
+
+/// Whole-word search for `var` inside `text` (avoids matching `i` inside
+/// `id` or `item`).
+fn contains_identifier(text: &str, var: &str) -> bool {
+    let bytes = text.as_bytes();
+    let vlen = var.len();
+    let mut start = 0;
+    while let Some(pos) = text[start..].find(var) {
+        let abs = start + pos;
+        let before_ok = abs == 0 || !(bytes[abs - 1] as char).is_alphanumeric() && bytes[abs - 1] != b'_';
+        let after_idx = abs + vlen;
+        let after_ok = after_idx >= bytes.len() || (!(bytes[after_idx] as char).is_alphanumeric() && bytes[after_idx] != b'_');
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + vlen;
+        if start >= text.len() {
+            break;
+        }
+    }
+    false
+}
+
+/// Flags `go func() { }` / `defer func() { }` closures (no parameters,
+/// i.e. capturing by reference rather than being passed the value) that
+/// reference an enclosing `for ... := range ...` loop's variable, on Go
+/// modules targeting a pre-1.22 Go version. This is the documented
+/// Let's Encrypt-class bug: pre-1.22, all iterations share one variable,
+/// so every closure ends up seeing the final value.
+fn detect_loopvar_capture(path: &str, content: &str) -> Vec<AgentFinding> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut findings = Vec::new();
+    let mut depth: i32 = 0;
+    // (start_depth, vars) for currently open range loops.
+    let mut loop_stack: Vec<(i32, Vec<String>)> = Vec::new();
+
+    let mut idx = 0;
+    while idx < lines.len() {
+        let trimmed = lines[idx].trim();
+
+        let vars = range_loop_vars(trimmed);
+        if !vars.is_empty() {
+            loop_stack.push((depth, vars));
+            depth += 1;
+            idx += 1;
+            continue;
+        }
+
+        let opens_bare_closure = trimmed.ends_with("go func() {") || trimmed.ends_with("defer func() {") || trimmed == "go func() {" || trimmed == "defer func() {";
+        if opens_bare_closure && !loop_stack.is_empty() {
+            let active_vars: Vec<&String> = loop_stack.iter().flat_map(|(_, vs)| vs.iter()).collect();
+
+            let mut closure_depth = 1i32;
+            let mut end_idx = idx;
+            let mut shadowed: Vec<&str> = Vec::new();
+            let mut found_var: Option<&str> = None;
+            for (k, l) in lines.iter().enumerate().skip(idx + 1) {
+                let lt = l.trim();
+                // A same-named local shadow copy (`v := v`) right at the
+                // top of the closure is the standard pre-1.22 fix — treat
+                // that variable as safe for the rest of this closure.
+                for v in &active_vars {
+                    if lt == format!("{v} := {v}") {
+                        shadowed.push(v.as_str());
+                    }
+                }
+                if found_var.is_none() {
+                    for v in &active_vars {
+                        if !shadowed.contains(&v.as_str()) && contains_identifier(lt, v) {
+                            found_var = Some(v.as_str());
+                        }
+                    }
+                }
+                closure_depth += l.matches('{').count() as i32;
+                closure_depth -= l.matches('}').count() as i32;
+                if closure_depth <= 0 {
+                    end_idx = k;
+                    break;
+                }
+            }
+            if let Some(var) = found_var {
+                let kind = if trimmed.contains("go func") { "goroutine" } else { "deferred closure" };
+                findings.push(make_finding(
+                    "loopvar-capture-pre-1.22",
+                    path,
+                    (idx + 1) as u32,
+                    (end_idx + 1) as u32,
+                    format!("Loop variable `{var}` captured by a {kind} on a pre-1.22 Go module"),
+                    format!("This {kind} references the enclosing loop's `{var}` without shadowing it first, and `go.mod` targets a Go version before 1.22. Before 1.22, `for`/`range` loop variables have per-loop (not per-iteration) scope — every {kind} launched by this loop ends up seeing the same, final value of `{var}` instead of its own iteration's value (a real, documented class of production bug). Shadow it first (`{var} := {var}`) right inside the closure, or pass it as a parameter."),
+                    trimmed.to_string(),
+                ));
+            }
+        }
+
+        idx += 1;
+    }
+    findings
+}
+
 /// Runs all Track 4 checks against one changed file's current content.
 pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
+    let go_pre_1_22 = go_module_targets_pre_1_22(repo_root);
     changed_files
         .iter()
         .filter_map(|path| {
@@ -880,6 +1016,9 @@ pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<Ag
             }
             if language == PracticesLanguage::Go {
                 findings.extend(detect_iterator_err_not_checked(path, &content));
+                if go_pre_1_22 {
+                    findings.extend(detect_loopvar_capture(path, &content));
+                }
             }
             Some(findings)
         })
@@ -1232,6 +1371,48 @@ mod tests {
         let content = "class Foo {\n    void f(java.util.List<String> items) {\n        for (String item : items) {\n            System.out.println(item);\n        }\n    }\n}\n";
         let findings = detect_concurrent_modification_during_foreach("Foo.java", content);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn flags_a_goroutine_capturing_the_loop_variable_pre_1_22() {
+        let content = "func f(items []string) {\n\tfor _, item := range items {\n\t\tgo func() {\n\t\t\tprintln(item)\n\t\t}()\n\t}\n}\n";
+        let findings = detect_loopvar_capture("main.go", content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("loopvar-capture-pre-1.22"));
+    }
+
+    #[test]
+    fn does_not_flag_a_goroutine_that_shadows_the_loop_variable() {
+        let content = "func f(items []string) {\n\tfor _, item := range items {\n\t\tgo func() {\n\t\t\titem := item\n\t\t\tprintln(item)\n\t\t}()\n\t}\n}\n";
+        let findings = detect_loopvar_capture("main.go", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn does_not_flag_a_goroutine_passed_the_variable_as_a_parameter() {
+        let content = "func f(items []string) {\n\tfor _, item := range items {\n\t\tgo func(item string) {\n\t\t\tprintln(item)\n\t\t}(item)\n\t}\n}\n";
+        let findings = detect_loopvar_capture("main.go", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn go_module_pre_1_22_reads_the_go_directive() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module example.com/x\n\ngo 1.20\n").unwrap();
+        assert!(go_module_targets_pre_1_22(dir.path()));
+    }
+
+    #[test]
+    fn go_module_1_22_and_later_is_not_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module example.com/x\n\ngo 1.23\n").unwrap();
+        assert!(!go_module_targets_pre_1_22(dir.path()));
+    }
+
+    #[test]
+    fn missing_go_mod_defaults_to_not_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!go_module_targets_pre_1_22(dir.path()));
     }
 
     #[test]
