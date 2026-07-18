@@ -37,20 +37,36 @@ fn classify_rhs(node: Node, source: &[u8]) -> RhsShape {
         // literal itself under this dedicated kind).
         "nil" => RhsShape::NilLiteral,
         "identifier" => RhsShape::Var(text(node, source).to_string()),
+        "unary_expression" => {
+            let full = text(node, source);
+            match node.child_by_field_name("operand") {
+                Some(operand) if operand.kind() == "identifier" && full.starts_with('&') => RhsShape::AddressOf { of: text(operand, source).to_string() },
+                _ => RhsShape::Unknown,
+            }
+        }
         _ => RhsShape::Unknown,
     }
 }
 
 /// Lowers a call expression's arguments to the flat identifier list
-/// `Stmt::Call` carries (non-identifier arguments, e.g. literals or
-/// nested expressions, are simply omitted — rules that need to check
-/// "is this variable passed as an argument" only care about the
-/// identifier ones).
+/// `Stmt::Call` carries. A bare identifier argument lowers to its name;
+/// an address-of argument (`&x`) lowers to `"&x"` — a pragmatic encoding
+/// (rather than a second `Vec` field on `Stmt::Call`) that keeps this
+/// variant's shape stable for the rules that don't care about the
+/// distinction, while still letting `go_loopvar_address_capture` check
+/// for it via a simple prefix match. Anything else (literals, nested
+/// expressions) is omitted.
 fn call_arg_identifiers(call: Node, source: &[u8]) -> Vec<String> {
     call.child_by_field_name("arguments")
         .map(|args| {
             let mut cursor = args.walk();
-            args.named_children(&mut cursor).filter(|n| n.kind() == "identifier").map(|n| text(n, source).to_string()).collect()
+            args.named_children(&mut cursor)
+                .filter_map(|n| match n.kind() {
+                    "identifier" => Some(text(n, source).to_string()),
+                    "unary_expression" if text(n, source).starts_with('&') => n.child_by_field_name("operand").filter(|o| o.kind() == "identifier").map(|o| format!("&{}", text(o, source))),
+                    _ => None,
+                })
+                .collect()
         })
         .unwrap_or_default()
 }
@@ -234,6 +250,14 @@ fn lower_statement(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: Node
         }
         "if_statement" => lower_if(cfg, stmt, source, current),
         "for_statement" => lower_for(cfg, stmt, source, current),
+        "go_statement" => {
+            cfg.nodes[current].stmts.push(lower_closure_capture(stmt, source, crate::cfg::ClosureKind::Goroutine));
+            current
+        }
+        "defer_statement" => {
+            cfg.nodes[current].stmts.push(lower_closure_capture(stmt, source, crate::cfg::ClosureKind::Deferred));
+            current
+        }
         "expression_statement" => {
             cfg.nodes[current].stmts.push(Stmt::Other(text(stmt, source).to_string()));
             current
@@ -306,16 +330,97 @@ fn lower_if(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> 
     join
 }
 
+/// Extracts a range-clause `for`'s own loop variables (`for k, v := range
+/// x`) — `range_clause` is a positional child of `for_statement`, not a
+/// named field (same positional-child pattern as `for_clause`, verified
+/// via `--debug-query=ast`). `_` is excluded (nothing to capture). A
+/// classic three-clause `for i := 0; i < n; i++` loop's `i` isn't
+/// modeled here — the pre-1.22 loop-variable-scoping bug this feeds only
+/// applies to range loops (matches the old heuristic's own scope).
+fn range_clause_vars(stmt: Node, source: &[u8]) -> Vec<String> {
+    let mut cursor = stmt.walk();
+    let Some(range_clause) = stmt.named_children(&mut cursor).find(|n| n.kind() == "range_clause") else { return Vec::new() };
+    let Some(left) = range_clause.child_by_field_name("left") else { return Vec::new() };
+    let mut cursor = left.walk();
+    left.named_children(&mut cursor).filter(|n| n.kind() == "identifier").map(|n| text(n, source).to_string()).filter(|t| t != "_").collect()
+}
+
 fn lower_for(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {
     let header = current;
     let body_start = cfg.push_node(stmt.start_position().row as u32 + 1);
     cfg.edges.push((header, body_start, EdgeKind::True));
+
+    let loop_vars = range_clause_vars(stmt, source);
+    if !loop_vars.is_empty() {
+        cfg.nodes[body_start].stmts.push(Stmt::LoopVarBind { vars: loop_vars });
+    }
+
     let body_end = if let Some(body) = stmt.child_by_field_name("body") { lower_block(cfg, body, source, body_start) } else { body_start };
     cfg.edges.push((body_end, header, EdgeKind::Loop));
 
     let after = cfg.push_node(stmt.end_position().row as u32 + 1);
     cfg.edges.push((header, after, EdgeKind::False));
     after
+}
+
+/// Collects every `identifier` node's text anywhere in `node`'s subtree —
+/// a blunt, over-approximate free-variable set (doesn't distinguish a
+/// declaration site from a use site, doesn't track the closure's own
+/// local shadowing beyond the single first-statement check in
+/// `lower_closure_capture`). That's an acceptable precision tradeoff
+/// here: the rules consuming `ClosureCapture::captured` only care about
+/// its *intersection* with the outer function's active loop variables,
+/// so a superset is safe — it can't manufacture a false positive on a
+/// name that isn't actually an active loop variable.
+fn collect_identifiers(node: Node, source: &[u8], out: &mut Vec<String>) {
+    if node.kind() == "identifier" {
+        out.push(text(node, source).to_string());
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_identifiers(child, source, out);
+    }
+}
+
+/// Lowers `go func() { ... }()` / `defer func() { ... }()` — a bare
+/// (no-parameter) function literal immediately invoked as a goroutine or
+/// deferred call, the shape that captures enclosing variables by
+/// reference. Anything else (`go f(x)`, `defer f(x)`, a func literal
+/// *with* parameters) is safe by Go's own by-value argument-passing
+/// semantics and lowers to `Stmt::Other` instead.
+fn lower_closure_capture(stmt: Node, source: &[u8], kind: crate::cfg::ClosureKind) -> Stmt {
+    let fallback = || Stmt::Other(text(stmt, source).to_string());
+    let Some(call) = stmt.named_child(0).filter(|n| n.kind() == "call_expression") else { return fallback() };
+    let Some(func) = call.child_by_field_name("function").filter(|n| n.kind() == "func_literal") else { return fallback() };
+    let is_bare = func.child_by_field_name("parameters").map(|p| p.named_child_count() == 0).unwrap_or(true);
+    if !is_bare {
+        return fallback();
+    }
+    let Some(body) = func.child_by_field_name("body") else { return fallback() };
+
+    let mut captured = Vec::new();
+    collect_identifiers(body, source, &mut captured);
+
+    // The standard pre-1.22 fix is a self-shadow copy (`v := v`) as the
+    // closure's very first statement — exclude any variable shadowed
+    // that way from `captured` so the rule doesn't flag an
+    // already-fixed closure.
+    let mut cursor = body.walk();
+    if let Some(list) = body.named_children(&mut cursor).find(|n| n.kind() == "statement_list") {
+        if let Some(first) = list.named_child(0) {
+            if first.kind() == "short_var_declaration" {
+                if let Stmt::Assign { lhs, rhs: RhsShape::Var(rhs) } = lower_assign_like(first, source) {
+                    if lhs == rhs {
+                        captured.retain(|v| *v != lhs);
+                    }
+                }
+            }
+        }
+    }
+
+    captured.sort();
+    captured.dedup();
+    Stmt::ClosureCapture { captured, kind }
 }
 
 #[cfg(test)]
@@ -412,5 +517,63 @@ mod tests {
         assert!(function_returns_pointer(fns[2]));
         assert!(!function_returns_pointer(fns[0]));
         assert_eq!(function_name(fns[2], src.as_bytes()).as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn range_loop_binds_its_own_variables() {
+        let cfg = lower("package p\nfunc f(items []string) {\n\tfor _, item := range items {\n\t\tprintln(item)\n\t}\n}\n");
+        assert!(cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::LoopVarBind { vars } if vars == &vec!["item".to_string()]))), "got: {:#?}", cfg.nodes);
+    }
+
+    #[test]
+    fn a_three_clause_for_loop_does_not_bind_loop_vars() {
+        let cfg = lower("package p\nfunc f() {\n\tfor i := 0; i < 3; i++ {\n\t\tprintln(i)\n\t}\n}\n");
+        assert!(!cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::LoopVarBind { .. }))), "got: {:#?}", cfg.nodes);
+    }
+
+    #[test]
+    fn a_bare_goroutine_closure_captures_its_free_identifiers() {
+        let cfg = lower("package p\nfunc f(items []string) {\n\tfor _, item := range items {\n\t\tgo func() {\n\t\t\tprintln(item)\n\t\t}()\n\t}\n}\n");
+        assert!(
+            cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::ClosureCapture { captured, kind: crate::cfg::ClosureKind::Goroutine } if captured.contains(&"item".to_string())))),
+            "got: {:#?}",
+            cfg.nodes
+        );
+    }
+
+    #[test]
+    fn a_shadowed_closure_excludes_the_shadowed_var_from_captured() {
+        let cfg = lower("package p\nfunc f(items []string) {\n\tfor _, item := range items {\n\t\tgo func() {\n\t\t\titem := item\n\t\t\tprintln(item)\n\t\t}()\n\t}\n}\n");
+        assert!(
+            !cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::ClosureCapture { captured, .. } if captured.contains(&"item".to_string())))),
+            "got: {:#?}",
+            cfg.nodes
+        );
+    }
+
+    #[test]
+    fn a_closure_with_parameters_is_not_treated_as_a_capture() {
+        let cfg = lower("package p\nfunc f(items []string) {\n\tfor _, item := range items {\n\t\tgo func(x string) {\n\t\t\tprintln(x)\n\t\t}(item)\n\t}\n}\n");
+        assert!(!cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::ClosureCapture { .. }))), "got: {:#?}", cfg.nodes);
+    }
+
+    #[test]
+    fn recognizes_an_address_of_argument_in_an_append_call() {
+        let cfg = lower("package p\nfunc f(items []string) []*string {\n\tvar out []*string\n\tfor _, item := range items {\n\t\tout = append(out, &item)\n\t}\n\treturn out\n}\n");
+        assert!(
+            cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { args, .. } if args.contains(&"&item".to_string())))),
+            "got: {:#?}",
+            cfg.nodes
+        );
+    }
+
+    #[test]
+    fn recognizes_a_direct_address_of_assignment() {
+        let cfg = lower("package p\nfunc f(items []string) {\n\tfor _, item := range items {\n\t\tp := &item\n\t\t_ = p\n\t}\n}\n");
+        assert!(
+            cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Assign { lhs, rhs: RhsShape::AddressOf { of } } if lhs == "p" && of == "item"))),
+            "got: {:#?}",
+            cfg.nodes
+        );
     }
 }

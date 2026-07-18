@@ -3,12 +3,13 @@
 //! symindex`: the dataflow crate has no knowledge of the schema's
 //! `Finding` type, so that mapping lives here.
 //!
-//! Phase 3 added Go's `append-shared-backing-array`; Phase 4 adds
-//! `typed-nil-interface-return` — both drop-in replacements for
+//! Phase 3 added Go's `append-shared-backing-array`; Phase 4 added
+//! `typed-nil-interface-return`; Phase 5 adds `loopvar-capture-pre-1.22`
+//! and `loopvar-address-pre-1.22` — all drop-in replacements for
 //! text-heuristic versions previously in `analyzers::practices` (same
 //! rule ids, so this is not new rule surface, just sounder
 //! implementations). `run_practices_check`'s Go branch no longer calls
-//! either old heuristic for this reason.
+//! any of the four old heuristics for this reason.
 //!
 //! `typed-nil-interface-return`'s interprocedural call resolution is
 //! same-file only (see `autoreview_dataflow::rules::
@@ -23,7 +24,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use autoreview_dataflow::rules::{go_append_shared_backing_array, go_typed_nil_interface_return};
+use autoreview_dataflow::rules::{go_append_shared_backing_array, go_loopvar, go_typed_nil_interface_return};
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
 fn make_finding(rule_id: &str, path: &str, line: u32, title: String, message: String) -> AgentFinding {
@@ -118,10 +119,48 @@ fn run_typed_nil_interface_return(path: &str, content: &str) -> Vec<AgentFinding
     findings
 }
 
+fn run_loopvar_checks(path: &str, content: &str) -> Vec<AgentFinding> {
+    let Some(mut parser) = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Go) else { return Vec::new() };
+    let Some(tree) = parser.parse(content, None) else { return Vec::new() };
+    let mut findings = Vec::new();
+    for fn_node in go_functions(&tree) {
+        let cfg = autoreview_dataflow::lower::go::lower_function(content.as_bytes(), fn_node);
+
+        for hit in go_loopvar::check_capture(&cfg) {
+            let kind = if hit.kind == autoreview_dataflow::cfg::ClosureKind::Goroutine { "goroutine" } else { "deferred closure" };
+            findings.push(make_finding(
+                "loopvar-capture-pre-1.22",
+                path,
+                hit.source_line,
+                format!("Loop variable `{}` captured by a {kind} on a pre-1.22 Go module", hit.var),
+                format!(
+                    "This {kind} references the enclosing loop's `{}` without shadowing it first, and `go.mod` targets a Go version before 1.22. Before 1.22, `for`/`range` loop variables have per-loop (not per-iteration) scope — every {kind} launched by this loop ends up seeing the same, final value of `{}` instead of its own iteration's value. Shadow it first (`{} := {}`) right inside the closure, or pass it as a parameter.",
+                    hit.var, hit.var, hit.var, hit.var
+                ),
+            ));
+        }
+
+        for hit in go_loopvar::check_address(&cfg) {
+            findings.push(make_finding(
+                "loopvar-address-pre-1.22",
+                path,
+                hit.source_line,
+                format!("Address of loop variable `{}` taken on a pre-1.22 Go module", hit.var),
+                format!(
+                    "This takes `&{}` inside the loop that declares `{}`, and `go.mod` targets a Go version before 1.22. Before 1.22, `for`/`range` loop variables have per-loop (not per-iteration) scope — every `&{}` taken across iterations points at the same shared variable, so a slice/map built from these pointers ends up holding N copies of the loop's final value instead of each iteration's own value. Shadow the variable first (`{} := {}`) before taking its address, or upgrade the module's Go version.",
+                    hit.var, hit.var, hit.var, hit.var, hit.var
+                ),
+            ));
+        }
+    }
+    findings
+}
+
 /// Runs all dataflow-powered checks against one changed file's current
-/// content. Go-only for now (Phase 3/4); Java/Kotlin land once their
+/// content. Go-only for now (Phase 3/4/5); Java/Kotlin land once their
 /// lowering passes do (Phase 6/7).
 pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
+    let go_pre_1_22 = crate::analyzers::practices::go_module_targets_pre_1_22(repo_root);
     changed_files
         .iter()
         .filter(|path| path.ends_with(".go"))
@@ -130,6 +169,9 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String]) -> Vec<Age
             let content = std::fs::read_to_string(&full_path).ok()?;
             let mut findings = run_append_shared_backing_array(path, &content);
             findings.extend(run_typed_nil_interface_return(path, &content));
+            if go_pre_1_22 {
+                findings.extend(run_loopvar_checks(path, &content));
+            }
             Some(findings)
         })
         .flatten()
@@ -198,6 +240,57 @@ mod tests {
         .unwrap();
         let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
         assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("typed-nil-interface-return")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_loopvar_capture_when_go_mod_targets_pre_1_22() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module example.com/x\n\ngo 1.20\n").unwrap();
+        std::fs::write(
+            dir.path().join("main.go"),
+            "package main\n\nfunc f(items []string) {\n\tfor _, item := range items {\n\t\tgo func() {\n\t\t\tprintln(item)\n\t\t}()\n\t}\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("loopvar-capture-pre-1.22")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_loopvar_address_capture_when_go_mod_targets_pre_1_22() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module example.com/x\n\ngo 1.20\n").unwrap();
+        std::fs::write(
+            dir.path().join("main.go"),
+            "package main\n\nfunc f(items []string) []*string {\n\tvar out []*string\n\tfor _, item := range items {\n\t\tout = append(out, &item)\n\t}\n\treturn out\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("loopvar-address-pre-1.22")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_loopvar_capture_when_go_mod_targets_1_22_or_later() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module example.com/x\n\ngo 1.23\n").unwrap();
+        std::fs::write(
+            dir.path().join("main.go"),
+            "package main\n\nfunc f(items []string) {\n\tfor _, item := range items {\n\t\tgo func() {\n\t\t\tprintln(item)\n\t\t}()\n\t}\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("loopvar-capture-pre-1.22")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_loopvar_capture_without_a_go_mod() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.go"),
+            "package main\n\nfunc f(items []string) {\n\tfor _, item := range items {\n\t\tgo func() {\n\t\t\tprintln(item)\n\t\t}()\n\t}\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("loopvar-capture-pre-1.22")), "got: {findings:#?}");
     }
 
     #[test]

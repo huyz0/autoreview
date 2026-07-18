@@ -17,6 +17,8 @@ pub enum RhsShape {
     Reslice { of: VarId },
     /// A plain variable reference, `x = y`.
     Var(VarId),
+    /// `&x` — taking a reference/address of another variable.
+    AddressOf { of: VarId },
     /// Anything this lowering pass doesn't specifically recognize.
     Unknown,
 }
@@ -53,6 +55,13 @@ pub enum Stmt {
     Call { target: CallTarget, args: Vec<VarId>, assigned_to: Option<VarId> },
     Guard { var: VarId, op: GuardOp, against: GuardAgainst },
     ClosureCapture { captured: Vec<VarId>, kind: ClosureKind },
+    /// Marks the point where `vars` come into scope as a range-loop's own
+    /// loop variables (pushed once, at the top of the loop body). Rules
+    /// that need to know "is this variable a currently-active loop
+    /// variable" (the pre-1.22 capture/address rules) key off this rather
+    /// than any generic `Assign`, since an ordinary reassignment
+    /// shouldn't be conflated with loop-variable scoping.
+    LoopVarBind { vars: Vec<VarId> },
     /// Anything not specifically recognized above. Keeps the statement's
     /// raw source text so a rule can still fall back to a textual
     /// whole-word reference check (e.g. "is `full` mentioned here at

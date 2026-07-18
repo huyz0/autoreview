@@ -3,4 +3,5 @@
 //! crate doesn't try to share one general-purpose lattice across rules.
 
 pub mod go_append_shared_backing_array;
+pub mod go_loopvar;
 pub mod go_typed_nil_interface_return;
