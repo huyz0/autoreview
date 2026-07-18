@@ -1,0 +1,22 @@
+id: go-sql-rows-not-closed
+language: Go
+category: correctness
+semantic: true
+severity: warning
+message: "`*sql.Rows` obtained from a query is never deferred-closed. This leaks the underlying database connection even if the rows are fully read — always `defer rows.Close()` right after checking the error."
+rule:
+  any:
+    - pattern:
+        context: "func w() { $ROWS, $ERR := $DB.Query($$$ARGS) }"
+        selector: short_var_declaration
+      not:
+        precedes:
+          pattern: "defer $ROWS.Close()"
+          stopBy: end
+    - pattern:
+        context: "func w() { $ROWS, $ERR := $DB.QueryContext($$$ARGS) }"
+        selector: short_var_declaration
+      not:
+        precedes:
+          pattern: "defer $ROWS.Close()"
+          stopBy: end
