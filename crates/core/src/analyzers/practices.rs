@@ -1053,6 +1053,89 @@ fn detect_loopvar_address_capture(path: &str, content: &str) -> Vec<AgentFinding
     findings
 }
 
+fn go_func_declares_error_return(trimmed: &str) -> bool {
+    if !trimmed.starts_with("func ") || !trimmed.ends_with('{') {
+        return false;
+    }
+    let before_brace = trimmed[..trimmed.len() - 1].trim_end();
+    let stripped = before_brace.trim_end_matches(')');
+    stripped.ends_with("error") && !stripped.ends_with("Error")
+}
+
+/// Extracts `(NAME, TYPE)` from a bare `var NAME *TYPE` declaration line
+/// (no initializer, so the variable starts out nil).
+fn go_nil_pointer_var_decl(trimmed: &str) -> Option<&str> {
+    let rest = trimmed.strip_prefix("var ")?;
+    if rest.contains('=') {
+        return None;
+    }
+    let mut parts = rest.split_whitespace();
+    let name = parts.next()?;
+    let ty = parts.next()?;
+    ty.starts_with('*').then_some(name)
+}
+
+/// Flags a function declared to return `error` (or `(..., error)`) that
+/// `return`s a locally-declared `*T` pointer variable directly instead of
+/// an `error`-typed value — the classic Go "typed nil in an interface"
+/// gotcha: an `error` interface value holding a nil `*T` is itself
+/// non-nil (interfaces are a `(type, value)` pair), so `err != nil`
+/// checks at the call site pass even though nothing actually went wrong.
+fn detect_typed_nil_interface_return(path: &str, content: &str) -> Vec<AgentFinding> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut findings = Vec::new();
+    let mut idx = 0;
+    while idx < lines.len() {
+        let trimmed = lines[idx].trim();
+        if !go_func_declares_error_return(trimmed) {
+            idx += 1;
+            continue;
+        }
+
+        let mut depth = 1i32;
+        let mut nil_ptr_vars: Vec<&str> = Vec::new();
+        let mut end_idx = idx;
+        let mut found: Option<(&str, usize)> = None;
+        for (k, l) in lines.iter().enumerate().skip(idx + 1) {
+            let lt = l.trim();
+            if let Some(name) = go_nil_pointer_var_decl(lt) {
+                nil_ptr_vars.push(name);
+            }
+            if let Some(rest) = lt.strip_prefix("return ") {
+                let last = rest.rsplit(',').next().unwrap_or(rest).trim();
+                // The standard safe idiom (`if X != nil { return X }`)
+                // guards the return with an explicit nil check on the
+                // immediately preceding line — don't flag that shape.
+                let guarded = k > 0 && lines[k - 1].trim() == format!("if {last} != nil {{");
+                if nil_ptr_vars.contains(&last) && !guarded {
+                    found = Some((last, k));
+                }
+            }
+            depth += l.matches('{').count() as i32;
+            depth -= l.matches('}').count() as i32;
+            if depth <= 0 {
+                end_idx = k;
+                break;
+            }
+        }
+
+        if let Some((var, ret_idx)) = found {
+            findings.push(make_finding(
+                "typed-nil-interface-return",
+                path,
+                (idx + 1) as u32,
+                (ret_idx + 1) as u32,
+                format!("Returning typed pointer `{var}` where an `error` is expected"),
+                format!("This function declares an `error` return, but returns `{var}` — a locally-declared pointer variable — directly instead of an `error`-typed value. An `error` interface value holding a nil `*T` is itself non-nil (interfaces are a `(type, value)` pair internally), so a caller's `if err != nil` check passes even when `{var}` is nil and nothing actually went wrong. Return a literal `nil` when there's no error, or explicitly convert: `if {var} != nil {{ return {var} }}; return nil`."),
+                lines[ret_idx].trim().to_string(),
+            ));
+        }
+
+        idx = end_idx + 1;
+    }
+    findings
+}
+
 /// Runs all Track 4 checks against one changed file's current content.
 pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
     let go_pre_1_22 = go_module_targets_pre_1_22(repo_root);
@@ -1079,6 +1162,7 @@ pub fn run_practices_check(repo_root: &Path, changed_files: &[String]) -> Vec<Ag
             }
             if language == PracticesLanguage::Go {
                 findings.extend(detect_iterator_err_not_checked(path, &content));
+                findings.extend(detect_typed_nil_interface_return(path, &content));
                 if go_pre_1_22 {
                     findings.extend(detect_loopvar_capture(path, &content));
                     findings.extend(detect_loopvar_address_capture(path, &content));
@@ -1434,6 +1518,28 @@ mod tests {
     fn does_not_flag_a_foreach_that_only_reads() {
         let content = "class Foo {\n    void f(java.util.List<String> items) {\n        for (String item : items) {\n            System.out.println(item);\n        }\n    }\n}\n";
         let findings = detect_concurrent_modification_during_foreach("Foo.java", content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn flags_a_typed_nil_pointer_returned_as_error() {
+        let content = "func do() error {\n\tvar e *myError\n\tif somethingBad {\n\t\te = &myError{}\n\t}\n\treturn e\n}\n";
+        let findings = detect_typed_nil_interface_return("main.go", content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("typed-nil-interface-return"));
+    }
+
+    #[test]
+    fn does_not_flag_the_guarded_nil_check_idiom() {
+        let content = "func do() error {\n\tvar e *myError\n\tif somethingBad {\n\t\te = &myError{}\n\t}\n\tif e != nil {\n\t\treturn e\n\t}\n\treturn nil\n}\n";
+        let findings = detect_typed_nil_interface_return("main.go", content);
+        assert!(findings.is_empty(), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_function_that_does_not_return_error() {
+        let content = "func do() int {\n\tvar e *myError\n\treturn 0\n}\n";
+        let findings = detect_typed_nil_interface_return("main.go", content);
         assert!(findings.is_empty());
     }
 
