@@ -1,0 +1,12 @@
+# `language: Go` here only picks which fixture extension/filename
+# rule_pack_conformance-style testing uses — complexity.rs's cyclomatic
+# complexity check runs uniformly across Go/Java/Kotlin from this one
+# threshold value, it isn't gated by this field at runtime.
+id: cyclomatic-complexity
+language: Go
+category: correctness
+severity: warning
+kind: threshold
+metric: cyclomatic-complexity
+threshold: 10
+message: "High cyclomatic complexity"

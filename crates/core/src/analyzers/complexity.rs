@@ -51,6 +51,27 @@ const DEFAULT_MAX_RETURNS: usize = 4;
 /// noticeably higher than `DEFAULT_MAX_CYCLOMATIC_COMPLEXITY`.
 const DEFAULT_MAX_COGNITIVE_COMPLEXITY: usize = 15;
 
+/// The subset of this file's thresholds that are YAML-configurable via
+/// `kind: threshold` rules (see `crates/core/src/analyzers/threshold_rules.rs`)
+/// — `cyclomatic-complexity` and `too-many-returns` for this first pass,
+/// per the plan's own scoping (the other eight thresholds in this file
+/// stay hardcoded constants; several are entangled with more struct-shaped
+/// logic than a bare `metric > threshold` comparison and need their own
+/// look before flattening into this schema). `Default` reproduces today's
+/// hardcoded behavior exactly, so `detect_complexity_in_file` (used by
+/// dozens of existing unit tests) keeps working unchanged.
+#[derive(Debug, Clone, Copy)]
+pub struct ComplexityThresholds {
+    pub cyclomatic_complexity: usize,
+    pub too_many_returns: usize,
+}
+
+impl Default for ComplexityThresholds {
+    fn default() -> Self {
+        ComplexityThresholds { cyclomatic_complexity: DEFAULT_MAX_CYCLOMATIC_COMPLEXITY, too_many_returns: DEFAULT_MAX_RETURNS }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComplexityLanguage {
     Go,
@@ -217,10 +238,20 @@ fn make_finding(rule_id: &str, path: &str, start_line: u32, end_line: u32, title
 }
 
 /// Scans one file's content for long methods, long parameter lists, deep
+/// nesting, and (Java/Kotlin only) god classes, using the default
+/// thresholds. Thin wrapper over `detect_complexity_in_file_with_thresholds`
+/// kept so the dozens of existing unit tests in this file (and any other
+/// caller not concerned with YAML-configured thresholds) don't need to
+/// pass one explicitly.
+pub fn detect_complexity_in_file(path: &str, content: &str, language: ComplexityLanguage) -> Vec<AgentFinding> {
+    detect_complexity_in_file_with_thresholds(path, content, language, &ComplexityThresholds::default())
+}
+
+/// Scans one file's content for long methods, long parameter lists, deep
 /// nesting, and (Java/Kotlin only) god classes. A single brace-depth pass:
 /// opening a function or class pushes a tracked span; closing braces that
 /// return to a span's start depth close it and evaluate its thresholds.
-pub fn detect_complexity_in_file(path: &str, content: &str, language: ComplexityLanguage) -> Vec<AgentFinding> {
+pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, language: ComplexityLanguage, thresholds: &ComplexityThresholds) -> Vec<AgentFinding> {
     let mut findings = Vec::new();
     let mut depth: i32 = 0;
     let mut stack: Vec<OpenSpan> = Vec::new();
@@ -344,14 +375,17 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
                         let end_line = line_no as u32;
                         let line_count = end_line - span.start_line as u32;
                         let cyclomatic_complexity = branch_count + 1;
-                        if cyclomatic_complexity > DEFAULT_MAX_CYCLOMATIC_COMPLEXITY {
+                        if cyclomatic_complexity > thresholds.cyclomatic_complexity {
                             findings.push(make_finding(
                                 "cyclomatic-complexity",
                                 path,
                                 span.start_line as u32,
                                 end_line,
                                 format!("High cyclomatic complexity ({cyclomatic_complexity})"),
-                                format!("This function/method has an estimated cyclomatic complexity of {cyclomatic_complexity} (over the {DEFAULT_MAX_CYCLOMATIC_COMPLEXITY}-threshold) — {branch_count} branch point(s) plus the base path. Consider extracting some of its branches into named helper functions, or replacing a long if/else-if chain with a lookup table or polymorphism."),
+                                format!(
+                                    "This function/method has an estimated cyclomatic complexity of {cyclomatic_complexity} (over the {}-threshold) — {branch_count} branch point(s) plus the base path. Consider extracting some of its branches into named helper functions, or replacing a long if/else-if chain with a lookup table or polymorphism.",
+                                    thresholds.cyclomatic_complexity
+                                ),
                             ));
                         }
                         if cognitive_score > DEFAULT_MAX_COGNITIVE_COMPLEXITY {
@@ -364,14 +398,17 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
                                 format!("This function/method has an estimated cognitive complexity of {cognitive_score} (over the {DEFAULT_MAX_COGNITIVE_COMPLEXITY}-threshold, detekt's CognitiveComplexMethod) — unlike cyclomatic complexity, nested control structures compound this score instead of adding linearly, so it tracks how hard the function is to hold in your head better than branch count alone. Consider flattening nesting with early returns/guard clauses, or extracting inner blocks into named helpers."),
                             ));
                         }
-                        if return_count > DEFAULT_MAX_RETURNS {
+                        if return_count > thresholds.too_many_returns {
                             findings.push(make_finding(
                                 "too-many-returns",
                                 path,
                                 span.start_line as u32,
                                 end_line,
                                 format!("Too many return points ({return_count})"),
-                                format!("This function/method has {return_count} separate `return` statements (over the {DEFAULT_MAX_RETURNS}-threshold) — that many exit points makes it hard to reason about every path through the function. Consider consolidating logic or extracting some branches into their own functions."),
+                                format!(
+                                    "This function/method has {return_count} separate `return` statements (over the {}-threshold) — that many exit points makes it hard to reason about every path through the function. Consider consolidating logic or extracting some branches into their own functions.",
+                                    thresholds.too_many_returns
+                                ),
                             ));
                         }
                         if line_count as usize > DEFAULT_MAX_METHOD_LINES {
@@ -487,13 +524,14 @@ pub fn detect_complexity_in_file(path: &str, content: &str, language: Complexity
 }
 
 pub fn run_complexity_check(repo_root: &std::path::Path, changed_files: &[String]) -> Vec<AgentFinding> {
+    let thresholds = super::threshold_rules::resolve_complexity_thresholds();
     changed_files
         .iter()
         .filter_map(|path| {
             let language = language_for_file(path)?;
             let full_path = repo_root.join(path);
             let content = std::fs::read_to_string(&full_path).ok()?;
-            Some(detect_complexity_in_file(path, &content, language))
+            Some(detect_complexity_in_file_with_thresholds(path, &content, language, &thresholds))
         })
         .flatten()
         .collect()
@@ -527,6 +565,27 @@ mod tests {
         let content = "func doIt(x int) {\n\tif x > 0 {\n\t\tprintln(x)\n\t}\n}\n";
         let findings = detect_complexity_in_file("main.go", content, ComplexityLanguage::Go);
         assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("cyclomatic-complexity")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn a_yaml_configured_threshold_actually_changes_whether_the_rule_fires() {
+        // 5 branches, cyclomatic complexity 6 — over a threshold of 5,
+        // under a threshold of 20. Proves ComplexityThresholds is read,
+        // not just parsed and ignored.
+        let mut content = String::from("func doIt(x int) {\n");
+        for i in 0..5 {
+            content.push_str(&format!("\tif x == {i} {{\n\t\tprintln({i})\n\t}}\n"));
+        }
+        content.push_str("}\n");
+
+        let strict = ComplexityThresholds { cyclomatic_complexity: 5, too_many_returns: 4 };
+        let lenient = ComplexityThresholds { cyclomatic_complexity: 20, too_many_returns: 4 };
+
+        let strict_findings = detect_complexity_in_file_with_thresholds("main.go", &content, ComplexityLanguage::Go, &strict);
+        let lenient_findings = detect_complexity_in_file_with_thresholds("main.go", &content, ComplexityLanguage::Go, &lenient);
+
+        assert!(strict_findings.iter().any(|f| f.source.rule_id.as_deref() == Some("cyclomatic-complexity")), "got: {strict_findings:#?}");
+        assert!(!lenient_findings.iter().any(|f| f.source.rule_id.as_deref() == Some("cyclomatic-complexity")), "got: {lenient_findings:#?}");
     }
 
     #[test]
