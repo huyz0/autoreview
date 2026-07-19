@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
-use crate::model::{MethodDecl, NamedSlot, SymbolIndex};
+use crate::model::{MethodDecl, NamedSlot, SymbolIndex, TypeDecl};
 
 /// One message-chain finding: a call chain at or above the reporting
 /// threshold, anchored at the method it was found in.
@@ -199,10 +199,14 @@ pub struct RefusedBequestFinding {
 /// type wouldn't be a confirmed override, just a name coincidence, so this
 /// deliberately under-reports rather than guess at library inheritance.
 pub fn find_refused_bequest(index: &SymbolIndex) -> Vec<RefusedBequestFinding> {
+    // A per-subclass `index.find_type` linear scan makes this O(types²);
+    // building one name->type lookup up front makes the whole pass O(types).
+    let types_by_name: std::collections::HashMap<&str, &TypeDecl> = index.types.iter().map(|t| (t.name.as_str(), t)).collect();
+
     let mut findings = Vec::new();
     for sub in &index.types {
         let Some(super_name) = &sub.superclass else { continue };
-        let Some(parent) = index.find_type(super_name) else { continue };
+        let Some(parent) = types_by_name.get(super_name.as_str()).copied() else { continue };
         for method in &sub.methods {
             if !method.is_trivial_body {
                 continue;

@@ -321,9 +321,17 @@ impl HistoryStore {
     /// `threshold`. Used by the Stage 4 filter to test both the
     /// `fpBlockThreshold` and `tpOverrideThreshold` conditions with the same
     /// query, just a different `verdict`/`threshold` pair.
+    /// Only the most recent `MAX_SCANNED_EMBEDDINGS` rows for `verdict` are
+    /// compared — this runs a full cosine-similarity pass per call, so
+    /// without a cap it scales linearly with total historical feedback for
+    /// that verdict, unbounded. Recency is the right bound here (matches
+    /// this store's general "recent signal matters more" posture), not an
+    /// arbitrary cutoff.
+    const MAX_SCANNED_EMBEDDINGS: u32 = 2_000;
+
     pub fn count_similar_embeddings(&self, embedding: &[f32], verdict: &str, threshold: f64) -> anyhow::Result<u32> {
-        let mut stmt = self.conn.prepare("SELECT fingerprint, embedding FROM embeddings WHERE verdict = ?1")?;
-        let rows = stmt.query_map([verdict], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
+        let mut stmt = self.conn.prepare("SELECT fingerprint, embedding FROM embeddings WHERE verdict = ?1 ORDER BY id DESC LIMIT ?2")?;
+        let rows = stmt.query_map(rusqlite::params![verdict, Self::MAX_SCANNED_EMBEDDINGS], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
         let mut matched: std::collections::HashSet<String> = std::collections::HashSet::new();
         for row in rows {
             let (fingerprint, bytes) = row?;
