@@ -114,14 +114,25 @@ fn mentions(stmt: &Stmt, var: &str) -> bool {
     }
 }
 
+/// A byte can only continue a Go identifier if it's ASCII alnum/`_` (Go
+/// does allow non-ASCII identifier runes, but treating any non-ASCII byte
+/// as a boundary is the conservative, always-safe direction here — the
+/// bug this fixes was casting raw UTF-8 bytes to `char` via `as char`,
+/// which mangles multi-byte sequences into unrelated Latin-1 codepoints
+/// (e.g. a continuation byte landing on an alphabetic accented letter),
+/// silently breaking the boundary check near any non-ASCII text.
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
 fn contains_whole_word(haystack: &str, word: &str) -> bool {
     let bytes = haystack.as_bytes();
     let mut start = 0;
     while let Some(pos) = haystack[start..].find(word) {
         let abs = start + pos;
-        let before_ok = abs == 0 || !(bytes[abs - 1] as char).is_alphanumeric() && bytes[abs - 1] != b'_';
+        let before_ok = abs == 0 || !is_ident_byte(bytes[abs - 1]);
         let after = abs + word.len();
-        let after_ok = after >= bytes.len() || (!(bytes[after] as char).is_alphanumeric() && bytes[after] != b'_');
+        let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
         if before_ok && after_ok {
             return true;
         }

@@ -38,7 +38,7 @@ fn resolve_location(repo_root: &Path, location: &str) -> String {
     if location.contains('/') || location.contains(':') {
         return location.to_string();
     }
-    run_git(repo_root, &["remote", "get-url", location]).unwrap_or_else(|_| location.to_string())
+    run_git(repo_root, &["remote", "get-url", "--", location]).unwrap_or_else(|_| location.to_string())
 }
 
 /// Ensures a local git working copy of the sync branch exists at
@@ -51,7 +51,10 @@ fn ensure_sync_repo(repo_root: &Path, sync_repo: &Path, location: &str, branch: 
         run_git(sync_repo, &["config", "user.email", "autoreview-sync@localhost"])?;
         run_git(sync_repo, &["config", "user.name", "autoreview-sync"])?;
         let url = resolve_location(repo_root, location);
-        run_git(sync_repo, &["remote", "add", "origin", &url])?;
+        // `--` stops git from treating a `location` starting with `-`
+        // (e.g. from a repo-local, potentially attacker-controlled
+        // `.autoreview/config.yaml`) as a flag/argument-injection vector.
+        run_git(sync_repo, &["remote", "add", "origin", "--", &url])?;
     }
 
     let fetched = run_git(sync_repo, &["fetch", "origin", branch]).is_ok();

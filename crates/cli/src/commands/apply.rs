@@ -92,9 +92,21 @@ pub fn apply_patch_to_repo(repo_root: &Path, patch: &str) -> anyhow::Result<Appl
         return Ok(ApplyOutcome::ApplyFailedAfterCheckPassed { stderr: String::from_utf8_lossy(&apply.stderr).trim().to_string() });
     }
 
+    let Ok(canonical_repo_root) = repo_root.canonicalize() else {
+        cleanup();
+        anyhow::bail!("could not canonicalize repo root {}", repo_root.display());
+    };
     for relative_path in patched_file_paths(patch) {
         let full_path = repo_root.join(&relative_path);
-        let Ok(content) = std::fs::read_to_string(&full_path) else { continue };
+        // `relative_path` comes straight from the patch's `+++ b/<path>`
+        // header — a crafted/stale patch could point outside the repo, so
+        // this re-parse check must not read whatever it resolves to
+        // without confirming it's still inside `repo_root`.
+        let Ok(canonical) = full_path.canonicalize() else { continue };
+        if !canonical.starts_with(&canonical_repo_root) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&canonical) else { continue };
         if parses_cleanly(&full_path, &content) == Some(false) {
             let _ = Command::new("git").args(["apply", "-R"]).arg(&patch_path).current_dir(repo_root).status();
             cleanup();

@@ -33,9 +33,16 @@ fn line_of(node: Node) -> u32 {
 }
 
 /// Strips a leading `*` so a pointer-receiver's type text (`*Widget`)
-/// matches the struct name (`Widget`) it declares fields for.
+/// matches the struct name (`Widget`) it declares fields for, and a
+/// trailing `[...]` type-parameter list so a Go 1.18+ generic receiver
+/// (`*Widget[T]`) matches too — otherwise methods on generic types are
+/// silently dropped from the type's method set.
 fn strip_pointer(type_text: &str) -> &str {
-    type_text.trim_start_matches('*')
+    let without_pointer = type_text.trim_start_matches('*');
+    match without_pointer.find('[') {
+        Some(idx) => &without_pointer[..idx],
+        None => without_pointer,
+    }
 }
 
 pub fn extract_types(tree: &tree_sitter::Tree, source: &[u8], file: &Path) -> Vec<TypeDecl> {
@@ -298,6 +305,15 @@ mod tests {
         ]);
         assert_eq!(widget.methods.len(), 1);
         assert_eq!(widget.methods[0].own_field_accesses, vec![AccessRef { field_name: "Quantity".into(), line: 9 }]);
+    }
+
+    #[test]
+    fn a_generic_pointer_receiver_method_is_attached_to_its_type() {
+        let types = extract("package main\n\ntype Box[T any] struct {\n\tValue T\n}\n\nfunc (b *Box[T]) Get() T {\n\treturn b.Value\n}\n");
+        assert_eq!(types.len(), 1);
+        let boxed = &types[0];
+        assert_eq!(boxed.name, "Box");
+        assert_eq!(boxed.methods.len(), 1, "the generic receiver's method must attach to Box, not go unmatched: {boxed:#?}");
     }
 
     #[test]

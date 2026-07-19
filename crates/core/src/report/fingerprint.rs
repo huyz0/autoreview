@@ -3,21 +3,42 @@ use std::collections::HashMap;
 
 use autoreview_schema::{AgentFinding, Finding, FindingFingerprints, FindingSourceKind, FingerprintedFinding};
 
+/// Finds the byte offset of a trailing `//` or `#` line-comment start,
+/// ignoring any `//`/`#` that appears inside a `"..."` or `'...'` string
+/// literal — a bare `line.find("//")` would truncate
+/// `res.redirect("http://a.com")` at the string's own `//`, dropping real
+/// code content (and colliding two different URLs into one fingerprint).
+/// Deliberately simple: no escape-sequence handling, just quote-state
+/// tracking, since this only needs to avoid the common false-positive case.
+fn trailing_comment_start(line: &str) -> Option<usize> {
+    let mut in_string: Option<char> = None;
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    for (i, &(byte_idx, c)) in chars.iter().enumerate() {
+        match in_string {
+            Some(quote) => {
+                if c == quote {
+                    in_string = None;
+                }
+            }
+            None => match c {
+                '"' | '\'' => in_string = Some(c),
+                '/' if chars.get(i + 1).is_some_and(|&(_, next)| next == '/') => return Some(byte_idx),
+                '#' => return Some(byte_idx),
+                _ => {}
+            },
+        }
+    }
+    None
+}
+
 /// Strip trailing line comments and collapse whitespace so line-number drift
 /// and incidental reformatting don't change the fingerprint, but the code itself does.
 pub fn normalize_snippet(snippet: &str) -> String {
     let stripped: Vec<String> = snippet
         .lines()
-        .map(|line| {
-            let no_line_comment = match line.find("//") {
-                Some(idx) => &line[..idx],
-                None => line,
-            };
-            let no_hash_comment = match no_line_comment.find('#') {
-                Some(idx) => &no_line_comment[..idx],
-                None => no_line_comment,
-            };
-            no_hash_comment.trim().to_string()
+        .map(|line| match trailing_comment_start(line) {
+            Some(idx) => line[..idx].trim().to_string(),
+            None => line.trim().to_string(),
         })
         .filter(|line| !line.is_empty())
         .collect();
@@ -167,6 +188,21 @@ mod tests {
     #[test]
     fn normalize_snippet_does_not_collapse_different_code() {
         assert_ne!(normalize_snippet("if (x) { doThing(); }"), normalize_snippet("if (y) { doThing(); }"));
+    }
+
+    #[test]
+    fn normalize_snippet_does_not_treat_a_url_slash_as_a_comment() {
+        let a = normalize_snippet(r#"res.redirect("http://a.com");"#);
+        let b = normalize_snippet(r#"res.redirect("http://b.com");"#);
+        assert_ne!(a, b, "different URLs must not collapse to the same fingerprint");
+        assert!(a.contains("http://a.com"));
+    }
+
+    #[test]
+    fn normalize_snippet_still_strips_a_real_trailing_comment() {
+        let with_comment = normalize_snippet("doThing(); // a note");
+        let without = normalize_snippet("doThing();");
+        assert_eq!(with_comment, without);
     }
 
     #[test]

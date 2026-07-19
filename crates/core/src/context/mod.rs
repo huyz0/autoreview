@@ -41,12 +41,22 @@ fn default_providers() -> Vec<ContextProviderConfig> {
 
 fn collect_docs(repo_root: &Path, glob_patterns: &[String]) -> Vec<ContextItem> {
     let mut items = Vec::new();
+    let Ok(canonical_repo_root) = repo_root.canonicalize() else { return items };
     for pattern in glob_patterns {
         // Plain filenames (no glob metacharacters) are checked directly so a
         // bare "CLAUDE.md" doesn't need glob-walking the whole tree.
         if !pattern.contains(['*', '?', '[']) {
             let path = repo_root.join(pattern);
-            if let Ok(contents) = std::fs::read_to_string(&path) {
+            // `pattern` comes from repo-local config (`.autoreview/config.yaml`),
+            // which — in a code-review tool that processes untrusted PRs — can
+            // itself be attacker-controlled diff content. Without this check a
+            // `../../etc/passwd`-style path would read files outside the repo
+            // straight into an LLM prompt.
+            let Ok(canonical) = path.canonicalize() else { continue };
+            if !canonical.starts_with(&canonical_repo_root) {
+                continue;
+            }
+            if let Ok(contents) = std::fs::read_to_string(&canonical) {
                 items.push(ContextItem { label: pattern.clone(), content: truncate(&contents, MAX_ITEM_CHARS) });
             }
             continue;

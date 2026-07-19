@@ -118,6 +118,9 @@ fn count_matching_files(rule_path: &Path, target_files: &[PathBuf], cwd: &Path) 
     let relative: Vec<String> = existing.iter().filter_map(|p| p.strip_prefix(cwd).ok().map(|rel| rel.to_string_lossy().to_string())).collect();
 
     let output = Command::new("ast-grep").arg("scan").arg("--config").arg(&sgconfig_path).arg("--json").args(&relative).current_dir(cwd).output()?;
+    if !output.status.success() {
+        anyhow::bail!("ast-grep scan failed ({}): {}", output.status, String::from_utf8_lossy(&output.stderr).trim());
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
     let matches: Vec<serde_json::Value> = serde_json::from_str(&stdout).map_err(|err| anyhow::anyhow!("ast-grep produced unparsable output: {err}. stderr: {}", String::from_utf8_lossy(&output.stderr)))?;
 

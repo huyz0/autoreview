@@ -165,10 +165,15 @@ impl AgentBackend for PiBackend {
             cmd.arg("--provider").arg(provider);
         }
         // pi has no CLI flag for a per-invocation turn cap (verified against
-        // `pi --help`) — `req.max_turns` is silently unenforceable on this
-        // backend, unlike Claude Code's `--max-turns`. A real, intentional
-        // gap: budget accounting still records whatever pi actually spends.
-        let _ = req.max_turns;
+        // `pi --help`) — `req.max_turns` is unenforceable on this backend,
+        // unlike Claude Code's `--max-turns`. A real, intentional gap:
+        // budget accounting still records whatever pi actually spends. Warn
+        // once per process rather than staying silent, so a configured
+        // turn budget doesn't look enforced when it isn't.
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            eprintln!("warning: pi backend has no per-invocation max-turns flag — req.max_turns ({}) is not enforced", req.max_turns);
+        });
 
         cmd.arg(&req.prompt).current_dir(&req.cwd);
         let output = cmd.output()?;

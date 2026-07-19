@@ -65,7 +65,7 @@ impl NamePattern {
 
     fn matches(&self, call_name: &str) -> bool {
         match self {
-            NamePattern::Suffix(name) => call_name == name || call_name.ends_with(&format!(".{name}")),
+            NamePattern::Suffix(name) => call_name == name || call_name.strip_suffix(name.as_str()).is_some_and(|prefix| prefix.ends_with('.')),
             NamePattern::Regex(re) => re.is_match(call_name),
         }
     }
@@ -175,7 +175,11 @@ pub fn check(spec: &TaintSpec, cfg: &Cfg<Stmt>) -> Vec<TaintHit> {
         let mut facts = preds.iter().fold(TaintFacts::bottom(), |acc, &p| acc.join(&out_facts[p]));
         for stmt in &node.stmts {
             if let Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, .. } = stmt {
-                if let Some(sink) = spec.sinks.iter().find(|s| s.call.matches(name)) {
+                // Every matching sink is checked, not just the first — a
+                // rule authoring two sink entries for the same call name
+                // (e.g. one general, one position-restricted) would
+                // otherwise silently only enforce the first one.
+                for sink in spec.sinks.iter().filter(|s| s.call.matches(name)) {
                     let candidates: Vec<(usize, &String)> = args.iter().enumerate().collect();
                     let dangerous = candidates.into_iter().filter(|(idx, _)| sink.tainted_arg_positions.as_ref().is_none_or(|positions| positions.contains(idx)));
                     for (_, arg) in dangerous {

@@ -88,23 +88,23 @@ fn detect_commented_out_code(path: &str, content: &str, language: PracticesLangu
             run_len += 1;
         } else {
             if run_len >= 3 {
-                let start = run_start.unwrap();
-                findings.push(make_finding(
-                    "commented-out-code",
-                    path,
-                    (start + 1) as u32,
-                    idx as u32,
-                    format!("Commented-out code block ({run_len} lines)"),
-                    "A run of consecutive commented-out statements was left in the file — delete it (version control already has the history) or add a comment explaining why it's kept.".to_string(),
-                    lines[start..idx].join("\n"),
-                ));
+                if let Some(start) = run_start {
+                    findings.push(make_finding(
+                        "commented-out-code",
+                        path,
+                        (start + 1) as u32,
+                        idx as u32,
+                        format!("Commented-out code block ({run_len} lines)"),
+                        "A run of consecutive commented-out statements was left in the file — delete it (version control already has the history) or add a comment explaining why it's kept.".to_string(),
+                        lines[start..idx].join("\n"),
+                    ));
+                }
             }
             run_start = None;
             run_len = 0;
         }
     }
-    if run_len >= 3 {
-        let start = run_start.unwrap();
+    if let Some(start) = run_start.filter(|_| run_len >= 3) {
         findings.push(make_finding(
             "commented-out-code",
             path,
