@@ -1,0 +1,8 @@
+id: large-switch
+language: Java
+category: design
+severity: warning
+kind: threshold
+metric: large-switch
+threshold: 8
+message: "Large switch statement"

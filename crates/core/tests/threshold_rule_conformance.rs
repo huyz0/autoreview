@@ -55,6 +55,7 @@ fn walk(dir: &Path, out: &mut Vec<RuleMeta>) {
 fn extension_for_language(language: &str) -> &'static str {
     match language {
         "Go" => "go",
+        "Java" => "java",
         other => panic!("threshold_rule_conformance doesn't know the fixture extension for language {other:?} — add it to extension_for_language"),
     }
 }
@@ -62,6 +63,7 @@ fn extension_for_language(language: &str) -> &'static str {
 fn scan_filename_for_language(language: &str) -> &'static str {
     match language {
         "Go" => "main.go",
+        "Java" => "Main.java",
         other => panic!("threshold_rule_conformance doesn't know the scan filename for language {other:?} — add it to scan_filename_for_language"),
     }
 }

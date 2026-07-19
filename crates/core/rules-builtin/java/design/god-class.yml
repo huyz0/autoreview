@@ -1,0 +1,8 @@
+id: god-class
+language: Java
+category: design
+severity: warning
+kind: threshold
+metric: god-class
+threshold: 20
+message: "Large class (god class)"

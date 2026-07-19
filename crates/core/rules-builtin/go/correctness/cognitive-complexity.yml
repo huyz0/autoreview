@@ -1,0 +1,12 @@
+# `language: Go` here only picks which fixture extension/filename
+# rule_pack_conformance-style testing uses — complexity.rs's cognitive
+# complexity check runs uniformly across Go/Java/Kotlin from this one
+# threshold value, it isn't gated by this field at runtime.
+id: cognitive-complexity
+language: Go
+category: correctness
+severity: warning
+kind: threshold
+metric: cognitive-complexity
+threshold: 15
+message: "High cognitive complexity"

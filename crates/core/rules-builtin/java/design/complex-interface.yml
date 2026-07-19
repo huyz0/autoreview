@@ -1,0 +1,8 @@
+id: complex-interface
+language: Java
+category: design
+severity: warning
+kind: threshold
+metric: complex-interface
+threshold: 10
+message: "Complex interface"

@@ -1,0 +1,12 @@
+# `language: Go` here only picks which fixture extension/filename
+# rule_pack_conformance-style testing uses — complexity.rs's
+# long-parameter-list check runs uniformly across Go/Java/Kotlin from this
+# one threshold value, it isn't gated by this field at runtime.
+id: long-parameter-list
+language: Go
+category: design
+severity: warning
+kind: threshold
+metric: long-parameter-list
+threshold: 5
+message: "Long parameter list"

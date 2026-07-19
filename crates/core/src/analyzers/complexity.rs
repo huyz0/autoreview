@@ -50,25 +50,44 @@ const DEFAULT_MAX_RETURNS: usize = 4;
 /// faster than cyclomatic complexity for nested code, so its threshold is
 /// noticeably higher than `DEFAULT_MAX_CYCLOMATIC_COMPLEXITY`.
 const DEFAULT_MAX_COGNITIVE_COMPLEXITY: usize = 15;
+/// detekt's ComplexInterface default.
+const MAX_INTERFACE_MEMBERS: usize = 10;
 
 /// The subset of this file's thresholds that are YAML-configurable via
 /// `kind: threshold` rules (see `crates/core/src/analyzers/threshold_rules.rs`)
-/// — `cyclomatic-complexity` and `too-many-returns` for this first pass,
-/// per the plan's own scoping (the other eight thresholds in this file
-/// stay hardcoded constants; several are entangled with more struct-shaped
-/// logic than a bare `metric > threshold` comparison and need their own
-/// look before flattening into this schema). `Default` reproduces today's
-/// hardcoded behavior exactly, so `detect_complexity_in_file` (used by
-/// dozens of existing unit tests) keeps working unchanged.
+/// — every bare `metric > threshold` comparison in this file. `data-class`
+/// and `utility-class-public-constructor` stay hardcoded Rust constants:
+/// both are entangled with more struct-shaped logic (trivial-accessor
+/// ratios, static/constructor detection) than a single numeric limit, and
+/// need their own look before flattening into this schema. `Default`
+/// reproduces today's hardcoded behavior exactly, so `detect_complexity_in_file`
+/// (used by dozens of existing unit tests) keeps working unchanged.
 #[derive(Debug, Clone, Copy)]
 pub struct ComplexityThresholds {
     pub cyclomatic_complexity: usize,
     pub too_many_returns: usize,
+    pub cognitive_complexity: usize,
+    pub long_method: usize,
+    pub long_parameter_list: usize,
+    pub deep_nesting: usize,
+    pub god_class: usize,
+    pub large_switch: usize,
+    pub complex_interface: usize,
 }
 
 impl Default for ComplexityThresholds {
     fn default() -> Self {
-        ComplexityThresholds { cyclomatic_complexity: DEFAULT_MAX_CYCLOMATIC_COMPLEXITY, too_many_returns: DEFAULT_MAX_RETURNS }
+        ComplexityThresholds {
+            cyclomatic_complexity: DEFAULT_MAX_CYCLOMATIC_COMPLEXITY,
+            too_many_returns: DEFAULT_MAX_RETURNS,
+            cognitive_complexity: DEFAULT_MAX_COGNITIVE_COMPLEXITY,
+            long_method: DEFAULT_MAX_METHOD_LINES,
+            long_parameter_list: DEFAULT_MAX_PARAMS,
+            deep_nesting: DEFAULT_MAX_NESTING,
+            god_class: DEFAULT_MAX_CLASS_MEMBERS,
+            large_switch: DEFAULT_MAX_SWITCH_CASES,
+            complex_interface: MAX_INTERFACE_MEMBERS,
+        }
     }
 }
 
@@ -388,14 +407,14 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
                                 ),
                             ));
                         }
-                        if cognitive_score > DEFAULT_MAX_COGNITIVE_COMPLEXITY {
+                        if cognitive_score > thresholds.cognitive_complexity {
                             findings.push(make_finding(
                                 "cognitive-complexity",
                                 path,
                                 span.start_line as u32,
                                 end_line,
                                 format!("High cognitive complexity ({cognitive_score})"),
-                                format!("This function/method has an estimated cognitive complexity of {cognitive_score} (over the {DEFAULT_MAX_COGNITIVE_COMPLEXITY}-threshold, detekt's CognitiveComplexMethod) — unlike cyclomatic complexity, nested control structures compound this score instead of adding linearly, so it tracks how hard the function is to hold in your head better than branch count alone. Consider flattening nesting with early returns/guard clauses, or extracting inner blocks into named helpers."),
+                                format!("This function/method has an estimated cognitive complexity of {cognitive_score} (over the {}-threshold, detekt's CognitiveComplexMethod) — unlike cyclomatic complexity, nested control structures compound this score instead of adding linearly, so it tracks how hard the function is to hold in your head better than branch count alone. Consider flattening nesting with early returns/guard clauses, or extracting inner blocks into named helpers.", thresholds.cognitive_complexity),
                             ));
                         }
                         if return_count > thresholds.too_many_returns {
@@ -411,34 +430,34 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
                                 ),
                             ));
                         }
-                        if line_count as usize > DEFAULT_MAX_METHOD_LINES {
+                        if line_count as usize > thresholds.long_method {
                             findings.push(make_finding(
                                 "long-method",
                                 path,
                                 span.start_line as u32,
                                 end_line,
                                 format!("Long method ({line_count} lines)"),
-                                format!("This function/method body is {line_count} lines long (over the {DEFAULT_MAX_METHOD_LINES}-line threshold) — consider extracting smaller, named helper functions for its distinct steps."),
+                                format!("This function/method body is {line_count} lines long (over the {}-line threshold) — consider extracting smaller, named helper functions for its distinct steps.", thresholds.long_method),
                             ));
                         }
-                        if param_count > DEFAULT_MAX_PARAMS {
+                        if param_count > thresholds.long_parameter_list {
                             findings.push(make_finding(
                                 "long-parameter-list",
                                 path,
                                 span.start_line as u32,
                                 span.start_line as u32,
                                 format!("Long parameter list ({param_count} parameters)"),
-                                format!("This function/method takes {param_count} parameters (over the {DEFAULT_MAX_PARAMS}-parameter threshold) — consider grouping related parameters into a struct/options object."),
+                                format!("This function/method takes {param_count} parameters (over the {}-parameter threshold) — consider grouping related parameters into a struct/options object.", thresholds.long_parameter_list),
                             ));
                         }
-                        if max_nesting > DEFAULT_MAX_NESTING {
+                        if max_nesting > thresholds.deep_nesting {
                             findings.push(make_finding(
                                 "deep-nesting",
                                 path,
                                 span.start_line as u32,
                                 end_line,
                                 format!("Deep nesting ({max_nesting} levels)"),
-                                format!("This function/method nests control-flow blocks {max_nesting} levels deep (over the {DEFAULT_MAX_NESTING}-level threshold) — consider early returns/guard clauses or extracting the innermost blocks into their own functions."),
+                                format!("This function/method nests control-flow blocks {max_nesting} levels deep (over the {}-level threshold) — consider early returns/guard clauses or extracting the innermost blocks into their own functions.", thresholds.deep_nesting),
                             ));
                         }
                         // Trivial-accessor detection for the enclosing
@@ -458,14 +477,14 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
                         }
                     }
                     SpanKind::Class { member_count, trivial_accessor_count, is_java, saw_any_method, all_methods_static, has_private_constructor, .. } => {
-                        if member_count > DEFAULT_MAX_CLASS_MEMBERS {
+                        if member_count > thresholds.god_class {
                             findings.push(make_finding(
                                 "god-class",
                                 path,
                                 span.start_line as u32,
                                 line_no as u32,
                                 format!("Large class ({member_count} methods)"),
-                                format!("This class defines {member_count} methods (over the {DEFAULT_MAX_CLASS_MEMBERS}-method threshold) — a class this large is often doing more than one job; consider splitting it by responsibility."),
+                                format!("This class defines {member_count} methods (over the {}-method threshold) — a class this large is often doing more than one job; consider splitting it by responsibility.", thresholds.god_class),
                             ));
                         }
                         if is_java && member_count >= MIN_DATA_CLASS_ACCESSORS && trivial_accessor_count == member_count {
@@ -490,27 +509,26 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
                         }
                     }
                     SpanKind::Interface { member_count } => {
-                        const MAX_INTERFACE_MEMBERS: usize = 10;
-                        if member_count > MAX_INTERFACE_MEMBERS {
+                        if member_count > thresholds.complex_interface {
                             findings.push(make_finding(
                                 "complex-interface",
                                 path,
                                 span.start_line as u32,
                                 line_no as u32,
                                 format!("Complex interface ({member_count} members)"),
-                                format!("This interface declares {member_count} members (over the {MAX_INTERFACE_MEMBERS}-member threshold, detekt's ComplexInterface) — an interface this large is likely handling more than one responsibility. Consider splitting it into smaller, more focused interfaces."),
+                                format!("This interface declares {member_count} members (over the {}-member threshold, detekt's ComplexInterface) — an interface this large is likely handling more than one responsibility. Consider splitting it into smaller, more focused interfaces.", thresholds.complex_interface),
                             ));
                         }
                     }
                     SpanKind::Switch { case_count } => {
-                        if case_count > DEFAULT_MAX_SWITCH_CASES {
+                        if case_count > thresholds.large_switch {
                             findings.push(make_finding(
                                 "large-switch",
                                 path,
                                 span.start_line as u32,
                                 line_no as u32,
                                 format!("Large switch statement ({case_count} cases)"),
-                                format!("This switch statement has {case_count} cases (over the {DEFAULT_MAX_SWITCH_CASES}-case threshold, Fowler's Switch Statements smell) — if the cases dispatch on an object's type/kind, consider polymorphism (a method per type) or a lookup table instead."),
+                                format!("This switch statement has {case_count} cases (over the {}-case threshold, Fowler's Switch Statements smell) — if the cases dispatch on an object's type/kind, consider polymorphism (a method per type) or a lookup table instead.", thresholds.large_switch),
                             ));
                         }
                     }
@@ -578,8 +596,8 @@ mod tests {
         }
         content.push_str("}\n");
 
-        let strict = ComplexityThresholds { cyclomatic_complexity: 5, too_many_returns: 4 };
-        let lenient = ComplexityThresholds { cyclomatic_complexity: 20, too_many_returns: 4 };
+        let strict = ComplexityThresholds { cyclomatic_complexity: 5, ..ComplexityThresholds::default() };
+        let lenient = ComplexityThresholds { cyclomatic_complexity: 20, ..ComplexityThresholds::default() };
 
         let strict_findings = detect_complexity_in_file_with_thresholds("main.go", &content, ComplexityLanguage::Go, &strict);
         let lenient_findings = detect_complexity_in_file_with_thresholds("main.go", &content, ComplexityLanguage::Go, &lenient);

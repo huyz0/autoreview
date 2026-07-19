@@ -7,10 +7,11 @@
 //! limits from YAML into a `complexity::ComplexityThresholds` the
 //! existing check functions read instead of a hardcoded Rust constant.
 //!
-//! Scope for this first pass: only `cyclomatic-complexity` and
-//! `too-many-returns` are YAML-configurable (see
-//! `complexity::ComplexityThresholds`'s own docs for why the other eight
-//! thresholds in that file stay hardcoded for now).
+//! Every bare `metric > threshold` comparison in `complexity.rs` is
+//! YAML-configurable this way (see `complexity::ComplexityThresholds`'s own
+//! docs for the two — `data-class`/`utility-class-public-constructor` —
+//! that stay hardcoded because they're entangled with more than a single
+//! numeric limit).
 
 use serde::Deserialize;
 
@@ -78,6 +79,13 @@ pub fn resolve_complexity_thresholds() -> ComplexityThresholds {
         match rule.metric.as_str() {
             "cyclomatic-complexity" => thresholds.cyclomatic_complexity = rule.threshold,
             "too-many-returns" => thresholds.too_many_returns = rule.threshold,
+            "cognitive-complexity" => thresholds.cognitive_complexity = rule.threshold,
+            "long-method" => thresholds.long_method = rule.threshold,
+            "long-parameter-list" => thresholds.long_parameter_list = rule.threshold,
+            "deep-nesting" => thresholds.deep_nesting = rule.threshold,
+            "god-class" => thresholds.god_class = rule.threshold,
+            "large-switch" => thresholds.large_switch = rule.threshold,
+            "complex-interface" => thresholds.complex_interface = rule.threshold,
             _ => {}
         }
     }
@@ -89,11 +97,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn loads_the_two_builtin_threshold_rules() {
+    fn loads_the_builtin_threshold_rules() {
         let rules = load_threshold_rules();
         let ids: Vec<&str> = rules.iter().map(|r| r.id.as_str()).collect();
-        assert!(ids.contains(&"cyclomatic-complexity"), "got: {ids:?}");
-        assert!(ids.contains(&"too-many-returns"), "got: {ids:?}");
+        for expected in ["cyclomatic-complexity", "too-many-returns", "cognitive-complexity", "long-method", "long-parameter-list", "deep-nesting", "god-class", "large-switch", "complex-interface"] {
+            assert!(ids.contains(&expected), "got: {ids:?}");
+        }
     }
 
     #[test]
