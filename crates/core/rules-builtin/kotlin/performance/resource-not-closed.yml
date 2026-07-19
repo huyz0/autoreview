@@ -10,4 +10,4 @@ rule:
     selector: property_declaration
 constraints:
   CTOR:
-    regex: (InputStream|OutputStream|Reader|Writer|Socket|Connection|Statement|ResultSet|Channel)$
+    regex: (InputStream|OutputStream|Reader|Writer|Socket|Connection|Statement|ResultSet|Channel|Scanner|Cursor|ZipFile|JarFile|RandomAccessFile|DirectoryStream|Closeable|AutoCloseable|CloseableHttpClient|KafkaProducer|KafkaConsumer|FileLock)$
