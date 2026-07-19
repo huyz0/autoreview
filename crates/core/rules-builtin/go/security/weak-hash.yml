@@ -3,6 +3,12 @@ language: Go
 category: security
 severity: warning
 message: MD5 and SHA-1 are broken for security purposes (collision attacks) — use SHA-256 or better for anything security-sensitive (signatures, integrity checks, password-adjacent hashing).
+metadata:
+  cwe: ["CWE-327"]
+  owasp: ["A02:2021"]
+  confidence: HIGH
+  references:
+    - "https://cwe.mitre.org/data/definitions/327.html"
 rule:
   any:
     - pattern: md5.New()

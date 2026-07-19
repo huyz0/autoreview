@@ -16,17 +16,50 @@ fn default_category() -> String {
     "correctness".to_string()
 }
 
-/// Just enough of the rule YAML shape to recover `category` — a field
+fn default_kind() -> String {
+    "pattern".to_string()
+}
+
+/// Semgrep-style structured metadata — entirely optional, self-documenting
+/// rather than execution-affecting. Flows verbatim into
+/// `AgentFinding.meta` so a rule can carry a CWE/OWASP mapping or a
+/// confidence/likelihood/impact self-rating (the same fields Semgrep's own
+/// registry rules use) without needing a schema change every time a new
+/// piece of metadata turns out to be useful.
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+pub struct RuleMetadataBlock {
+    #[serde(default)]
+    pub cwe: Vec<String>,
+    #[serde(default)]
+    pub owasp: Vec<String>,
+    #[serde(default)]
+    pub references: Vec<String>,
+    #[serde(default)]
+    pub confidence: Option<String>,
+    #[serde(default)]
+    pub likelihood: Option<String>,
+    #[serde(default)]
+    pub impact: Option<String>,
+    #[serde(default)]
+    pub subcategory: Vec<String>,
+}
+
+/// Just enough of the rule YAML shape to recover the fields common to every
+/// rule *kind* (`category`, `semantic`, `kind`, `metadata`) — fields
 /// `ast-grep` itself doesn't understand (verified empirically: it neither
-/// errors on the unrecognized top-level key nor echoes a `metadata` block
-/// back in `--json` scan output, so category can't flow through ast-grep's
-/// own pipeline at all). Parsed directly from the embedded rule files
-/// ourselves, independent of the ast-grep invocation.
+/// errors on unrecognized top-level keys nor echoes them back in `--json`
+/// scan output, so none of this can flow through ast-grep's own pipeline).
+/// Parsed directly from the embedded rule files ourselves, independent of
+/// the ast-grep invocation — and, since `kind` now discriminates which
+/// *backend* actually executes a rule (`pattern` → this file's `ast-grep`
+/// subprocess, `taint` → `crates/dataflow`'s taint engine, `threshold` →
+/// `complexity.rs`), this same struct/parse is the shared foundation every
+/// backend's own loader builds on, not a `pattern`-specific one.
 #[derive(Debug, Deserialize)]
-struct RuleCategoryMeta {
-    id: String,
+pub struct RuleMeta {
+    pub id: String,
     #[serde(default = "default_category")]
-    category: String,
+    pub category: String,
     /// Marks a rule as a "semantic rule" candidate: syntactically precise
     /// but semantically approximate (no type resolution, no dataflow) —
     /// higher false-positive risk than a plain deterministic rule, so its
@@ -37,7 +70,21 @@ struct RuleCategoryMeta {
     /// then only that finding (not the whole codebase) is handed to the
     /// verifier to confirm or refute.
     #[serde(default)]
-    semantic: bool,
+    pub semantic: bool,
+    /// Which backend executes this rule. `"pattern"` (the default, and
+    /// every rule written before this field existed) means the `rule:`/
+    /// `constraints:` block is native ast-grep syntax handed to the CLI
+    /// subprocess unchanged. Any other value means this file is invisible
+    /// to that subprocess (see `extract_pattern_rules`) and its body is
+    /// interpreted by that kind's own backend instead.
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub metadata: Option<RuleMetadataBlock>,
+}
+
+fn parse_rule_meta(contents: &str) -> Option<RuleMeta> {
+    serde_yaml::from_str(contents).ok()
 }
 
 /// Builds a `ruleId -> category` lookup by parsing every embedded rule file
@@ -47,51 +94,64 @@ struct RuleCategoryMeta {
 /// default category via `unwrap_or`.
 fn rule_categories() -> HashMap<String, String> {
     let mut map = HashMap::new();
-    collect_rule_categories(&BUILTIN_RULES, &mut map);
+    walk_rule_files(&BUILTIN_RULES, &mut |meta| {
+        map.insert(meta.id.clone(), meta.category.clone());
+    });
     map
 }
 
-fn collect_rule_categories(dir: &Dir, map: &mut HashMap<String, String>) {
-    for file in dir.files() {
-        let is_yaml = file.path().extension().is_some_and(|ext| ext == "yml" || ext == "yaml");
-        if !is_yaml {
-            continue;
-        }
-        if let Some(contents) = file.contents_utf8() {
-            if let Ok(meta) = serde_yaml::from_str::<RuleCategoryMeta>(contents) {
-                map.insert(meta.id, meta.category);
-            }
-        }
-    }
-    for subdir in dir.dirs() {
-        collect_rule_categories(subdir, map);
-    }
-}
-
 /// The set of builtin rule ids declaring `semantic: true` — see
-/// `RuleCategoryMeta::semantic`'s docs for what that means and why.
+/// `RuleMeta::semantic`'s docs for what that means and why.
 pub fn semantic_rule_ids() -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
-    collect_semantic_rule_ids(&BUILTIN_RULES, &mut set);
+    walk_rule_files(&BUILTIN_RULES, &mut |meta| {
+        if meta.semantic {
+            set.insert(meta.id.clone());
+        }
+    });
     set
 }
 
-fn collect_semantic_rule_ids(dir: &Dir, set: &mut std::collections::HashSet<String>) {
+/// A `ruleId -> metadata` lookup for every rule that declares a `metadata:`
+/// block, regardless of `kind` — used to populate `AgentFinding.meta`.
+/// Rules with no `metadata:` block simply don't appear here (not inserted
+/// as an empty entry), so callers should treat a missing key as "no
+/// metadata was declared," not "metadata was declared empty."
+pub fn rule_metadata() -> HashMap<String, RuleMetadataBlock> {
+    let mut map = HashMap::new();
+    walk_rule_files(&BUILTIN_RULES, &mut |meta| {
+        if let Some(metadata) = &meta.metadata {
+            map.insert(meta.id.clone(), metadata.clone());
+        }
+    });
+    map
+}
+
+/// Shared recursive walk over every embedded `.yml`/`.yaml` rule file,
+/// parsing each into `RuleMeta` and handing it to `visit` — the one place
+/// all of `rule_categories`/`semantic_rule_ids`/`rule_metadata` (and
+/// `extract_pattern_rules`'s filtering) read the embedded tree from.
+fn walk_rule_files(dir: &Dir, visit: &mut impl FnMut(&RuleMeta)) {
     for file in dir.files() {
         let is_yaml = file.path().extension().is_some_and(|ext| ext == "yml" || ext == "yaml");
         if !is_yaml {
             continue;
         }
         if let Some(contents) = file.contents_utf8() {
-            if let Ok(meta) = serde_yaml::from_str::<RuleCategoryMeta>(contents) {
-                if meta.semantic {
-                    set.insert(meta.id);
-                }
+            if let Some(meta) = parse_rule_meta(contents) {
+                visit(&meta);
             }
         }
     }
     for subdir in dir.dirs() {
-        collect_semantic_rule_ids(subdir, set);
+        walk_rule_files(subdir, visit);
+    }
+}
+
+fn metadata_to_meta_map(metadata: &RuleMetadataBlock) -> Option<HashMap<String, serde_json::Value>> {
+    match serde_json::to_value(metadata).ok()? {
+        serde_json::Value::Object(map) => Some(map.into_iter().collect()),
+        _ => None,
     }
 }
 
@@ -142,7 +202,7 @@ pub fn run_ast_grep(repo_root: &Path, changed_files: &[String]) -> anyhow::Resul
     let temp_dir = tempfile::tempdir()?;
     let rules_dir = temp_dir.path().join("rules");
     std::fs::create_dir_all(&rules_dir)?;
-    BUILTIN_RULES.extract(&rules_dir)?;
+    extract_pattern_rules(&BUILTIN_RULES, &rules_dir)?;
 
     // sgconfig.yml must live outside `rules_dir` — ruleDirs scans every YAML
     // file in that directory recursively, so a config file placed inside it
@@ -168,16 +228,50 @@ pub fn run_ast_grep(repo_root: &Path, changed_files: &[String]) -> anyhow::Resul
     };
 
     let categories = rule_categories();
-    Ok(matches.iter().filter_map(|m| match_to_finding(m, &categories)).collect())
+    let metadata = rule_metadata();
+    Ok(matches.iter().filter_map(|m| match_to_finding(m, &categories, &metadata)).collect())
 }
 
-fn match_to_finding(m: &serde_json::Value, categories: &HashMap<String, String>) -> Option<AgentFinding> {
+/// Copies only `kind: pattern` (or `kind`-absent) rule files from `dir`
+/// into `dest`, preserving their relative paths. ast-grep's CLI errors if
+/// any file under its `ruleDirs` lacks a valid `rule:` key, so a
+/// `kind: taint`/`kind: threshold` file (which has no `rule:` block at
+/// all — its body is `sources:`/`sinks:`/`metric:`/`threshold:` instead)
+/// must never reach the subprocess. This is what makes "one rules
+/// directory, three execution backends" possible: every rule lives in the
+/// same `rules-builtin/<lang>/<category>/<id>.yml` tree, but only the
+/// pattern-kind ones are ever visible to `ast-grep scan`.
+fn extract_pattern_rules(dir: &Dir, dest: &Path) -> anyhow::Result<()> {
+    for file in dir.files() {
+        let is_yaml = file.path().extension().is_some_and(|ext| ext == "yml" || ext == "yaml");
+        if !is_yaml {
+            continue;
+        }
+        let Some(contents) = file.contents_utf8() else { continue };
+        let kind = parse_rule_meta(contents).map(|m| m.kind).unwrap_or_else(default_kind);
+        if kind != "pattern" {
+            continue;
+        }
+        let dest_path = dest.join(file.path());
+        if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(dest_path, contents)?;
+    }
+    for subdir in dir.dirs() {
+        extract_pattern_rules(subdir, dest)?;
+    }
+    Ok(())
+}
+
+fn match_to_finding(m: &serde_json::Value, categories: &HashMap<String, String>, metadata: &HashMap<String, RuleMetadataBlock>) -> Option<AgentFinding> {
     let rule_id = m.get("ruleId")?.as_str()?.to_string();
     let file = m.get("file")?.as_str()?.to_string();
     let message = m.get("message").and_then(|v| v.as_str()).unwrap_or("(no message provided by rule)").to_string();
     let severity = map_severity(m.get("severity").and_then(|v| v.as_str()).unwrap_or("warning"));
     let snippet = m.get("lines").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let category = categories.get(&rule_id).cloned().unwrap_or_else(default_category);
+    let meta = metadata.get(&rule_id).and_then(metadata_to_meta_map);
 
     let range = m.get("range")?;
     // ast-grep reports 0-indexed line/column; our schema is 1-indexed to
@@ -198,7 +292,7 @@ fn match_to_finding(m: &serde_json::Value, categories: &HashMap<String, String>)
         related_locations: None,
         suggestion: None,
         tags: None,
-        meta: None,
+        meta,
         suggested_patch: None,
     })
 }
@@ -550,6 +644,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_rule_meta_defaults_kind_to_pattern_when_absent() {
+        let meta = parse_rule_meta("id: some-rule\ncategory: correctness\n").unwrap();
+        assert_eq!(meta.kind, "pattern");
+    }
+
+    #[test]
+    fn parse_rule_meta_reads_an_explicit_kind() {
+        let meta = parse_rule_meta("id: some-taint-rule\nkind: taint\n").unwrap();
+        assert_eq!(meta.kind, "taint");
+    }
+
+    #[test]
+    fn parse_rule_meta_reads_a_metadata_block() {
+        let meta = parse_rule_meta("id: some-rule\nmetadata:\n  cwe: [\"CWE-79\"]\n  confidence: HIGH\n").unwrap();
+        let metadata = meta.metadata.expect("metadata block should parse");
+        assert_eq!(metadata.cwe, vec!["CWE-79".to_string()]);
+        assert_eq!(metadata.confidence.as_deref(), Some("HIGH"));
+    }
+
+    #[test]
+    fn rule_metadata_only_contains_rules_that_declare_a_metadata_block() {
+        let metadata = rule_metadata();
+        let weak_hash = metadata.get("go-weak-hash").expect("go-weak-hash should declare metadata");
+        assert_eq!(weak_hash.cwe, vec!["CWE-327".to_string()]);
+        assert!(!metadata.contains_key("go-no-self-comparison"), "a rule with no metadata: block must not appear");
+    }
+
+    #[test]
+    fn metadata_flows_through_into_a_real_finding_via_the_meta_field() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let dir = write_repo(&[("main.go", "package main\n\nimport \"crypto/md5\"\n\nfunc f() {\n\tmd5.New()\n}\n")]);
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        let finding = findings.iter().find(|f| f.source.rule_id.as_deref() == Some("go-weak-hash")).expect("go-weak-hash should fire");
+        let meta = finding.meta.as_ref().expect("go-weak-hash declares a metadata: block, meta should be Some");
+        assert_eq!(meta.get("cwe").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|v| v.as_str()), Some("CWE-327"));
+    }
+
+    #[test]
     fn semantic_rule_ids_reads_rules_declaring_semantic_true() {
         let ids = semantic_rule_ids();
         assert!(ids.contains("go-nested-loop-linear-search"));
@@ -561,6 +696,7 @@ mod tests {
     #[test]
     fn a_rule_with_no_declared_category_falls_back_to_correctness() {
         let categories: HashMap<String, String> = HashMap::new();
+        let metadata: HashMap<String, RuleMetadataBlock> = HashMap::new();
         let m = serde_json::json!({
             "ruleId": "some-undeclared-rule",
             "file": "a.go",
@@ -569,7 +705,7 @@ mod tests {
             "lines": "x",
             "range": {"start": {"line": 0, "column": 0}, "end": {"line": 0, "column": 1}}
         });
-        let finding = match_to_finding(&m, &categories).unwrap();
+        let finding = match_to_finding(&m, &categories, &metadata).unwrap();
         assert_eq!(finding.category, "correctness");
     }
 }
