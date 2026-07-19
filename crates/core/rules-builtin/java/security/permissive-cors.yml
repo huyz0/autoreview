@@ -2,6 +2,15 @@ id: java-permissive-cors
 language: Java
 category: security
 severity: warning
-message: Access-Control-Allow-Origin set to "*" allows any website to make credentialed cross-origin requests to this endpoint — scope it to a known allowlist of origins instead.
+message: "Access-Control-Allow-Origin set to \"*\" allows any website to make credentialed cross-origin requests to this endpoint — scope it to a known allowlist of origins instead. Covers a raw response-header set, Spring's `CorsRegistry.allowedOrigins(\"*\")` (typically in a `WebMvcConfigurer.addCorsMappings`), and `CorsConfiguration.addAllowedOrigin(\"*\")`."
+metadata:
+  cwe: ["CWE-942"]
+  owasp: ["A05:2021"]
+  confidence: HIGH
+  references:
+    - "https://cwe.mitre.org/data/definitions/942.html"
 rule:
-  pattern: $RESP.setHeader("Access-Control-Allow-Origin", "*")
+  any:
+    - pattern: $RESP.setHeader("Access-Control-Allow-Origin", "*")
+    - pattern: $REG.allowedOrigins("*")
+    - pattern: $CFG.addAllowedOrigin("*")

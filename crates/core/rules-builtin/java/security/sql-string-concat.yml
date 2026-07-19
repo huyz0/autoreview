@@ -2,9 +2,22 @@ id: java-sql-string-concat
 language: Java
 category: security
 severity: error
-message: A SQL query built via string concatenation is vulnerable to SQL injection — use a PreparedStatement with bind parameters instead of concatenating user input into the query text.
+message: "A SQL/HQL query built via string concatenation is vulnerable to injection — use a `PreparedStatement` with bind parameters (JDBC) or a named/positional parameter (`setParameter`, JPQL `:name`) instead of concatenating user input into the query text. Covers raw JDBC (`executeQuery`/`executeUpdate`/`execute`), JPA/Hibernate (`createQuery`), and Spring's `JdbcTemplate`."
+metadata:
+  cwe: ["CWE-89"]
+  owasp: ["A03:2021"]
+  confidence: HIGH
+  references:
+    - "https://cwe.mitre.org/data/definitions/89.html"
 rule:
-  pattern: $STMT.executeQuery($QUERY)
+  any:
+    - pattern: $STMT.executeQuery($QUERY)
+    - pattern: $STMT.executeUpdate($QUERY)
+    - pattern: $STMT.execute($QUERY)
+    - pattern: $EM.createQuery($QUERY)
+    - pattern: $JDBC.query($QUERY, $$$REST)
+    - pattern: $JDBC.update($QUERY, $$$REST)
+    - pattern: $JDBC.queryForObject($QUERY, $$$REST)
 constraints:
   QUERY:
     regex: '".*"\s*\+'

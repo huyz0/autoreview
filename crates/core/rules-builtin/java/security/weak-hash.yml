@@ -2,9 +2,22 @@ id: java-weak-hash
 language: Java
 category: security
 severity: warning
-message: MD5 and SHA-1 are broken for security purposes (collision attacks) — use SHA-256 or better for anything security-sensitive (signatures, integrity checks, password-adjacent hashing).
+message: MD5 and SHA-1 are broken for security purposes (collision attacks) — use SHA-256 or better for anything security-sensitive (signatures, integrity checks, password-adjacent hashing). Covers raw MessageDigest, Apache Commons Codec's DigestUtils, and Guava's Hashing.
+metadata:
+  cwe: ["CWE-327"]
+  owasp: ["A02:2021"]
+  confidence: HIGH
+  references:
+    - "https://cwe.mitre.org/data/definitions/327.html"
 rule:
-  pattern: MessageDigest.getInstance("$ALG")
+  any:
+    - pattern: MessageDigest.getInstance("$ALG")
+    - pattern: DigestUtils.md5($$$ARGS)
+    - pattern: DigestUtils.md5Hex($$$ARGS)
+    - pattern: DigestUtils.sha1($$$ARGS)
+    - pattern: DigestUtils.sha1Hex($$$ARGS)
+    - pattern: Hashing.md5()
+    - pattern: Hashing.sha1()
 constraints:
   ALG:
     regex: (?i)^(md5|sha-?1)$

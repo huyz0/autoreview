@@ -2,6 +2,25 @@ id: java-tls-verification-disabled
 language: Java
 category: security
 severity: error
-message: ALLOW_ALL_HOSTNAME_VERIFIER disables TLS hostname verification entirely, making the connection vulnerable to man-in-the-middle attacks. Only acceptable in tests against a known-safe endpoint.
+message: "TLS certificate/hostname verification is disabled or bypassed, making the connection vulnerable to man-in-the-middle attacks: either an `X509TrustManager` with an empty `checkServerTrusted`/`checkClientTrusted` body (accepts any certificate chain), a `HostnameVerifier`/OkHttp `hostnameVerifier` that unconditionally returns `true`, or the legacy `ALLOW_ALL_HOSTNAME_VERIFIER` constant. Only acceptable in tests against a known-safe endpoint — delegate to the real verification logic otherwise."
+metadata:
+  cwe: ["CWE-295"]
+  owasp: ["A02:2021"]
+  confidence: HIGH
+  references:
+    - "https://cwe.mitre.org/data/definitions/295.html"
 rule:
-  pattern: $X.setHostnameVerifier(SSLSocketFactory.ALLOW_ALL_HOSTNAME_VERIFIER)
+  any:
+    - pattern: $X.setHostnameVerifier(SSLSocketFactory.ALLOW_ALL_HOSTNAME_VERIFIER)
+    - pattern: $BUILDER.hostnameVerifier(($$$ARGS) -> true)
+    - pattern:
+        context: "class W { public boolean verify($$$ARGS) { return true; } }"
+        selector: method_declaration
+    - kind: method_declaration
+      regex: "check(Server|Client)Trusted"
+      has:
+        kind: block
+        not:
+          has:
+            stopBy: end
+            kind: expression_statement
