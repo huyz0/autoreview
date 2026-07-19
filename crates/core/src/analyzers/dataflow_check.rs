@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use autoreview_dataflow::rules::{go_append_shared_backing_array, go_command_injection_taint, go_loopvar, go_typed_nil_interface_return};
+use autoreview_dataflow::rules::{go_append_shared_backing_array, go_command_injection_taint, go_loopvar, go_path_traversal_taint, go_sql_injection_taint, go_typed_nil_interface_return};
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
 fn make_finding(rule_id: &str, path: &str, line: u32, title: String, message: String) -> AgentFinding {
@@ -156,27 +156,56 @@ fn run_loopvar_checks(path: &str, content: &str) -> Vec<AgentFinding> {
     findings
 }
 
-fn run_command_injection_taint(path: &str, content: &str) -> Vec<AgentFinding> {
+/// Shared shape for every taint-powered Go rule: parse, lower every
+/// function, run `spec` over each, map hits to findings via `message`.
+fn run_taint_spec(rule_id: &str, spec: &autoreview_dataflow::taint::TaintSpec, path: &str, content: &str, message: impl Fn(&autoreview_dataflow::taint::TaintHit) -> (String, String)) -> Vec<AgentFinding> {
     let Some(mut parser) = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Go) else { return Vec::new() };
     let Some(tree) = parser.parse(content, None) else { return Vec::new() };
-    let spec = go_command_injection_taint::spec();
     let mut findings = Vec::new();
     for fn_node in go_functions(&tree) {
         let cfg = autoreview_dataflow::lower::go::lower_function(content.as_bytes(), fn_node);
-        for hit in autoreview_dataflow::taint::check(&spec, &cfg) {
-            findings.push(make_finding(
-                "go-command-injection-taint",
-                path,
-                hit.source_line,
-                format!("`{}` reaches `{}` with an unsanitized value from an HTTP form field", hit.tainted_arg, hit.sink_call),
-                format!(
-                    "`{}` is derived from `r.FormValue(...)`/`r.PostFormValue(...)` (attacker-controlled request data) and reaches `{}` without going through a sanitizer first. If this value ends up in the executed command's argument list, an attacker can inject arbitrary shell arguments or a different binary entirely. Validate/allowlist the value before it reaches `{}`, or avoid passing request-derived data into it at all.",
-                    hit.tainted_arg, hit.sink_call, hit.sink_call
-                ),
-            ));
+        for hit in autoreview_dataflow::taint::check(spec, &cfg) {
+            let (title, msg) = message(&hit);
+            findings.push(make_finding(rule_id, path, hit.source_line, title, msg));
         }
     }
     findings
+}
+
+fn run_command_injection_taint(path: &str, content: &str) -> Vec<AgentFinding> {
+    run_taint_spec("go-command-injection-taint", &go_command_injection_taint::spec(), path, content, |hit| {
+        (
+            format!("`{}` reaches `{}` with an unsanitized value from an HTTP form field", hit.tainted_arg, hit.sink_call),
+            format!(
+                "`{}` is derived from `r.FormValue(...)`/`r.PostFormValue(...)` (attacker-controlled request data) and reaches `{}` without going through a sanitizer first. If this value ends up in the executed command's argument list, an attacker can inject arbitrary shell arguments or a different binary entirely. Validate/allowlist the value before it reaches `{}`, or avoid passing request-derived data into it at all.",
+                hit.tainted_arg, hit.sink_call, hit.sink_call
+            ),
+        )
+    })
+}
+
+fn run_sql_injection_taint(path: &str, content: &str) -> Vec<AgentFinding> {
+    run_taint_spec("go-sql-injection-taint", &go_sql_injection_taint::spec(), path, content, |hit| {
+        (
+            format!("`{}` reaches `{}` with an unsanitized value from an HTTP form field", hit.tainted_arg, hit.sink_call),
+            format!(
+                "`{}` is derived from `r.FormValue(...)`/`r.PostFormValue(...)` and reaches `{}` — either passed directly as (part of) the query, or concatenated into a query string first. Use a parameterized query (`?` placeholders) instead of building the query text from request-derived data, even indirectly through a variable.",
+                hit.tainted_arg, hit.sink_call
+            ),
+        )
+    })
+}
+
+fn run_path_traversal_taint(path: &str, content: &str) -> Vec<AgentFinding> {
+    run_taint_spec("go-path-traversal-taint", &go_path_traversal_taint::spec(), path, content, |hit| {
+        (
+            format!("`{}` reaches `{}` with an unsanitized value from an HTTP form field", hit.tainted_arg, hit.sink_call),
+            format!(
+                "`{}` is derived from `r.FormValue(...)`/`r.PostFormValue(...)` and reaches `{}` — either directly or concatenated into a path first — without validation. An attacker can supply `../` segments to escape the intended directory. Validate the resulting path stays within an expected base directory before this call, not just that it was built from a \"cleaned\" string.",
+                hit.tainted_arg, hit.sink_call
+            ),
+        )
+    })
 }
 
 /// Runs all dataflow-powered checks against one changed file's current
@@ -193,6 +222,8 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String]) -> Vec<Age
             let mut findings = run_append_shared_backing_array(path, &content);
             findings.extend(run_typed_nil_interface_return(path, &content));
             findings.extend(run_command_injection_taint(path, &content));
+            findings.extend(run_sql_injection_taint(path, &content));
+            findings.extend(run_path_traversal_taint(path, &content));
             if go_pre_1_22 {
                 findings.extend(run_loopvar_checks(path, &content));
             }
@@ -335,6 +366,54 @@ mod tests {
         std::fs::write(dir.path().join("main.go"), "package main\n\nfunc f() {\n\texec.Command(\"ls\", \"-la\")\n}\n").unwrap();
         let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
         assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("go-command-injection-taint")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_form_value_reaching_sql_query_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.go"),
+            "package main\n\nfunc handle(r *http.Request, db *sql.DB) {\n\tid := r.FormValue(\"id\")\n\trows, err := db.Query(id)\n\t_ = rows\n\t_ = err\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("go-sql-injection-taint")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_concatenated_query_reaching_sql_exec_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.go"),
+            "package main\n\nfunc handle(r *http.Request, db *sql.DB) {\n\tid := r.FormValue(\"id\")\n\tq := \"DELETE FROM users WHERE id=\" + id\n\tres, err := db.Exec(q)\n\t_ = res\n\t_ = err\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("go-sql-injection-taint")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_form_value_reaching_os_open_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.go"),
+            "package main\n\nfunc handle(r *http.Request) {\n\tname := r.FormValue(\"file\")\n\tf, err := os.Open(name)\n\t_ = f\n\t_ = err\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("go-path-traversal-taint")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_hardcoded_path_or_query_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.go"),
+            "package main\n\nfunc f(db *sql.DB) {\n\trows, err := db.Query(\"SELECT * FROM users\")\n\t_ = rows\n\t_ = err\n\tdata, err2 := os.ReadFile(\"/etc/config.json\")\n\t_ = data\n\t_ = err2\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("go-sql-injection-taint") || f.source.rule_id.as_deref() == Some("go-path-traversal-taint")), "got: {findings:#?}");
     }
 
     #[test]

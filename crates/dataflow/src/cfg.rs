@@ -19,6 +19,12 @@ pub enum RhsShape {
     Var(VarId),
     /// `&x` — taking a reference/address of another variable.
     AddressOf { of: VarId },
+    /// `a + b + "literal"` — string concatenation. Carries every
+    /// identifier operand found anywhere in the expression (over-
+    /// approximate — doesn't distinguish which operand is which), used
+    /// by the taint engine to propagate taint through a concatenated
+    /// value (e.g. a SQL query or file path built from a tainted part).
+    Concat { parts: Vec<VarId> },
     /// Anything this lowering pass doesn't specifically recognize.
     Unknown,
 }

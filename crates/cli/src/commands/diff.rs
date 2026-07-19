@@ -475,6 +475,8 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
             "typed-nil-interface-return".to_string(),
             "append-shared-backing-array".to_string(),
             "go-command-injection-taint".to_string(),
+            "go-sql-injection-taint".to_string(),
+            "go-path-traversal-taint".to_string(),
         ]);
 
         let to_check = autoreview_core::select_for_verification(&findings, &config.verify.noisy_categories, &semantic_ids).len();

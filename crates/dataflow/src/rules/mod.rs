@@ -5,4 +5,6 @@
 pub mod go_append_shared_backing_array;
 pub mod go_command_injection_taint;
 pub mod go_loopvar;
+pub mod go_path_traversal_taint;
+pub mod go_sql_injection_taint;
 pub mod go_typed_nil_interface_return;

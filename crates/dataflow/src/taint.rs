@@ -116,6 +116,15 @@ fn apply(spec: &TaintSpec, facts: &TaintFacts, stmt: &Stmt) -> TaintFacts {
             let val = out.get(rhs).copied().unwrap_or(false);
             out.insert(lhs.clone(), val);
         }
+        Stmt::Assign { lhs, rhs: crate::cfg::RhsShape::Concat { parts } } => {
+            // A query/path/command string built by concatenating a
+            // tainted part (`"SELECT ... " + userInput`) is itself
+            // tainted — the classic indirect-injection shape none of
+            // the direct source-to-sink rules above would catch on
+            // their own.
+            let tainted = parts.iter().any(|p| out.get(p).copied().unwrap_or(false));
+            out.insert(lhs.clone(), tainted);
+        }
         Stmt::Assign { lhs, .. } => {
             out.insert(lhs.clone(), false);
         }

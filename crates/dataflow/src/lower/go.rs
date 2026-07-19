@@ -44,8 +44,31 @@ fn classify_rhs(node: Node, source: &[u8]) -> RhsShape {
                 _ => RhsShape::Unknown,
             }
         }
+        "binary_expression" => classify_binary_expression(node, source),
         _ => RhsShape::Unknown,
     }
+}
+
+/// Recognizes string concatenation (`a + b + "literal"`) — the operator
+/// token sits between the `left`/`right` fields as an anonymous child,
+/// identified by structural exclusion (not `left`'s or `right`'s own
+/// node) rather than a named field, since `binary_expression` doesn't
+/// expose one. Anything other than a bare `+` (comparisons, `&&`, etc.)
+/// stays `Unknown` here — this crate's other binary-expression handling
+/// (`recognize_nil_guard`) covers the comparison case separately.
+fn classify_binary_expression(node: Node, source: &[u8]) -> RhsShape {
+    let (Some(left), Some(right)) = (node.child_by_field_name("left"), node.child_by_field_name("right")) else { return RhsShape::Unknown };
+    let mut cursor = node.walk();
+    let is_plus = node.children(&mut cursor).any(|c| c.id() != left.id() && c.id() != right.id() && text(c, source) == "+");
+    if !is_plus {
+        return RhsShape::Unknown;
+    }
+    let mut parts = Vec::new();
+    collect_identifiers(left, source, &mut parts);
+    collect_identifiers(right, source, &mut parts);
+    parts.sort();
+    parts.dedup();
+    RhsShape::Concat { parts }
 }
 
 /// Lowers a call expression's arguments to the flat identifier list
@@ -111,11 +134,29 @@ fn lower_assign_like(node: Node, source: &[u8]) -> Stmt {
     let (Some(left), Some(right)) = (node.child_by_field_name("left"), node.child_by_field_name("right")) else {
         return Stmt::Other(text(node, source).to_string());
     };
-    // Only the single-target, single-value case is modeled — tuple
-    // assignment (`a, b := f()`) is common for Go's `(value, err)`
-    // pattern but isn't needed by any current rule, so it falls back to
-    // `Other` rather than guessing which side is which.
-    if left.named_child_count() != 1 || right.named_child_count() != 1 {
+    if right.named_child_count() != 1 {
+        return Stmt::Other(text(node, source).to_string());
+    }
+    let rhs_node = right.named_child(0).unwrap();
+
+    // The common `value, err := f()` idiom — most of Go's standard
+    // library returns `(value, error)`, so without this case almost no
+    // realistic sink call (db.Query, os.Open, ...) would ever lower to
+    // `Stmt::Call` at all. Only the primary (first) value is tracked;
+    // the second binding (idiomatically `err`) isn't modeled — this
+    // isn't general tuple-assignment support, just this one shape.
+    if left.named_child_count() == 2 && rhs_node.kind() == "call_expression" {
+        let primary = left.named_child(0).unwrap();
+        if primary.kind() == "identifier" && text(primary, source) != "_" {
+            if let Some(name) = call_target_name(rhs_node, source) {
+                let args = call_arg_identifiers(rhs_node, source);
+                return Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(text(primary, source).to_string()) };
+            }
+        }
+        return Stmt::Other(text(node, source).to_string());
+    }
+
+    if left.named_child_count() != 1 {
         return Stmt::Other(text(node, source).to_string());
     }
     let lhs_node = left.named_child(0).unwrap();
@@ -123,7 +164,6 @@ fn lower_assign_like(node: Node, source: &[u8]) -> Stmt {
         return Stmt::Other(text(node, source).to_string());
     }
     let lhs = text(lhs_node, source).to_string();
-    let rhs_node = right.named_child(0).unwrap();
 
     if rhs_node.kind() == "call_expression" {
         if let Some(name) = call_target_name(rhs_node, source) {
@@ -631,6 +671,28 @@ mod tests {
         let cfg = lower("package p\nfunc f(full []int) {\n\tprintln(full[0])\n}\n");
         assert!(
             cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { args, .. } if args.contains(&"full".to_string())))),
+            "got: {:#?}",
+            cfg.nodes
+        );
+    }
+
+    #[test]
+    fn lowers_a_value_err_tuple_assignment_from_a_call() {
+        let cfg = lower("package p\nfunc f(path string) {\n\tfile, err := os.Open(path)\n\t_ = file\n\t_ = err\n}\n");
+        assert!(
+            cfg.nodes.iter().any(
+                |n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(a) } if name == "os.Open" && a == "file" && args.contains(&"path".to_string())))
+            ),
+            "got: {:#?}",
+            cfg.nodes
+        );
+    }
+
+    #[test]
+    fn recognizes_string_concatenation_carrying_both_operand_identifiers() {
+        let cfg = lower("package p\nfunc f(userInput string) {\n\tquery := \"SELECT * FROM x WHERE id=\" + userInput\n\t_ = query\n}\n");
+        assert!(
+            cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Assign { lhs, rhs: RhsShape::Concat { parts } } if lhs == "query" && parts.contains(&"userInput".to_string())))),
             "got: {:#?}",
             cfg.nodes
         );
