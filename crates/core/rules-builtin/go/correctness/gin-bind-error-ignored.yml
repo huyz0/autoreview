@@ -1,0 +1,20 @@
+id: go-gin-bind-error-ignored
+language: Go
+category: correctness
+severity: warning
+semantic: true
+message: "Gin's `BindJSON`/`ShouldBindJSON` returns an `error` that's silently discarded when called as a bare statement — a malformed or type-mismatched request body leaves the target struct partially populated (or zero-valued) with no signal that binding failed. Check the returned error and respond with a 4xx status before using the bound value."
+metadata:
+  cwe: ["CWE-252"]
+  confidence: MEDIUM
+rule:
+  any:
+    - pattern:
+        context: "func f() { $C.ShouldBindJSON($$$ARGS) }"
+        selector: expression_statement
+    - pattern:
+        context: "func f() { $C.BindJSON($$$ARGS) }"
+        selector: expression_statement
+    - pattern:
+        context: "func f() { $C.ShouldBind($$$ARGS) }"
+        selector: expression_statement

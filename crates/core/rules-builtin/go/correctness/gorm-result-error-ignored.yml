@@ -1,0 +1,23 @@
+id: go-gorm-result-error-ignored
+language: Go
+category: correctness
+severity: warning
+semantic: true
+message: "GORM's `Find`/`Create`/`Save`/`Delete` return a `*gorm.DB` whose `.Error` field carries the operation's result — calling one as a bare statement discards that `*gorm.DB` entirely, so a failed query/write looks identical to a successful one with no signal anything went wrong. Capture the result and check `.Error` (e.g. `if result := db.Find(&x); result.Error != nil { ... }`)."
+metadata:
+  cwe: ["CWE-252"]
+  confidence: MEDIUM
+rule:
+  any:
+    - pattern:
+        context: "func f() { $DB.Find($$$ARGS) }"
+        selector: expression_statement
+    - pattern:
+        context: "func f() { $DB.Create($$$ARGS) }"
+        selector: expression_statement
+    - pattern:
+        context: "func f() { $DB.Save($$$ARGS) }"
+        selector: expression_statement
+    - pattern:
+        context: "func f() { $DB.Delete($$$ARGS) }"
+        selector: expression_statement

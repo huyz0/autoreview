@@ -1,0 +1,19 @@
+id: kotlin-spring-aop-annotation-on-private-method
+language: Kotlin
+category: correctness
+severity: warning
+message: "Spring's AOP proxies (both JDK dynamic proxies and CGLIB) can only intercept calls that go through the proxy — a `private` method is never called that way, even from within the same class, so `@Transactional`/`@Async`/`@Cacheable`/`@CacheEvict`/`@Retryable` on a private function is silently ignored at runtime with no error. Make the function at least internal (or, more commonly, public) for the annotation to actually take effect."
+metadata:
+  confidence: HIGH
+  references:
+    - "https://docs.spring.io/spring-framework/reference/core/aop/proxying.html#aop-understanding-aop-proxies"
+rule:
+  kind: function_declaration
+  has:
+    stopBy: end
+    kind: modifiers
+    all:
+      - regex: "private"
+      - has:
+          kind: annotation
+          regex: "(Transactional|Async|Cacheable|CacheEvict|Retryable)"

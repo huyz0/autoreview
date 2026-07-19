@@ -1,0 +1,15 @@
+id: kotlin-spring-cors-wildcard-annotation
+language: Kotlin
+category: security
+severity: warning
+message: '`@CrossOrigin` with a wildcard origin allows any website to make cross-origin requests to this endpoint — scope `origins` to a known allowlist instead. (If `allowCredentials` is also enabled elsewhere, Spring itself will reject this combination at startup, but a wildcard with credentials disabled is still a broad, usually unintended, exposure.)'
+metadata:
+  cwe: ["CWE-942"]
+  owasp: ["A05:2021"]
+  confidence: HIGH
+  references:
+    - "https://cwe.mitre.org/data/definitions/942.html"
+rule:
+  any:
+    - pattern: '@CrossOrigin(origins = ["*"])'
+    - pattern: '@CrossOrigin("*")'

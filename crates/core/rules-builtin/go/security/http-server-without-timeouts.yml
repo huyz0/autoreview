@@ -1,0 +1,20 @@
+id: go-http-server-without-timeouts
+language: Go
+category: security
+severity: warning
+message: "`http.ListenAndServe`/`ListenAndServeTLS` always use Go's zero-value default `http.Server`, which has no read/write/idle timeouts — a slow or malicious client can hold a connection open indefinitely (Slowloris-style resource exhaustion). Construct an `&http.Server{...}` with explicit `ReadTimeout`/`WriteTimeout`/`IdleTimeout` and call `.ListenAndServe()` on that instead."
+metadata:
+  cwe: ["CWE-400"]
+  owasp: ["A05:2021"]
+  confidence: HIGH
+  references:
+    - "https://blog.cloudflare.com/the-complete-guide-to-golang-net-http-timeouts/"
+    - "https://github.com/securego/gosec (rule G112)"
+rule:
+  any:
+    - pattern:
+        context: "func f() { http.ListenAndServe($$$ARGS) }"
+        selector: expression_statement
+    - pattern:
+        context: "func f() { http.ListenAndServeTLS($$$ARGS) }"
+        selector: expression_statement

@@ -1,0 +1,13 @@
+id: java-spring-csrf-disabled
+language: Java
+category: security
+severity: warning
+message: "Spring Security's CSRF protection is explicitly disabled — appropriate for a stateless, token-authenticated API with no cookie-based session, but silently exploitable for any endpoint still relying on cookie/session auth (an attacker page can trigger authenticated state-changing requests on a victim's behalf). Confirm this app truly has no cookie-based session before disabling; otherwise configure a `CsrfTokenRepository` instead."
+metadata:
+  cwe: ["CWE-352"]
+  owasp: ["A05:2021"]
+  confidence: MEDIUM
+  references:
+    - "https://docs.spring.io/spring-security/reference/servlet/exploits/csrf.html"
+rule:
+  pattern: $HTTP.csrf().disable()
