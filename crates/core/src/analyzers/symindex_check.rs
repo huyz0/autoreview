@@ -45,10 +45,12 @@ fn path_str(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+const RELEVANT_EXTENSIONS: &[&str] = &[".go", ".java", ".kt", ".kts", ".ts", ".mts", ".cts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
+
 /// Runs the symbol-index queries over the whole repo and reports only
 /// results anchored in a file the current diff touched. Returns an empty
-/// list (not an error) when the diff touches no `.go`/`.java`/`.kt`/`.kts`
-/// file.
+/// list (not an error) when the diff touches no file in a language
+/// `autoreview-symindex` extracts from (see `RELEVANT_EXTENSIONS`).
 pub fn run_symindex_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
     run_symindex_check_with_tier4(repo_root, changed_files, false)
 }
@@ -64,7 +66,7 @@ pub fn run_symindex_check(repo_root: &Path, changed_files: &[String]) -> Vec<Age
 /// the tool run produces no data at all (no `go` on `PATH`, non-Go repo,
 /// build failure), this is identical to the flag being off.
 pub fn run_symindex_check_with_tier4(repo_root: &Path, changed_files: &[String], tier4_go_enabled: bool) -> Vec<AgentFinding> {
-    let relevant_changed: Vec<&String> = changed_files.iter().filter(|f| f.ends_with(".go") || f.ends_with(".java") || f.ends_with(".kt") || f.ends_with(".kts")).collect();
+    let relevant_changed: Vec<&String> = changed_files.iter().filter(|f| RELEVANT_EXTENSIONS.iter().any(|ext| f.ends_with(ext))).collect();
     if relevant_changed.is_empty() {
         return Vec::new();
     }
@@ -466,6 +468,22 @@ mod tests {
             "class Widget {\n    fun envy(c: Customer): Int {\n        return c.getBalance() + c.getBalance() + c.getBalance()\n    }\n}\n",
         );
         let findings = run_symindex_check(dir.path(), &["Widget.kt".to_string()]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("feature-envy")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn reports_typescript_feature_envy_that_touches_a_changed_file() {
+        // Regression test: run_symindex_check_with_tier4's own
+        // relevant-file filter used to hardcode go/java/kt/kts, so this
+        // returned Vec::new() unconditionally for a TS-only diff even
+        // though the underlying extractor/query layer worked fine.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "Widget.ts",
+            "class Widget {\n    envy(c: Customer): number {\n        return c.getBalance() + c.getBalance() + c.getBalance();\n    }\n}\n",
+        );
+        let findings = run_symindex_check(dir.path(), &["Widget.ts".to_string()]);
         assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("feature-envy")), "got: {findings:#?}");
     }
 

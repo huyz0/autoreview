@@ -53,7 +53,10 @@ fn walk_source_files(dir: &Path, out: &mut Vec<PathBuf>) {
             }
             walk_source_files(&path, out);
         } else {
-            let is_relevant = matches!(path.extension().and_then(|e| e.to_str()), Some("go") | Some("java") | Some("kt") | Some("kts"));
+            let is_relevant = matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("go") | Some("java") | Some("kt") | Some("kts") | Some("ts") | Some("mts") | Some("cts") | Some("tsx") | Some("js") | Some("jsx") | Some("mjs") | Some("cjs")
+            );
             if is_relevant {
                 out.push(path);
             }
@@ -61,8 +64,9 @@ fn walk_source_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Builds the whole-repo symbol index — every `.go`/`.java`/`.kt`/`.kts` file under
-/// `repo_root`, unconditionally, not scoped to a diff's changed files (a
+/// Builds the whole-repo symbol index — every `.go`/`.java`/`.kt`/`.kts`/
+/// `.ts`/`.tsx`/`.js`/`.jsx` file under `repo_root`, unconditionally, not
+/// scoped to a diff's changed files (a
 /// cross-file smell is invisible if only one side of it is indexed). See
 /// the plan's "whole-repo, always" scoping decision for why this differs
 /// from `duplication.rs`'s changed-files-only cross-file variant: a symbol
@@ -104,6 +108,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_file(dir.path(), "internal/a/widget.go", "package a\n\ntype Widget struct {\n\tX int\n}\n");
         write_file(dir.path(), "src/Customer.java", "class Customer {\n    int balance;\n}\n");
+        let index = build_index(dir.path());
+        assert!(index.find_type("Widget").is_some());
+        assert!(index.find_type("Customer").is_some());
+    }
+
+    #[test]
+    fn build_index_finds_typescript_and_javascript_types_whole_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/Widget.ts", "class Widget {\n    x: number = 0;\n}\n");
+        write_file(dir.path(), "src/Customer.js", "class Customer {\n    constructor() {\n        this.balance = 0;\n    }\n}\n");
         let index = build_index(dir.path());
         assert!(index.find_type("Widget").is_some());
         assert!(index.find_type("Customer").is_some());

@@ -204,7 +204,9 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-go",
  "tree-sitter-java",
+ "tree-sitter-javascript",
  "tree-sitter-kotlin-ng",
+ "tree-sitter-typescript",
 ]
 
 [[package]]
