@@ -10,7 +10,7 @@ use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location
 /// Builtin ast-grep rules, embedded at compile time for the same reason the
 /// builtin skills are: a single binary shouldn't need a side-car data
 /// directory installed next to it to have any deterministic coverage at all.
-static BUILTIN_RULES: Dir = include_dir!("$CARGO_MANIFEST_DIR/rules-builtin");
+pub(crate) static BUILTIN_RULES: Dir = include_dir!("$CARGO_MANIFEST_DIR/rules-builtin");
 
 fn default_category() -> String {
     "correctness".to_string()
@@ -132,19 +132,30 @@ pub fn rule_metadata() -> HashMap<String, RuleMetadataBlock> {
 /// all of `rule_categories`/`semantic_rule_ids`/`rule_metadata` (and
 /// `extract_pattern_rules`'s filtering) read the embedded tree from.
 fn walk_rule_files(dir: &Dir, visit: &mut impl FnMut(&RuleMeta)) {
+    walk_rule_contents(dir, &mut |contents| {
+        if let Some(meta) = parse_rule_meta(contents) {
+            visit(&meta);
+        }
+    });
+}
+
+/// Same recursive walk, but hands back each `.yml`/`.yaml` file's raw text
+/// instead of the parsed `RuleMeta` — used by non-pattern-kind loaders
+/// (e.g. `taint_rules.rs`) that need to deserialize their own kind-specific
+/// body (`sources:`/`sinks:`/...) from the same files, not just the common
+/// fields `RuleMeta` covers.
+pub(crate) fn walk_rule_contents(dir: &Dir, visit: &mut impl FnMut(&str)) {
     for file in dir.files() {
         let is_yaml = file.path().extension().is_some_and(|ext| ext == "yml" || ext == "yaml");
         if !is_yaml {
             continue;
         }
         if let Some(contents) = file.contents_utf8() {
-            if let Some(meta) = parse_rule_meta(contents) {
-                visit(&meta);
-            }
+            visit(contents);
         }
     }
     for subdir in dir.dirs() {
-        walk_rule_files(subdir, visit);
+        walk_rule_contents(subdir, visit);
     }
 }
 

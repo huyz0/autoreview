@@ -1,0 +1,19 @@
+id: go-path-traversal-taint
+language: Go
+category: security
+severity: warning
+kind: taint
+semantic: true
+message: "`{tainted_arg}` reaches `{sink_call}` with an unsanitized value from an HTTP form field"
+sources:
+  - call: FormValue
+  - call: PostFormValue
+sinks:
+  - call: Open
+  - call: OpenFile
+  - call: Create
+  - call: ReadFile
+  - call: WriteFile
+  - call: Remove
+  - call: RemoveAll
+sanitizers: []

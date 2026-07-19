@@ -1,0 +1,16 @@
+id: go-command-injection-taint
+language: Go
+category: security
+severity: error
+kind: taint
+semantic: true
+message: "`{tainted_arg}` reaches `{sink_call}` with an unsanitized value from an HTTP form field"
+sources:
+  - call: FormValue
+  - call: PostFormValue
+sinks:
+  - call: exec.Command
+  - call: exec.CommandContext
+  - call: syscall.Exec
+  - call: syscall.ForkExec
+sanitizers: []

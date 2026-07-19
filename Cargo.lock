@@ -167,6 +167,7 @@ version = "0.1.0"
 dependencies = [
  "autoreview-langsupport",
  "autoreview-symindex",
+ "regex",
  "tempfile",
  "tree-sitter",
  "tree-sitter-go",

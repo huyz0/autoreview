@@ -20,18 +20,28 @@
 //! external package. Extending resolution to same-package-different-file
 //! via `autoreview_symindex::SymbolIndex` is a tracked follow-up, not
 //! done in this pass.
+//!
+//! Taint rules (`go-command-injection-taint` and friends) used to be
+//! hand-written Rust `TaintSpec` constants, one per rule, each with its
+//! own `run_*_taint` wrapper here. They're now declarative YAML
+//! (`kind: taint` in `crates/core/rules-builtin/`), loaded at runtime by
+//! `taint_rules::load_taint_rules` and run generically via
+//! `run_loaded_taint_rules` — adding a new taint rule no longer touches
+//! this file at all.
 
 use std::collections::HashMap;
 use std::path::Path;
 
-use autoreview_dataflow::rules::{go_append_shared_backing_array, go_command_injection_taint, go_loopvar, go_path_traversal_taint, go_sql_injection_taint, go_typed_nil_interface_return};
+use autoreview_dataflow::rules::{go_append_shared_backing_array, go_loopvar, go_typed_nil_interface_return};
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
-fn make_finding(rule_id: &str, path: &str, line: u32, title: String, message: String) -> AgentFinding {
+use super::taint_rules;
+
+fn make_finding(rule_id: &str, category: &str, severity: Severity, path: &str, line: u32, title: String, message: String) -> AgentFinding {
     AgentFinding {
         source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-dataflow".to_string(), rule_id: Some(rule_id.to_string()), aspect: None, backend: None },
-        category: "style".to_string(),
-        severity: Severity::Low,
+        category: category.to_string(),
+        severity,
         confidence: 1.0,
         title,
         message,
@@ -65,6 +75,8 @@ fn run_append_shared_backing_array(path: &str, content: &str) -> Vec<AgentFindin
         for hit in go_append_shared_backing_array::check(&cfg) {
             findings.push(make_finding(
                 "append-shared-backing-array",
+                "correctness",
+                Severity::Medium,
                 path,
                 hit.source_line,
                 format!("`{} = append({}, ...)` may overwrite `{}`'s backing array", hit.sub, hit.sub, hit.full),
@@ -106,6 +118,8 @@ fn run_typed_nil_interface_return(path: &str, content: &str) -> Vec<AgentFinding
         for hit in go_typed_nil_interface_return::check(&cfg, &summaries) {
             findings.push(make_finding(
                 "typed-nil-interface-return",
+                "correctness",
+                Severity::High,
                 path,
                 hit.source_line,
                 format!("Returning typed pointer `{}` where an `error` is expected", hit.var),
@@ -130,6 +144,8 @@ fn run_loopvar_checks(path: &str, content: &str) -> Vec<AgentFinding> {
             let kind = if hit.kind == autoreview_dataflow::cfg::ClosureKind::Goroutine { "goroutine" } else { "deferred closure" };
             findings.push(make_finding(
                 "loopvar-capture-pre-1.22",
+                "correctness",
+                Severity::Medium,
                 path,
                 hit.source_line,
                 format!("Loop variable `{}` captured by a {kind} on a pre-1.22 Go module", hit.var),
@@ -143,6 +159,8 @@ fn run_loopvar_checks(path: &str, content: &str) -> Vec<AgentFinding> {
         for hit in go_loopvar::check_address(&cfg) {
             findings.push(make_finding(
                 "loopvar-address-pre-1.22",
+                "correctness",
+                Severity::Medium,
                 path,
                 hit.source_line,
                 format!("Address of loop variable `{}` taken on a pre-1.22 Go module", hit.var),
@@ -156,56 +174,40 @@ fn run_loopvar_checks(path: &str, content: &str) -> Vec<AgentFinding> {
     findings
 }
 
-/// Shared shape for every taint-powered Go rule: parse, lower every
-/// function, run `spec` over each, map hits to findings via `message`.
-fn run_taint_spec(rule_id: &str, spec: &autoreview_dataflow::taint::TaintSpec, path: &str, content: &str, message: impl Fn(&autoreview_dataflow::taint::TaintHit) -> (String, String)) -> Vec<AgentFinding> {
+/// Substitutes `{tainted_arg}`/`{sink_call}` in a rule's YAML `message`
+/// template with the actual hit's values — the declarative-rule
+/// equivalent of what the three old hand-written Rust closures each did
+/// inline.
+fn render_taint_message(template: &str, hit: &autoreview_dataflow::taint::TaintHit) -> String {
+    template.replace("{tainted_arg}", &hit.tainted_arg).replace("{sink_call}", &hit.sink_call)
+}
+
+fn taint_title(hit: &autoreview_dataflow::taint::TaintHit) -> String {
+    format!("`{}` reaches `{}` with an unsanitized value from an HTTP form field", hit.tainted_arg, hit.sink_call)
+}
+
+/// Runs every `kind: taint` rule declared in `rules-builtin/` (loaded via
+/// `taint_rules::load_taint_rules`) whose `language` matches, against one
+/// file's already-lowered functions. Adding a new taint rule means adding
+/// a new YAML file — this function doesn't change.
+fn run_loaded_taint_rules(path: &str, content: &str) -> Vec<AgentFinding> {
     let Some(mut parser) = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Go) else { return Vec::new() };
     let Some(tree) = parser.parse(content, None) else { return Vec::new() };
+    let rules: Vec<_> = taint_rules::load_taint_rules().into_iter().filter(|r| r.language == "Go").collect();
+    if rules.is_empty() {
+        return Vec::new();
+    }
+
     let mut findings = Vec::new();
     for fn_node in go_functions(&tree) {
         let cfg = autoreview_dataflow::lower::go::lower_function(content.as_bytes(), fn_node);
-        for hit in autoreview_dataflow::taint::check(spec, &cfg) {
-            let (title, msg) = message(&hit);
-            findings.push(make_finding(rule_id, path, hit.source_line, title, msg));
+        for rule in &rules {
+            for hit in autoreview_dataflow::taint::check(&rule.spec, &cfg) {
+                findings.push(make_finding(&rule.id, &rule.category, rule.severity, path, hit.source_line, taint_title(&hit), render_taint_message(&rule.message, &hit)));
+            }
         }
     }
     findings
-}
-
-fn run_command_injection_taint(path: &str, content: &str) -> Vec<AgentFinding> {
-    run_taint_spec("go-command-injection-taint", &go_command_injection_taint::spec(), path, content, |hit| {
-        (
-            format!("`{}` reaches `{}` with an unsanitized value from an HTTP form field", hit.tainted_arg, hit.sink_call),
-            format!(
-                "`{}` is derived from `r.FormValue(...)`/`r.PostFormValue(...)` (attacker-controlled request data) and reaches `{}` without going through a sanitizer first. If this value ends up in the executed command's argument list, an attacker can inject arbitrary shell arguments or a different binary entirely. Validate/allowlist the value before it reaches `{}`, or avoid passing request-derived data into it at all.",
-                hit.tainted_arg, hit.sink_call, hit.sink_call
-            ),
-        )
-    })
-}
-
-fn run_sql_injection_taint(path: &str, content: &str) -> Vec<AgentFinding> {
-    run_taint_spec("go-sql-injection-taint", &go_sql_injection_taint::spec(), path, content, |hit| {
-        (
-            format!("`{}` reaches `{}` with an unsanitized value from an HTTP form field", hit.tainted_arg, hit.sink_call),
-            format!(
-                "`{}` is derived from `r.FormValue(...)`/`r.PostFormValue(...)` and reaches `{}` — either passed directly as (part of) the query, or concatenated into a query string first. Use a parameterized query (`?` placeholders) instead of building the query text from request-derived data, even indirectly through a variable.",
-                hit.tainted_arg, hit.sink_call
-            ),
-        )
-    })
-}
-
-fn run_path_traversal_taint(path: &str, content: &str) -> Vec<AgentFinding> {
-    run_taint_spec("go-path-traversal-taint", &go_path_traversal_taint::spec(), path, content, |hit| {
-        (
-            format!("`{}` reaches `{}` with an unsanitized value from an HTTP form field", hit.tainted_arg, hit.sink_call),
-            format!(
-                "`{}` is derived from `r.FormValue(...)`/`r.PostFormValue(...)` and reaches `{}` — either directly or concatenated into a path first — without validation. An attacker can supply `../` segments to escape the intended directory. Validate the resulting path stays within an expected base directory before this call, not just that it was built from a \"cleaned\" string.",
-                hit.tainted_arg, hit.sink_call
-            ),
-        )
-    })
 }
 
 /// Runs all dataflow-powered checks against one changed file's current
@@ -221,9 +223,7 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String]) -> Vec<Age
             let content = std::fs::read_to_string(&full_path).ok()?;
             let mut findings = run_append_shared_backing_array(path, &content);
             findings.extend(run_typed_nil_interface_return(path, &content));
-            findings.extend(run_command_injection_taint(path, &content));
-            findings.extend(run_sql_injection_taint(path, &content));
-            findings.extend(run_path_traversal_taint(path, &content));
+            findings.extend(run_loaded_taint_rules(path, &content));
             if go_pre_1_22 {
                 findings.extend(run_loopvar_checks(path, &content));
             }

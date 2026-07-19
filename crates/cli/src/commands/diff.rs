@@ -474,9 +474,13 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
             "loopvar-address-pre-1.22".to_string(),
             "typed-nil-interface-return".to_string(),
             "append-shared-backing-array".to_string(),
-            "go-command-injection-taint".to_string(),
-            "go-sql-injection-taint".to_string(),
-            "go-path-traversal-taint".to_string(),
+            // go-{command-injection,sql-injection,path-traversal}-taint are
+            // NOT listed here — they're kind: taint YAML rules with
+            // semantic: true declared in the rule file itself, so
+            // autoreview_core::semantic_rule_ids() (which walks the whole
+            // rules-builtin tree, not just pattern-kind rules) already
+            // includes them. Adding a future taint rule means adding a YAML
+            // file, not editing this list.
         ]);
 
         let to_check = autoreview_core::select_for_verification(&findings, &config.verify.noisy_categories, &semantic_ids).len();

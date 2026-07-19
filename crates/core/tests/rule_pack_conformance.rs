@@ -24,10 +24,16 @@ use std::process::Command;
 use autoreview_core::run_ast_grep;
 use serde::Deserialize;
 
+fn default_kind() -> String {
+    "pattern".to_string()
+}
+
 #[derive(Debug, Deserialize)]
 struct RuleMeta {
     id: String,
     language: String,
+    #[serde(default = "default_kind")]
+    kind: String,
 }
 
 fn ast_grep_available() -> bool {
@@ -42,9 +48,16 @@ fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("rules")
 }
 
+/// Only `kind: pattern` (or `kind`-absent) rules — this test drives
+/// `run_ast_grep`, which can't run a `kind: taint`/`kind: threshold` rule
+/// at all (see `extract_pattern_rules`'s docs in `ast_grep.rs` for why
+/// those files are invisible to the ast-grep subprocess in the first
+/// place). Non-pattern rules get their own conformance test —
+/// `taint_rule_conformance.rs` for `kind: taint`.
 fn discover_rules() -> Vec<RuleMeta> {
     let mut rules = Vec::new();
     walk(&rules_dir(), &mut rules);
+    rules.retain(|r| r.kind == "pattern");
     rules.sort_by(|a, b| a.id.cmp(&b.id));
     rules
 }

@@ -27,6 +27,9 @@
 //! syntactic sink/source patterns make.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use regex::Regex;
 
 use crate::cfg::{Cfg, CfgNode, NodeId, Stmt};
 use crate::lattice::Lattice;
@@ -34,16 +37,37 @@ use crate::solver;
 
 /// A name pattern for matching a `Stmt::Call`'s target name (as lowered
 /// by e.g. `lower::go::call_target_name`: `"name"` for a bare call,
-/// `"operand.field"` for a selector call). Matches if the call's name is
-/// exactly `self.0`, or ends with `.{self.0}` — i.e. `"FormValue"`
-/// matches both a bare `FormValue(...)` and any `X.FormValue(...)`,
-/// regardless of what `X` is (no type resolution available).
-#[derive(Debug, Clone, Copy)]
-pub struct NamePattern(pub &'static str);
+/// `"operand.field"` for a selector call). Owned (not `&'static str`)
+/// since specs are now built at runtime from YAML rule files, not written
+/// as Rust consts.
+#[derive(Debug, Clone)]
+pub enum NamePattern {
+    /// Exact-or-trailing-`.method` match — i.e. `Suffix("FormValue")`
+    /// matches both a bare `FormValue(...)` and any `X.FormValue(...)`,
+    /// regardless of what `X` is (no type resolution available). The
+    /// original (and still default) matcher.
+    Suffix(String),
+    /// A regex tested against the call's full lowered name — added for
+    /// sink/source families a suffix match can't express in one rule
+    /// (e.g. "any `db.Query*` variant"), matching how frequently
+    /// Semgrep's own sink/source patterns are regex-shaped.
+    Regex(Arc<Regex>),
+}
 
 impl NamePattern {
+    pub fn suffix(name: impl Into<String>) -> Self {
+        NamePattern::Suffix(name.into())
+    }
+
+    pub fn regex(pattern: &str) -> Result<Self, regex::Error> {
+        Ok(NamePattern::Regex(Arc::new(Regex::new(pattern)?)))
+    }
+
     fn matches(&self, call_name: &str) -> bool {
-        call_name == self.0 || call_name.ends_with(&format!(".{}", self.0))
+        match self {
+            NamePattern::Suffix(name) => call_name == name || call_name.ends_with(&format!(".{name}")),
+            NamePattern::Regex(re) => re.is_match(call_name),
+        }
     }
 }
 
@@ -59,7 +83,7 @@ pub struct TaintSink {
 
 #[derive(Debug, Clone)]
 pub struct TaintSpec {
-    pub rule_id: &'static str,
+    pub rule_id: String,
     /// A call matching one of these makes its assigned variable tainted
     /// (Semgrep's `pattern-sources`).
     pub sources: Vec<NamePattern>,
@@ -174,10 +198,10 @@ mod tests {
 
     fn spec() -> TaintSpec {
         TaintSpec {
-            rule_id: "test-taint",
-            sources: vec![NamePattern("FormValue")],
-            sinks: vec![TaintSink { call: NamePattern("exec.Command"), tainted_arg_positions: None }],
-            sanitizers: vec![NamePattern("sanitize")],
+            rule_id: "test-taint".to_string(),
+            sources: vec![NamePattern::suffix("FormValue")],
+            sinks: vec![TaintSink { call: NamePattern::suffix("exec.Command"), tainted_arg_positions: None }],
+            sanitizers: vec![NamePattern::suffix("sanitize")],
         }
     }
 
