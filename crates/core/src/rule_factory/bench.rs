@@ -95,6 +95,9 @@ fn extension_for_language(language: &str) -> Option<&'static str> {
         "Go" => Some("go"),
         "Java" => Some("java"),
         "Kotlin" => Some("kt"),
+        "TypeScript" => Some("ts"),
+        "Tsx" => Some("tsx"),
+        "JavaScript" => Some("js"),
         _ => None,
     }
 }

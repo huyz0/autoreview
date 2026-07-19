@@ -8,12 +8,13 @@
 //! and still produce broken code (a missing brace, an unterminated string).
 //! This module answers exactly that second question, narrowly.
 //!
-//! Language coverage: Go, Java, and Kotlin. Kotlin was originally evaluated
-//! and dropped — the stale `tree-sitter-kotlin` crate pins `tree-sitter
-//! ^0.21`, incompatible with `tree-sitter-go`/`tree-sitter-java`'s `^0.25`/
-//! `^0.26` (Cargo's `links = "tree-sitter"` forbids two versions of the
-//! native library in one dependency graph) — but `tree-sitter-kotlin-ng`
-//! (the actively-maintained `tree-sitter-grammars` org fork) builds cleanly
+//! Language coverage: Go, Java, Kotlin, TypeScript, TSX, and JavaScript.
+//! Kotlin was originally evaluated and dropped — the stale
+//! `tree-sitter-kotlin` crate pins `tree-sitter ^0.21`, incompatible with
+//! `tree-sitter-go`/`tree-sitter-java`'s `^0.25`/`^0.26` (Cargo's
+//! `links = "tree-sitter"` forbids two versions of the native library in
+//! one dependency graph) — but `tree-sitter-kotlin-ng` (the
+//! actively-maintained `tree-sitter-grammars` org fork) builds cleanly
 //! against the same `tree-sitter` version already in use, so Kotlin is
 //! supported here too now.
 
@@ -24,6 +25,9 @@ fn language_for_extension(extension: &str) -> Option<tree_sitter::Language> {
         "go" => Some(tree_sitter_go::LANGUAGE.into()),
         "java" => Some(tree_sitter_java::LANGUAGE.into()),
         "kt" | "kts" => Some(tree_sitter_kotlin_ng::LANGUAGE.into()),
+        "ts" | "mts" | "cts" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        "tsx" => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
+        "js" | "jsx" | "mjs" | "cjs" => Some(tree_sitter_javascript::LANGUAGE.into()),
         _ => None,
     }
 }
@@ -81,6 +85,36 @@ mod tests {
     fn kotlin_with_a_missing_brace_fails_to_parse_cleanly() {
         let content = "fun main() {\n    println(\"hi\")\n";
         assert_eq!(parses_cleanly(&PathBuf::from("Main.kt"), content), Some(false));
+    }
+
+    #[test]
+    fn valid_typescript_parses_cleanly() {
+        let content = "function main(): void {\n    console.log(\"hi\");\n}\n";
+        assert_eq!(parses_cleanly(&PathBuf::from("main.ts"), content), Some(true));
+    }
+
+    #[test]
+    fn typescript_with_a_missing_brace_fails_to_parse_cleanly() {
+        let content = "function main(): void {\n    console.log(\"hi\");\n";
+        assert_eq!(parses_cleanly(&PathBuf::from("main.ts"), content), Some(false));
+    }
+
+    #[test]
+    fn valid_tsx_parses_cleanly() {
+        let content = "function App() {\n    return <div>hi</div>;\n}\n";
+        assert_eq!(parses_cleanly(&PathBuf::from("App.tsx"), content), Some(true));
+    }
+
+    #[test]
+    fn valid_javascript_parses_cleanly() {
+        let content = "function main() {\n    console.log(\"hi\");\n}\n";
+        assert_eq!(parses_cleanly(&PathBuf::from("main.js"), content), Some(true));
+    }
+
+    #[test]
+    fn javascript_with_a_missing_brace_fails_to_parse_cleanly() {
+        let content = "function main() {\n    console.log(\"hi\");\n";
+        assert_eq!(parses_cleanly(&PathBuf::from("main.js"), content), Some(false));
     }
 
     #[test]

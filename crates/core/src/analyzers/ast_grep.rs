@@ -166,7 +166,7 @@ fn metadata_to_meta_map(metadata: &RuleMetadataBlock) -> Option<HashMap<String, 
     }
 }
 
-pub(crate) const SOURCE_EXTENSIONS: &[&str] = &["go", "java", "kt", "kts"];
+pub(crate) const SOURCE_EXTENSIONS: &[&str] = &["go", "java", "kt", "kts", "ts", "mts", "cts", "tsx", "js", "jsx", "mjs", "cjs"];
 
 pub(crate) fn is_relevant_source_file(path: &str) -> bool {
     Path::new(path).extension().and_then(|e| e.to_str()).map(|ext| SOURCE_EXTENSIONS.contains(&ext)).unwrap_or(false)

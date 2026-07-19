@@ -84,6 +84,9 @@ fn extension_for_language(language: &str) -> &'static str {
         "Go" => "go",
         "Java" => "java",
         "Kotlin" => "kt",
+        "TypeScript" => "ts",
+        "Tsx" => "tsx",
+        "JavaScript" => "js",
         other => panic!("rule_pack_conformance doesn't know the fixture extension for language {other:?} — add it to extension_for_language"),
     }
 }
@@ -93,6 +96,9 @@ fn scan_filename_for_language(language: &str) -> &'static str {
         "Go" => "main.go",
         "Java" => "Sample.java",
         "Kotlin" => "Sample.kt",
+        "TypeScript" => "sample.ts",
+        "Tsx" => "Sample.tsx",
+        "JavaScript" => "sample.js",
         other => panic!("rule_pack_conformance doesn't know the scan filename for language {other:?} — add it to scan_filename_for_language"),
     }
 }
