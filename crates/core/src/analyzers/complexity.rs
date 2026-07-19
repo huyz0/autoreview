@@ -95,12 +95,14 @@ impl Default for ComplexityThresholds {
 pub enum ComplexityLanguage {
     Go,
     JavaOrKotlin,
+    JavaScriptOrTypeScript,
 }
 
 pub fn language_for_file(path: &str) -> Option<ComplexityLanguage> {
     match std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
         Some("go") => Some(ComplexityLanguage::Go),
         Some("java") | Some("kt") | Some("kts") => Some(ComplexityLanguage::JavaOrKotlin),
+        Some("ts") | Some("tsx") | Some("mts") | Some("cts") | Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => Some(ComplexityLanguage::JavaScriptOrTypeScript),
         _ => None,
     }
 }
@@ -117,17 +119,37 @@ pub(crate) fn opens_function(trimmed: &str) -> Option<&str> {
         return None;
     }
     let before_brace = trimmed[..trimmed.len() - 1].trim_end();
-    let Some(close_paren) = before_brace.rfind(')') else { return None };
-    let Some(open_paren) = before_brace[..close_paren].rfind('(') else { return None };
-    let head = before_brace[..open_paren].trim();
-    let first_word = head.split_whitespace().next().unwrap_or("");
-    if CONTROL_KEYWORDS.contains(&first_word) {
-        return None;
+    if let Some(close_paren) = before_brace.rfind(')') {
+        if let Some(open_paren) = before_brace[..close_paren].rfind('(') {
+            let head = before_brace[..open_paren].trim();
+            let first_word = head.split_whitespace().next().unwrap_or("");
+            if !CONTROL_KEYWORDS.contains(&first_word) && !head.is_empty() {
+                return Some(&before_brace[open_paren + 1..close_paren]);
+            }
+        }
     }
-    if head.is_empty() {
-        return None;
-    }
-    Some(&before_brace[open_paren + 1..close_paren])
+    opens_unparenthesized_arrow(before_brace)
+}
+
+/// JS/TS's single-parameter arrow function skips the parens entirely
+/// (`x => {` / `async x => {`), which the paren-based check above can't
+/// see at all — no `(`/`)` appears on the line. `=>` can't appear in this
+/// position in Go/Java/Kotlin (Kotlin's own lambda arrow is `->`, a
+/// different token), so this fallback is safe to run unconditionally
+/// rather than gating it behind a language check.
+fn opens_unparenthesized_arrow(before_brace: &str) -> Option<&str> {
+    let before_arrow = before_brace.strip_suffix("=>")?.trim_end();
+    // The param is whatever identifier-shaped token sits immediately
+    // before `=>` — deliberately not requiring the *whole* line up to
+    // this point to be just that identifier, since a real line is often
+    // `items.map(x => {` (a chained call, not a bare assignment). `=>`
+    // is unique to arrow-function syntax in JS/TS, so a trailing
+    // `<ident> => {` is unambiguously an arrow function opening
+    // regardless of what precedes it.
+    let ident_start = before_arrow.rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).map(|i| i + 1).unwrap_or(0);
+    let param = &before_arrow[ident_start..];
+    let starts_like_identifier = param.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$');
+    starts_like_identifier.then_some(param)
 }
 
 /// Extracts a method's name from its declaration line (the same shape
@@ -328,7 +350,7 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
             continue;
         }
 
-        if language == ComplexityLanguage::JavaOrKotlin && opens_class(trimmed) {
+        if matches!(language, ComplexityLanguage::JavaOrKotlin | ComplexityLanguage::JavaScriptOrTypeScript) && opens_class(trimmed) {
             stack.push(OpenSpan {
                 start_line: line_no,
                 start_depth: depth,
@@ -346,7 +368,7 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
             continue;
         }
 
-        if language == ComplexityLanguage::JavaOrKotlin && opens_interface(trimmed) {
+        if matches!(language, ComplexityLanguage::JavaOrKotlin | ComplexityLanguage::JavaScriptOrTypeScript) && opens_interface(trimmed) {
             stack.push(OpenSpan { start_line: line_no, start_depth: depth, kind: SpanKind::Interface { member_count: 0 } });
             depth += 1;
             continue;
@@ -382,7 +404,13 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
             continue;
         }
 
-        if trimmed == "}" || trimmed.starts_with("} ") {
+        // Broader than `== "}"`/`starts_with("} ")` on purpose: JS/TS
+        // routinely closes a callback-as-last-argument as `});`/`},` (e.g.
+        // `items.map(x => {...});`), and by this point in the loop any
+        // line that *also* opens a new block (e.g. `} else {`) has already
+        // matched the `ends_with('{')` branch above and `continue`d — so
+        // anything reaching here starting with `}` is a pure close.
+        if trimmed.starts_with('}') {
             depth -= 1;
             while let Some(span) = stack.last() {
                 if depth != span.start_depth {
@@ -832,6 +860,60 @@ mod tests {
         let content = "public class Pair {\n    private int a;\n    private int b;\n\n    public int getA() {\n        return a;\n    }\n    public int getB() {\n        return b;\n    }\n}\n";
         let findings = detect_complexity_in_file("Pair.java", content, ComplexityLanguage::JavaOrKotlin);
         assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("data-class")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn language_for_file_recognizes_typescript_and_javascript_extensions() {
+        for ext in ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"] {
+            assert_eq!(language_for_file(&format!("main.{ext}")), Some(ComplexityLanguage::JavaScriptOrTypeScript), "extension: {ext}");
+        }
+    }
+
+    #[test]
+    fn flags_a_long_typescript_function() {
+        let mut body = String::from("function doIt() {\n");
+        for i in 0..90 {
+            body.push_str(&format!("\tconst x{i} = {i};\n"));
+        }
+        body.push_str("}\n");
+        let findings = detect_complexity_in_file("main.ts", &body, ComplexityLanguage::JavaScriptOrTypeScript);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("long-method")), "expected a long-method finding, got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_high_cyclomatic_complexity_in_an_unparenthesized_arrow_function() {
+        // Regression test: `x => { ... }` (no parens around the single
+        // param) has no `(`/`)` on the line at all, which the paren-based
+        // half of `opens_function` can't see — without the dedicated arrow
+        // fallback, this callback's own branches would silently count
+        // toward whatever span happens to be on the stack instead of its
+        // own function, and none of this file's checks would ever fire on
+        // it directly.
+        let mut content = String::from("items.map(x => {\n");
+        for i in 0..11 {
+            content.push_str(&format!("\tif (x === {i}) {{\n\t\tconsole.log({i});\n\t}}\n"));
+        }
+        content.push_str("\treturn x;\n});\n");
+        let findings = detect_complexity_in_file("main.ts", &content, ComplexityLanguage::JavaScriptOrTypeScript);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("cyclomatic-complexity")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_short_typescript_function() {
+        let content = "function doIt(): void {\n\tconst x = 1;\n\tconsole.log(x);\n}\n";
+        let findings = detect_complexity_in_file("main.ts", content, ComplexityLanguage::JavaScriptOrTypeScript);
+        assert!(findings.is_empty(), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_god_class_in_typescript() {
+        let mut content = String::from("class Big {\n");
+        for i in 0..25 {
+            content.push_str(&format!("    method{i}() {{\n        const x = {i};\n    }}\n"));
+        }
+        content.push_str("}\n");
+        let findings = detect_complexity_in_file("Big.ts", &content, ComplexityLanguage::JavaScriptOrTypeScript);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("god-class")), "got: {findings:#?}");
     }
 
     #[test]

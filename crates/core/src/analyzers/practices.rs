@@ -27,19 +27,31 @@ use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location
 enum PracticesLanguage {
     Go,
     JavaOrKotlin,
+    /// Deliberately only gets the language-agnostic `//`-comment checks
+    /// below (commented-out-code, TODO-without-ticket, padding-comment,
+    /// bidi-control-char) — the JavaOrKotlin-gated checks further down
+    /// (unused-import, unused-private-field/method, wildcard-imports,
+    /// duplicate-string-literals, swallowed-exception,
+    /// double-checked-locking, concurrent-modification) all assume
+    /// Java/Kotlin-specific syntax (`import x.y.*`, `volatile`,
+    /// `synchronized`) that doesn't translate to JS/TS's ES module
+    /// imports or lack of those keywords — same scoping principle as Go
+    /// only getting `detect_iterator_err_not_checked`, not every check.
+    JavaScriptOrTypeScript,
 }
 
 fn language_for_file(path: &str) -> Option<PracticesLanguage> {
     match Path::new(path).extension().and_then(|e| e.to_str()) {
         Some("go") => Some(PracticesLanguage::Go),
         Some("java") | Some("kt") | Some("kts") => Some(PracticesLanguage::JavaOrKotlin),
+        Some("ts") | Some("tsx") | Some("mts") | Some("cts") | Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => Some(PracticesLanguage::JavaScriptOrTypeScript),
         _ => None,
     }
 }
 
 fn line_comment_prefix(language: PracticesLanguage) -> &'static str {
     match language {
-        PracticesLanguage::Go | PracticesLanguage::JavaOrKotlin => "//",
+        PracticesLanguage::Go | PracticesLanguage::JavaOrKotlin | PracticesLanguage::JavaScriptOrTypeScript => "//",
     }
 }
 
@@ -1199,6 +1211,28 @@ mod tests {
         std::fs::write(dir.path().join("main.go"), "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(1) }\n").unwrap();
         let findings = run_practices_check(dir.path(), &["main.go".to_string()]);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn run_practices_check_finds_todo_and_commented_out_code_in_typescript() {
+        let content = "function f() {\n\t// TODO fix this\n\t// x = 1;\n\t// y = 2;\n\t// z = 3;\n\treturn 1;\n}\n";
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.ts"), content).unwrap();
+        let findings = run_practices_check(dir.path(), &["main.ts".to_string()]);
+        assert_eq!(findings.len(), 2, "expected a todo-without-ticket and a commented-out-code finding, got: {findings:#?}");
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("todo-without-ticket")), "got: {findings:#?}");
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("commented-out-code")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn run_practices_check_skips_javaorkotlin_only_checks_for_typescript() {
+        // Wildcard-import/unused-import/etc. are Java/Kotlin-syntax-specific
+        // and deliberately not run for TS/JS — a wildcard-shaped import
+        // here must not trigger anything.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.ts"), "import * as fs from \"fs\";\n\nfunction f(): void {}\n").unwrap();
+        let findings = run_practices_check(dir.path(), &["main.ts".to_string()]);
+        assert!(findings.is_empty(), "got: {findings:#?}");
     }
 
     #[test]

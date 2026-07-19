@@ -45,12 +45,14 @@ fn layer_for_path<'a>(path: &str, layers: &'a [autoreview_schema::ArchitectureLa
 enum ImportLanguage {
     Go,
     JavaOrKotlin,
+    JavaScriptOrTypeScript,
 }
 
 fn language_for_file(path: &str) -> Option<ImportLanguage> {
     match Path::new(path).extension().and_then(|e| e.to_str()) {
         Some("go") => Some(ImportLanguage::Go),
         Some("java") | Some("kt") | Some("kts") => Some(ImportLanguage::JavaOrKotlin),
+        Some("ts") | Some("tsx") | Some("mts") | Some("cts") | Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => Some(ImportLanguage::JavaScriptOrTypeScript),
         _ => None,
     }
 }
@@ -98,6 +100,23 @@ fn extract_imports(content: &str, language: ImportLanguage) -> Vec<(u32, String)
                     }
                 }
             }
+            // Covers both ES module imports (`import x from "path"`,
+            // `import { a, b } from "path"`, and the side-effect-only
+            // `import "path";`) and CommonJS's `require("path")` —
+            // deliberately not distinguishing dynamic `import("path")`
+            // from `require`, since both name the same kind of module
+            // dependency this check cares about.
+            ImportLanguage::JavaScriptOrTypeScript => {
+                if line.starts_with("import ") || line.starts_with("import(") {
+                    if let Some(path) = extract_quoted(line) {
+                        imports.push((line_no, path));
+                    }
+                } else if let Some(require_start) = line.find("require(") {
+                    if let Some(path) = extract_quoted(&line[require_start..]) {
+                        imports.push((line_no, path));
+                    }
+                }
+            }
         }
     }
 
@@ -128,7 +147,11 @@ fn extract_quoted(s: &str) -> Option<String> {
 /// `myapp/internal/repository`.
 fn normalize_import(import_path: &str, language: ImportLanguage) -> String {
     let slashed = match language {
-        ImportLanguage::Go => import_path.to_string(),
+        // JS/TS import specifiers are already slash-separated paths
+        // (relative like `../repository/UserRepo` or bare like
+        // `@scope/pkg`), same shape as Go's — no dot-to-slash rewrite
+        // needed, unlike Java/Kotlin's dotted package names.
+        ImportLanguage::Go | ImportLanguage::JavaScriptOrTypeScript => import_path.to_string(),
         ImportLanguage::JavaOrKotlin => import_path.replace('.', "/"),
     };
     format!("{slashed}/_")
@@ -234,9 +257,21 @@ mod tests {
     }
 
     #[test]
+    fn extract_imports_finds_typescript_es_module_and_commonjs_imports() {
+        let content = "import { UserRepository } from \"../repository/UserRepository\";\nimport \"./side-effect\";\nconst legacy = require(\"../handler/LoginHandler\");\n\nexport function f(): void {}\n";
+        let imports = extract_imports(content, ImportLanguage::JavaScriptOrTypeScript);
+        assert_eq!(imports, vec![(1, "../repository/UserRepository".to_string()), (2, "./side-effect".to_string()), (3, "../handler/LoginHandler".to_string())]);
+    }
+
+    #[test]
     fn normalize_import_converts_dots_to_slashes_for_java_and_kotlin() {
         assert_eq!(normalize_import("com.example.repository.UserRepo", ImportLanguage::JavaOrKotlin), "com/example/repository/UserRepo/_");
         assert_eq!(normalize_import("myapp/internal/repository", ImportLanguage::Go), "myapp/internal/repository/_");
+    }
+
+    #[test]
+    fn normalize_import_does_not_touch_slashes_for_typescript() {
+        assert_eq!(normalize_import("../repository/UserRepo", ImportLanguage::JavaScriptOrTypeScript), "../repository/UserRepo/_");
     }
 
     #[test]
@@ -285,6 +320,19 @@ mod tests {
         let config = make_config();
         let findings = run_architecture_check(dir.path(), &["repository/UserRepository.java".to_string()], &config);
         assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("repository"));
+        assert!(findings[0].message.contains("handler"));
+    }
+
+    #[test]
+    fn detects_a_direct_layer_violation_in_typescript() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("repository")).unwrap();
+        std::fs::write(dir.path().join("repository/UserRepository.ts"), "import { LoginHandler } from \"../handler/LoginHandler\";\n\nexport class UserRepository {}\n").unwrap();
+
+        let config = make_config();
+        let findings = run_architecture_check(dir.path(), &["repository/UserRepository.ts".to_string()], &config);
+        assert_eq!(findings.len(), 1, "got: {findings:#?}");
         assert!(findings[0].message.contains("repository"));
         assert!(findings[0].message.contains("handler"));
     }
