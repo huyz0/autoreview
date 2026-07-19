@@ -1,0 +1,16 @@
+id: kotlin-runblocking-in-suspend-function
+language: Kotlin
+category: performance
+severity: warning
+message: "`runBlocking` inside a `suspend fun` blocks the underlying thread until its block completes — on a shared dispatcher (e.g. `Dispatchers.Default`/`Dispatchers.IO`), that can stall every other coroutine sharing that thread, and on `Dispatchers.Main` it can deadlock outright if the blocked-on work itself needs the main thread. A suspend function should call other suspend functions directly (no `runBlocking` needed) or use `withContext`/`coroutineScope` to switch context without blocking a thread."
+metadata:
+  references:
+    - "https://kotlinlang.org/docs/coroutines-basics.html#your-first-coroutine"
+rule:
+  pattern: runBlocking { $$$BODY }
+  inside:
+    stopBy: end
+    kind: function_declaration
+    has:
+      stopBy: end
+      regex: ^suspend$

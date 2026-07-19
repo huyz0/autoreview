@@ -1,0 +1,24 @@
+id: java-resttemplate-constructed-outside-bean
+language: Java
+category: performance
+severity: warning
+semantic: true
+message: "`RestTemplate` is constructed directly instead of being injected as a Spring-managed `@Bean` — each `new RestTemplate()` gets its own `ClientHttpRequestFactory` and, by default, its own connection handling with no pooling shared across calls, so constructing one per request/method call is wasteful and, under load, can exhaust ephemeral ports. Define a single `RestTemplate` `@Bean` (ideally backed by a pooling `ClientHttpRequestFactory`) and inject it instead. (Heuristic: a script/test context may legitimately construct one directly, so this is flagged for a semantic check rather than reported outright.)"
+metadata:
+  confidence: MEDIUM
+rule:
+  pattern: new RestTemplate($$$ARGS)
+  not:
+    inside:
+      kind: method_declaration
+      stopBy: end
+      has:
+        stopBy: end
+        kind: modifiers
+        any:
+          - has:
+              kind: marker_annotation
+              regex: "Bean"
+          - has:
+              kind: annotation
+              regex: "Bean"

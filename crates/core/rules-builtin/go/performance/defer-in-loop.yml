@@ -1,0 +1,17 @@
+id: go-defer-in-loop
+language: Go
+category: performance
+severity: warning
+semantic: true
+message: "`defer` inside a loop doesn't run at the end of each iteration — it runs at the end of the *enclosing function*, so every deferred call piles up and stays pending until the whole loop (and anything after it) finishes. For a long-running or unbounded loop this can accumulate a large number of held resources (file handles, locks, connections) before any of them are released. If the loop genuinely needs per-iteration cleanup, wrap the loop body in its own function (or call `.Close()`/etc. directly instead of deferring it). (Heuristic: a short, bounded loop with a cheap deferred call may be fine in practice, so this is flagged for a semantic check rather than reported outright.)"
+metadata:
+  references:
+    - "https://staticcheck.dev/docs/checks/#SA9001"
+rule:
+  pattern: defer $$$CALL
+  inside:
+    kind: for_statement
+    stopBy:
+      any:
+        - kind: func_literal
+        - kind: function_declaration

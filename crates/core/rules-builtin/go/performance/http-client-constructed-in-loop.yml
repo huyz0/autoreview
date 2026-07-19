@@ -1,0 +1,29 @@
+id: go-http-client-constructed-in-loop
+language: Go
+category: performance
+severity: warning
+semantic: true
+message: "A new `http.Client` is constructed on every loop iteration — `http.Client` is meant to be created once and reused; each new instance gets its own connection pool, so constructing one per iteration defeats keep-alive/connection reuse and forces a fresh TCP (and, for HTTPS, TLS) handshake on every request. Hoist the client construction outside the loop. (Heuristic: this rule can't prove the client's configuration is actually loop-invariant, so it's flagged for a semantic check rather than reported outright.)"
+metadata:
+  references:
+    - "https://pkg.go.dev/net/http#Client"
+rule:
+  any:
+    - pattern:
+        context: "func f() { $V := &http.Client{} }"
+        selector: short_var_declaration
+      inside:
+        kind: for_statement
+        stopBy:
+          any:
+            - kind: func_literal
+            - kind: function_declaration
+    - pattern:
+        context: "func f() { $V := http.Client{} }"
+        selector: short_var_declaration
+      inside:
+        kind: for_statement
+        stopBy:
+          any:
+            - kind: func_literal
+            - kind: function_declaration
