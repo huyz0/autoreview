@@ -64,6 +64,13 @@ fn call_arg_identifiers(call: Node, source: &[u8]) -> Vec<String> {
                 .filter_map(|n| match n.kind() {
                     "identifier" => Some(text(n, source).to_string()),
                     "unary_expression" if text(n, source).starts_with('&') => n.child_by_field_name("operand").filter(|o| o.kind() == "identifier").map(|o| format!("&{}", text(o, source))),
+                    // `full[0]` — indexing into a variable still "uses"
+                    // it (relevant both to append-shared-backing-array's
+                    // "is this variable still used" check and to taint
+                    // propagation), so surface the indexed variable's own
+                    // name rather than dropping it because the argument
+                    // as a whole isn't a bare identifier.
+                    "index_expression" => n.child_by_field_name("operand").filter(|o| o.kind() == "identifier").map(|o| text(o, source).to_string()),
                     _ => None,
                 })
                 .collect()
@@ -78,6 +85,28 @@ fn call_arg_identifiers(call: Node, source: &[u8]) -> Vec<String> {
 /// rather than a generic `Assign` — rules that need interprocedural
 /// resolution (e.g. `typed-nil-interface-return`) need to see the call
 /// target, not just "this variable was reassigned to something unknown".
+/// Resolves a call expression's function target to a name usable for
+/// taint-rule/interprocedural matching: a bare `name(...)` call lowers to
+/// `"name"`; a selector call (`pkg.Func(...)` or `recv.Method(...)`)
+/// lowers to `"operand.field"` (e.g. `"exec.Command"`, `"r.FormValue"`).
+/// This is syntactic, not type-resolved — `r.FormValue` and
+/// `otherThing.FormValue` both lower to their own literal qualified
+/// text, so taint-rule sink/source patterns that only care about the
+/// trailing method name (not the specific receiver) should match on the
+/// suffix after the last `.`, not the whole string.
+fn call_target_name(call: Node, source: &[u8]) -> Option<String> {
+    let func = call.child_by_field_name("function")?;
+    match func.kind() {
+        "identifier" => Some(text(func, source).to_string()),
+        "selector_expression" => {
+            let operand = func.child_by_field_name("operand")?;
+            let field = func.child_by_field_name("field")?;
+            Some(format!("{}.{}", text(operand, source), text(field, source)))
+        }
+        _ => None,
+    }
+}
+
 fn lower_assign_like(node: Node, source: &[u8]) -> Stmt {
     let (Some(left), Some(right)) = (node.child_by_field_name("left"), node.child_by_field_name("right")) else {
         return Stmt::Other(text(node, source).to_string());
@@ -97,16 +126,9 @@ fn lower_assign_like(node: Node, source: &[u8]) -> Stmt {
     let rhs_node = right.named_child(0).unwrap();
 
     if rhs_node.kind() == "call_expression" {
-        // Only a bare `name(...)` call is resolvable to a `CallTarget`;
-        // a method/selector call (`recv.name(...)`) has no simple target
-        // text worth carrying yet (no receiver-type resolution exists),
-        // so it falls back to `Stmt::Assign { rhs: Unknown }` below.
-        if let Some(func) = rhs_node.child_by_field_name("function") {
-            if func.kind() == "identifier" {
-                let name = text(func, source).to_string();
-                let args = call_arg_identifiers(rhs_node, source);
-                return Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(lhs) };
-            }
+        if let Some(name) = call_target_name(rhs_node, source) {
+            let args = call_arg_identifiers(rhs_node, source);
+            return Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(lhs) };
         }
     }
 
@@ -259,7 +281,12 @@ fn lower_statement(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: Node
             current
         }
         "expression_statement" => {
-            cfg.nodes[current].stmts.push(Stmt::Other(text(stmt, source).to_string()));
+            let lowered = stmt
+                .named_child(0)
+                .filter(|n| n.kind() == "call_expression")
+                .and_then(|call| call_target_name(call, source).map(|name| Stmt::Call { target: crate::cfg::CallTarget::Named(name), args: call_arg_identifiers(call, source), assigned_to: None }))
+                .unwrap_or_else(|| Stmt::Other(text(stmt, source).to_string()));
+            cfg.nodes[current].stmts.push(lowered);
             current
         }
         _ => {
@@ -572,6 +599,38 @@ mod tests {
         let cfg = lower("package p\nfunc f(items []string) {\n\tfor _, item := range items {\n\t\tp := &item\n\t\t_ = p\n\t}\n}\n");
         assert!(
             cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Assign { lhs, rhs: RhsShape::AddressOf { of } } if lhs == "p" && of == "item"))),
+            "got: {:#?}",
+            cfg.nodes
+        );
+    }
+
+    #[test]
+    fn recognizes_a_package_qualified_selector_call_assigned_to_a_variable() {
+        let cfg = lower("package p\nfunc f(userInput string) {\n\tcmd := exec.Command(\"sh\", \"-c\", userInput)\n\t_ = cmd\n}\n");
+        assert!(
+            cfg.nodes.iter().any(
+                |n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(a) } if name == "exec.Command" && a == "cmd" && args.contains(&"userInput".to_string())))
+            ),
+            "got: {:#?}",
+            cfg.nodes
+        );
+    }
+
+    #[test]
+    fn recognizes_a_bare_method_call_statement_with_no_assignment() {
+        let cfg = lower("package p\nfunc f() {\n\tcmd.Run()\n}\n");
+        assert!(
+            cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), assigned_to: None, .. } if name == "cmd.Run"))),
+            "got: {:#?}",
+            cfg.nodes
+        );
+    }
+
+    #[test]
+    fn indexing_into_a_variable_as_a_call_argument_still_counts_as_a_use() {
+        let cfg = lower("package p\nfunc f(full []int) {\n\tprintln(full[0])\n}\n");
+        assert!(
+            cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { args, .. } if args.contains(&"full".to_string())))),
             "got: {:#?}",
             cfg.nodes
         );

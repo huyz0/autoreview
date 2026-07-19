@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use autoreview_dataflow::rules::{go_append_shared_backing_array, go_loopvar, go_typed_nil_interface_return};
+use autoreview_dataflow::rules::{go_append_shared_backing_array, go_command_injection_taint, go_loopvar, go_typed_nil_interface_return};
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
 fn make_finding(rule_id: &str, path: &str, line: u32, title: String, message: String) -> AgentFinding {
@@ -156,6 +156,29 @@ fn run_loopvar_checks(path: &str, content: &str) -> Vec<AgentFinding> {
     findings
 }
 
+fn run_command_injection_taint(path: &str, content: &str) -> Vec<AgentFinding> {
+    let Some(mut parser) = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Go) else { return Vec::new() };
+    let Some(tree) = parser.parse(content, None) else { return Vec::new() };
+    let spec = go_command_injection_taint::spec();
+    let mut findings = Vec::new();
+    for fn_node in go_functions(&tree) {
+        let cfg = autoreview_dataflow::lower::go::lower_function(content.as_bytes(), fn_node);
+        for hit in autoreview_dataflow::taint::check(&spec, &cfg) {
+            findings.push(make_finding(
+                "go-command-injection-taint",
+                path,
+                hit.source_line,
+                format!("`{}` reaches `{}` with an unsanitized value from an HTTP form field", hit.tainted_arg, hit.sink_call),
+                format!(
+                    "`{}` is derived from `r.FormValue(...)`/`r.PostFormValue(...)` (attacker-controlled request data) and reaches `{}` without going through a sanitizer first. If this value ends up in the executed command's argument list, an attacker can inject arbitrary shell arguments or a different binary entirely. Validate/allowlist the value before it reaches `{}`, or avoid passing request-derived data into it at all.",
+                    hit.tainted_arg, hit.sink_call, hit.sink_call
+                ),
+            ));
+        }
+    }
+    findings
+}
+
 /// Runs all dataflow-powered checks against one changed file's current
 /// content. Go-only for now (Phase 3/4/5); Java/Kotlin land once their
 /// lowering passes do (Phase 6/7).
@@ -169,6 +192,7 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String]) -> Vec<Age
             let content = std::fs::read_to_string(&full_path).ok()?;
             let mut findings = run_append_shared_backing_array(path, &content);
             findings.extend(run_typed_nil_interface_return(path, &content));
+            findings.extend(run_command_injection_taint(path, &content));
             if go_pre_1_22 {
                 findings.extend(run_loopvar_checks(path, &content));
             }
@@ -291,6 +315,26 @@ mod tests {
         .unwrap();
         let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
         assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("loopvar-capture-pre-1.22")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_form_value_reaching_exec_command_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.go"),
+            "package main\n\nfunc handle(r *http.Request) {\n\tuserInput := r.FormValue(\"cmd\")\n\texec.Command(\"sh\", \"-c\", userInput)\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("go-command-injection-taint")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_literal_only_exec_command_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.go"), "package main\n\nfunc f() {\n\texec.Command(\"ls\", \"-la\")\n}\n").unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("go-command-injection-taint")), "got: {findings:#?}");
     }
 
     #[test]

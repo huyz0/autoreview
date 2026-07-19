@@ -474,6 +474,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
             "loopvar-address-pre-1.22".to_string(),
             "typed-nil-interface-return".to_string(),
             "append-shared-backing-array".to_string(),
+            "go-command-injection-taint".to_string(),
         ]);
 
         let to_check = autoreview_core::select_for_verification(&findings, &config.verify.noisy_categories, &semantic_ids).len();
