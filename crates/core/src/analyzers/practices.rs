@@ -362,31 +362,37 @@ fn detect_unused_private_field(path: &str, content: &str) -> Vec<AgentFinding> {
             continue; // a method declaration, not a field — handled separately
         }
 
-        let name: Option<&str> = if let Some((_, after_keyword)) = trimmed.split_once("val ").or_else(|| trimmed.split_once("var ")) {
+        let names: Vec<&str> = if let Some((_, after_keyword)) = trimmed.split_once("val ").or_else(|| trimmed.split_once("var ")) {
             // Kotlin: `private val NAME: TYPE = ...` / `private var NAME = ...`
-            Some(after_keyword.split(&[':', '='][..]).next().unwrap_or(after_keyword).trim())
+            // — Kotlin doesn't allow comma-separated multi-declaration here,
+            // so there's always exactly one name.
+            vec![after_keyword.split(&[':', '='][..]).next().unwrap_or(after_keyword).trim()]
         } else if trimmed.ends_with(';') {
-            // Java: `private [modifiers] TYPE NAME [= ...];`
+            // Java: `private [modifiers] TYPE NAME [, NAME2, ...] [= ...];`
+            // — a comma-separated declaration (`private int a, b;`) shares
+            // one type across multiple names, so every comma-separated
+            // last-token is a distinct field name, not just the final one.
             let body = trimmed.trim_end_matches(';');
             let head = body.split('=').next().unwrap_or(body).trim();
-            head.split_whitespace().next_back()
+            let Some((_, rest)) = head.split_once(char::is_whitespace) else { continue };
+            rest.split(',').filter_map(|part| part.split_whitespace().next_back()).collect()
         } else {
-            None
+            Vec::new()
         };
 
-        let Some(name) = name.filter(|n| !n.is_empty() && n.chars().all(|c| c.is_alphanumeric() || c == '_')) else { continue };
-
-        let used_elsewhere = lines.iter().enumerate().any(|(other_idx, other_line)| other_idx != idx && contains_whole_word(other_line, name));
-        if !used_elsewhere {
-            findings.push(make_finding(
-                "unused-private-field",
-                path,
-                (idx + 1) as u32,
-                (idx + 1) as u32,
-                format!("Unused private field ({name})"),
-                format!("`{name}` is declared `private` but never referenced anywhere else in this file — dead state, or a sign this field was meant to be used and isn't yet. Heuristic: reflection-based frameworks (serialization, JPA, some test runners) can reference private members without a textual match, so this is flagged for a semantic check rather than reported outright."),
-                trimmed.to_string(),
-            ));
+        for name in names.into_iter().filter(|n| !n.is_empty() && n.chars().all(|c| c.is_alphanumeric() || c == '_')) {
+            let used_elsewhere = lines.iter().enumerate().any(|(other_idx, other_line)| other_idx != idx && contains_whole_word(other_line, name));
+            if !used_elsewhere {
+                findings.push(make_finding(
+                    "unused-private-field",
+                    path,
+                    (idx + 1) as u32,
+                    (idx + 1) as u32,
+                    format!("Unused private field ({name})"),
+                    format!("`{name}` is declared `private` but never referenced anywhere else in this file — dead state, or a sign this field was meant to be used and isn't yet. Heuristic: reflection-based frameworks (serialization, JPA, some test runners) can reference private members without a textual match, so this is flagged for a semantic check rather than reported outright."),
+                    trimmed.to_string(),
+                ));
+            }
         }
     }
     findings
@@ -1058,6 +1064,14 @@ mod tests {
         let content = "public class S {\n    public int x;\n}\n";
         let findings = detect_unused_private_field("S.java", content);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn flags_each_name_in_a_comma_separated_private_field_declaration() {
+        let content = "public class S {\n    private int a, b;\n\n    int getB() { return b; }\n}\n";
+        let findings = detect_unused_private_field("S.java", content);
+        assert_eq!(findings.len(), 1, "only `a` is unused; `b` is used by getB()");
+        assert!(findings[0].title.contains('a'), "got: {:?}", findings[0].title);
     }
 
     #[test]

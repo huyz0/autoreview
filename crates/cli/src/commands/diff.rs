@@ -6,8 +6,7 @@ use autoreview_core::{
     append_event_log, assign_fingerprints, collect_context, collect_diff_facts, compile_skill,
     dedupe_exact, dedupe_fuzzy, discover_manifests, events_from_report, load_config, plan_review,
     render_context_block, run_ast_grep, run_golangci_lint, run_specialist, to_finding,
-    AgentBackend, ClaudeCodeBackend, HistoryStore, InvokeRequest, LocalLlmBackend, PiBackend,
-    PlanOverrides, SpecialistStatus,
+    AgentBackend, HistoryStore, InvokeRequest, PlanOverrides, SpecialistStatus,
 };
 use autoreview_schema::{
     AgentBackendKind, AutoreviewConfig, CostEntry, DiffStats, Finding, ReviewReport, ReviewSummary, ReviewTarget, RunCosts, Tier,
@@ -26,32 +25,7 @@ pub struct DiffCommandOptions {
     pub backend: Option<AgentBackendKind>,
 }
 
-fn backend_label(kind: AgentBackendKind) -> &'static str {
-    match kind {
-        AgentBackendKind::ClaudeCode => "claude",
-        AgentBackendKind::Pi => "pi",
-        AgentBackendKind::LocalLlm => "local-llm",
-    }
-}
-
-/// Availability check per backend, mirroring `claude --version` for the
-/// other two: `pi --version` for pi, an HTTP reachability probe for the
-/// local-LLM server (there's no CLI binary to version-check).
-fn backend_available(kind: AgentBackendKind, config: &AutoreviewConfig) -> bool {
-    match kind {
-        AgentBackendKind::ClaudeCode => Command::new("claude").arg("--version").output().map(|o| o.status.success()).unwrap_or(false),
-        AgentBackendKind::Pi => Command::new("pi").arg("--version").output().map(|o| o.status.success()).unwrap_or(false),
-        AgentBackendKind::LocalLlm => autoreview_core::local_llm_available(&config.agents.local_llm.base_url, "curl"),
-    }
-}
-
-fn build_backend(kind: AgentBackendKind, config: &AutoreviewConfig) -> Box<dyn AgentBackend + Sync> {
-    match kind {
-        AgentBackendKind::ClaudeCode => Box::new(ClaudeCodeBackend::default()),
-        AgentBackendKind::Pi => Box::new(PiBackend { binary: "pi".to_string(), provider: config.agents.pi_provider.clone() }),
-        AgentBackendKind::LocalLlm => Box::new(LocalLlmBackend { base_url: config.agents.local_llm.base_url.clone(), curl_binary: "curl".to_string() }),
-    }
-}
+use super::backend::{backend_available, backend_label, build_backend};
 
 /// The cheap-tier model name to use for a given backend. The local-LLM
 /// backend has exactly one served model (`agents.localLlm.model`) rather

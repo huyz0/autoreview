@@ -16,26 +16,11 @@
 use std::path::Path;
 use std::process::Command;
 
-use autoreview_core::{compare_replay, compile_skill, run_specialist, AgentBackend, ClaudeCodeBackend, HistoryStore, LocalLlmBackend, PiBackend, ReplayComparison};
+use autoreview_core::{compare_replay, compile_skill, run_specialist, AgentBackend, HistoryStore, ReplayComparison};
 use autoreview_schema::{AgentBackendKind, ReviewReport, Tier};
 
+use super::backend::{backend_available, build_backend};
 use super::history::history_dir_for;
-
-fn backend_available(kind: AgentBackendKind, config: &autoreview_schema::AutoreviewConfig) -> bool {
-    match kind {
-        AgentBackendKind::ClaudeCode => Command::new("claude").arg("--version").output().map(|o| o.status.success()).unwrap_or(false),
-        AgentBackendKind::Pi => Command::new("pi").arg("--version").output().map(|o| o.status.success()).unwrap_or(false),
-        AgentBackendKind::LocalLlm => autoreview_core::local_llm_available(&config.agents.local_llm.base_url, "curl"),
-    }
-}
-
-fn build_backend(kind: AgentBackendKind, config: &autoreview_schema::AutoreviewConfig) -> Box<dyn AgentBackend + Sync> {
-    match kind {
-        AgentBackendKind::ClaudeCode => Box::new(ClaudeCodeBackend::default()),
-        AgentBackendKind::Pi => Box::new(PiBackend { binary: "pi".to_string(), provider: config.agents.pi_provider.clone() }),
-        AgentBackendKind::LocalLlm => Box::new(LocalLlmBackend { base_url: config.agents.local_llm.base_url.clone(), curl_binary: "curl".to_string() }),
-    }
-}
 
 fn cheap_model_for(kind: AgentBackendKind, config: &autoreview_schema::AutoreviewConfig) -> &str {
     match kind {
