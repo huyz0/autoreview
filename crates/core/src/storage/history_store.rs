@@ -2,7 +2,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
-use autoreview_schema::ReviewReport;
+use autoreview_schema::{FeedbackVerdict, ReviewReport};
 
 /// Embedded SQLite index over the event log (`rusqlite`, `bundled` feature —
 /// no separate native-module install step, since SQLite compiles directly
@@ -214,22 +214,22 @@ impl HistoryStore {
     /// Appends a feedback row — insert-only, mirroring the event log's
     /// append-only design (see `event_log.rs`): feedback is never a mutation
     /// of the original finding row, only a new fact recorded alongside it.
-    pub fn record_feedback(&self, finding_id: &str, lookup: &FindingLookup, verdict: &str, note: Option<&str>, created_at: &str) -> anyhow::Result<()> {
+    pub fn record_feedback(&self, finding_id: &str, lookup: &FindingLookup, verdict: FeedbackVerdict, note: Option<&str>, created_at: &str) -> anyhow::Result<()> {
         self.conn.execute(
             "INSERT INTO feedback (finding_id, fingerprint, category, rule_id_or_aspect, severity, verdict, note, created_at, title, message)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            rusqlite::params![finding_id, lookup.fingerprint, lookup.category, lookup.rule_id_or_tool, lookup.severity, verdict, note, created_at, lookup.title, lookup.message],
+            rusqlite::params![finding_id, lookup.fingerprint, lookup.category, lookup.rule_id_or_tool, lookup.severity, verdict.as_str(), note, created_at, lookup.title, lookup.message],
         )?;
         Ok(())
     }
 
-    /// `--fp` feedback rows that carry a human-supplied `--note`, per
-    /// category — skill evolution's channel 2 input (repeated `--fp`
-    /// feedback with the human's own stated reason). Feedback without a
-    /// note is excluded: an unexplained "this was wrong" has no thread for
-    /// negative-guidance drafting to work from.
+    /// `--false-positive` feedback rows that carry a human-supplied
+    /// `--note`, per category — skill evolution's channel 2 input (repeated
+    /// false-positive feedback with the human's own stated reason).
+    /// Feedback without a note is excluded: an unexplained "this was wrong"
+    /// has no thread for negative-guidance drafting to work from.
     pub fn fp_feedback_with_notes(&self) -> anyhow::Result<Vec<FpFeedbackRow>> {
-        let mut stmt = self.conn.prepare("SELECT category, rule_id_or_aspect, title, message, note FROM feedback WHERE verdict = 'fp' AND note IS NOT NULL AND note != ''")?;
+        let mut stmt = self.conn.prepare("SELECT category, rule_id_or_aspect, title, message, note FROM feedback WHERE verdict = 'false_positive' AND note IS NOT NULL AND note != ''")?;
         let rows = stmt.query_map([], |row| {
             Ok(FpFeedbackRow { category: row.get(0)?, rule_id_or_aspect: row.get(1)?, title: row.get(2)?, message: row.get(3)?, note: row.get(4)? })
         })?;
@@ -301,37 +301,42 @@ impl HistoryStore {
         Ok(result)
     }
 
-    /// Records an embedding vector for a piece of feedback (`verdict` is
-    /// `"fp"` or `"tp"`), keyed by fingerprint — best-effort input to the
-    /// Stage 4 similarity filter. Insert-only, same append-only shape as
-    /// `record_feedback`; a fingerprint can accumulate multiple embedding
-    /// rows over time (e.g. re-computed with a different model) without
-    /// needing an update path.
-    pub fn record_embedding(&self, fingerprint: &str, verdict: &str, embedding: &[f32], created_at: &str) -> anyhow::Result<()> {
+    /// Records an embedding vector for a piece of feedback, keyed by
+    /// fingerprint — best-effort input to the Stage 4 similarity filter.
+    /// Insert-only, same append-only shape as `record_feedback`; a
+    /// fingerprint can accumulate multiple embedding rows over time (e.g.
+    /// re-computed with a different model) without needing an update path.
+    pub fn record_embedding(&self, fingerprint: &str, verdict: FeedbackVerdict, embedding: &[f32], created_at: &str) -> anyhow::Result<()> {
         let bytes = crate::agents::embedding::embedding_to_bytes(embedding);
         self.conn.execute(
             "INSERT INTO embeddings (fingerprint, verdict, embedding, created_at) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![fingerprint, verdict, bytes, created_at],
+            rusqlite::params![fingerprint, verdict.as_str(), bytes, created_at],
         )?;
         Ok(())
     }
 
-    /// Counts distinct fingerprints, among those recorded with `verdict`,
-    /// whose stored embedding is cosine-similar to `embedding` at or above
-    /// `threshold`. Used by the Stage 4 filter to test both the
-    /// `fpBlockThreshold` and `tpOverrideThreshold` conditions with the same
-    /// query, just a different `verdict`/`threshold` pair.
-    /// Only the most recent `MAX_SCANNED_EMBEDDINGS` rows for `verdict` are
-    /// compared — this runs a full cosine-similarity pass per call, so
-    /// without a cap it scales linearly with total historical feedback for
-    /// that verdict, unbounded. Recency is the right bound here (matches
-    /// this store's general "recent signal matters more" posture), not an
+    /// Counts distinct fingerprints, among those recorded with any verdict
+    /// in `verdicts`, whose stored embedding is cosine-similar to
+    /// `embedding` at or above `threshold`. Used by the Stage 4 filter to
+    /// test both the `fpBlockThreshold` and `tpOverrideThreshold`
+    /// conditions with the same query, just a different verdict-set/
+    /// threshold pair — `verdicts` takes a slice (not one verdict) so the
+    /// "tp-like" side of that check can span `TruePositive`/`AcceptedRisk`/
+    /// `FixInFollowup` in one query rather than three.
+    /// Only the most recent `MAX_SCANNED_EMBEDDINGS` rows across those
+    /// verdicts are compared — this runs a full cosine-similarity pass per
+    /// call, so without a cap it scales linearly with total historical
+    /// feedback, unbounded. Recency is the right bound here (matches this
+    /// store's general "recent signal matters more" posture), not an
     /// arbitrary cutoff.
     const MAX_SCANNED_EMBEDDINGS: u32 = 2_000;
 
-    pub fn count_similar_embeddings(&self, embedding: &[f32], verdict: &str, threshold: f64) -> anyhow::Result<u32> {
-        let mut stmt = self.conn.prepare("SELECT fingerprint, embedding FROM embeddings WHERE verdict = ?1 ORDER BY id DESC LIMIT ?2")?;
-        let rows = stmt.query_map(rusqlite::params![verdict, Self::MAX_SCANNED_EMBEDDINGS], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
+    pub fn count_similar_embeddings(&self, embedding: &[f32], verdicts: &[FeedbackVerdict], threshold: f64) -> anyhow::Result<u32> {
+        let placeholders = verdicts.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let sql = format!("SELECT fingerprint, embedding FROM embeddings WHERE verdict IN ({placeholders}) ORDER BY id DESC LIMIT {}", Self::MAX_SCANNED_EMBEDDINGS);
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&str> = verdicts.iter().map(|v| v.as_str()).collect();
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
         let mut matched: std::collections::HashSet<String> = std::collections::HashSet::new();
         for row in rows {
             let (fingerprint, bytes) = row?;
@@ -421,11 +426,15 @@ impl HistoryStore {
         Ok(result)
     }
 
-    /// Count of `--fp` feedback recorded against any finding attributed to
-    /// this rule — the demotion signal, independent of the shadow-firing
-    /// agreement ratio (a user's own explicit feedback always counts).
+    /// Count of `--false-positive` feedback recorded against any finding
+    /// attributed to this rule — the demotion signal, independent of the
+    /// shadow-firing agreement ratio (a user's own explicit feedback always
+    /// counts). Deliberately excludes `doesnt_apply`: that verdict says the
+    /// rule is valid in general but this instance wasn't relevant, which
+    /// isn't evidence the rule itself misjudged the code shape the way a
+    /// real false positive is (see `FeedbackVerdict`'s own doc comment).
     pub fn count_fp_feedback_for_rule(&self, rule_id: &str) -> anyhow::Result<u32> {
-        Ok(self.conn.query_row("SELECT COUNT(*) FROM feedback WHERE rule_id_or_aspect = ?1 AND verdict = 'fp'", [rule_id], |row| row.get(0))?)
+        Ok(self.conn.query_row("SELECT COUNT(*) FROM feedback WHERE rule_id_or_aspect = ?1 AND verdict = ?2", rusqlite::params![rule_id, FeedbackVerdict::FalsePositive.as_str()], |row| row.get(0))?)
     }
 
     /// Flips a rule's lifecycle status in place (`"shadow"` <-> `"promoted"`)
@@ -629,7 +638,7 @@ mod tests {
         let store = HistoryStore::open_in_memory().unwrap();
         store.record_run(&make_report("run-1", vec![make_finding("a")])).unwrap();
         let lookup = store.find_finding_by_id("f-a").unwrap().unwrap();
-        store.record_feedback("f-a", &lookup, "fp", Some("intentional pattern here"), "2026-07-12T00:00:00Z").unwrap();
+        store.record_feedback("f-a", &lookup, FeedbackVerdict::FalsePositive, Some("intentional pattern here"), "2026-07-12T00:00:00Z").unwrap();
         assert_eq!(store.count_feedback_for_fingerprint("a").unwrap(), 1);
         assert_eq!(store.count_findings().unwrap(), 1);
     }
@@ -639,8 +648,8 @@ mod tests {
         let store = HistoryStore::open_in_memory().unwrap();
         store.record_run(&make_report("run-1", vec![make_finding("a")])).unwrap();
         let lookup = store.find_finding_by_id("f-a").unwrap().unwrap();
-        store.record_feedback("f-a", &lookup, "fp", None, "2026-07-12T00:00:00Z").unwrap();
-        store.record_feedback("f-a", &lookup, "fp", None, "2026-07-13T00:00:00Z").unwrap();
+        store.record_feedback("f-a", &lookup, FeedbackVerdict::FalsePositive, None, "2026-07-12T00:00:00Z").unwrap();
+        store.record_feedback("f-a", &lookup, FeedbackVerdict::FalsePositive, None, "2026-07-13T00:00:00Z").unwrap();
         assert_eq!(store.count_feedback_for_fingerprint("a").unwrap(), 2);
     }
 
@@ -680,24 +689,39 @@ mod tests {
     #[test]
     fn count_similar_embeddings_counts_only_vectors_above_the_threshold() {
         let store = HistoryStore::open_in_memory().unwrap();
-        store.record_embedding("a", "fp", &[1.0, 0.0], "2026-07-12T00:00:00Z").unwrap();
-        store.record_embedding("b", "fp", &[0.0, 1.0], "2026-07-12T00:00:00Z").unwrap();
-        assert_eq!(store.count_similar_embeddings(&[1.0, 0.0], "fp", 0.9).unwrap(), 1);
+        store.record_embedding("a", FeedbackVerdict::FalsePositive, &[1.0, 0.0], "2026-07-12T00:00:00Z").unwrap();
+        store.record_embedding("b", FeedbackVerdict::FalsePositive, &[0.0, 1.0], "2026-07-12T00:00:00Z").unwrap();
+        assert_eq!(store.count_similar_embeddings(&[1.0, 0.0], &[FeedbackVerdict::FalsePositive], 0.9).unwrap(), 1);
     }
 
     #[test]
     fn count_similar_embeddings_ignores_a_different_verdict() {
         let store = HistoryStore::open_in_memory().unwrap();
-        store.record_embedding("a", "tp", &[1.0, 0.0], "2026-07-12T00:00:00Z").unwrap();
-        assert_eq!(store.count_similar_embeddings(&[1.0, 0.0], "fp", 0.9).unwrap(), 0);
+        store.record_embedding("a", FeedbackVerdict::TruePositive, &[1.0, 0.0], "2026-07-12T00:00:00Z").unwrap();
+        assert_eq!(store.count_similar_embeddings(&[1.0, 0.0], &[FeedbackVerdict::FalsePositive], 0.9).unwrap(), 0);
     }
 
     #[test]
     fn count_similar_embeddings_counts_each_matching_fingerprint_once() {
         let store = HistoryStore::open_in_memory().unwrap();
-        store.record_embedding("a", "fp", &[1.0, 0.0], "2026-07-12T00:00:00Z").unwrap();
-        store.record_embedding("a", "fp", &[1.0, 0.01], "2026-07-13T00:00:00Z").unwrap();
-        assert_eq!(store.count_similar_embeddings(&[1.0, 0.0], "fp", 0.9).unwrap(), 1);
+        store.record_embedding("a", FeedbackVerdict::FalsePositive, &[1.0, 0.0], "2026-07-12T00:00:00Z").unwrap();
+        store.record_embedding("a", FeedbackVerdict::FalsePositive, &[1.0, 0.01], "2026-07-13T00:00:00Z").unwrap();
+        assert_eq!(store.count_similar_embeddings(&[1.0, 0.0], &[FeedbackVerdict::FalsePositive], 0.9).unwrap(), 1);
+    }
+
+    #[test]
+    fn count_similar_embeddings_aggregates_across_multiple_verdicts_in_one_call() {
+        // The Stage 4 filter's tp-side check spans TruePositive/
+        // AcceptedRisk/FixInFollowup in one query — all three confirm the
+        // finding was correct, so they must all count toward the same
+        // "tp-like" bucket.
+        let store = HistoryStore::open_in_memory().unwrap();
+        store.record_embedding("a", FeedbackVerdict::TruePositive, &[1.0, 0.0], "2026-07-12T00:00:00Z").unwrap();
+        store.record_embedding("b", FeedbackVerdict::AcceptedRisk, &[1.0, 0.0], "2026-07-12T00:00:00Z").unwrap();
+        store.record_embedding("c", FeedbackVerdict::FixInFollowup, &[1.0, 0.0], "2026-07-12T00:00:00Z").unwrap();
+        store.record_embedding("d", FeedbackVerdict::DoesntApply, &[1.0, 0.0], "2026-07-12T00:00:00Z").unwrap();
+        let tp_like = &[FeedbackVerdict::TruePositive, FeedbackVerdict::AcceptedRisk, FeedbackVerdict::FixInFollowup];
+        assert_eq!(store.count_similar_embeddings(&[1.0, 0.0], tp_like, 0.9).unwrap(), 3, "DoesntApply must not count toward the tp-like bucket");
     }
 
     #[test]
@@ -740,10 +764,25 @@ mod tests {
         let store = HistoryStore::open_in_memory().unwrap();
         store.record_run(&make_report("run-1", vec![make_finding("a")])).unwrap();
         let lookup = store.find_finding_by_id("f-a").unwrap().unwrap();
-        store.record_feedback("f-a", &lookup, "fp", None, "2026-07-12T00:00:00Z").unwrap();
-        store.record_feedback("f-a", &lookup, "tp", None, "2026-07-13T00:00:00Z").unwrap();
+        store.record_feedback("f-a", &lookup, FeedbackVerdict::FalsePositive, None, "2026-07-12T00:00:00Z").unwrap();
+        store.record_feedback("f-a", &lookup, FeedbackVerdict::TruePositive, None, "2026-07-13T00:00:00Z").unwrap();
         assert_eq!(store.count_fp_feedback_for_rule("go-no-self-comparison").unwrap(), 1);
         assert_eq!(store.count_fp_feedback_for_rule("some-other-rule").unwrap(), 0);
+    }
+
+    #[test]
+    fn count_fp_feedback_for_rule_excludes_doesnt_apply() {
+        // Regression test for the whole point of this waiver taxonomy:
+        // `DoesntApply` says the rule is valid in general, just not
+        // relevant here — that's not evidence the rule itself misjudged
+        // the code shape, so it must never count toward the demotion gate
+        // the way a real `FalsePositive` does.
+        let store = HistoryStore::open_in_memory().unwrap();
+        store.record_run(&make_report("run-1", vec![make_finding("a")])).unwrap();
+        let lookup = store.find_finding_by_id("f-a").unwrap().unwrap();
+        store.record_feedback("f-a", &lookup, FeedbackVerdict::DoesntApply, None, "2026-07-12T00:00:00Z").unwrap();
+        store.record_feedback("f-a", &lookup, FeedbackVerdict::DoesntApply, None, "2026-07-13T00:00:00Z").unwrap();
+        assert_eq!(store.count_fp_feedback_for_rule("go-no-self-comparison").unwrap(), 0);
     }
 
     #[test]
@@ -753,9 +792,9 @@ mod tests {
         let a = store.find_finding_by_id("f-a").unwrap().unwrap();
         let b = store.find_finding_by_id("f-b").unwrap().unwrap();
         let c = store.find_finding_by_id("f-c").unwrap().unwrap();
-        store.record_feedback("f-a", &a, "fp", Some("intentional pattern here"), "2026-07-12T00:00:00Z").unwrap();
-        store.record_feedback("f-b", &b, "fp", None, "2026-07-12T00:00:00Z").unwrap();
-        store.record_feedback("f-c", &c, "tp", Some("real bug"), "2026-07-12T00:00:00Z").unwrap();
+        store.record_feedback("f-a", &a, FeedbackVerdict::FalsePositive, Some("intentional pattern here"), "2026-07-12T00:00:00Z").unwrap();
+        store.record_feedback("f-b", &b, FeedbackVerdict::FalsePositive, None, "2026-07-12T00:00:00Z").unwrap();
+        store.record_feedback("f-c", &c, FeedbackVerdict::TruePositive, Some("real bug"), "2026-07-12T00:00:00Z").unwrap();
 
         let rows = store.fp_feedback_with_notes().unwrap();
         assert_eq!(rows.len(), 1);
@@ -767,12 +806,12 @@ mod tests {
         let store = HistoryStore::open_in_memory().unwrap();
         store.record_run(&make_report("run-1", vec![make_finding("a"), make_finding("b")])).unwrap();
         let a = store.find_finding_by_id("f-a").unwrap().unwrap();
-        store.record_feedback("f-a", &a, "fp", None, "2026-07-12T00:00:00Z").unwrap();
+        store.record_feedback("f-a", &a, FeedbackVerdict::FalsePositive, None, "2026-07-12T00:00:00Z").unwrap();
 
         let known = store.known_verdicts_for_run("run-1").unwrap();
         assert_eq!(known.len(), 1, "only 'a' has feedback recorded");
         assert_eq!(known[0].fingerprint, "a");
-        assert_eq!(known[0].verdict, "fp");
+        assert_eq!(known[0].verdict, "false_positive");
     }
 
     #[test]
@@ -781,7 +820,7 @@ mod tests {
         store.record_run(&make_report("run-1", vec![make_finding("a")])).unwrap();
         store.record_run(&make_report("run-2", vec![make_finding("b")])).unwrap();
         let a = store.find_finding_by_id("f-a").unwrap().unwrap();
-        store.record_feedback("f-a", &a, "tp", None, "2026-07-12T00:00:00Z").unwrap();
+        store.record_feedback("f-a", &a, FeedbackVerdict::TruePositive, None, "2026-07-12T00:00:00Z").unwrap();
 
         let runs = store.runs_with_known_verdicts().unwrap();
         assert_eq!(runs, vec!["run-1".to_string()]);

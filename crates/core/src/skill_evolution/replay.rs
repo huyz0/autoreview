@@ -7,7 +7,7 @@
 //! This module only answers: "given what a run flagged and what we already
 //! know the ground truth was, did the candidate do better?"
 
-use autoreview_schema::AgentFinding;
+use autoreview_schema::{AgentFinding, FeedbackVerdict};
 
 use crate::report::dedupe::title_similarity;
 use crate::storage::history_store::KnownVerdict;
@@ -55,26 +55,30 @@ impl ReplayComparison {
 
 /// Compares a candidate skill's replay findings against the known ground
 /// truth for one run. `known_verdicts` are findings a human already judged
-/// `fp` or `tp` for the *old* skill; `candidate_findings` is what the
-/// *candidate* (with the proposed instruction edit) flagged on the same
-/// replayed diff. Pure — no I/O, directly testable against literal fixtures.
+/// for the *old* skill; `candidate_findings` is what the *candidate* (with
+/// the proposed instruction edit) flagged on the same replayed diff. Pure —
+/// no I/O, directly testable against literal fixtures.
+///
+/// `DoesntApply` verdicts are deliberately excluded from both totals — they
+/// don't confirm the finding was correct (unlike `TruePositive`/
+/// `AcceptedRisk`/`FixInFollowup`, all of which count toward `tp_total`) and
+/// they aren't evidence it was wrong either (only `FalsePositive` counts
+/// toward `fp_total`), so a candidate's behavior on a doesn't-apply case
+/// says nothing about whether it's actually better.
 pub fn compare_replay(known_verdicts: &[KnownVerdict], candidate_findings: &[AgentFinding]) -> ReplayComparison {
     let mut comparison = ReplayComparison::default();
     for known in known_verdicts {
-        match known.verdict.as_str() {
-            "fp" => {
-                comparison.fp_total += 1;
-                if !still_flagged(known, candidate_findings) {
-                    comparison.fp_resolved += 1;
-                }
+        let Some(verdict) = FeedbackVerdict::parse(&known.verdict) else { continue };
+        if verdict.is_false_positive_like() {
+            comparison.fp_total += 1;
+            if !still_flagged(known, candidate_findings) {
+                comparison.fp_resolved += 1;
             }
-            "tp" => {
-                comparison.tp_total += 1;
-                if !still_flagged(known, candidate_findings) {
-                    comparison.tp_lost.push(known.title.clone());
-                }
+        } else if verdict.is_true_positive_like() {
+            comparison.tp_total += 1;
+            if !still_flagged(known, candidate_findings) {
+                comparison.tp_lost.push(known.title.clone());
             }
-            _ => {}
         }
     }
     comparison
@@ -108,7 +112,7 @@ mod tests {
 
     #[test]
     fn counts_a_resolved_fp_when_the_candidate_no_longer_flags_it() {
-        let known_verdicts = vec![known("Missing null check", "Parameter x is not null-checked before use", "fp")];
+        let known_verdicts = vec![known("Missing null check", "Parameter x is not null-checked before use", "false_positive")];
         let comparison = compare_replay(&known_verdicts, &[]);
         assert_eq!(comparison.fp_total, 1);
         assert_eq!(comparison.fp_resolved, 1);
@@ -116,7 +120,7 @@ mod tests {
 
     #[test]
     fn does_not_count_an_fp_as_resolved_if_the_candidate_still_flags_it() {
-        let known_verdicts = vec![known("Missing null check", "Parameter x is not null-checked before use", "fp")];
+        let known_verdicts = vec![known("Missing null check", "Parameter x is not null-checked before use", "false_positive")];
         let candidate = vec![finding("Missing null check", "Parameter x is not null-checked before use")];
         let comparison = compare_replay(&known_verdicts, &candidate);
         assert_eq!(comparison.fp_resolved, 0);
@@ -124,17 +128,35 @@ mod tests {
 
     #[test]
     fn flags_a_lost_tp_when_the_candidate_stops_flagging_a_confirmed_true_positive() {
-        let known_verdicts = vec![known("SQL injection risk", "raw query built from input", "tp")];
+        let known_verdicts = vec![known("SQL injection risk", "raw query built from input", "true_positive")];
         let comparison = compare_replay(&known_verdicts, &[]);
         assert_eq!(comparison.tp_lost, vec!["SQL injection risk".to_string()]);
     }
 
     #[test]
     fn does_not_flag_a_tp_as_lost_if_the_candidate_still_flags_it() {
-        let known_verdicts = vec![known("SQL injection risk", "raw query built from input", "tp")];
+        let known_verdicts = vec![known("SQL injection risk", "raw query built from input", "true_positive")];
         let candidate = vec![finding("SQL injection risk", "raw query built from input")];
         let comparison = compare_replay(&known_verdicts, &candidate);
         assert!(comparison.tp_lost.is_empty());
+    }
+
+    #[test]
+    fn a_doesnt_apply_verdict_counts_toward_neither_total() {
+        let known_verdicts = vec![known("Missing null check", "Parameter x is not null-checked before use", "doesnt_apply")];
+        let comparison = compare_replay(&known_verdicts, &[]);
+        assert_eq!(comparison.fp_total, 0);
+        assert_eq!(comparison.tp_total, 0);
+    }
+
+    #[test]
+    fn accepted_risk_and_fix_in_followup_both_count_as_true_positive_like() {
+        let known_verdicts = vec![
+            known("A", "a", "accepted_risk"),
+            known("B", "b", "fix_in_followup"),
+        ];
+        let comparison = compare_replay(&known_verdicts, &[]);
+        assert_eq!(comparison.tp_total, 2);
     }
 
     #[test]

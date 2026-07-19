@@ -604,9 +604,12 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     // server), and best-effort — an unreachable server just skips the filter
     // rather than failing the run. Reuses the plan's Greptile-derived rule:
     // suppress a finding cosine-similar to >= fpBlockThreshold distinct past
-    // `--fp` findings, unless it's also similar to >= tpOverrideThreshold
-    // distinct past `--tp` findings (a recurring real issue shouldn't be
-    // silenced just because it also resembles some noise).
+    // false-positive findings, unless it's also similar to >=
+    // tpOverrideThreshold distinct past true-positive-like findings (a
+    // recurring real issue shouldn't be silenced just because it also
+    // resembles some noise) — `AcceptedRisk`/`FixInFollowup` count on the
+    // tp side too, same as `TruePositive`, since all three confirm the
+    // finding was correct; only `DoesntApply` counts toward neither side.
     if config.agents.embedding.enabled {
         match HistoryStore::open(&history_dir) {
             Ok(store) => {
@@ -616,8 +619,10 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
                     let embedding = autoreview_core::fetch_embedding(&config.agents.embedding.base_url, &config.agents.embedding.model, &text, &config.agents.embedding.curl_binary);
                     let suppress = match embedding {
                         Ok(embedding) => {
-                            let fp_count = store.count_similar_embeddings(&embedding, "fp", 0.9).unwrap_or(0);
-                            let tp_count = store.count_similar_embeddings(&embedding, "tp", 0.9).unwrap_or(0);
+                            let fp_count = store.count_similar_embeddings(&embedding, &[autoreview_schema::FeedbackVerdict::FalsePositive], 0.9).unwrap_or(0);
+                            let tp_count = store
+                                .count_similar_embeddings(&embedding, &[autoreview_schema::FeedbackVerdict::TruePositive, autoreview_schema::FeedbackVerdict::AcceptedRisk, autoreview_schema::FeedbackVerdict::FixInFollowup], 0.9)
+                                .unwrap_or(0);
                             fp_count >= config.storage.fp_block_threshold && tp_count < config.storage.tp_override_threshold
                         }
                         Err(_) => false,
@@ -646,7 +651,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         println!("    {}", finding.message);
     }
     if !dedupe_result.findings.is_empty() {
-        println!("\n  (use `autoreview feedback <id> --fp|--tp` to record feedback on a finding above)");
+        println!("\n  (use `autoreview feedback <id> --fp|--tp` to record feedback on a finding above — or --doesnt-apply/--accepted-risk/--fix-in-followup for a more specific reason)");
     }
 
     let run_dir = history_dir.join("runs").join(&run_id);

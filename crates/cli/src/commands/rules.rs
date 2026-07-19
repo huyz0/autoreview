@@ -146,7 +146,7 @@ pub fn run_rules_shadow_log(repo_root: &std::path::Path, rule_id: &str) -> anyho
     for firing in &firings {
         println!("  [{}] {}:{} (run {}, {}) — {}", firing.agreement, firing.location_path, firing.location_line, firing.run_id, firing.created_at, firing.fingerprint);
     }
-    println!("\n(use `autoreview feedback <id> --fp|--tp` on a finding's own id to feed the promotion/demotion gates)");
+    println!("\n(use `autoreview feedback <id> --fp|--tp` on a finding's own id to feed the promotion/demotion gates — use --doesnt-apply instead of --fp if the rule is valid but just not relevant here, since that does NOT count toward demotion)");
     Ok(())
 }
 

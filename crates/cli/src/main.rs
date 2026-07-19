@@ -7,7 +7,7 @@ use autoreview_schema::{AgentBackendKind, Tier};
 use commands::apply::run_apply;
 use commands::diff::{run_diff, DiffCommandOptions};
 use commands::doctor::run_doctor;
-use commands::feedback::run_feedback;
+use commands::feedback::{run_feedback, run_missed_report};
 use commands::history::run_history_sync;
 use commands::rules::{run_rules_bench, run_rules_mine, run_rules_review, run_rules_shadow_log};
 use commands::skills::{run_skills_list, run_skills_mine, run_skills_review, run_skills_stub};
@@ -46,13 +46,28 @@ enum Commands {
     },
     /// Apply a finding's suggested patch, gated by a `git apply --check` sanity check
     Apply { finding_id: String },
-    /// Record true/false-positive feedback on a finding, or report a missed finding
+    /// Record a verdict on a finding, or report a missed finding. --fp/--tp
+    /// are the quick/generic verdicts; --doesnt-apply/--accepted-risk/
+    /// --fix-in-followup record a more specific reason a finding wasn't
+    /// acted on (modeled on Aviator Verify's waiver taxonomy) — all three
+    /// still count as a confirmed true positive for rule-precision
+    /// purposes, but --doesnt-apply does NOT count as evidence the rule
+    /// itself is wrong the way --fp does.
     Feedback {
         id: String,
         #[arg(long)]
         fp: bool,
         #[arg(long)]
         tp: bool,
+        /// The rule is valid in general but doesn't apply to this specific case
+        #[arg(long)]
+        doesnt_apply: bool,
+        /// The finding is real; the author accepts the risk and won't fix it
+        #[arg(long)]
+        accepted_risk: bool,
+        /// The finding is real and will be fixed in a separate follow-up PR
+        #[arg(long)]
+        fix_in_followup: bool,
         #[arg(long)]
         missed: Option<String>,
         #[arg(long)]
@@ -172,15 +187,26 @@ fn main() -> anyhow::Result<()> {
             })?;
         }
         Commands::Apply { finding_id } => run_apply(&repo_root, &finding_id)?,
-        Commands::Feedback { id, fp, tp, missed, note } => {
+        Commands::Feedback { id, fp, tp, doesnt_apply, accepted_risk, fix_in_followup, missed, note } => {
+            let flags = [fp, tp, doesnt_apply, accepted_risk, fix_in_followup, missed.is_some()];
+            if flags.iter().filter(|f| **f).count() > 1 {
+                eprintln!("error: specify only one of --fp, --tp, --doesnt-apply, --accepted-risk, --fix-in-followup, or --missed <description>");
+                std::process::exit(1);
+            }
             if let Some(description) = missed {
-                run_feedback(&repo_root, &id, "missed", Some(&description))?;
+                run_missed_report(&repo_root, &id, &description)?;
             } else if fp {
-                run_feedback(&repo_root, &id, "fp", note.as_deref())?;
+                run_feedback(&repo_root, &id, autoreview_schema::FeedbackVerdict::FalsePositive, note.as_deref())?;
             } else if tp {
-                run_feedback(&repo_root, &id, "tp", note.as_deref())?;
+                run_feedback(&repo_root, &id, autoreview_schema::FeedbackVerdict::TruePositive, note.as_deref())?;
+            } else if doesnt_apply {
+                run_feedback(&repo_root, &id, autoreview_schema::FeedbackVerdict::DoesntApply, note.as_deref())?;
+            } else if accepted_risk {
+                run_feedback(&repo_root, &id, autoreview_schema::FeedbackVerdict::AcceptedRisk, note.as_deref())?;
+            } else if fix_in_followup {
+                run_feedback(&repo_root, &id, autoreview_schema::FeedbackVerdict::FixInFollowup, note.as_deref())?;
             } else {
-                eprintln!("error: specify one of --fp, --tp, or --missed <description>");
+                eprintln!("error: specify one of --fp, --tp, --doesnt-apply, --accepted-risk, --fix-in-followup, or --missed <description>");
                 std::process::exit(1);
             }
         }
