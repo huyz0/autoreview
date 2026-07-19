@@ -1,0 +1,19 @@
+id: java-logged-exception-without-stacktrace
+language: Java
+category: correctness
+severity: warning
+message: "The caught exception's `.getMessage()` is logged as text instead of passing the exception object itself — SLF4J/Log4j only attach a full stack trace when the `Throwable` is passed as its own argument (e.g. `log.error(\"Failed\", e)`). Interpolating just the message string silently drops the stack trace, which is often the only thing that makes a production log entry actually debuggable."
+metadata:
+  confidence: HIGH
+rule:
+  pattern: $LOG.$METHOD($MSG)
+  has:
+    stopBy: end
+    kind: method_invocation
+    regex: "\\.getMessage\\(\\)$"
+  inside:
+    stopBy: end
+    kind: catch_clause
+constraints:
+  METHOD:
+    regex: "^(error|warn)$"

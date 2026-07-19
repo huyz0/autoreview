@@ -1,0 +1,19 @@
+id: kotlin-logged-exception-without-stacktrace
+language: Kotlin
+category: correctness
+severity: warning
+message: "The caught exception's `.message` is logged as text instead of passing the exception object itself — SLF4J/Log4j only attach a full stack trace when the `Throwable` is passed as its own argument (e.g. `log.error(\"Failed\", e)`). Interpolating just the message string silently drops the stack trace, which is often the only thing that makes a production log entry actually debuggable."
+metadata:
+  confidence: HIGH
+rule:
+  pattern: $LOG.$METHOD($MSG)
+  has:
+    stopBy: end
+    kind: navigation_expression
+    regex: "\\.message$"
+  inside:
+    stopBy: end
+    kind: catch_block
+constraints:
+  METHOD:
+    regex: "^(error|warn)$"

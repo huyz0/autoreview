@@ -1,0 +1,18 @@
+id: kotlin-log-string-concat
+language: Kotlin
+category: performance
+severity: warning
+message: "A log message is built via string concatenation or a string template instead of SLF4J/Log4j's parameterized form (`log.info(\"User {} logged in\", userId)`) — both `+` concatenation and `\"$var\"` template interpolation always run, even when this log level is disabled, wasting the formatting/allocation cost on every call; the parameterized form only formats when the level is actually enabled."
+metadata:
+  confidence: HIGH
+rule:
+  pattern: $LOG.$METHOD($MSG)
+  has:
+    stopBy: end
+    any:
+      - kind: additive_expression
+      - kind: interpolation_identifier_start
+      - kind: interpolation_expression_start
+constraints:
+  METHOD:
+    regex: "^(trace|debug|info|warn|error)$"

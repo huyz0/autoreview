@@ -1,0 +1,14 @@
+id: java-log-string-concat
+language: Java
+category: performance
+severity: warning
+message: "A log message is built via string concatenation instead of SLF4J/Log4j's parameterized form (`log.info(\"User {} logged in\", userId)`) — concatenation always runs, even when this log level is disabled, wasting the formatting/allocation cost on every call; the parameterized form only formats when the level is actually enabled."
+metadata:
+  confidence: HIGH
+rule:
+  pattern: $LOG.$METHOD($MSG)
+constraints:
+  METHOD:
+    regex: "^(trace|debug|info|warn|error)$"
+  MSG:
+    regex: '".*"\s*\+'

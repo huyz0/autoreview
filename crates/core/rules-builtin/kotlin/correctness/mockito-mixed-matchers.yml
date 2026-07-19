@@ -1,0 +1,21 @@
+id: kotlin-mockito-mixed-matchers
+language: Kotlin
+category: correctness
+severity: error
+message: "Mockito requires every argument in a stubbed/verified call to be a matcher (`any()`, `eq()`, `argThat()`, ...) if even one of them is — mixing a raw literal alongside a matcher like this throws `InvalidUseOfMatchersException` at runtime, not at compile time. Wrap the plain argument in `eq(...)` too."
+metadata:
+  confidence: HIGH
+  references:
+    - "https://javadoc.io/doc/org.mockito/mockito-core/latest/org/mockito/Mockito.html#15"
+rule:
+  kind: value_arguments
+  has:
+    kind: value_argument
+    has:
+      kind: call_expression
+      regex: "^(any|anyString|anyInt|anyLong|anyDouble|anyBoolean|anyList|anySet|anyMap|anyCollection|argThat|isA|isNull|notNull|nullable)\\("
+  all:
+    - has:
+        kind: value_argument
+        has:
+          kind: string_literal

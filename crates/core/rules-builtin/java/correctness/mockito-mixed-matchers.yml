@@ -1,0 +1,21 @@
+id: java-mockito-mixed-matchers
+language: Java
+category: correctness
+severity: error
+message: "Mockito requires every argument in a stubbed/verified call to be a matcher (`any()`, `eq()`, `argThat()`, ...) if even one of them is — mixing a raw literal alongside a matcher like this throws `InvalidUseOfMatchersException` at runtime, not at compile time. Wrap the plain argument in `eq(...)` too."
+metadata:
+  confidence: HIGH
+  references:
+    - "https://javadoc.io/doc/org.mockito/mockito-core/latest/org/mockito/Mockito.html#15"
+rule:
+  kind: argument_list
+  has:
+    stopBy: neighbor
+    kind: method_invocation
+    regex: "^(any|anyString|anyInt|anyLong|anyDouble|anyBoolean|anyList|anySet|anyMap|anyCollection|anyVararg|argThat|isA|isNull|notNull|nullable)\\("
+  all:
+    - has:
+        stopBy: neighbor
+        any:
+          - kind: string_literal
+          - kind: decimal_integer_literal

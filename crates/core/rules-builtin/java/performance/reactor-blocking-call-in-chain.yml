@@ -1,0 +1,22 @@
+id: java-reactor-blocking-call-in-chain
+language: Java
+category: performance
+severity: error
+message: "`.block()` is called inside a `map`/`flatMap`/`doOnNext`/`filter`/`then` lambda — these operators run on whatever thread the reactive chain is scheduled on (often a small, shared event-loop thread pool like Reactor Netty's), so blocking there can stall every other request sharing that thread, and can deadlock outright if the blocked-on work itself needs the same thread to complete. Use the non-blocking equivalent (`flatMap` returning a `Mono`/`Flux` instead of blocking on one) instead of mixing imperative blocking calls into the reactive chain."
+metadata:
+  confidence: HIGH
+  references:
+    - "https://projectreactor.io/docs/core/release/reference/#faq.wrap-blocking"
+rule:
+  pattern: $X.block($$$ARGS)
+  inside:
+    stopBy: end
+    kind: lambda_expression
+    inside:
+      stopBy: end
+      any:
+        - pattern: $UPSTREAM.map($$$LAMBDA)
+        - pattern: $UPSTREAM.flatMap($$$LAMBDA)
+        - pattern: $UPSTREAM.doOnNext($$$LAMBDA)
+        - pattern: $UPSTREAM.filter($$$LAMBDA)
+        - pattern: $UPSTREAM.then($$$LAMBDA)
