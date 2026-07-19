@@ -1,0 +1,7 @@
+id: javascript-json-parse-stringify-clone
+language: JavaScript
+category: performance
+severity: warning
+message: "`JSON.parse(JSON.stringify(x))` for a deep clone serializes the entire object to a string and re-parses it — slow for anything but tiny objects, and silently drops/mangles anything JSON can't represent (`undefined`, functions, `Date`/`Map`/`Set`, circular references). Use `structuredClone(x)` (or a proper deep-clone utility) instead."
+rule:
+  pattern: JSON.parse(JSON.stringify($X))

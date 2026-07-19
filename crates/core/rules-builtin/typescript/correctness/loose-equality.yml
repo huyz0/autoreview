@@ -1,0 +1,15 @@
+id: typescript-loose-equality
+language: TypeScript
+category: correctness
+severity: warning
+message: "`==`/`!=` coerce operand types before comparing, producing surprising results (`0 == \"\"`, `[] == false`) — use `===`/`!==` instead. (The `== null`/`!= null` idiom, which intentionally matches both `null` and `undefined` in one comparison, is not flagged — that's a deliberate, common exception.)"
+rule:
+  any:
+    - pattern: $A == $B
+    - pattern: $A != $B
+  not:
+    any:
+      - pattern: $A == null
+      - pattern: $A != null
+      - pattern: $A == undefined
+      - pattern: $A != undefined

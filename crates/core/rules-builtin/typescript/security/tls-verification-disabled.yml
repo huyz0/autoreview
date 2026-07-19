@@ -1,0 +1,20 @@
+id: typescript-tls-verification-disabled
+language: TypeScript
+category: security
+severity: error
+message: "`rejectUnauthorized: false` disables TLS certificate verification entirely, making the connection vulnerable to man-in-the-middle attacks — any certificate (expired, self-signed, for the wrong hostname) is accepted. Only acceptable in tests against a known-safe endpoint; use a custom CA bundle instead if the real issue is an internal/self-signed cert."
+metadata:
+  cwe: ["CWE-295"]
+  owasp: ["A02:2021"]
+  confidence: HIGH
+  references:
+    - "https://cwe.mitre.org/data/definitions/295.html"
+rule:
+  kind: pair
+  has:
+    field: key
+    regex: "^rejectUnauthorized$"
+  all:
+    - has:
+        field: value
+        kind: "false"

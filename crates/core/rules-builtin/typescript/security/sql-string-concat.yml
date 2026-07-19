@@ -1,0 +1,16 @@
+id: typescript-sql-string-concat
+language: TypeScript
+category: security
+severity: error
+message: A SQL query built via string concatenation is vulnerable to SQL injection — use a parameterized query (`db.query("... WHERE id = $1", [id])` or the driver's own placeholder syntax) instead of concatenating user input into the query text.
+metadata:
+  cwe: ["CWE-89"]
+  owasp: ["A03:2021"]
+  confidence: HIGH
+  references:
+    - "https://cwe.mitre.org/data/definitions/89.html"
+rule:
+  pattern: $DB.query($QUERY)
+constraints:
+  QUERY:
+    regex: '".*"\s*\+'

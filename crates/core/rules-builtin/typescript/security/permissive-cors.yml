@@ -1,0 +1,15 @@
+id: typescript-permissive-cors
+language: TypeScript
+category: security
+severity: warning
+message: Access-Control-Allow-Origin set to "*" allows any website to make credentialed cross-origin requests to this endpoint — scope it to a known allowlist of origins instead (or configure the `cors` middleware's `origin` option with a function/allowlist rather than a bare wildcard).
+metadata:
+  cwe: ["CWE-942"]
+  owasp: ["A05:2021"]
+  confidence: HIGH
+  references:
+    - "https://cwe.mitre.org/data/definitions/942.html"
+rule:
+  any:
+    - pattern: $RES.header("Access-Control-Allow-Origin", "*")
+    - pattern: $RES.setHeader("Access-Control-Allow-Origin", "*")

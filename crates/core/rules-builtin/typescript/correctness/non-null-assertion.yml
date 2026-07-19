@@ -1,0 +1,7 @@
+id: typescript-non-null-assertion
+language: TypeScript
+category: correctness
+severity: warning
+message: "The non-null assertion operator (`!`) tells the type checker to trust that this value isn't `null`/`undefined` with no runtime check backing that promise — if the assertion is wrong, this throws a `TypeError` at the point of use instead of surfacing as a type error at compile time. Prefer an explicit check (`if (x == null) { ... }`, optional chaining `?.`, or a default via `??`) so the failure mode is visible and handled."
+rule:
+  kind: non_null_expression

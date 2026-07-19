@@ -1,0 +1,8 @@
+id: typescript-explicit-any-type
+language: TypeScript
+category: design
+severity: warning
+message: "`any` opts this value out of type checking entirely — any property access, call, or assignment on it is unverified, and `any` silently propagates to everywhere the value flows (a function returning `any` makes every caller's inferred type `any` too). Prefer `unknown` (forces a check/cast before use) or a real type; `any` should be a deliberate, rare escape hatch, not a default."
+rule:
+  kind: predefined_type
+  regex: "^any$"

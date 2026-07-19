@@ -1,0 +1,16 @@
+id: typescript-weak-hash
+language: TypeScript
+category: security
+severity: warning
+message: MD5 and SHA-1 are broken for security purposes (collision attacks) — use SHA-256 or better (`crypto.createHash("sha256")`) for anything security-sensitive (signatures, integrity checks, password-adjacent hashing).
+metadata:
+  cwe: ["CWE-327"]
+  owasp: ["A02:2021"]
+  confidence: HIGH
+  references:
+    - "https://cwe.mitre.org/data/definitions/327.html"
+rule:
+  pattern: crypto.createHash("$ALG")
+constraints:
+  ALG:
+    regex: (?i)^(md5|sha-?1)$

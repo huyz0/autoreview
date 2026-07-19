@@ -1,0 +1,13 @@
+id: javascript-eval-usage
+language: JavaScript
+category: security
+severity: error
+message: "`eval()` executes arbitrary JavaScript from a string — if any part of that string is influenced by user input, this is direct code execution, not just injection. There is almost always a safer alternative (`JSON.parse` for data, a real parser/interpreter for expressions) — avoid `eval` entirely rather than trying to sanitize its input."
+metadata:
+  cwe: ["CWE-95"]
+  owasp: ["A03:2021"]
+  confidence: HIGH
+  references:
+    - "https://cwe.mitre.org/data/definitions/95.html"
+rule:
+  pattern: eval($ARG)
