@@ -362,6 +362,13 @@ fn recognize_nil_guard(cond: Node, source: &[u8]) -> Option<(String, crate::cfg:
 }
 
 fn lower_if(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {
+    // Go's `if v := f(); v != nil { ... }` initializer clause (the
+    // `if v, err := db.Query(...); err == nil {` idiom) sits in its own
+    // `initializer` field, separate from `condition` — without lowering
+    // it, any source/assign captured only there (a taint source, a
+    // nil-check target) was silently invisible to the CFG.
+    let current = if let Some(initializer) = stmt.child_by_field_name("initializer") { lower_statement(cfg, initializer, source, current) } else { current };
+
     // The condition expression itself isn't modeled as a `Stmt` beyond
     // the nil-guard case below — recorded as `Other` text on the branch
     // point for line-number/debug fidelity regardless.
@@ -542,6 +549,20 @@ mod tests {
         // earlier version of this lowering always produced `value: None`.
         let cfg = lower("package p\nfunc f() int {\n\tx := 1\n\treturn x\n}\n");
         assert!(cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Return { value: Some(v) } if v == "x"))), "got: {:#?}", cfg.nodes);
+    }
+
+    #[test]
+    fn lowers_an_if_statements_initializer_clause() {
+        // Regression test: `if v := f(); v != nil { ... }` has its own
+        // `initializer` field, separate from `condition` — it used to be
+        // dropped entirely, so `v`'s assignment (and any taint source it
+        // carries) was invisible to the CFG.
+        let cfg = lower("package p\nfunc f() {\n\tif v := g(); v != nil {\n\t\t_ = v\n\t}\n}\n");
+        assert!(
+            cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { assigned_to: Some(a), .. } if a == "v") || matches!(s, Stmt::Assign { lhs, .. } if lhs == "v"))),
+            "got: {:#?}",
+            cfg.nodes
+        );
     }
 
     #[test]
