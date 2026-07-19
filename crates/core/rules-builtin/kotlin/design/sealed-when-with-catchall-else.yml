@@ -1,0 +1,20 @@
+id: kotlin-sealed-when-with-catchall-else
+language: Kotlin
+category: design
+severity: warning
+semantic: true
+message: "This `when` branches on type (`is $Type ->`) and also has a catch-all `else` branch — if the subject is a `sealed class`/`sealed interface`, that `else` defeats the whole point of sealing it: the compiler can no longer force this `when` to be updated when a new subtype is added, so a forgotten case silently falls through to the catch-all instead of failing to compile. If the subject really is sealed, list every subtype explicitly and drop `else`. (Heuristic: this rule can't confirm the subject's type is actually sealed, so it's flagged for a semantic check rather than reported outright.)"
+metadata:
+  references:
+    - "https://kotlinlang.org/docs/sealed-classes.html"
+rule:
+  kind: when_expression
+  has:
+    stopBy: end
+    kind: when_entry
+    regex: "^is "
+  all:
+    - has:
+        stopBy: end
+        kind: when_entry
+        regex: "^else"

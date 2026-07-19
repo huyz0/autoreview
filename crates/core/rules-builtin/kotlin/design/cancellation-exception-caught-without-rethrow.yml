@@ -1,0 +1,18 @@
+id: kotlin-cancellation-exception-caught-without-rethrow
+language: Kotlin
+category: design
+severity: warning
+semantic: true
+message: "`CancellationException` is caught but never rethrown — cancellation in `kotlinx.coroutines` is cooperative and relies on this exception propagating back up through every frame that catches it. Swallowing it here means the enclosing coroutine (and anything joined/awaiting it) won't actually stop, breaking structured concurrency. Always rethrow `CancellationException` after any cleanup this `catch` needs to do."
+metadata:
+  references:
+    - "https://kotlinlang.org/docs/exception-handling.html#exception-transparency"
+rule:
+  kind: catch_block
+  has:
+    kind: user_type
+    regex: "^CancellationException$"
+  not:
+    has:
+      stopBy: end
+      regex: "throw"

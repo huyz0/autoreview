@@ -1,0 +1,21 @@
+id: kotlin-async-result-discarded
+language: Kotlin
+category: correctness
+severity: warning
+semantic: true
+message: "`async { }`'s result (a `Deferred`) is discarded instead of assigned — since `async` doesn't propagate an exception until `.await()` is called, a failure inside this block is silently swallowed with no signal anything went wrong, and any work it started is never awaited or joined. If the result truly isn't needed, use `launch { }` instead (which does report exceptions eagerly); otherwise keep the `Deferred` and call `.await()` on it."
+metadata:
+  references:
+    - "https://kotlinlang.org/docs/exception-handling.html#coroutineexceptionhandler"
+rule:
+  any:
+    - pattern:
+        context: "fun f() { $SCOPE.async { $$$BODY } }"
+        selector: call_expression
+      inside:
+        kind: statements
+    - pattern:
+        context: "fun f() { async { $$$BODY } }"
+        selector: call_expression
+      inside:
+        kind: statements

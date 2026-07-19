@@ -1,0 +1,13 @@
+id: kotlin-sequential-async-await
+language: Kotlin
+category: performance
+severity: warning
+semantic: true
+message: "`async { }` is immediately followed by `.await()` on the same expression — this blocks on the result right where it's started, so it runs no more concurrently than a plain suspending call would. Inside a loop or `.map { }`, this pattern is a common trap: it looks concurrent but actually awaits each item sequentially. Start every `async` first (e.g. collect a `List<Deferred<T>>`), then `.await()` (or `.awaitAll()`) them afterward — or, if concurrency genuinely isn't needed here, drop `async`/`.await()` entirely and call the suspending function directly. (Heuristic: a one-off `async(dispatcher) { }.await()` used purely to switch context is a lesser, sometimes-intentional variant of this — `withContext` is the idiomatic form, but this rule can't tell that case apart from the sequential-loop case, so it's flagged for a semantic check.)"
+metadata:
+  references:
+    - "https://kotlinlang.org/docs/composing-suspending-functions.html#concurrent-using-async"
+rule:
+  any:
+    - pattern: $SCOPE.async { $$$BODY }.await()
+    - pattern: async { $$$BODY }.await()

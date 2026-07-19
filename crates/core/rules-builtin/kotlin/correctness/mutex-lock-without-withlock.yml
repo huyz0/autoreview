@@ -1,0 +1,11 @@
+id: kotlin-mutex-lock-without-withlock
+language: Kotlin
+category: correctness
+severity: warning
+semantic: true
+message: "A lock is acquired via a direct `.lock()` call instead of `withLock { }` — if an exception is thrown (or, for `kotlinx.coroutines.sync.Mutex`, if the coroutine is cancelled) between `.lock()` and the matching `.unlock()`, the lock is never released, permanently stalling every other coroutine/thread waiting on it. Use `mutex.withLock { ... }` (or `lock.withLock { ... }` for `java.util.concurrent.locks.Lock`), which unlocks in a `finally` for you. (Heuristic: this rule can't confirm `.unlock()` is missing from a `finally` block elsewhere, so it's flagged for a semantic check rather than reported outright.)"
+metadata:
+  references:
+    - "https://kotlinlang.org/api/kotlinx.coroutines/kotlinx-coroutines-core/kotlinx.coroutines.sync/-mutex/with-lock.html"
+rule:
+  pattern: $LOCK.lock()
