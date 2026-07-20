@@ -239,8 +239,9 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         Ok(None) => {}
         Err(err) => println!("  [warn] failed to parse .autoreview/architecture.yaml: {err}"),
     }
-    // archgraph (Tier 2): Go-only whole-repo import-cycle detection, a
-    // no-op for non-Go-module repos or diffs that touch no .go files.
+    // archgraph (Tier 2): whole-repo import-cycle detection (Go and
+    // Java/Kotlin, each its own graph), a no-op for a repo/diff with
+    // neither a go.mod nor any .go/.java/.kt files touched.
     stage1_agent_findings.extend(autoreview_core::run_archgraph_check(&options.repo_root, &changed_file_paths));
     stage1_agent_findings.extend(autoreview_core::run_symindex_check_with_tier4(&options.repo_root, &changed_file_paths, config.symindex.tier4_go));
     stage1_agent_findings.extend(autoreview_core::run_dataflow_check(&options.repo_root, &changed_file_paths, &registered_packs));

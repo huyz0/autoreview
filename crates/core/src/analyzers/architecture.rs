@@ -325,6 +325,23 @@ mod tests {
     }
 
     #[test]
+    fn detects_a_direct_layer_violation_in_kotlin() {
+        // Kotlin's import syntax has no trailing semicolon, unlike Java's —
+        // verifies `ImportLanguage::JavaOrKotlin`'s shared extraction
+        // actually handles both, not just the Java shape its own name
+        // suggests it was written against.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("repository")).unwrap();
+        std::fs::write(dir.path().join("repository/UserRepository.kt"), "package com.example.repository\n\nimport com.example.handler.LoginHandler\n\nclass UserRepository\n").unwrap();
+
+        let config = make_config();
+        let findings = run_architecture_check(dir.path(), &["repository/UserRepository.kt".to_string()], &config);
+        assert_eq!(findings.len(), 1, "got: {findings:#?}");
+        assert!(findings[0].message.contains("repository"));
+        assert!(findings[0].message.contains("handler"));
+    }
+
+    #[test]
     fn detects_a_direct_layer_violation_in_typescript() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("repository")).unwrap();
