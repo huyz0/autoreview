@@ -12,6 +12,9 @@
 //! into every `diff` run — see `commands::diff`), and gives a human the
 //! actual `--approve`/`--reject` gate the plan calls for before a candidate
 //! ever reaches shadow mode. Rollback stays a stub (`run_rules_stub`).
+//! `rules packs` lists registered external rule packs
+//! (`.autoreview/rulepacks.yaml`) — mirrors `skills list`'s "list
+//! registered things" precedent.
 
 use autoreview_core::{draft_candidate, mine_candidates, mine_from_pr_comments, run_bench, write_seed_file, BenchVerdict, CandidateSeed, DraftOutcome, HistoryStore};
 use autoreview_schema::AgentBackendKind;
@@ -279,5 +282,81 @@ fn reject_candidate(repo_root: &std::path::Path, cluster_id: &str, reason: &str)
     }
     std::fs::write(dir.join("rejected.json"), serde_json::json!({ "reason": reason, "rejectedAt": chrono::Utc::now().to_rfc3339() }).to_string())?;
     println!("Rejected '{cluster_id}': {reason}");
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct RuleKindCounts {
+    pattern: usize,
+    taint: usize,
+    threshold: usize,
+}
+
+#[derive(Deserialize)]
+struct MinimalRuleMeta {
+    #[serde(default = "default_rule_kind")]
+    kind: String,
+}
+
+fn default_rule_kind() -> String {
+    "pattern".to_string()
+}
+
+/// Recursively counts a resolved pack's rule files by declared `kind:` —
+/// a small, standalone walk (not the shared `analyzers::ast_grep` machinery,
+/// which is private to `autoreview-core`) since this listing command only
+/// needs the count, not the parsed rule bodies themselves.
+fn count_rule_kinds(pack_root: &std::path::Path) -> RuleKindCounts {
+    let mut counts = RuleKindCounts::default();
+    count_rule_kinds_inner(pack_root, &mut counts);
+    counts
+}
+
+fn count_rule_kinds_inner(dir: &std::path::Path, counts: &mut RuleKindCounts) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            count_rule_kinds_inner(&path, counts);
+            continue;
+        }
+        let is_yaml = path.extension().and_then(|e| e.to_str()).map(|e| e == "yml" || e == "yaml").unwrap_or(false);
+        if !is_yaml || path.file_name().and_then(|n| n.to_str()) == Some("rulepack.yaml") {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else { continue };
+        let Ok(meta) = serde_yaml::from_str::<MinimalRuleMeta>(&contents) else { continue };
+        match meta.kind.as_str() {
+            "taint" => counts.taint += 1,
+            "threshold" => counts.threshold += 1,
+            _ => counts.pattern += 1,
+        }
+    }
+}
+
+/// Lists every pack registered in `.autoreview/rulepacks.yaml`: id, source
+/// resolution status, and a rule-kind breakdown for packs that resolved
+/// successfully. A pack that failed to resolve is listed with its error —
+/// same information `diff`'s own `[warn]` line shows, surfaced here on
+/// demand instead of only in review output.
+pub fn run_rules_packs(repo_root: &std::path::Path) -> anyhow::Result<()> {
+    let config_path = autoreview_core::rule_packs_config_path(repo_root);
+    let configured = autoreview_core::load_rule_packs_config(&config_path)?;
+    if configured.is_empty() {
+        println!("No rule packs registered ({} not found or empty).", config_path.display());
+        return Ok(());
+    }
+
+    let cache_root = autoreview_core::default_rule_packs_cache_root();
+    println!("Registered rule packs:\n");
+    for (id, result) in autoreview_core::resolve_rule_packs(repo_root, &cache_root, &configured) {
+        match result {
+            Ok(resolved) => {
+                let counts = count_rule_kinds(&resolved.local_path);
+                println!("  {id} — {} pattern, {} taint, {} threshold rule(s) ({})", counts.pattern, counts.taint, counts.threshold, resolved.local_path.display());
+            }
+            Err(err) => println!("  {id} — failed to resolve: {err}"),
+        }
+    }
     Ok(())
 }

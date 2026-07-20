@@ -312,7 +312,27 @@ pub fn run_ast_grep(repo_root: &Path, changed_files: &[String], registered_packs
 
     let categories = rule_categories(&roots);
     let metadata = rule_metadata(&roots);
-    Ok(matches.iter().filter_map(|m| match_to_finding(m, &categories, &metadata)).collect())
+    let pack_provenance = pack_rule_provenance(registered_packs);
+    Ok(matches.iter().filter_map(|m| match_to_finding(m, &categories, &metadata, &pack_provenance)).collect())
+}
+
+/// Maps each registered pack's own declared rule ids back to the pack's
+/// id — stamped into `AgentFinding.meta["rulePackId"]` so a pack-sourced
+/// finding is identifiable in a report. Worth doing precisely because
+/// packs run "full trust immediately" (no shadow-mode staging gate that
+/// would otherwise visually set them apart from builtin findings).
+/// Pattern-kind rules only for now — taint/threshold provenance isn't
+/// wired yet, a deliberate scope cut, not an oversight.
+fn pack_rule_provenance(registered_packs: &[ResolvedRulePack]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for pack in registered_packs {
+        walk_disk_dir(&pack.local_path, &mut |contents| {
+            if let Some(meta) = parse_rule_meta(contents) {
+                map.insert(meta.id, pack.id.clone());
+            }
+        });
+    }
+    map
 }
 
 /// Copies every `kind: pattern` (or `kind`-absent) rule file across `roots`
@@ -403,14 +423,17 @@ fn extract_pattern_rules_disk_inner(current: &Path, pack_root: &Path, pack_id: &
     Ok(())
 }
 
-fn match_to_finding(m: &serde_json::Value, categories: &HashMap<String, String>, metadata: &HashMap<String, RuleMetadataBlock>) -> Option<AgentFinding> {
+fn match_to_finding(m: &serde_json::Value, categories: &HashMap<String, String>, metadata: &HashMap<String, RuleMetadataBlock>, pack_provenance: &HashMap<String, String>) -> Option<AgentFinding> {
     let rule_id = m.get("ruleId")?.as_str()?.to_string();
     let file = m.get("file")?.as_str()?.to_string();
     let message = m.get("message").and_then(|v| v.as_str()).unwrap_or("(no message provided by rule)").to_string();
     let severity = map_severity(m.get("severity").and_then(|v| v.as_str()).unwrap_or("warning"));
     let snippet = m.get("lines").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let category = categories.get(&rule_id).cloned().unwrap_or_else(default_category);
-    let meta = metadata.get(&rule_id).and_then(metadata_to_meta_map);
+    let mut meta = metadata.get(&rule_id).and_then(metadata_to_meta_map);
+    if let Some(pack_id) = pack_provenance.get(&rule_id) {
+        meta.get_or_insert_with(HashMap::new).insert("rulePackId".to_string(), serde_json::Value::String(pack_id.clone()));
+    }
 
     let range = m.get("range")?;
     // ast-grep reports 0-indexed line/column; our schema is 1-indexed to
@@ -863,7 +886,42 @@ mod tests {
             "lines": "x",
             "range": {"start": {"line": 0, "column": 0}, "end": {"line": 0, "column": 1}}
         });
-        let finding = match_to_finding(&m, &categories, &metadata).unwrap();
+        let finding = match_to_finding(&m, &categories, &metadata, &HashMap::new()).unwrap();
         assert_eq!(finding.category, "correctness");
+    }
+
+    #[test]
+    fn a_pack_sourced_rule_gets_its_pack_id_stamped_into_meta() {
+        let categories: HashMap<String, String> = HashMap::new();
+        let metadata: HashMap<String, RuleMetadataBlock> = HashMap::new();
+        let pack_provenance: HashMap<String, String> = [("acme-no-println".to_string(), "acme-security".to_string())].into_iter().collect();
+        let m = serde_json::json!({
+            "ruleId": "acme-no-println",
+            "file": "a.go",
+            "message": "m",
+            "severity": "warning",
+            "lines": "x",
+            "range": {"start": {"line": 0, "column": 0}, "end": {"line": 0, "column": 1}}
+        });
+        let finding = match_to_finding(&m, &categories, &metadata, &pack_provenance).unwrap();
+        let meta = finding.meta.expect("expected meta to be populated with rulePackId");
+        assert_eq!(meta.get("rulePackId").and_then(|v| v.as_str()), Some("acme-security"));
+    }
+
+    #[test]
+    fn a_builtin_rule_gets_no_rule_pack_id_in_meta() {
+        let categories: HashMap<String, String> = HashMap::new();
+        let metadata: HashMap<String, RuleMetadataBlock> = HashMap::new();
+        let pack_provenance: HashMap<String, String> = [("some-other-pack-rule".to_string(), "some-pack".to_string())].into_iter().collect();
+        let m = serde_json::json!({
+            "ruleId": "go-no-self-comparison",
+            "file": "a.go",
+            "message": "m",
+            "severity": "warning",
+            "lines": "x",
+            "range": {"start": {"line": 0, "column": 0}, "end": {"line": 0, "column": 1}}
+        });
+        let finding = match_to_finding(&m, &categories, &metadata, &pack_provenance).unwrap();
+        assert!(finding.meta.is_none());
     }
 }
