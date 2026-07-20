@@ -8,7 +8,7 @@ use commands::apply::run_apply;
 use commands::diff::{run_diff, DiffCommandOptions};
 use commands::doctor::run_doctor;
 use commands::feedback::{run_feedback, run_missed_report};
-use commands::history::run_history_sync;
+use commands::history::{run_history_costs, run_history_sync};
 use commands::rules::{run_rules_bench, run_rules_mine, run_rules_mine_code, run_rules_mine_comments, run_rules_packs, run_rules_packs_add, run_rules_packs_refresh, run_rules_packs_validate, run_rules_review, run_rules_rollback, run_rules_shadow_log};
 use commands::skills::{run_skills_list, run_skills_mine, run_skills_review, run_skills_rollback};
 use commands::skills_bench::run_skills_bench;
@@ -119,6 +119,12 @@ enum SpecAction {
 enum HistoryAction {
     /// Pull the team's synced event log (storage.sync.mode: git) onto this machine
     Sync,
+    /// Show total/per-stage/per-day spend across every local run
+    Costs {
+        /// Only include runs on or after this date (YYYY-MM-DD)
+        #[arg(long)]
+        since: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -305,6 +311,7 @@ fn main() -> anyhow::Result<()> {
         },
         Commands::History { action } => match action {
             HistoryAction::Sync => run_history_sync(&repo_root)?,
+            HistoryAction::Costs { since } => run_history_costs(&repo_root, since.as_deref())?,
         },
         Commands::Spec { action } => match action {
             SpecAction::Draft { base, head, force } => run_spec_draft(SpecDraftOptions { repo_root, base_ref: base, head_ref: head, force })?,

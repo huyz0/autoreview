@@ -48,6 +48,9 @@ pub use rule_factory::mine_from_comments::mine_from_pr_comments;
 pub use rule_packs::{default_rule_packs_cache_root, discover_pack_source, load_rule_packs_config, refresh_git_rule_packs, resolve_rule_packs, rule_packs_config_path, save_rule_packs_config, RefreshResult, ResolvedRulePack};
 pub use skills::{compile_skill, discover_manifests, materialize_builtin_skill_to_disk, CompiledSkill};
 pub use spec_verify::{draft_spec, parse_spec, run_spec_verify, DraftedSpec, SpecVerifyResult};
-pub use storage::{append_event_log, events_from_report, feedback_event, sync_pull, sync_push, EventRecord, FindingLookup, FpFeedbackRow, HistoryStore, KnownVerdict, MinedFindingRow};
+pub use storage::{
+    append_event_log, events_from_report, feedback_event, filter_cost_records_since, load_run_cost_records, summarize_costs, sync_pull, sync_push, CostDashboard, EventRecord, FindingLookup,
+    FpFeedbackRow, HistoryStore, KnownVerdict, MinedFindingRow, RunCostRecord,
+};
 pub use triage::*;
 pub use verify::{run_verify_pass, select_for_verification, verify_finding, VerifyPassResult, VerifyResult};

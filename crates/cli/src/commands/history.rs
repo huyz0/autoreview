@@ -46,6 +46,61 @@ pub fn hostname() -> String {
     "unknown-host".to_string()
 }
 
+/// `autoreview history costs [--since YYYY-MM-DD]` — aggregates every local
+/// run's `RunCosts` (already written to `<history_dir>/runs/<run_id>/
+/// report.json` by every `autoreview diff`) into totals, a per-stage
+/// breakdown, and a per-day trend. Purely a read/report over data that
+/// already exists on disk — no new persistence, no budget-cap enforcement.
+pub fn run_history_costs(repo_root: &Path, since: Option<&str>) -> anyhow::Result<()> {
+    let history_dir = history_dir_for(repo_root);
+    let records = autoreview_core::load_run_cost_records(&history_dir);
+    if records.is_empty() {
+        println!("No local run history found under {} — run `autoreview diff` at least once first.", history_dir.display());
+        return Ok(());
+    }
+
+    let filtered = match since {
+        Some(since) => autoreview_core::filter_cost_records_since(&records, since),
+        None => records.iter().collect(),
+    };
+    if filtered.is_empty() {
+        println!("No runs on or after {} (out of {} total run(s) in history).", since.unwrap_or(""), records.len());
+        return Ok(());
+    }
+
+    let dashboard = autoreview_core::summarize_costs(&filtered);
+
+    let range_label = match since {
+        Some(since) => format!("since {since}"),
+        None => "all time".to_string(),
+    };
+    println!("autoreview history costs  ({range_label})\n");
+    println!("  runs:             {}", dashboard.run_count);
+    if dashboard.any_usd_reported {
+        println!("  total cost:       ${:.2}", dashboard.total_usd);
+    } else {
+        println!("  total cost:       (no backend in this history reported USD pricing)");
+    }
+    println!("  total tokens:     {} in / {} out", dashboard.total_input_tokens, dashboard.total_output_tokens);
+    println!("  total wall time:  {:.1}s", dashboard.total_wall_ms as f64 / 1000.0);
+
+    if !dashboard.by_stage_usd.is_empty() {
+        println!("\n  by stage:");
+        for (stage, usd) in &dashboard.by_stage_usd {
+            println!("    {stage:<20} ${usd:.2}");
+        }
+    }
+
+    if !dashboard.by_day_usd.is_empty() {
+        println!("\n  by day:");
+        for (day, usd) in &dashboard.by_day_usd {
+            println!("    {day}  ${usd:.2}");
+        }
+    }
+
+    Ok(())
+}
+
 /// `autoreview history sync` — manually pulls the team's synced event log
 /// (`storage.sync.mode: git`) onto this machine, on top of the best-effort
 /// push `diff` already does at the end of every run. Useful right after
