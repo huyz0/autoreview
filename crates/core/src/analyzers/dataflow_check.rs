@@ -12,14 +12,17 @@
 //! any of the four old heuristics for this reason.
 //!
 //! `typed-nil-interface-return`'s interprocedural call resolution is
-//! same-file only (see `autoreview_dataflow::rules::
-//! go_typed_nil_interface_return`'s module docs for the two-pass design)
-//! — a call to a function resolvable in the SymbolIndex but declared in
-//! a different file of the same package is currently treated as an
-//! unknown boundary (not flagged), same as a call to a genuinely
-//! external package. Extending resolution to same-package-different-file
-//! via `autoreview_symindex::SymbolIndex` is a tracked follow-up, not
-//! done in this pass.
+//! same-package (same-directory) aware (see `autoreview_dataflow::rules::
+//! go_typed_nil_interface_return`'s module docs for the two-pass design):
+//! pass 1's summaries come from `package_summaries`, which scans every
+//! `.go` file in the changed file's directory (Go's directory=package
+//! convention), not just the changed file itself. A call to a function
+//! declared in a genuinely different package is still treated as an
+//! unknown boundary (not flagged). This deliberately doesn't go through
+//! `autoreview_symindex::SymbolIndex` — its Go extractor only indexes
+//! receiver methods whose struct is declared in the same file, so it
+//! can't resolve the free-function case this rule needs; `package_summaries`
+//! is a self-contained scan instead.
 //!
 //! Taint rules (`go-command-injection-taint` and friends) used to be
 //! hand-written Rust `TaintSpec` constants, one per rule, each with its
@@ -110,16 +113,43 @@ fn run_append_shared_backing_array(path: &str, lowered: &[(Node, Cfg<Stmt>)]) ->
     findings
 }
 
-fn run_typed_nil_interface_return(path: &str, source: &[u8], lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
-    // Pass 1: same-file summaries for every pointer-returning function.
-    let mut summaries: HashMap<String, bool> = HashMap::new();
-    for (fn_node, cfg) in lowered {
-        if autoreview_dataflow::lower::go::function_returns_pointer(*fn_node) {
-            if let Some(name) = autoreview_dataflow::lower::go::function_name(*fn_node, source) {
-                summaries.insert(name, go_typed_nil_interface_return::compute_summary(cfg));
+/// Package-wide (same-directory) summaries for every pointer-returning
+/// function, feeding pass 1 of `run_typed_nil_interface_return` below —
+/// scans every `.go` file in `file_path`'s directory (Go's
+/// directory=package convention), including `file_path` itself, rather
+/// than just the one file being checked. Best-effort: a sibling file
+/// that fails to read or parse is silently skipped rather than failing
+/// the whole check, since the current file's own findings still matter
+/// even if a sibling can't be read.
+fn package_summaries(repo_root: &Path, file_path: &str) -> HashMap<String, bool> {
+    let mut summaries = HashMap::new();
+    let Some(dir) = repo_root.join(file_path).parent().map(Path::to_path_buf) else { return summaries };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return summaries };
+    for entry in entries.filter_map(Result::ok) {
+        let sibling_path = entry.path();
+        if sibling_path.extension().and_then(|e| e.to_str()) != Some("go") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&sibling_path) else { continue };
+        let Some(mut parser) = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Go) else { continue };
+        let Some(tree) = parser.parse(&content, None) else { continue };
+        let source = content.as_bytes();
+        for fn_node in go_functions(&tree) {
+            if autoreview_dataflow::lower::go::function_returns_pointer(fn_node) {
+                if let Some(name) = autoreview_dataflow::lower::go::function_name(fn_node, source) {
+                    let cfg = autoreview_dataflow::lower::go::lower_function(source, fn_node);
+                    summaries.insert(name, go_typed_nil_interface_return::compute_summary(&cfg));
+                }
             }
         }
     }
+    summaries
+}
+
+fn run_typed_nil_interface_return(repo_root: &Path, path: &str, source: &[u8], lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
+    // Pass 1: package-wide (same-directory) summaries for every
+    // pointer-returning function — see `package_summaries` above.
+    let summaries = package_summaries(repo_root, path);
 
     // Pass 2: check every function declaring an `error` return against
     // those summaries.
@@ -238,7 +268,7 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
             let lowered = lower_all_functions(source, &tree);
 
             let mut findings = run_append_shared_backing_array(path, &lowered);
-            findings.extend(run_typed_nil_interface_return(path, source, &lowered));
+            findings.extend(run_typed_nil_interface_return(repo_root, path, source, &lowered));
             findings.extend(run_loaded_taint_rules(path, &lowered, registered_packs));
             if go_pre_1_22 {
                 findings.extend(run_loopvar_checks(path, &lowered));
@@ -298,6 +328,18 @@ mod tests {
         assert!(
             findings.iter().any(|f| f.source.rule_id.as_deref() == Some("typed-nil-interface-return")),
             "got: {findings:#?} — same-function-only heuristic couldn't have caught this"
+        );
+    }
+
+    #[test]
+    fn flags_an_interprocedural_typed_nil_return_across_two_files_in_the_same_package() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("helper.go"), "package main\n\nfunc helper() *myError {\n\tvar e *myError\n\treturn e\n}\n").unwrap();
+        std::fs::write(dir.path().join("caller.go"), "package main\n\nfunc Do() error {\n\te := helper()\n\treturn e\n}\n").unwrap();
+        let findings = run_dataflow_check(dir.path(), &["caller.go".to_string()], &[]);
+        assert!(
+            findings.iter().any(|f| f.source.rule_id.as_deref() == Some("typed-nil-interface-return")),
+            "got: {findings:#?} — same-file-only resolution couldn't have caught this, `helper` is declared in a sibling file"
         );
     }
 
