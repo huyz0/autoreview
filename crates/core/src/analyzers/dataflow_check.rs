@@ -453,7 +453,7 @@ mod tests {
             "id: acme-env-taint\nkind: taint\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\nsources:\n  - call: Getenv\nsinks:\n  - call: Println\nsanitizers: []\n",
         )
         .unwrap();
-        let packs = vec![crate::rule_packs::ResolvedRulePack { id: "acme-taint".to_string(), local_path: pack_dir }];
+        let packs = vec![crate::rule_packs::ResolvedRulePack { id: "acme-taint".to_string(), local_path: pack_dir, trust: autoreview_schema::RulePackTrust::Full }];
 
         let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &packs);
         let finding = findings.iter().find(|f| f.source.rule_id.as_deref() == Some("acme-env-taint")).unwrap_or_else(|| panic!("got: {findings:#?}"));

@@ -20,6 +20,25 @@ pub struct RulePacksFile {
 pub struct RulePackConfig {
     pub id: String,
     pub source: RulePackSourceConfig,
+    /// `full` (default): the pack's rules run exactly like builtin ones —
+    /// no staging gate. `shadow`: the pack's rules still run (so their
+    /// findings are computed and provenance-tagged the same way), but the
+    /// findings are suppressed from the surfaced report — same "runs, but
+    /// doesn't count yet" posture as a human-authored
+    /// `.autoreview/rules/shadow/` rule. Unlike that mechanism, a shadow-
+    /// trust pack rule isn't (yet) tracked toward automatic promotion —
+    /// this is a manual, config-level trust decision, not a firing-history
+    /// gate.
+    #[serde(default)]
+    pub trust: RulePackTrust,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RulePackTrust {
+    #[default]
+    Full,
+    Shadow,
 }
 
 /// `kind: local` resolves `path` relative to the repo root — no caching,
@@ -122,12 +141,27 @@ mod tests {
     fn round_trips_through_serde_yaml() {
         let file = RulePacksFile {
             packs: vec![
-                RulePackConfig { id: "a".to_string(), source: RulePackSourceConfig::Local { path: "../a".to_string() } },
-                RulePackConfig { id: "b".to_string(), source: RulePackSourceConfig::Git { url: "https://example.com/b".to_string(), r#ref: Some("main".to_string()), subpath: None } },
+                RulePackConfig { id: "a".to_string(), source: RulePackSourceConfig::Local { path: "../a".to_string() }, trust: RulePackTrust::Full },
+                RulePackConfig { id: "b".to_string(), source: RulePackSourceConfig::Git { url: "https://example.com/b".to_string(), r#ref: Some("main".to_string()), subpath: None }, trust: RulePackTrust::Shadow },
             ],
         };
         let yaml = serde_yaml::to_string(&file).unwrap();
         let parsed: RulePacksFile = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed.packs.len(), 2);
+        assert_eq!(parsed.packs[1].trust, RulePackTrust::Shadow);
+    }
+
+    #[test]
+    fn trust_defaults_to_full_when_absent() {
+        let yaml = "packs:\n  - id: a\n    source:\n      kind: local\n      path: ../a\n";
+        let file: RulePacksFile = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(file.packs[0].trust, RulePackTrust::Full);
+    }
+
+    #[test]
+    fn trust_shadow_parses_explicitly() {
+        let yaml = "packs:\n  - id: a\n    source:\n      kind: local\n      path: ../a\n    trust: shadow\n";
+        let file: RulePacksFile = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(file.packs[0].trust, RulePackTrust::Shadow);
     }
 }

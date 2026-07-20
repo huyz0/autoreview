@@ -106,6 +106,51 @@ fn diff_against_a_seeded_bug_produces_a_valid_report_with_the_expected_finding()
 }
 
 #[test]
+fn a_shadow_trust_rule_packs_finding_is_suppressed_not_surfaced() {
+    if !ast_grep_available() {
+        eprintln!("skipping: ast-grep not on PATH");
+        return;
+    }
+
+    let pack_dir = tempfile::tempdir().unwrap();
+    std::fs::write(pack_dir.path().join("rulepack.yaml"), "id: acme-shadow\nversion: \"1.0.0\"\n").unwrap();
+    std::fs::write(
+        pack_dir.path().join("no-println.yml"),
+        "id: acme-shadow-no-println\nlanguage: Go\ncategory: security\nseverity: error\nmessage: no println\nrule:\n  pattern: println($$$ARGS)\n",
+    )
+    .unwrap();
+
+    let repo = init_repo_with_diff(
+        &[("main.go", "package main\n\nfunc main() {}\n")],
+        &[("main.go", "package main\n\nfunc main() {\n\tprintln(\"debug leftover\")\n}\n")],
+        "seed a println debug leftover",
+    );
+    std::fs::create_dir_all(repo.path().join(".autoreview")).unwrap();
+    std::fs::write(
+        repo.path().join(".autoreview/rulepacks.yaml"),
+        format!("packs:\n  - id: acme-shadow\n    source:\n      kind: local\n      path: {}\n    trust: shadow\n", pack_dir.path().display()),
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("autoreview").unwrap();
+    cmd.current_dir(repo.path()).args(["diff", "--base", "main~1", "--head", "main", "--tier", "quick"]);
+    let assert = cmd.assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+
+    let report: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(report_path_from_stdout(&stdout)).unwrap()).unwrap();
+    let findings = report["findings"].as_array().unwrap();
+    assert!(
+        !findings.iter().any(|f| f["source"]["ruleId"] == "acme-shadow-no-println"),
+        "a shadow-trust pack rule's finding must not surface, got: {findings:#?}"
+    );
+    let suppressed = report["suppressed"].as_array().unwrap();
+    assert!(
+        suppressed.iter().any(|s| s["finding"]["source"]["ruleId"] == "acme-shadow-no-println" && s["reason"] == "shadow-rule-pack"),
+        "expected the finding in suppressed with reason shadow-rule-pack, got: {suppressed:#?}"
+    );
+}
+
+#[test]
 fn diff_incremental_suppresses_findings_already_reported_in_the_previous_run() {
     if !ast_grep_available() {
         eprintln!("skipping: ast-grep not on PATH");

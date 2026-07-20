@@ -171,7 +171,7 @@ mod tests {
             "id: acme-tight-cyclomatic-complexity\nkind: threshold\nlanguage: Go\ncategory: correctness\nseverity: warning\nmetric: cyclomatic-complexity\nthreshold: 2\nmessage: m\n",
         )
         .unwrap();
-        let packs = vec![crate::rule_packs::ResolvedRulePack { id: "acme-thresholds".to_string(), local_path: pack_dir }];
+        let packs = vec![crate::rule_packs::ResolvedRulePack { id: "acme-thresholds".to_string(), local_path: pack_dir, trust: autoreview_schema::RulePackTrust::Full }];
 
         let (thresholds, pack_ids_by_metric) = resolve_complexity_thresholds_with_provenance(&packs);
         assert_eq!(thresholds.cyclomatic_complexity, 2, "the pack's threshold value should win");

@@ -970,7 +970,7 @@ mod tests {
             "id: acme-tight-cyclomatic-complexity\nkind: threshold\nlanguage: Go\ncategory: correctness\nseverity: warning\nmetric: cyclomatic-complexity\nthreshold: 2\nmessage: m\n",
         )
         .unwrap();
-        let packs = vec![crate::rule_packs::ResolvedRulePack { id: "acme-thresholds".to_string(), local_path: pack_dir }];
+        let packs = vec![crate::rule_packs::ResolvedRulePack { id: "acme-thresholds".to_string(), local_path: pack_dir, trust: autoreview_schema::RulePackTrust::Full }];
 
         let findings = run_complexity_check(dir.path(), &["main.go".to_string()], &packs);
         let finding = findings.iter().find(|f| f.source.rule_id.as_deref() == Some("cyclomatic-complexity")).unwrap_or_else(|| panic!("got: {findings:#?}"));

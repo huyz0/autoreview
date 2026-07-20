@@ -234,8 +234,23 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     stage1_agent_findings.extend(autoreview_core::run_dataflow_check(&options.repo_root, &changed_file_paths, &registered_packs));
     stage1_agent_findings.extend(autoreview_core::detect_shotgun_surgery(&facts.files));
     stage1_agent_findings.extend(autoreview_core::run_divergent_change_check(&options.repo_root, &changed_file_paths));
-    let stage1_finding_count = stage1_agent_findings.len();
-    let stage1_findings: Vec<Finding> = assign_fingerprints(stage1_agent_findings)
+    // Rule-pack shadow trust: a pack's rule still ran (its finding was
+    // computed and provenance-tagged like any `trust: full` pack's), but a
+    // `trust: shadow` pack's findings never surface, don't count toward
+    // this diff's finding density / tier scoring, and don't reach the
+    // triage classifier — same posture the human-authored
+    // `.autoreview/rules/shadow/` mechanism already has (that one is
+    // suppressed post-triage since it doesn't fire until Stage 3.5+; this
+    // filters pre-triage since pack rules run at Stage 1).
+    let shadow_pack_ids: std::collections::HashSet<&str> = registered_packs.iter().filter(|p| p.trust == autoreview_schema::RulePackTrust::Shadow).map(|p| p.id.as_str()).collect();
+    let (stage1_surfaced, stage1_shadow_suppressed): (Vec<_>, Vec<_>) = stage1_agent_findings.into_iter().partition(|f| {
+        let pack_id = f.meta.as_ref().and_then(|m| m.get("rulePackId")).and_then(|v| v.as_str());
+        !pack_id.is_some_and(|id| shadow_pack_ids.contains(id))
+    });
+    let shadow_pack_suppressed: Vec<Finding> = assign_fingerprints(stage1_shadow_suppressed).into_iter().map(to_finding).collect();
+
+    let stage1_finding_count = stage1_surfaced.len();
+    let stage1_findings: Vec<Finding> = assign_fingerprints(stage1_surfaced)
         .into_iter()
         .map(to_finding)
         .collect();
@@ -586,6 +601,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     let mut dedupe_result = dedupe_fuzzy(exact_result.findings, 3, 0.55);
     dedupe_result.suppressed.extend(exact_result.suppressed);
     dedupe_result.suppressed.extend(verify_suppressed);
+    dedupe_result.suppressed.extend(shadow_pack_suppressed.into_iter().map(|finding| autoreview_schema::SuppressedFinding { finding, reason: autoreview_schema::SuppressedReason::ShadowRulePack }));
     if !dedupe_result.suppressed.is_empty() {
         println!(
             "\n  [dedupe] suppressed {} duplicate/refuted finding(s)",

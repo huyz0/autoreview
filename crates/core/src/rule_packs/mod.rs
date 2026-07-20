@@ -8,15 +8,18 @@
 //! `rulepack.yaml` before it's handed to the rule-loading backends
 //! (`analyzers::ast_grep`/`taint_rules`/`threshold_rules`), which fold a
 //! resolved pack's directory into the same rule tree the embedded builtin
-//! pack is read from — "full trust immediately," per the design: a
-//! registered pack's rules run exactly like builtin rules, no shadow/
-//! promoted staging gate.
+//! pack is read from — a pack's rules always *run* exactly like builtin
+//! ones (same category/severity/kind dispatch), but `RulePackConfig::trust`
+//! decides whether their findings surface: `full` (default) surfaces them
+//! immediately, `shadow` suppresses them the same way a human-authored
+//! `.autoreview/rules/shadow/` rule would (`diff.rs` reads
+//! `ResolvedRulePack::trust` to apply this).
 
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use autoreview_schema::{RulePackConfig, RulePackManifest, RulePackSourceConfig, RulePacksFile};
+use autoreview_schema::{RulePackConfig, RulePackManifest, RulePackSourceConfig, RulePackTrust, RulePacksFile};
 
 use crate::storage::sync::run_git;
 
@@ -68,6 +71,11 @@ pub fn default_rule_packs_cache_root() -> PathBuf {
 pub struct ResolvedRulePack {
     pub id: String,
     pub local_path: PathBuf,
+    /// Carried through from the pack's `rulepacks.yaml` registration
+    /// (`RulePackConfig::trust`) — `diff.rs` reads this to decide whether
+    /// this pack's findings surface directly or get suppressed like a
+    /// shadow-mode rule.
+    pub trust: RulePackTrust,
 }
 
 /// Resolves every configured pack against `cache_root` (see
@@ -89,7 +97,7 @@ fn resolve_rule_pack(repo_root: &Path, cache_root: &Path, pack: &RulePackConfig)
         RulePackSourceConfig::Git { url, r#ref, subpath } => resolve_git_source(cache_root, url, r#ref.as_deref(), subpath.as_deref())?,
     };
     validate_pack_manifest(&pack.id, &local_path)?;
-    Ok(ResolvedRulePack { id: pack.id.clone(), local_path })
+    Ok(ResolvedRulePack { id: pack.id.clone(), local_path, trust: pack.trust })
 }
 
 fn resolve_local_source(repo_root: &Path, path: &str) -> anyhow::Result<PathBuf> {
@@ -197,7 +205,7 @@ mod tests {
         let repo_root = root.path().join("repo");
         std::fs::create_dir_all(&repo_root).unwrap();
         write(&root.path().join("shared/acme-security/rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n");
-        let config = RulePackConfig { id: "acme-security".to_string(), source: RulePackSourceConfig::Local { path: "../shared/acme-security".to_string() } };
+        let config = RulePackConfig { id: "acme-security".to_string(), source: RulePackSourceConfig::Local { path: "../shared/acme-security".to_string() }, trust: RulePackTrust::Full };
         let results = resolve_rule_packs(&repo_root, unused_cache_root().path(), &[config]);
         assert_eq!(results.len(), 1);
         let (id, result) = &results[0];
@@ -214,8 +222,8 @@ mod tests {
         std::fs::create_dir_all(&repo_root).unwrap();
         write(&root.path().join("shared/good/rulepack.yaml"), "id: good\nversion: \"1.0.0\"\n");
         let configs = vec![
-            RulePackConfig { id: "missing".to_string(), source: RulePackSourceConfig::Local { path: "../shared/does-not-exist".to_string() } },
-            RulePackConfig { id: "good".to_string(), source: RulePackSourceConfig::Local { path: "../shared/good".to_string() } },
+            RulePackConfig { id: "missing".to_string(), source: RulePackSourceConfig::Local { path: "../shared/does-not-exist".to_string() }, trust: RulePackTrust::Full },
+            RulePackConfig { id: "good".to_string(), source: RulePackSourceConfig::Local { path: "../shared/good".to_string() }, trust: RulePackTrust::Full },
         ];
         let results = resolve_rule_packs(&repo_root, unused_cache_root().path(), &configs);
         assert!(results[0].1.is_err());
@@ -228,7 +236,7 @@ mod tests {
         let repo_root = root.path().join("repo");
         std::fs::create_dir_all(&repo_root).unwrap();
         write(&root.path().join("shared/acme-security/rulepack.yaml"), "id: totally-different-id\nversion: \"1.0.0\"\n");
-        let config = RulePackConfig { id: "acme-security".to_string(), source: RulePackSourceConfig::Local { path: "../shared/acme-security".to_string() } };
+        let config = RulePackConfig { id: "acme-security".to_string(), source: RulePackSourceConfig::Local { path: "../shared/acme-security".to_string() }, trust: RulePackTrust::Full };
         let results = resolve_rule_packs(&repo_root, unused_cache_root().path(), &[config]);
         let err = results[0].1.as_ref().unwrap_err();
         assert!(err.to_string().contains("totally-different-id"), "got: {err}");
@@ -240,7 +248,7 @@ mod tests {
         let repo_root = root.path().join("repo");
         std::fs::create_dir_all(&repo_root).unwrap();
         std::fs::create_dir_all(root.path().join("shared/no-manifest")).unwrap();
-        let config = RulePackConfig { id: "no-manifest".to_string(), source: RulePackSourceConfig::Local { path: "../shared/no-manifest".to_string() } };
+        let config = RulePackConfig { id: "no-manifest".to_string(), source: RulePackSourceConfig::Local { path: "../shared/no-manifest".to_string() }, trust: RulePackTrust::Full };
         let results = resolve_rule_packs(&repo_root, unused_cache_root().path(), &[config]);
         assert!(results[0].1.is_err());
     }
@@ -269,7 +277,7 @@ mod tests {
     fn resolves_a_git_source_by_cloning_and_checking_out_the_manifest() {
         let remote = init_remote_with_pack("acme-git-pack");
         let url = remote.path().to_string_lossy().to_string();
-        let config = RulePackConfig { id: "acme-git-pack".to_string(), source: RulePackSourceConfig::Git { url, r#ref: None, subpath: None } };
+        let config = RulePackConfig { id: "acme-git-pack".to_string(), source: RulePackSourceConfig::Git { url, r#ref: None, subpath: None }, trust: RulePackTrust::Full };
         let cache_root = tempfile::tempdir().unwrap();
         let results = resolve_rule_packs(tempfile::tempdir().unwrap().path(), cache_root.path(), &[config]);
         let (id, result) = &results[0];
@@ -286,7 +294,7 @@ mod tests {
     fn a_git_source_id_mismatch_is_a_clear_error() {
         let remote = init_remote_with_pack("actual-id");
         let url = remote.path().to_string_lossy().to_string();
-        let config = RulePackConfig { id: "expected-id".to_string(), source: RulePackSourceConfig::Git { url, r#ref: None, subpath: None } };
+        let config = RulePackConfig { id: "expected-id".to_string(), source: RulePackSourceConfig::Git { url, r#ref: None, subpath: None }, trust: RulePackTrust::Full };
         let results = resolve_rule_packs(tempfile::tempdir().unwrap().path(), unused_cache_root().path(), &[config]);
         let err = results[0].1.as_ref().unwrap_err();
         assert!(err.to_string().contains("actual-id"), "got: {err}");
@@ -296,7 +304,7 @@ mod tests {
     fn an_unreachable_git_url_fails_that_pack_clearly() {
         let root = tempfile::tempdir().unwrap();
         let bogus_url = root.path().join("does-not-exist-as-a-repo").to_string_lossy().to_string();
-        let config = RulePackConfig { id: "acme-git-pack".to_string(), source: RulePackSourceConfig::Git { url: bogus_url, r#ref: None, subpath: None } };
+        let config = RulePackConfig { id: "acme-git-pack".to_string(), source: RulePackSourceConfig::Git { url: bogus_url, r#ref: None, subpath: None }, trust: RulePackTrust::Full };
         let results = resolve_rule_packs(root.path(), unused_cache_root().path(), &[config]);
         assert!(results[0].1.is_err());
     }

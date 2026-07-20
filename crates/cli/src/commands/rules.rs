@@ -395,7 +395,11 @@ pub fn run_rules_packs(repo_root: &std::path::Path) -> anyhow::Result<()> {
         match result {
             Ok(resolved) => {
                 let counts = count_rule_kinds(&resolved.local_path);
-                println!("  {id} — {} pattern, {} taint, {} threshold rule(s) ({})", counts.pattern, counts.taint, counts.threshold, resolved.local_path.display());
+                let trust = match resolved.trust {
+                    autoreview_schema::RulePackTrust::Full => "full",
+                    autoreview_schema::RulePackTrust::Shadow => "shadow",
+                };
+                println!("  {id} [{trust}] — {} pattern, {} taint, {} threshold rule(s) ({})", counts.pattern, counts.taint, counts.threshold, resolved.local_path.display());
             }
             Err(err) => println!("  {id} — failed to resolve: {err}"),
         }

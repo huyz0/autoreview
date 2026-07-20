@@ -190,7 +190,7 @@ mod tests {
             "id: acme-env-taint\nkind: taint\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\nsources:\n  - call: Getenv\nsinks:\n  - call: Println\nsanitizers: []\n",
         )
         .unwrap();
-        let packs = vec![crate::rule_packs::ResolvedRulePack { id: "acme-taint".to_string(), local_path: pack_dir }];
+        let packs = vec![crate::rule_packs::ResolvedRulePack { id: "acme-taint".to_string(), local_path: pack_dir, trust: autoreview_schema::RulePackTrust::Full }];
 
         let rules = load_taint_rules(&packs);
         let rule = rules.iter().find(|r| r.id == "acme-env-taint").expect("pack rule should load");

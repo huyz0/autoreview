@@ -90,6 +90,13 @@ pub enum SuppressedReason {
     /// voted to refute it — see the plan's "grounded generation + separate
     /// judge" section.
     Refuted,
+    /// This finding came from a rule declared by a registered pack with
+    /// `trust: shadow` in `.autoreview/rulepacks.yaml` — the rule still
+    /// ran (so its findings are computed and provenance-tagged the same
+    /// way a `trust: full` pack's would be), but a config-level trust
+    /// decision keeps it out of the surfaced report, the same "runs, but
+    /// doesn't count yet" posture a human-authored shadow rule gets.
+    ShadowRulePack,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
