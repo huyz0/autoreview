@@ -446,6 +446,127 @@ pub fn run_rules_packs_add(repo_root: &std::path::Path, source: &str) -> anyhow:
     Ok(())
 }
 
+// Presence-only checks: successful deserialization is the signal these two
+// exist and have the right shape, so the fields themselves are never read.
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct MinimalTaintRule {
+    sinks: Vec<serde_yaml::Value>,
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct MinimalThresholdRule {
+    metric: String,
+    threshold: serde_yaml::Value,
+}
+
+/// Structurally checks one rule file matches the shape its own declared
+/// `kind:` needs to actually load at runtime — deliberately checking the
+/// *minimum* required keys (the same ones each real loader in
+/// `autoreview-core` requires), not re-implementing full rule semantics
+/// here. Returns `Err` with a message naming what's missing/malformed.
+fn validate_rule_file(contents: &str) -> anyhow::Result<(String, String)> {
+    let meta: MinimalRuleMeta = serde_yaml::from_str(contents).map_err(|err| anyhow::anyhow!("not a valid rule file: {err}"))?;
+    #[derive(Deserialize)]
+    struct IdOnly {
+        id: String,
+    }
+    let id_only: IdOnly = serde_yaml::from_str(contents).map_err(|_| anyhow::anyhow!("missing or empty `id` field"))?;
+    if id_only.id.trim().is_empty() {
+        anyhow::bail!("`id` field is empty");
+    }
+    match meta.kind.as_str() {
+        "taint" => {
+            serde_yaml::from_str::<MinimalTaintRule>(contents).map_err(|err| anyhow::anyhow!("kind: taint rule is missing a valid `sinks:` list: {err}"))?;
+        }
+        "threshold" => {
+            serde_yaml::from_str::<MinimalThresholdRule>(contents).map_err(|err| anyhow::anyhow!("kind: threshold rule is missing `metric:`/`threshold:`: {err}"))?;
+        }
+        "pattern" => {
+            let value: serde_yaml::Value = serde_yaml::from_str(contents)?;
+            if value.get("rule").is_none() {
+                anyhow::bail!("kind: pattern rule is missing a `rule:` block — ast-grep will reject it at scan time");
+            }
+        }
+        other => anyhow::bail!("unknown `kind: {other}` — expected pattern, taint, or threshold"),
+    }
+    Ok((id_only.id, meta.kind))
+}
+
+fn validate_pack_dir(dir: &std::path::Path, errors: &mut Vec<String>, seen_ids: &mut std::collections::HashMap<String, std::path::PathBuf>, counts: &mut RuleKindCounts) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        errors.push(format!("{}: could not read directory", dir.display()));
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            validate_pack_dir(&path, errors, seen_ids, counts);
+            continue;
+        }
+        let is_yaml = path.extension().and_then(|e| e.to_str()).map(|e| e == "yml" || e == "yaml").unwrap_or(false);
+        if !is_yaml || path.file_name().and_then(|n| n.to_str()) == Some("rulepack.yaml") {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            errors.push(format!("{}: could not read file", path.display()));
+            continue;
+        };
+        match validate_rule_file(&contents) {
+            Ok((id, kind)) => {
+                match kind.as_str() {
+                    "taint" => counts.taint += 1,
+                    "threshold" => counts.threshold += 1,
+                    _ => counts.pattern += 1,
+                }
+                if let Some(existing) = seen_ids.insert(id.clone(), path.clone()) {
+                    errors.push(format!("{}: duplicate id '{id}' (already declared in {})", path.display(), existing.display()));
+                }
+            }
+            Err(err) => errors.push(format!("{}: {err}", path.display())),
+        }
+    }
+}
+
+/// `autoreview rules packs validate <path>` — checks a rule pack directory
+/// (not necessarily registered anywhere yet) is well-formed before its
+/// author publishes it or a consumer runs `rules packs add` against it:
+/// a readable `rulepack.yaml`, and every rule file structurally valid for
+/// its own declared `kind`, with no duplicate ids within the pack. Doesn't
+/// touch `.autoreview/rulepacks.yaml` at all — purely a local check.
+pub fn run_rules_packs_validate(pack_path: &std::path::Path) -> anyhow::Result<()> {
+    if !pack_path.is_dir() {
+        anyhow::bail!("'{}' is not a directory", pack_path.display());
+    }
+    let manifest_path = pack_path.join("rulepack.yaml");
+    let manifest_contents = std::fs::read_to_string(&manifest_path).map_err(|err| anyhow::anyhow!("missing or unreadable {}: {err}", manifest_path.display()))?;
+    let manifest: autoreview_schema::RulePackManifest = serde_yaml::from_str(&manifest_contents).map_err(|err| anyhow::anyhow!("failed to parse {}: {err}", manifest_path.display()))?;
+    if manifest.id.trim().is_empty() {
+        anyhow::bail!("{}: `id` field is empty", manifest_path.display());
+    }
+
+    let mut errors = Vec::new();
+    let mut seen_ids = std::collections::HashMap::new();
+    let mut counts = RuleKindCounts::default();
+    validate_pack_dir(pack_path, &mut errors, &mut seen_ids, &mut counts);
+
+    let description = if manifest.description.is_empty() { String::new() } else { format!(" — {}", manifest.description) };
+    println!("Pack '{}' (version {}){description}", manifest.id, manifest.version);
+    println!("  {} pattern, {} taint, {} threshold rule(s)", counts.pattern, counts.taint, counts.threshold);
+
+    if errors.is_empty() {
+        println!("  no problems found.");
+        Ok(())
+    } else {
+        println!("  {} problem(s):", errors.len());
+        for err in &errors {
+            println!("    - {err}");
+        }
+        anyhow::bail!("{} validation problem(s) found in {}:\n{}", errors.len(), pack_path.display(), errors.join("\n"));
+    }
+}
+
 /// Manually reverses a shadow/promoted rule's most recent lifecycle step —
 /// the human override sitting alongside the automatic `should_promote`/
 /// `should_demote` gate `diff.rs` already runs on every review. A
@@ -547,5 +668,58 @@ mod tests {
 
         let err = run_rules_rollback(repo.path(), "go-example").unwrap_err();
         assert!(err.to_string().contains("rejected"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_succeeds_for_a_well_formed_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+        std::fs::write(dir.path().join("no-println.yml"), "id: acme-no-println\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\nrule:\n  pattern: println($$$ARGS)\n").unwrap();
+        std::fs::write(
+            dir.path().join("cmd-taint.yml"),
+            "id: acme-cmd-taint\nkind: taint\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\nsources:\n  - call: FormValue\nsinks:\n  - call: exec.Command\nsanitizers: []\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("cyclo.yml"), "id: acme-cyclo\nlanguage: Go\ncategory: correctness\nseverity: warning\nkind: threshold\nmetric: cyclomatic-complexity\nthreshold: 8\nmessage: m\n").unwrap();
+
+        run_rules_packs_validate(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn validate_fails_clearly_when_rulepack_yaml_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = run_rules_packs_validate(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("rulepack.yaml"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_reports_a_pattern_rule_missing_its_rule_block() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+        std::fs::write(dir.path().join("broken.yml"), "id: acme-broken\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\n").unwrap();
+
+        let err = run_rules_packs_validate(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("1 validation problem"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_reports_a_taint_rule_missing_sinks() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+        std::fs::write(dir.path().join("broken.yml"), "id: acme-broken\nkind: taint\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\nsources:\n  - call: FormValue\n").unwrap();
+
+        let err = run_rules_packs_validate(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("1 validation problem"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_reports_a_duplicate_id_across_two_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+        std::fs::write(dir.path().join("a.yml"), "id: acme-dup\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\nrule:\n  pattern: println($$$ARGS)\n").unwrap();
+        std::fs::write(dir.path().join("b.yml"), "id: acme-dup\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\nrule:\n  pattern: fmt.Println($$$ARGS)\n").unwrap();
+
+        let err = run_rules_packs_validate(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("duplicate id 'acme-dup'"), "got: {err}");
     }
 }

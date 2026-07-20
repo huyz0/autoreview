@@ -9,7 +9,7 @@ use commands::diff::{run_diff, DiffCommandOptions};
 use commands::doctor::run_doctor;
 use commands::feedback::{run_feedback, run_missed_report};
 use commands::history::run_history_sync;
-use commands::rules::{run_rules_bench, run_rules_mine, run_rules_mine_code, run_rules_mine_comments, run_rules_packs, run_rules_packs_add, run_rules_review, run_rules_rollback, run_rules_shadow_log};
+use commands::rules::{run_rules_bench, run_rules_mine, run_rules_mine_code, run_rules_mine_comments, run_rules_packs, run_rules_packs_add, run_rules_packs_validate, run_rules_review, run_rules_rollback, run_rules_shadow_log};
 use commands::skills::{run_skills_list, run_skills_mine, run_skills_review, run_skills_rollback};
 use commands::skills_bench::run_skills_bench;
 
@@ -142,6 +142,11 @@ enum PacksAction {
     /// is what proves it's a real pack before anything gets written to
     /// .autoreview/rulepacks.yaml.
     Add { source: String },
+    /// Checks a rule pack directory is well-formed (readable rulepack.yaml,
+    /// every rule file valid for its own kind, no duplicate ids) — doesn't
+    /// touch .autoreview/rulepacks.yaml, so it works on a pack that isn't
+    /// registered anywhere yet.
+    Validate { path: String },
 }
 
 #[derive(Subcommand)]
@@ -255,6 +260,7 @@ fn main() -> anyhow::Result<()> {
             RulesAction::Rollback { rule_id } => run_rules_rollback(&repo_root, &rule_id)?,
             RulesAction::Packs { action: None } => run_rules_packs(&repo_root)?,
             RulesAction::Packs { action: Some(PacksAction::Add { source }) } => run_rules_packs_add(&repo_root, &source)?,
+            RulesAction::Packs { action: Some(PacksAction::Validate { path }) } => run_rules_packs_validate(std::path::Path::new(&path))?,
         },
         Commands::Skills { action } => match action {
             SkillsAction::List => run_skills_list(&repo_root)?,

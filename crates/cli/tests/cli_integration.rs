@@ -181,6 +181,28 @@ fn rules_packs_add_fails_clearly_for_an_already_registered_id() {
 }
 
 #[test]
+fn rules_packs_validate_succeeds_for_a_well_formed_pack() {
+    let pack_dir = tempfile::tempdir().unwrap();
+    std::fs::write(pack_dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+    std::fs::write(pack_dir.path().join("no-println.yml"), "id: acme-no-println\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\nrule:\n  pattern: println($$$ARGS)\n").unwrap();
+
+    let mut cmd = Command::cargo_bin("autoreview").unwrap();
+    cmd.args(["rules", "packs", "validate", &pack_dir.path().to_string_lossy()]);
+    cmd.assert().success().stdout(predicate::str::contains("no problems found"));
+}
+
+#[test]
+fn rules_packs_validate_fails_clearly_on_a_broken_pattern_rule() {
+    let pack_dir = tempfile::tempdir().unwrap();
+    std::fs::write(pack_dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+    std::fs::write(pack_dir.path().join("broken.yml"), "id: acme-broken\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\n").unwrap();
+
+    let mut cmd = Command::cargo_bin("autoreview").unwrap();
+    cmd.args(["rules", "packs", "validate", &pack_dir.path().to_string_lossy()]);
+    cmd.assert().failure().stderr(predicate::str::contains("validation problem"));
+}
+
+#[test]
 fn aspects_filter_scopes_out_complexity_findings_outside_the_requested_category() {
     let repo = init_repo_with_diff(
         &[("main.go", "package main\n\nfunc main() {}\n")],
