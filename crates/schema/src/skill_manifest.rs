@@ -32,18 +32,13 @@ impl Default for SkillTools {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CostClass {
     Quick,
+    #[default]
     Moderate,
     Expensive,
-}
-
-impl Default for CostClass {
-    fn default() -> Self {
-        CostClass::Moderate
-    }
 }
 
 fn default_languages() -> Vec<String> {

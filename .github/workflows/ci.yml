@@ -54,15 +54,14 @@ jobs:
       - name: Build
         run: cargo build --workspace --tests --locked
 
-      # --test-threads=4 avoids CPU-contention flakiness observed in
-      # subprocess-heavy tests (golangci-lint/ast-grep invocations racing
-      # each other) under full default parallelism.
+      # --test-threads=4: golangci-lint's own subprocess invocation
+      # already retries its transient "no output" failure mode (a
+      # contended shared Go build cache under heavy concurrent load —
+      # see golangci_lint.rs's own docs), but capping parallelism here is
+      # a cheap second layer of defense against the same class of
+      # contention, on top of that fix rather than instead of it.
       - name: Test
         run: cargo test --workspace --locked -- --test-threads=4
 
-      # Not -D warnings: the workspace carries a small pre-existing
-      # warning baseline (tracked separately for cleanup) that isn't
-      # this gate's job to block on — this step is here to keep new
-      # warnings visible in CI output, not to fail the build on them yet.
       - name: Clippy
-        run: cargo clippy --workspace --tests --locked
+        run: cargo clippy --workspace --tests --locked -- -D warnings

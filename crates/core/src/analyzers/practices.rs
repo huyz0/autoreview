@@ -137,8 +137,7 @@ fn detect_commented_out_code(path: &str, content: &str, language: PracticesLangu
 fn has_ticket_reference(text: &str) -> bool {
     let bytes = text.as_bytes();
     // #123
-    let mut chars = text.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
+    for (i, c) in text.char_indices() {
         if c == '#' && bytes.get(i + 1).is_some_and(|b| b.is_ascii_digit()) {
             return true;
         }

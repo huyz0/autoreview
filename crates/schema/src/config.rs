@@ -277,19 +277,13 @@ pub struct AgentsConfig {
     pub embedding: EmbeddingConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BudgetsConfig {
     #[serde(default)]
     pub models: ModelsConfig,
     #[serde(default)]
     pub tiers: BudgetTiers,
-}
-
-impl Default for BudgetsConfig {
-    fn default() -> Self {
-        Self { models: ModelsConfig::default(), tiers: BudgetTiers::default() }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -468,7 +462,7 @@ impl Default for MineFromCommentsConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoreviewConfig {
     #[serde(default)]
@@ -487,19 +481,4 @@ pub struct AutoreviewConfig {
     pub symindex: SymindexConfig,
     #[serde(default)]
     pub mine_from_comments: MineFromCommentsConfig,
-}
-
-impl Default for AutoreviewConfig {
-    fn default() -> Self {
-        Self {
-            triage: TriageConfig::default(),
-            budgets: BudgetsConfig::default(),
-            context: ContextConfig::default(),
-            storage: StorageConfig::default(),
-            verify: VerifyConfig::default(),
-            agents: AgentsConfig::default(),
-            symindex: SymindexConfig::default(),
-            mine_from_comments: MineFromCommentsConfig::default(),
-        }
-    }
 }

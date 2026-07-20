@@ -858,6 +858,11 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
+// Each parameter is independent context one specialist invocation needs
+// (backend, target repo, tier/plan entry, three prompt-building inputs, an
+// optional override) — no natural subgroup exists that wouldn't just be a
+// struct wrapping this whole parameter list.
+#[allow(clippy::too_many_arguments)]
 fn run_one_specialist(
     backend: &dyn AgentBackend,
     repo_root: &Path,

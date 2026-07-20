@@ -29,7 +29,7 @@ fn render_finding(f: &Finding) -> String {
     out.push_str(&format!("- **Source:** {} (`{}`)\n", f.source.tool, rule));
     out.push_str(&format!("- **Category:** {}\n", f.category));
     out.push_str(&format!("- **Confidence:** {:.0}%\n", f.confidence * 100.0));
-    out.push_str("\n");
+    out.push('\n');
     out.push_str(&format!("{}\n\n", f.message));
     if !f.location.snippet.is_empty() {
         out.push_str(&format!("```\n{}\n```\n\n", f.location.snippet));
@@ -107,7 +107,7 @@ pub fn render_markdown(report: &ReviewReport) -> String {
         let entry = by_severity.entry(severity_rank(f.severity)).or_insert((f.severity, 0));
         entry.1 += 1;
     }
-    for (_, (severity, count)) in &by_severity {
+    for (severity, count) in by_severity.values() {
         out.push_str(&format!("| {} | {} |\n", severity_label(*severity), count));
     }
     out.push('\n');

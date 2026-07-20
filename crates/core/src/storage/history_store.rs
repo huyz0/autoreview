@@ -366,6 +366,10 @@ impl HistoryStore {
     /// spot-check listing) and increments the rolled-up counters on the
     /// `rules` table (for cheap promotion/demotion threshold checks, so
     /// those don't need a `GROUP BY` scan over every firing on every run).
+    // Every parameter maps 1:1 onto its own `shadow_firings` column
+    // (matches the INSERT below) — none of them naturally group into a
+    // struct without inventing one just to satisfy this lint's count.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_shadow_firing(&self, rule_id: &str, fingerprint: &str, run_id: &str, location_path: &str, location_line: u32, agreement: &str, created_at: &str) -> anyhow::Result<()> {
         self.conn.execute(
             "INSERT INTO shadow_firings (rule_id, fingerprint, run_id, location_path, location_line, agreement, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",

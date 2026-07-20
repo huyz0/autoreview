@@ -29,10 +29,10 @@ const INEXPRESSIBLE_MARKER: &str = "INEXPRESSIBLE:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DraftOutcome {
-    /// >= `MIN_AGREEMENT` of `ATTEMPTS` independent drafts converged on the
-    /// same pattern (compared after whitespace normalization). Carries one
-    /// representative attempt's raw text (not normalized) as the actual
-    /// candidate rule YAML.
+    /// At least `MIN_AGREEMENT` of `ATTEMPTS` independent drafts converged
+    /// on the same pattern (compared after whitespace normalization).
+    /// Carries one representative attempt's raw text (not normalized) as
+    /// the actual candidate rule YAML.
     Drafted { rule_yaml: String, agreement_count: usize },
     /// Fewer than `MIN_AGREEMENT` attempts agreed on any single pattern, or
     /// a majority of attempts themselves declared the cluster inexpressible

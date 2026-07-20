@@ -179,12 +179,12 @@ pub(crate) fn function_name(trimmed: &str) -> Option<&str> {
 
 fn opens_class(trimmed: &str) -> bool {
     let words: Vec<&str> = trimmed.split_whitespace().collect();
-    trimmed.ends_with('{') && words.iter().any(|w| *w == "class")
+    trimmed.ends_with('{') && words.contains(&"class")
 }
 
 fn opens_interface(trimmed: &str) -> bool {
     let words: Vec<&str> = trimmed.split_whitespace().collect();
-    trimmed.ends_with('{') && words.iter().any(|w| *w == "interface")
+    trimmed.ends_with('{') && words.contains(&"interface")
 }
 
 /// Heuristic: does this line look like an abstract method signature inside

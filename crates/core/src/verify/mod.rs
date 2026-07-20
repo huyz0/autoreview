@@ -111,6 +111,10 @@ pub struct VerifyPassResult {
 /// passes through untouched. Findings are matched by id (stable within one
 /// run) rather than re-filtering, so the selection logic and the
 /// keep/suppress split can never disagree about which findings were checked.
+// Each parameter is an independent input the pass needs (agent backend,
+// data, model choice, selection config) — no natural subgroup exists that
+// wouldn't just be a struct wrapping "everything but backend and findings".
+#[allow(clippy::too_many_arguments)]
 pub fn run_verify_pass(backend: &dyn AgentBackend, findings: Vec<Finding>, diff_text: &str, model: &str, max_turns: u32, cwd: &Path, noisy_categories: &[String], semantic_rule_ids: &std::collections::HashSet<String>) -> VerifyPassResult {
     let to_verify: std::collections::HashSet<String> = select_for_verification(&findings, noisy_categories, semantic_rule_ids).into_iter().map(|f| f.id.clone()).collect();
 
