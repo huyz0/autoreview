@@ -21,7 +21,7 @@ use std::process::Command;
 
 use autoreview_schema::{StorageSyncConfig, SyncMode};
 
-fn run_git(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
+pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
     let output = Command::new("git").args(args).current_dir(cwd).output()?;
     if !output.status.success() {
         anyhow::bail!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim());

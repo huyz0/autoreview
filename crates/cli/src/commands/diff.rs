@@ -185,7 +185,8 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         }
     };
     let mut registered_packs = Vec::new();
-    for (id, result) in autoreview_core::resolve_rule_packs(&options.repo_root, &configured_packs) {
+    let rule_packs_cache_root = autoreview_core::default_rule_packs_cache_root();
+    for (id, result) in autoreview_core::resolve_rule_packs(&options.repo_root, &rule_packs_cache_root, &configured_packs) {
         match result {
             Ok(resolved) => registered_packs.push(resolved),
             Err(err) => println!("  [warn] failed to resolve rule pack '{id}': {err}"),

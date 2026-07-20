@@ -148,6 +148,7 @@ dependencies = [
  "autoreview-schema",
  "autoreview-symindex",
  "autoreview-test-support",
+ "dirs",
  "globset",
  "include_dir",
  "rusqlite",
