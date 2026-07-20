@@ -42,6 +42,7 @@ pub use rule_factory::shadow::{classify_agreement, should_demote, should_promote
 pub use skill_evolution::mine::{draft_negative_guidance, mine_negative_guidance, write_proposal_file as write_skill_proposal_file, NegativeGuidanceSeed};
 pub use skill_evolution::replay::{compare_replay, ReplayComparison};
 pub use rule_factory::mine::{mine_candidates, write_seed_file, CandidateSeed, RepresentativeSnippet};
+pub use rule_factory::mine_from_code::{mine_call_pair_conventions, CallPairConvention};
 pub use rule_factory::mine_from_comments::mine_from_pr_comments;
 pub use rule_packs::{default_rule_packs_cache_root, load_rule_packs_config, resolve_rule_packs, rule_packs_config_path, ResolvedRulePack};
 pub use skills::{compile_skill, discover_manifests, materialize_builtin_skill_to_disk, CompiledSkill};

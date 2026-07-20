@@ -15,7 +15,9 @@
 //! sitting alongside the automatic promote/demote gate `diff.rs` runs.
 //! `rules packs` lists registered external rule packs
 //! (`.autoreview/rulepacks.yaml`) — mirrors `skills list`'s "list
-//! registered things" precedent.
+//! registered things" precedent. `rules mine --from-code` is a third
+//! mining source (see `run_rules_mine_code`'s own docs) — a discovery
+//! prototype, not yet integrated into the draft/bench/shadow pipeline.
 
 use autoreview_core::{draft_candidate, mine_candidates, mine_from_pr_comments, run_bench, write_seed_file, BenchVerdict, CandidateSeed, DraftOutcome, HistoryStore};
 use autoreview_schema::AgentBackendKind;
@@ -124,6 +126,44 @@ pub fn run_rules_mine_comments(repo_root: &std::path::Path) -> anyhow::Result<()
     }
 
     draft_and_write_seeds(repo_root, &config, &seeds)
+}
+
+const CODE_MINE_MIN_OCCURRENCES: usize = 5;
+const CODE_MINE_MIN_CONSISTENCY: f64 = 0.9;
+
+/// `autoreview rules mine --from-code` — a third mining source, and a
+/// genuinely different kind of one: not clustering pre-existing labeled
+/// findings/comments, but discovering call-pair usage conventions
+/// (`autoreview_core::mine_call_pair_conventions`) directly from how
+/// consistently the repo's own Go source already uses its APIs (e.g. a
+/// `Lock()` almost always paired with an `Unlock()` nearby). Prints
+/// discovered conventions for inspection — a discovery prototype, not yet
+/// wired into the mine -> draft -> bench -> shadow pipeline the other two
+/// sources feed (see the module's own doc comment for why: there's no
+/// natural `CandidateSeed` mapping for "one repo-wide consistency ratio").
+pub fn run_rules_mine_code(repo_root: &std::path::Path) -> anyhow::Result<()> {
+    let conventions = autoreview_core::mine_call_pair_conventions(repo_root, CODE_MINE_MIN_OCCURRENCES, CODE_MINE_MIN_CONSISTENCY);
+    if conventions.is_empty() {
+        println!(
+            "No call-pair conventions found meeting the >={CODE_MINE_MIN_OCCURRENCES} occurrences / >={:.0}% consistency bar.",
+            CODE_MINE_MIN_CONSISTENCY * 100.0
+        );
+        return Ok(());
+    }
+
+    println!("Found {} candidate call-pair convention(s) (prototype — inspect only, not yet fed into the rule-draft pipeline):\n", conventions.len());
+    for c in &conventions {
+        println!(
+            "  .{}(...) -> .{}(...)  [{:.0}% of {} occurrence(s), e.g. {}]",
+            c.call_a,
+            c.call_b,
+            c.consistency * 100.0,
+            c.occurrences_of_a,
+            c.example_location
+        );
+    }
+    println!("\n(a call to the first method with no accompanying call to the second nearby is a plausible candidate for a future rule — inspect before drafting one)");
+    Ok(())
 }
 
 pub fn run_rules_bench(repo_root: &std::path::Path, cluster_id: &str) -> anyhow::Result<()> {

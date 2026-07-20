@@ -7,5 +7,6 @@
 pub mod bench;
 pub mod draft;
 pub mod mine;
+pub mod mine_from_code;
 pub mod mine_from_comments;
 pub mod shadow;

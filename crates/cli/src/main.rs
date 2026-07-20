@@ -9,7 +9,7 @@ use commands::diff::{run_diff, DiffCommandOptions};
 use commands::doctor::run_doctor;
 use commands::feedback::{run_feedback, run_missed_report};
 use commands::history::run_history_sync;
-use commands::rules::{run_rules_bench, run_rules_mine, run_rules_mine_comments, run_rules_packs, run_rules_review, run_rules_rollback, run_rules_shadow_log};
+use commands::rules::{run_rules_bench, run_rules_mine, run_rules_mine_code, run_rules_mine_comments, run_rules_packs, run_rules_review, run_rules_rollback, run_rules_shadow_log};
 use commands::skills::{run_skills_list, run_skills_mine, run_skills_review, run_skills_rollback};
 use commands::skills_bench::run_skills_bench;
 
@@ -99,10 +99,15 @@ enum HistoryAction {
 enum RulesAction {
     /// Mine recurring agent findings into rule candidates. With
     /// --from-comments, mines recurring human PR review comments via `gh`
-    /// instead (opt-in — see mineFromComments in .autoreview/config.yaml)
+    /// instead (opt-in — see mineFromComments in .autoreview/config.yaml).
+    /// With --from-code, mines call-pair usage conventions directly from
+    /// the repo's own Go source (discovery prototype, prints findings —
+    /// see commands::rules::run_rules_mine_code).
     Mine {
         #[arg(long)]
         from_comments: bool,
+        #[arg(long)]
+        from_code: bool,
     },
     /// Bench a candidate rule against its self-test + historical precision
     Bench { cluster_id: String },
@@ -218,9 +223,14 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Rules { action } => match action {
-            RulesAction::Mine { from_comments } => {
-                if from_comments {
+            RulesAction::Mine { from_comments, from_code } => {
+                if from_comments && from_code {
+                    eprintln!("error: --from-comments and --from-code are mutually exclusive");
+                    std::process::exit(1);
+                } else if from_comments {
                     run_rules_mine_comments(&repo_root)?
+                } else if from_code {
+                    run_rules_mine_code(&repo_root)?
                 } else {
                     run_rules_mine(&repo_root)?
                 }
