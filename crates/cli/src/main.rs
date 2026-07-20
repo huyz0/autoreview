@@ -10,7 +10,7 @@ use commands::doctor::run_doctor;
 use commands::feedback::{run_feedback, run_missed_report};
 use commands::history::run_history_sync;
 use commands::rules::{run_rules_bench, run_rules_mine, run_rules_mine_comments, run_rules_packs, run_rules_review, run_rules_rollback, run_rules_shadow_log};
-use commands::skills::{run_skills_list, run_skills_mine, run_skills_review, run_skills_stub};
+use commands::skills::{run_skills_list, run_skills_mine, run_skills_review, run_skills_rollback};
 use commands::skills_bench::run_skills_bench;
 
 #[derive(Parser)]
@@ -77,7 +77,7 @@ enum Commands {
         #[command(subcommand)]
         action: RulesAction,
     },
-    /// Manage review skills (list and mine are implemented; bench/review/rollback planned M3)
+    /// Manage review skills (list, mine, bench, review, rollback)
     Skills {
         #[command(subcommand)]
         action: SkillsAction,
@@ -236,7 +236,7 @@ fn main() -> anyhow::Result<()> {
             SkillsAction::Mine => run_skills_mine(&repo_root)?,
             SkillsAction::Bench { aspect, proposal_id } => run_skills_bench(&repo_root, &aspect, &proposal_id)?,
             SkillsAction::Review { approve, reject, reason } => run_skills_review(&repo_root, approve, reject, reason)?,
-            SkillsAction::Rollback { aspect, version } => run_skills_stub(&format!("rollback {aspect} {version}")),
+            SkillsAction::Rollback { aspect, version } => run_skills_rollback(&repo_root, &aspect, &version)?,
         },
         Commands::History { action } => match action {
             HistoryAction::Sync => run_history_sync(&repo_root)?,

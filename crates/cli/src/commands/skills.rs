@@ -48,11 +48,6 @@ pub fn run_skills_list(repo_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn run_skills_stub(action: &str) {
-    println!("`autoreview skills {action}` is not implemented yet — planned for M3 (feedback-driven skill evolution + replay eval), per the project plan.");
-    println!("Available today: `autoreview skills list`, `autoreview skills mine`.");
-}
-
 /// `autoreview skills mine` — channel 2 of skill evolution: clusters
 /// repeated `--fp` feedback (with a human-supplied `--note`) by category,
 /// drafts one negative-guidance instruction line per cluster via the
@@ -136,11 +131,11 @@ fn list_all_proposals(repo_root: &Path) -> Vec<(String, String)> {
 /// `autoreview skills review` — the human-approval gate for a skill-
 /// evolution proposal. No args: lists every proposal found across all
 /// aspects. `--approve <aspect>:<proposalId>`: materializes the aspect's
-/// builtin skill to a repo-local override (if none exists yet) and appends
-/// the proposal's drafted line to its `instructions.md` — the actual
-/// prompt-edit landing, version-bumping is left for `skills rollback`
-/// (still a stub) to reason about later. `--reject <aspect>:<proposalId>
-/// --reason <text>`: records why, alongside the proposal file.
+/// builtin skill to a repo-local override (if none exists yet), appends
+/// the proposal's drafted line to its `instructions.md`, and snapshots the
+/// result as a new version in `skill_versions` (`skills rollback` reads
+/// these back). `--reject <aspect>:<proposalId> --reason <text>`: records
+/// why, alongside the proposal file.
 pub fn run_skills_review(repo_root: &Path, approve: Option<String>, reject: Option<String>, reason: Option<String>) -> anyhow::Result<()> {
     if let Some(spec) = approve {
         let (aspect, proposal_id) = spec.split_once(':').ok_or_else(|| anyhow::anyhow!("--approve expects <aspect>:<proposalId>"))?;
@@ -183,14 +178,53 @@ fn approve_proposal(repo_root: &Path, aspect: &str, proposal_id: &str) -> anyhow
     let disk_dir = materialize_builtin_skill_to_disk(repo_root, aspect)?;
     let instructions_path = disk_dir.join("instructions.md");
     let mut instructions = std::fs::read_to_string(&instructions_path).unwrap_or_default();
+
+    let history_dir = history_dir_for(repo_root);
+    let store = HistoryStore::open(&history_dir)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    // First approval for this aspect: snapshot the pre-edit content as
+    // version "0" before touching it, so `skills rollback` can always get
+    // back to the unmodified baseline, not just to the most recent edit.
+    if store.latest_skill_version(aspect)?.is_none() {
+        store.record_skill_version(aspect, "0", &instructions, &now)?;
+    }
+
     instructions.push_str("\n\n");
     instructions.push_str(&drafted_line);
     instructions.push('\n');
-    std::fs::write(&instructions_path, instructions)?;
+    std::fs::write(&instructions_path, &instructions)?;
+
+    let next_version = store.latest_skill_version(aspect)?.unwrap_or(0) + 1;
+    store.record_skill_version(aspect, &next_version.to_string(), &instructions, &now)?;
 
     let marker_path = skill_proposals_dir(repo_root, aspect).join(format!("{proposal_id}.approved.json"));
-    std::fs::write(&marker_path, serde_json::json!({ "approvedAt": chrono::Utc::now().to_rfc3339(), "appliedLine": drafted_line }).to_string())?;
-    println!("Approved '{aspect}:{proposal_id}' — appended to {}", instructions_path.display());
+    std::fs::write(&marker_path, serde_json::json!({ "approvedAt": &now, "appliedLine": drafted_line, "version": next_version }).to_string())?;
+    println!("Approved '{aspect}:{proposal_id}' — appended to {} (version {next_version}, use `skills rollback {aspect} <version>` to undo)", instructions_path.display());
+    Ok(())
+}
+
+/// Restores a skill aspect's `instructions.md` to a previously recorded
+/// version — the manual override `skills review`'s own doc comment
+/// deferred to here. Version `"0"` is the pre-evolution baseline, snapshotted
+/// automatically on the aspect's first `--approve`; each later approval
+/// adds one more version on top.
+pub fn run_skills_rollback(repo_root: &Path, aspect: &str, version: &str) -> anyhow::Result<()> {
+    let history_dir = history_dir_for(repo_root);
+    let store = HistoryStore::open(&history_dir)?;
+
+    let Some(source) = store.skill_version_source(aspect, version)? else {
+        let available = store.list_skill_versions(aspect)?;
+        if available.is_empty() {
+            anyhow::bail!("no tracked versions for skill '{aspect}' — versions are recorded starting with that aspect's first `skills review --approve`");
+        }
+        let versions = available.iter().map(|(v, _)| v.as_str()).collect::<Vec<_>>().join(", ");
+        anyhow::bail!("skill '{aspect}' has no version '{version}' — available versions: {versions}");
+    };
+
+    let disk_dir = materialize_builtin_skill_to_disk(repo_root, aspect)?;
+    let instructions_path = disk_dir.join("instructions.md");
+    std::fs::write(&instructions_path, &source)?;
+    println!("Rolled back skill '{aspect}' to version {version} — wrote {}", instructions_path.display());
     Ok(())
 }
 
@@ -203,4 +237,69 @@ fn reject_proposal(repo_root: &Path, aspect: &str, proposal_id: &str, reason: &s
     std::fs::write(&marker_path, serde_json::json!({ "reason": reason, "rejectedAt": chrono::Utc::now().to_rfc3339() }).to_string())?;
     println!("Rejected '{aspect}:{proposal_id}': {reason}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use autoreview_core::{write_skill_proposal_file, NegativeGuidanceSeed};
+    use autoreview_test_support::init_repo;
+
+    fn seed_proposal(repo_root: &Path, aspect: &str, cluster_id: &str, drafted_line: &str) {
+        let seed = NegativeGuidanceSeed {
+            cluster_id: cluster_id.to_string(),
+            category: aspect.to_string(),
+            representative_title: "t".to_string(),
+            representative_message: "m".to_string(),
+            notes: vec!["n".to_string()],
+        };
+        write_skill_proposal_file(repo_root, &seed, Some(drafted_line)).unwrap();
+    }
+
+    #[test]
+    fn rollback_of_an_untracked_aspect_errors_clearly() {
+        let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+        let err = run_skills_rollback(repo.path(), "correctness", "0").unwrap_err();
+        assert!(err.to_string().contains("no tracked versions"), "got: {err}");
+    }
+
+    #[test]
+    fn approving_a_proposal_snapshots_a_baseline_and_a_new_version() {
+        let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+        seed_proposal(repo.path(), "correctness", "cluster-1", "Do not flag X.");
+
+        approve_proposal(repo.path(), "correctness", "cluster-1").unwrap();
+
+        let history_dir = history_dir_for(repo.path());
+        let store = HistoryStore::open(&history_dir).unwrap();
+        assert_eq!(store.latest_skill_version("correctness").unwrap(), Some(1));
+        let baseline = store.skill_version_source("correctness", "0").unwrap().unwrap();
+        let v1 = store.skill_version_source("correctness", "1").unwrap().unwrap();
+        assert!(!baseline.contains("Do not flag X."), "version 0 must be the pre-edit baseline");
+        assert!(v1.contains("Do not flag X."), "version 1 must include the newly appended line");
+    }
+
+    #[test]
+    fn rollback_restores_a_prior_versions_content() {
+        let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+        seed_proposal(repo.path(), "correctness", "cluster-1", "Do not flag X.");
+        approve_proposal(repo.path(), "correctness", "cluster-1").unwrap();
+
+        let instructions_path = repo.path().join(".autoreview/skills/correctness/instructions.md");
+        assert!(std::fs::read_to_string(&instructions_path).unwrap().contains("Do not flag X."));
+
+        run_skills_rollback(repo.path(), "correctness", "0").unwrap();
+        let restored = std::fs::read_to_string(&instructions_path).unwrap();
+        assert!(!restored.contains("Do not flag X."), "rollback to version 0 must remove what version 1 added");
+    }
+
+    #[test]
+    fn rollback_to_a_nonexistent_version_lists_the_available_ones() {
+        let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+        seed_proposal(repo.path(), "correctness", "cluster-1", "Do not flag X.");
+        approve_proposal(repo.path(), "correctness", "cluster-1").unwrap();
+
+        let err = run_skills_rollback(repo.path(), "correctness", "99").unwrap_err();
+        assert!(err.to_string().contains("0") && err.to_string().contains("1"), "got: {err}");
+    }
 }

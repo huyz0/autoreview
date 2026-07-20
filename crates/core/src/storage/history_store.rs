@@ -458,6 +458,53 @@ impl HistoryStore {
         Ok(())
     }
 
+    /// Snapshots one skill aspect's full `instructions.md` content as a
+    /// named version — the write side of `skill_versions`, a table that's
+    /// existed in the schema since M1 but had no reader/writer until now
+    /// (`skills rollback` is its first real consumer). `version` is a
+    /// plain incrementing integer string per aspect (`"0"` for the
+    /// pre-evolution baseline, `"1"`, `"2"`, ... for each approved
+    /// proposal) — `INSERT OR REPLACE` so re-recording an existing version
+    /// (shouldn't normally happen) overwrites rather than erroring.
+    pub fn record_skill_version(&self, aspect: &str, version: &str, source: &str, valid_from: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO skill_versions (aspect, version, source, valid_from) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![aspect, version, source, valid_from],
+        )?;
+        Ok(())
+    }
+
+    /// The highest recorded version number for an aspect, or `None` if
+    /// none has ever been snapshotted (the aspect has never gone through
+    /// `skills review --approve`).
+    pub fn latest_skill_version(&self, aspect: &str) -> anyhow::Result<Option<i64>> {
+        Ok(self.conn.query_row("SELECT MAX(CAST(version AS INTEGER)) FROM skill_versions WHERE aspect = ?1", [aspect], |row| row.get(0))?)
+    }
+
+    /// The full `instructions.md` snapshot recorded for `(aspect, version)`,
+    /// or `None` if that exact version was never recorded.
+    pub fn skill_version_source(&self, aspect: &str, version: &str) -> anyhow::Result<Option<String>> {
+        let result = self.conn.query_row("SELECT source FROM skill_versions WHERE aspect = ?1 AND version = ?2", rusqlite::params![aspect, version], |row| row.get(0));
+        match result {
+            Ok(source) => Ok(Some(source)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// Every recorded `(version, valid_from)` pair for an aspect, oldest
+    /// first — used to list available rollback targets when a requested
+    /// version doesn't exist.
+    pub fn list_skill_versions(&self, aspect: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT version, valid_from FROM skill_versions WHERE aspect = ?1 ORDER BY CAST(version AS INTEGER) ASC")?;
+        let rows = stmt.query_map([aspect], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
     #[cfg(test)]
     pub fn count_findings(&self) -> anyhow::Result<i64> {
         Ok(self.conn.query_row("SELECT COUNT(*) FROM findings", [], |row| row.get(0))?)
@@ -757,6 +804,44 @@ mod tests {
         let state = store.rule_state("go-example").unwrap().unwrap();
         assert_eq!(state.invalid_at.as_deref(), Some("2026-07-10T00:00:00Z"));
         assert_eq!(state.status, "shadow", "invalidating must not change the status column");
+    }
+
+    #[test]
+    fn latest_skill_version_is_none_for_an_untracked_aspect() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        assert_eq!(store.latest_skill_version("correctness").unwrap(), None);
+    }
+
+    #[test]
+    fn record_and_read_back_a_skill_version() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        store.record_skill_version("correctness", "0", "baseline instructions", "2026-07-01T00:00:00Z").unwrap();
+        store.record_skill_version("correctness", "1", "baseline instructions\n\nnew guidance line", "2026-07-02T00:00:00Z").unwrap();
+
+        assert_eq!(store.latest_skill_version("correctness").unwrap(), Some(1));
+        assert_eq!(store.skill_version_source("correctness", "0").unwrap().as_deref(), Some("baseline instructions"));
+        assert_eq!(store.skill_version_source("correctness", "1").unwrap().as_deref(), Some("baseline instructions\n\nnew guidance line"));
+        assert_eq!(store.skill_version_source("correctness", "2").unwrap(), None);
+    }
+
+    #[test]
+    fn list_skill_versions_orders_numerically_not_lexically() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        for v in ["0", "1", "2", "10"] {
+            store.record_skill_version("correctness", v, "x", "2026-07-01T00:00:00Z").unwrap();
+        }
+        let versions: Vec<String> = store.list_skill_versions("correctness").unwrap().into_iter().map(|(v, _)| v).collect();
+        assert_eq!(versions, vec!["0", "1", "2", "10"], "numeric ordering must put 10 after 2, not between 1 and 2 lexically");
+    }
+
+    #[test]
+    fn different_aspects_track_versions_independently() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        store.record_skill_version("correctness", "0", "a", "2026-07-01T00:00:00Z").unwrap();
+        store.record_skill_version("security", "0", "b", "2026-07-01T00:00:00Z").unwrap();
+        store.record_skill_version("security", "1", "b2", "2026-07-02T00:00:00Z").unwrap();
+        assert_eq!(store.latest_skill_version("correctness").unwrap(), Some(0));
+        assert_eq!(store.latest_skill_version("security").unwrap(), Some(1));
     }
 
     #[test]
