@@ -67,7 +67,7 @@ fn check_config(repo_root: &Path) -> CheckResult {
         CheckResult {
             name: "config",
             ok: true,
-            detail: "no .autoreview/config.yaml — running with defaults (run `autoreview init` to create one)".to_string(),
+            detail: "no .autoreview/config.yaml — running with defaults (fully optional; see docs/autoreview-directory-layout.md for the format)".to_string(),
         }
     }
 }

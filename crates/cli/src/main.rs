@@ -72,7 +72,10 @@ enum Commands {
         #[arg(long)]
         note: Option<String>,
     },
-    /// Manage the learned-rule factory (mine is implemented; draft/bench/shadow/promote planned M3)
+    /// Manage the learned-rule factory: mine candidates from findings/PR
+    /// comments/code, review/approve into shadow mode, bench against
+    /// history, and the automatic shadow -> promoted lifecycle diff.rs runs
+    /// on every review.
     Rules {
         #[command(subcommand)]
         action: RulesAction,
