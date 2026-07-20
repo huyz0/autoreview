@@ -184,3 +184,25 @@ triggers:
     assert_eq!(manifest.cost_class, autoreview_schema::CostClass::Expensive);
     assert_eq!(manifest.triggers.signals, vec!["sensitivePathHit".to_string()]);
 }
+
+#[test]
+fn rule_packs_file_parses_the_documented_yaml_shape() {
+    let yaml = r#"
+packs:
+  - id: acme-security
+    source:
+      kind: local
+      path: ../shared-rules/acme-security
+  - id: acme-perf
+    source:
+      kind: git
+      url: https://github.com/acme/perf-rules
+      ref: v1.2.0
+      subpath: rules/go
+"#;
+    let file: autoreview_schema::RulePacksFile = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(file.packs.len(), 2);
+    assert_eq!(file.packs[0].id, "acme-security");
+    assert!(matches!(&file.packs[0].source, autoreview_schema::RulePackSourceConfig::Local { path } if path == "../shared-rules/acme-security"));
+    assert!(matches!(&file.packs[1].source, autoreview_schema::RulePackSourceConfig::Git { url, .. } if url == "https://github.com/acme/perf-rules"));
+}
