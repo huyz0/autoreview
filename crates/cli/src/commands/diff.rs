@@ -172,6 +172,16 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     // internally on every call.
     let languages_present = autoreview_langsupport::languages_present(changed_file_paths.iter().map(String::as_str));
     const STRUCTURAL_RULE_LANGUAGES: ApplyCondition = ApplyCondition::AnyLanguage(&[Language::Go, Language::Java, Language::Kotlin, Language::TypeScript, Language::Tsx, Language::JavaScript]);
+    // `--aspects` restricts which categories the user asked to review —
+    // real, honest consumer of the AnyCategory apply-condition axis:
+    // complexity.rs's findings are always category "design" (a single,
+    // fixed category, unlike practices.rs's mixed-category output), so
+    // when the user explicitly asked for other aspects only, running it at
+    // all is wasted work for output that would never surface anyway. `None`
+    // (the common case, no --aspects given) means unrestricted — every
+    // AnyCategory condition applies, same as before this gate existed.
+    let categories_present: Option<std::collections::HashSet<String>> = options.aspects.as_ref().map(|aspects| aspects.iter().cloned().collect());
+    const DESIGN_ONLY: ApplyCondition = ApplyCondition::AnyCategory(&["design"]);
 
     // Registered external rule packs (.autoreview/rulepacks.yaml) — resolved
     // once here, run "full trust immediately" (no shadow/promoted staging
@@ -215,8 +225,10 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     // a behavior change, not a speed win.
     stage1_agent_findings.extend(autoreview_core::run_duplication_check(&options.repo_root, &changed_file_paths));
     stage1_agent_findings.extend(autoreview_core::run_cross_file_duplication_check(&options.repo_root, &changed_file_paths));
-    if STRUCTURAL_RULE_LANGUAGES.applies(&languages_present) {
-        stage1_agent_findings.extend(autoreview_core::run_complexity_check(&options.repo_root, &changed_file_paths, &registered_packs));
+    if STRUCTURAL_RULE_LANGUAGES.applies(&languages_present, None) {
+        if DESIGN_ONLY.applies(&languages_present, categories_present.as_ref()) {
+            stage1_agent_findings.extend(autoreview_core::run_complexity_check(&options.repo_root, &changed_file_paths, &registered_packs));
+        }
         stage1_agent_findings.extend(autoreview_core::run_practices_check(&options.repo_root, &changed_file_paths));
     }
     // Architecture layer check is opt-in: only runs when the repo has a

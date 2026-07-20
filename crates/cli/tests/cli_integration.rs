@@ -151,6 +151,23 @@ fn a_shadow_trust_rule_packs_finding_is_suppressed_not_surfaced() {
 }
 
 #[test]
+fn aspects_filter_scopes_out_complexity_findings_outside_the_requested_category() {
+    let repo = init_repo_with_diff(
+        &[("main.go", "package main\n\nfunc main() {}\n")],
+        &[("main.go", "package main\n\nfunc doIt(a int, b int, c int, d int, e int, f int) {\n\t_ = a\n}\n\nfunc main() {\n\tdoIt(1, 2, 3, 4, 5, 6)\n}\n")],
+        "add a function with 6 parameters",
+    );
+
+    let unrestricted = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["diff", "--base", "main~1", "--head", "main", "--tier", "quick"]).assert().success();
+    let unrestricted_stdout = String::from_utf8_lossy(&unrestricted.get_output().stdout);
+    assert!(unrestricted_stdout.contains("Long parameter list"), "expected the design finding with no --aspects restriction, got:\n{unrestricted_stdout}");
+
+    let restricted = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["diff", "--base", "main~1", "--head", "main", "--tier", "quick", "--aspects", "security"]).assert().success();
+    let restricted_stdout = String::from_utf8_lossy(&restricted.get_output().stdout);
+    assert!(!restricted_stdout.contains("Long parameter list"), "--aspects security should scope out a design-only finding, got:\n{restricted_stdout}");
+}
+
+#[test]
 fn diff_incremental_suppresses_findings_already_reported_in_the_previous_run() {
     if !ast_grep_available() {
         eprintln!("skipping: ast-grep not on PATH");
