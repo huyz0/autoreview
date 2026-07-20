@@ -39,6 +39,18 @@ const DIVERGENT_MIN_DISTINCT_DIRS: usize = 4;
 /// legitimate collaborator, not diffuse/unrelated coupling.
 const DIVERGENT_MAX_DOMINANT_SHARE: f64 = 0.5;
 const DIVERGENT_LOG_LIMIT: usize = 30;
+/// `divergent_change_for_file` pays at least one `git log --follow`
+/// subprocess per file, plus one `git show` per commit it finds (up to
+/// `DIVERGENT_LOG_LIMIT` more each) — unlike the language-scoped gates
+/// elsewhere in Stage 1, this cost is language-agnostic (co-change history
+/// applies to any file) so it can't be pre-filtered by language the way
+/// `ast_grep.rs`'s rule pack is. What it CAN be bounded by is the sheer
+/// number of changed files: an unusually large diff (a vendored-dependency
+/// bump, a mass rename) would otherwise spawn a subprocess tree proportional
+/// to `changed_files.len() * DIVERGENT_LOG_LIMIT`. Capping to the first N
+/// changed files keeps the worst case bounded without touching the common
+/// case (the vast majority of diffs stay well under this).
+const DIVERGENT_MAX_FILES_PER_RUN: usize = 25;
 
 fn make_finding(rule_id: &str, category: &str, severity: Severity, path: &str, title: String, message: String, related: Vec<Location>) -> AgentFinding {
     AgentFinding {
@@ -160,7 +172,8 @@ fn divergent_change_for_file(repo_root: &Path, path: &str) -> Option<AgentFindin
 /// little history to judge, and any repo where `git log`/`git show` fail
 /// (e.g. a shallow clone or non-git checkout) rather than erroring.
 pub fn run_divergent_change_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
-    changed_files.iter().filter_map(|path| divergent_change_for_file(repo_root, path)).collect()
+    let capped = &changed_files[..changed_files.len().min(DIVERGENT_MAX_FILES_PER_RUN)];
+    capped.iter().filter_map(|path| divergent_change_for_file(repo_root, path)).collect()
 }
 
 #[cfg(test)]
@@ -222,5 +235,27 @@ mod tests {
 
         let findings = run_divergent_change_check(repo.path(), &["shared.go".to_string()]);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn skips_files_past_the_max_files_per_run_cap() {
+        let repo = autoreview_test_support::init_repo(&[("shared.go", "package shared\n")]);
+        repo.commit(&[("shared.go", "package shared\nvar a = 1\n"), ("auth/a.go", "package auth\n")], "auth change");
+        repo.commit(&[("shared.go", "package shared\nvar a = 2\n"), ("billing/b.go", "package billing\n")], "billing change");
+        repo.commit(&[("shared.go", "package shared\nvar a = 3\n"), ("ui/u.go", "package ui\n")], "ui change");
+        repo.commit(&[("shared.go", "package shared\nvar a = 4\n"), ("metrics/m.go", "package metrics\n")], "metrics change");
+        repo.commit(&[("shared.go", "package shared\nvar a = 5\n"), ("auth/a2.go", "package auth\n")], "auth change 2");
+        repo.commit(&[("shared.go", "package shared\nvar a = 6\n"), ("billing/b2.go", "package billing\n")], "billing change 2");
+
+        // shared.go would be flagged if checked on its own (proven by
+        // `flags_divergent_change_when_co_change_partners_are_scattered`
+        // above) — placing it past the cap, behind DIVERGENT_MAX_FILES_PER_RUN
+        // filler entries, must suppress that finding.
+        let mut changed: Vec<String> = (0..DIVERGENT_MAX_FILES_PER_RUN).map(|i| format!("filler{i}.go")).collect();
+        changed.push("shared.go".to_string());
+        assert!(changed.len() > DIVERGENT_MAX_FILES_PER_RUN);
+
+        let findings = run_divergent_change_check(repo.path(), &changed);
+        assert!(findings.is_empty(), "shared.go sits past the cap and should never be checked, got: {findings:#?}");
     }
 }
