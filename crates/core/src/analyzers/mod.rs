@@ -8,6 +8,7 @@ pub mod complexity;
 pub mod dataflow_check;
 pub mod duplication;
 pub mod practices;
+pub mod rule_pack;
 pub mod shadow_rules;
 pub mod golangci_lint;
 pub mod sarif;

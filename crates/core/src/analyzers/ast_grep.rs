@@ -1,11 +1,26 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::process::Command;
 
 use include_dir::{include_dir, Dir};
 use serde::Deserialize;
 
+use autoreview_langsupport::Language;
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
+
+use super::rule_pack::{run_ast_grep_scan, write_rule_file};
+
+/// Maps a rule pack's top-level `rules-builtin/<language>/` directory name
+/// to the `Language` value(s) present in it — derived from the directory
+/// layout itself, not from parsing each YAML's `language:` field, since the
+/// layout already encodes it for free. One directory (`typescript`) covers
+/// two grammars (`.ts` and `.tsx`), so it maps to both.
+const RULE_DIR_LANGUAGES: &[(&str, &[Language])] = &[
+    ("go", &[Language::Go]),
+    ("java", &[Language::Java]),
+    ("kotlin", &[Language::Kotlin]),
+    ("javascript", &[Language::JavaScript]),
+    ("typescript", &[Language::TypeScript, Language::Tsx]),
+];
 
 /// Builtin ast-grep rules, embedded at compile time for the same reason the
 /// builtin skills are: a single binary shouldn't need a side-car data
@@ -210,32 +225,26 @@ pub fn run_ast_grep(repo_root: &Path, changed_files: &[String]) -> anyhow::Resul
         return Ok(vec![]);
     }
 
+    // Rule-group apply condition: only extract pattern rules for languages
+    // actually present in this diff — a Go-only diff never needs to see
+    // the Java/Kotlin/TypeScript/JavaScript rule subtrees at all.
+    let languages_present = autoreview_langsupport::languages_present(relevant.iter().copied());
+
     let temp_dir = tempfile::tempdir()?;
     let rules_dir = temp_dir.path().join("rules");
     std::fs::create_dir_all(&rules_dir)?;
-    extract_pattern_rules(&BUILTIN_RULES, &rules_dir)?;
+    let written = extract_pattern_rules(&BUILTIN_RULES, &rules_dir, &languages_present)?;
+    // Defensive, not expected to trigger today (SOURCE_EXTENSIONS and
+    // RULE_DIR_LANGUAGES are in lockstep) — future-proofs against the two
+    // lists drifting apart, e.g. a new source extension added to one and
+    // not the other.
+    if written == 0 {
+        return Ok(vec![]);
+    }
 
-    // sgconfig.yml must live outside `rules_dir` — ruleDirs scans every YAML
-    // file in that directory recursively, so a config file placed inside it
-    // gets misinterpreted as a rule file too.
-    let sgconfig_path = temp_dir.path().join("sgconfig.yml");
-    std::fs::write(&sgconfig_path, "ruleDirs:\n  - rules\n")?;
-
-    let output = match Command::new("ast-grep").arg("scan").arg("--config").arg(&sgconfig_path).arg("--json").args(&relevant).current_dir(repo_root).output() {
-        Ok(output) => output,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(err) => return Err(err.into()),
-    };
-
-    // ast-grep exits non-zero when error-severity rules match matches — that's
-    // signal, not failure. Only a genuinely unparsable stdout means the tool
-    // itself broke (bad rule file, crash, etc).
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let matches: Vec<serde_json::Value> = match serde_json::from_str(&stdout) {
-        Ok(matches) => matches,
-        Err(err) => {
-            anyhow::bail!("ast-grep produced unparsable output: {err}. stderr: {}", String::from_utf8_lossy(&output.stderr));
-        }
+    let matches = match run_ast_grep_scan(temp_dir.path(), repo_root, &relevant)? {
+        Some(matches) => matches,
+        None => return Ok(vec![]),
     };
 
     let categories = rule_categories();
@@ -244,15 +253,20 @@ pub fn run_ast_grep(repo_root: &Path, changed_files: &[String]) -> anyhow::Resul
 }
 
 /// Copies only `kind: pattern` (or `kind`-absent) rule files from `dir`
-/// into `dest`, preserving their relative paths. ast-grep's CLI errors if
-/// any file under its `ruleDirs` lacks a valid `rule:` key, so a
+/// into `dest`, preserving their relative paths, and only for a language
+/// subdirectory that has at least one representative in
+/// `languages_present` — the rule-group apply condition, gating whole
+/// language subtrees before any per-file work happens. ast-grep's CLI
+/// errors if any file under its `ruleDirs` lacks a valid `rule:` key, so a
 /// `kind: taint`/`kind: threshold` file (which has no `rule:` block at
 /// all — its body is `sources:`/`sinks:`/`metric:`/`threshold:` instead)
 /// must never reach the subprocess. This is what makes "one rules
 /// directory, three execution backends" possible: every rule lives in the
 /// same `rules-builtin/<lang>/<category>/<id>.yml` tree, but only the
-/// pattern-kind ones are ever visible to `ast-grep scan`.
-fn extract_pattern_rules(dir: &Dir, dest: &Path) -> anyhow::Result<()> {
+/// pattern-kind, language-relevant ones are ever visible to `ast-grep scan`.
+/// Returns the number of files actually written.
+fn extract_pattern_rules(dir: &Dir, dest: &Path, languages_present: &HashSet<Language>) -> anyhow::Result<usize> {
+    let mut written = 0usize;
     for file in dir.files() {
         let is_yaml = file.path().extension().is_some_and(|ext| ext == "yml" || ext == "yaml");
         if !is_yaml {
@@ -263,16 +277,20 @@ fn extract_pattern_rules(dir: &Dir, dest: &Path) -> anyhow::Result<()> {
         if kind != "pattern" {
             continue;
         }
-        let dest_path = dest.join(file.path());
-        if let Some(parent) = dest_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(dest_path, contents)?;
+        write_rule_file(&dest.join(file.path()), contents)?;
+        written += 1;
     }
     for subdir in dir.dirs() {
-        extract_pattern_rules(subdir, dest)?;
+        if let Some(dir_name) = subdir.path().file_name().and_then(|n| n.to_str()) {
+            if let Some((_, langs)) = RULE_DIR_LANGUAGES.iter().find(|(name, _)| *name == dir_name) {
+                if !langs.iter().any(|l| languages_present.contains(l)) {
+                    continue;
+                }
+            }
+        }
+        written += extract_pattern_rules(subdir, dest, languages_present)?;
     }
-    Ok(())
+    Ok(written)
 }
 
 fn match_to_finding(m: &serde_json::Value, categories: &HashMap<String, String>, metadata: &HashMap<String, RuleMetadataBlock>) -> Option<AgentFinding> {
@@ -381,6 +399,25 @@ mod tests {
         assert_eq!(finding.category, "correctness");
         assert_eq!(finding.location.path, "main.go");
         assert_eq!(finding.location.range.start_line, 4); // 1-indexed: line 4 is "if true == true {"
+    }
+
+    #[test]
+    fn extract_pattern_rules_for_go_only_copies_no_other_language_subtree() {
+        let dest = tempfile::tempdir().unwrap();
+        let languages_present: HashSet<Language> = [Language::Go].into_iter().collect();
+        let written = extract_pattern_rules(&BUILTIN_RULES, dest.path(), &languages_present).unwrap();
+        assert!(written > 0, "expected at least one Go pattern rule to be written");
+        for other in ["java", "kotlin", "typescript", "javascript"] {
+            assert!(!dest.path().join(other).exists(), "expected no {other} subtree to be copied for a Go-only diff");
+        }
+        assert!(dest.path().join("go").exists(), "expected the go subtree to be copied");
+    }
+
+    #[test]
+    fn extract_pattern_rules_for_no_languages_writes_nothing() {
+        let dest = tempfile::tempdir().unwrap();
+        let written = extract_pattern_rules(&BUILTIN_RULES, dest.path(), &HashSet::new()).unwrap();
+        assert_eq!(written, 0);
     }
 
     #[test]

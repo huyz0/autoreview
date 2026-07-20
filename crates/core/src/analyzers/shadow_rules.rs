@@ -13,13 +13,14 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
 
 use serde::Deserialize;
 
+use autoreview_langsupport::Language;
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Side};
 
 use super::ast_grep::{is_relevant_source_file, map_severity, title_from_rule_id};
+use super::rule_pack::{run_ast_grep_scan, write_rule_file};
 
 fn default_category() -> String {
     "correctness".to_string()
@@ -30,6 +31,32 @@ struct RuleIdMeta {
     id: String,
     #[serde(default = "default_category")]
     category: String,
+    /// ast-grep's own `language:` field — always present in practice (ast-
+    /// grep itself requires it to run a pattern rule at all), but parsed
+    /// as optional here since Rust has never enforced it before this
+    /// gate existed: a shadow rule predating this change with no
+    /// (unexpectedly) parseable `language:` value fails open, i.e. still
+    /// gets copied, rather than silently going missing.
+    #[serde(default)]
+    language: Option<String>,
+}
+
+/// Maps ast-grep's own `language:` string value to the `Language`(s) it can
+/// match against — same convention as `ast_grep.rs`'s `RULE_DIR_LANGUAGES`:
+/// `"TypeScript"` covers both `.ts` and `.tsx` (ast-grep dispatches `.tsx`
+/// files under the `TypeScript` value based on extension, not a separate
+/// declared value in practice), `"Tsx"` is accepted too for a rule author
+/// who writes it explicitly.
+fn languages_from_str(value: &str) -> Option<&'static [Language]> {
+    match value {
+        "Go" => Some(&[Language::Go]),
+        "Java" => Some(&[Language::Java]),
+        "Kotlin" => Some(&[Language::Kotlin]),
+        "TypeScript" => Some(&[Language::TypeScript, Language::Tsx]),
+        "Tsx" => Some(&[Language::Tsx]),
+        "JavaScript" => Some(&[Language::JavaScript]),
+        _ => None,
+    }
 }
 
 /// One discovered shadow/promoted rule file and the lifecycle status
@@ -83,6 +110,7 @@ pub fn run_shadow_rules(repo_root: &Path, changed_files: &[String]) -> anyhow::R
     if relevant.is_empty() {
         return Ok(vec![]);
     }
+    let languages_present = autoreview_langsupport::languages_present(relevant.iter().copied());
 
     let temp_dir = tempfile::tempdir()?;
     let rules_dir = temp_dir.path().join("rules");
@@ -92,26 +120,25 @@ pub fn run_shadow_rules(repo_root: &Path, changed_files: &[String]) -> anyhow::R
     for (idx, rule_file) in rule_files.iter().enumerate() {
         let Ok(contents) = std::fs::read_to_string(&rule_file.path) else { continue };
         let Ok(meta) = serde_yaml::from_str::<RuleIdMeta>(&contents) else { continue };
+        // Rule-group apply condition, fail-open: only skip when the
+        // declared language is both present AND resolves to a known
+        // Language with none of it in this diff — an unparseable/absent
+        // `language:` value means "don't gate," not "exclude."
+        if let Some(langs) = meta.language.as_deref().and_then(languages_from_str) {
+            if !langs.iter().any(|l| languages_present.contains(l)) {
+                continue;
+            }
+        }
         meta_by_rule_id.insert(meta.id, (rule_file.status, meta.category));
-        std::fs::write(rules_dir.join(format!("rule-{idx}.yml")), &contents)?;
+        write_rule_file(&rules_dir.join(format!("rule-{idx}.yml")), &contents)?;
     }
     if meta_by_rule_id.is_empty() {
         return Ok(vec![]);
     }
 
-    let sgconfig_path = temp_dir.path().join("sgconfig.yml");
-    std::fs::write(&sgconfig_path, "ruleDirs:\n  - rules\n")?;
-
-    let output = match Command::new("ast-grep").arg("scan").arg("--config").arg(&sgconfig_path).arg("--json").args(&relevant).current_dir(repo_root).output() {
-        Ok(output) => output,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(err) => return Err(err.into()),
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let matches: Vec<serde_json::Value> = match serde_json::from_str(&stdout) {
-        Ok(matches) => matches,
-        Err(err) => anyhow::bail!("ast-grep produced unparsable output: {err}. stderr: {}", String::from_utf8_lossy(&output.stderr)),
+    let matches = match run_ast_grep_scan(temp_dir.path(), repo_root, &relevant)? {
+        Some(matches) => matches,
+        None => return Ok(vec![]),
     };
 
     Ok(matches.iter().filter_map(|m| match_to_shadow_finding(m, &meta_by_rule_id)).collect())
@@ -154,6 +181,7 @@ fn match_to_shadow_finding(m: &serde_json::Value, meta_by_rule_id: &HashMap<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn ast_grep_available() -> bool {
         Command::new("ast-grep").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
@@ -165,6 +193,33 @@ mod tests {
     }
 
     const SELF_COMPARISON_RULE: &str = "id: go-self-comparison-shadow-test\nlanguage: Go\ncategory: correctness\nseverity: warning\nmessage: self comparison\nrule:\n  pattern: $A == $A\n";
+    const JAVA_ONLY_RULE: &str = "id: java-only-shadow-test\nlanguage: Java\ncategory: correctness\nseverity: warning\nmessage: java thing\nrule:\n  pattern: $A == $A\n";
+
+    #[test]
+    fn languages_from_str_maps_known_ast_grep_language_values() {
+        assert_eq!(languages_from_str("Go"), Some(&[Language::Go][..]));
+        assert_eq!(languages_from_str("TypeScript"), Some(&[Language::TypeScript, Language::Tsx][..]));
+        assert_eq!(languages_from_str("Unknown"), None);
+    }
+
+    #[test]
+    fn rule_id_meta_language_field_is_optional_for_fail_open_behavior() {
+        let meta: RuleIdMeta = serde_yaml::from_str("id: x\ncategory: correctness\n").unwrap();
+        assert_eq!(meta.language, None);
+    }
+
+    #[test]
+    fn a_shadow_rule_for_a_different_language_does_not_fire_on_a_go_only_diff() {
+        if !ast_grep_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join(".autoreview/rules/shadow/rule.yaml"), JAVA_ONLY_RULE);
+        write(&dir.path().join("main.go"), "package main\n\nfunc f(x int) bool {\n\treturn x == x\n}\n");
+
+        let findings = run_shadow_rules(dir.path(), &["main.go".to_string()]).unwrap();
+        assert!(findings.is_empty(), "a Java-only shadow rule should not be considered for a Go-only diff, got: {:#?}", findings.iter().map(|f| &f.rule_id).collect::<Vec<_>>());
+    }
 
     #[test]
     fn returns_empty_when_no_shadow_or_promoted_directories_exist() {
