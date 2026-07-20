@@ -32,6 +32,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use tree_sitter::{Node, Tree};
+
+use autoreview_dataflow::cfg::{Cfg, Stmt};
 use autoreview_dataflow::rules::{go_append_shared_backing_array, go_loopvar, go_typed_nil_interface_return};
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
@@ -66,13 +69,19 @@ fn go_functions(tree: &tree_sitter::Tree) -> Vec<tree_sitter::Node<'_>> {
     out
 }
 
-fn run_append_shared_backing_array(path: &str, content: &str) -> Vec<AgentFinding> {
-    let Some(mut parser) = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Go) else { return Vec::new() };
-    let Some(tree) = parser.parse(content, None) else { return Vec::new() };
+/// Parses and lowers every function in the file exactly once, shared by
+/// all four rule families below — previously each family independently
+/// re-parsed the file and re-lowered every function's CFG, up to 4x
+/// redundant work per file for logic that all operates on the same
+/// underlying functions.
+fn lower_all_functions<'a>(source: &[u8], tree: &'a Tree) -> Vec<(Node<'a>, Cfg<Stmt>)> {
+    go_functions(tree).into_iter().map(|fn_node| (fn_node, autoreview_dataflow::lower::go::lower_function(source, fn_node))).collect()
+}
+
+fn run_append_shared_backing_array(path: &str, lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
     let mut findings = Vec::new();
-    for fn_node in go_functions(&tree) {
-        let cfg = autoreview_dataflow::lower::go::lower_function(content.as_bytes(), fn_node);
-        for hit in go_append_shared_backing_array::check(&cfg) {
+    for (_, cfg) in lowered {
+        for hit in go_append_shared_backing_array::check(cfg) {
             findings.push(make_finding(
                 "append-shared-backing-array",
                 "correctness",
@@ -90,19 +99,13 @@ fn run_append_shared_backing_array(path: &str, content: &str) -> Vec<AgentFindin
     findings
 }
 
-fn run_typed_nil_interface_return(path: &str, content: &str) -> Vec<AgentFinding> {
-    let Some(mut parser) = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Go) else { return Vec::new() };
-    let Some(tree) = parser.parse(content, None) else { return Vec::new() };
-    let source = content.as_bytes();
-    let functions = go_functions(&tree);
-
+fn run_typed_nil_interface_return(path: &str, source: &[u8], lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
     // Pass 1: same-file summaries for every pointer-returning function.
     let mut summaries: HashMap<String, bool> = HashMap::new();
-    for fn_node in &functions {
+    for (fn_node, cfg) in lowered {
         if autoreview_dataflow::lower::go::function_returns_pointer(*fn_node) {
             if let Some(name) = autoreview_dataflow::lower::go::function_name(*fn_node, source) {
-                let cfg = autoreview_dataflow::lower::go::lower_function(source, *fn_node);
-                summaries.insert(name, go_typed_nil_interface_return::compute_summary(&cfg));
+                summaries.insert(name, go_typed_nil_interface_return::compute_summary(cfg));
             }
         }
     }
@@ -110,12 +113,11 @@ fn run_typed_nil_interface_return(path: &str, content: &str) -> Vec<AgentFinding
     // Pass 2: check every function declaring an `error` return against
     // those summaries.
     let mut findings = Vec::new();
-    for fn_node in &functions {
+    for (fn_node, cfg) in lowered {
         if !autoreview_dataflow::lower::go::function_returns_error(*fn_node, source) {
             continue;
         }
-        let cfg = autoreview_dataflow::lower::go::lower_function(source, *fn_node);
-        for hit in go_typed_nil_interface_return::check(&cfg, &summaries) {
+        for hit in go_typed_nil_interface_return::check(cfg, &summaries) {
             findings.push(make_finding(
                 "typed-nil-interface-return",
                 "correctness",
@@ -133,14 +135,10 @@ fn run_typed_nil_interface_return(path: &str, content: &str) -> Vec<AgentFinding
     findings
 }
 
-fn run_loopvar_checks(path: &str, content: &str) -> Vec<AgentFinding> {
-    let Some(mut parser) = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Go) else { return Vec::new() };
-    let Some(tree) = parser.parse(content, None) else { return Vec::new() };
+fn run_loopvar_checks(path: &str, lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
     let mut findings = Vec::new();
-    for fn_node in go_functions(&tree) {
-        let cfg = autoreview_dataflow::lower::go::lower_function(content.as_bytes(), fn_node);
-
-        for hit in go_loopvar::check_capture(&cfg) {
+    for (_, cfg) in lowered {
+        for hit in go_loopvar::check_capture(cfg) {
             let kind = if hit.kind == autoreview_dataflow::cfg::ClosureKind::Goroutine { "goroutine" } else { "deferred closure" };
             findings.push(make_finding(
                 "loopvar-capture-pre-1.22",
@@ -156,7 +154,7 @@ fn run_loopvar_checks(path: &str, content: &str) -> Vec<AgentFinding> {
             ));
         }
 
-        for hit in go_loopvar::check_address(&cfg) {
+        for hit in go_loopvar::check_address(cfg) {
             findings.push(make_finding(
                 "loopvar-address-pre-1.22",
                 "correctness",
@@ -190,19 +188,16 @@ fn taint_title(hit: &autoreview_dataflow::taint::TaintHit) -> String {
 /// `taint_rules::load_taint_rules`) whose `language` matches, against one
 /// file's already-lowered functions. Adding a new taint rule means adding
 /// a new YAML file — this function doesn't change.
-fn run_loaded_taint_rules(path: &str, content: &str) -> Vec<AgentFinding> {
-    let Some(mut parser) = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Go) else { return Vec::new() };
-    let Some(tree) = parser.parse(content, None) else { return Vec::new() };
+fn run_loaded_taint_rules(path: &str, lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
     let rules: Vec<_> = taint_rules::load_taint_rules().into_iter().filter(|r| r.language == "Go").collect();
     if rules.is_empty() {
         return Vec::new();
     }
 
     let mut findings = Vec::new();
-    for fn_node in go_functions(&tree) {
-        let cfg = autoreview_dataflow::lower::go::lower_function(content.as_bytes(), fn_node);
+    for (_, cfg) in lowered {
         for rule in &rules {
-            for hit in autoreview_dataflow::taint::check(&rule.spec, &cfg) {
+            for hit in autoreview_dataflow::taint::check(&rule.spec, cfg) {
                 findings.push(make_finding(&rule.id, &rule.category, rule.severity, path, hit.source_line, taint_title(&hit), render_taint_message(&rule.message, &hit)));
             }
         }
@@ -212,7 +207,9 @@ fn run_loaded_taint_rules(path: &str, content: &str) -> Vec<AgentFinding> {
 
 /// Runs all dataflow-powered checks against one changed file's current
 /// content. Go-only for now (Phase 3/4/5); Java/Kotlin land once their
-/// lowering passes do (Phase 6/7).
+/// lowering passes do (Phase 6/7). Parses and lowers each file's functions
+/// exactly once (`lower_all_functions`), shared across all four rule
+/// families below rather than each re-parsing/re-lowering independently.
 pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
     let go_pre_1_22 = crate::analyzers::practices::go_module_targets_pre_1_22(repo_root);
     changed_files
@@ -221,11 +218,16 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String]) -> Vec<Age
         .filter_map(|path| {
             let full_path = repo_root.join(path);
             let content = std::fs::read_to_string(&full_path).ok()?;
-            let mut findings = run_append_shared_backing_array(path, &content);
-            findings.extend(run_typed_nil_interface_return(path, &content));
-            findings.extend(run_loaded_taint_rules(path, &content));
+            let mut parser = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Go)?;
+            let tree = parser.parse(&content, None)?;
+            let source = content.as_bytes();
+            let lowered = lower_all_functions(source, &tree);
+
+            let mut findings = run_append_shared_backing_array(path, &lowered);
+            findings.extend(run_typed_nil_interface_return(path, source, &lowered));
+            findings.extend(run_loaded_taint_rules(path, &lowered));
             if go_pre_1_22 {
-                findings.extend(run_loopvar_checks(path, &content));
+                findings.extend(run_loopvar_checks(path, &lowered));
             }
             Some(findings)
         })
