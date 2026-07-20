@@ -2,6 +2,7 @@ pub mod apply;
 pub mod backend;
 pub mod diff;
 pub mod doctor;
+pub mod explain;
 pub mod feedback;
 pub mod history;
 pub mod rules;

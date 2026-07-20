@@ -7,6 +7,7 @@ use autoreview_schema::{AgentBackendKind, Tier};
 use commands::apply::run_apply;
 use commands::diff::{run_diff, DiffCommandOptions};
 use commands::doctor::run_doctor;
+use commands::explain::run_explain;
 use commands::feedback::{run_feedback, run_missed_report};
 use commands::history::{run_history_costs, run_history_sync};
 use commands::rules::{run_rules_bench, run_rules_mine, run_rules_mine_code, run_rules_mine_comments, run_rules_packs, run_rules_packs_add, run_rules_packs_refresh, run_rules_packs_validate, run_rules_review, run_rules_rollback, run_rules_shadow_log};
@@ -46,6 +47,9 @@ enum Commands {
     },
     /// Apply a finding's suggested patch, gated by a `git apply --check` sanity check
     Apply { finding_id: String },
+    /// Show why a finding fired: its recorded source, and (for a
+    /// deterministic rule) the exact rule definition it matched
+    Explain { finding_id: String },
     /// Record a verdict on a finding, or report a missed finding. --fp/--tp
     /// are the quick/generic verdicts; --doesnt-apply/--accepted-risk/
     /// --fix-in-followup record a more specific reason a finding wasn't
@@ -257,6 +261,7 @@ fn main() -> anyhow::Result<()> {
             })?;
         }
         Commands::Apply { finding_id } => run_apply(&repo_root, &finding_id)?,
+        Commands::Explain { finding_id } => run_explain(&repo_root, &finding_id)?,
         Commands::Feedback { id, fp, tp, doesnt_apply, accepted_risk, fix_in_followup, missed, note } => {
             let flags = [fp, tp, doesnt_apply, accepted_risk, fix_in_followup, missed.is_some()];
             if flags.iter().filter(|f| **f).count() > 1 {

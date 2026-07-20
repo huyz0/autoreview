@@ -14,9 +14,8 @@ use std::path::Path;
 use std::process::Command;
 
 use autoreview_core::parses_cleanly;
-use autoreview_schema::Finding;
 
-use super::history::history_dir_for;
+use super::history::{find_finding_in_run_reports, history_dir_for};
 
 /// Extracts the repo-relative paths a unified diff touches, from its
 /// `+++ b/<path>` header lines — good enough for the reparse check, which
@@ -28,31 +27,6 @@ fn patched_file_paths(patch: &str) -> Vec<String> {
         .filter(|p| *p != "/dev/null")
         .map(str::to_string)
         .collect()
-}
-
-/// Searches this repo's recorded run reports (newest first) for a finding
-/// with the given id — findings (and their suggestion patches) live in the
-/// per-run `report.json` artifacts, not the SQLite index, which only stores
-/// enough metadata to resolve an id back to its fingerprint (see
-/// `HistoryStore::find_finding_by_id`).
-fn find_finding_in_run_reports(history_dir: &Path, finding_id: &str) -> anyhow::Result<Option<Finding>> {
-    let runs_dir = history_dir.join("runs");
-    let mut run_dirs: Vec<_> = match std::fs::read_dir(&runs_dir) {
-        Ok(entries) => entries.filter_map(|e| e.ok()).map(|e| e.path()).collect(),
-        Err(_) => return Ok(None),
-    };
-    run_dirs.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
-    run_dirs.reverse();
-
-    for run_dir in run_dirs {
-        let report_path = run_dir.join("report.json");
-        let Ok(text) = std::fs::read_to_string(&report_path) else { continue };
-        let Ok(report) = serde_json::from_str::<autoreview_schema::ReviewReport>(&text) else { continue };
-        if let Some(finding) = report.findings.into_iter().find(|f| f.id == finding_id) {
-            return Ok(Some(finding));
-        }
-    }
-    Ok(None)
 }
 
 /// Outcome of trying to apply one patch to a repo — a plain enum (rather than

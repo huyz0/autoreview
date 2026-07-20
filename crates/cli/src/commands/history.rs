@@ -8,6 +8,33 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
+use autoreview_schema::Finding;
+
+/// Searches this repo's recorded run reports (newest first) for a finding
+/// with the given id — findings live in the per-run `report.json`
+/// artifacts, not the SQLite index, which only stores enough metadata to
+/// resolve an id back to its fingerprint. Shared by `apply` (needs the
+/// finding's suggestion patch) and `explain` (needs its source/rule info).
+pub fn find_finding_in_run_reports(history_dir: &Path, finding_id: &str) -> anyhow::Result<Option<Finding>> {
+    let runs_dir = history_dir.join("runs");
+    let mut run_dirs: Vec<_> = match std::fs::read_dir(&runs_dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).map(|e| e.path()).collect(),
+        Err(_) => return Ok(None),
+    };
+    run_dirs.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+    run_dirs.reverse();
+
+    for run_dir in run_dirs {
+        let report_path = run_dir.join("report.json");
+        let Ok(text) = std::fs::read_to_string(&report_path) else { continue };
+        let Ok(report) = serde_json::from_str::<autoreview_schema::ReviewReport>(&text) else { continue };
+        if let Some(finding) = report.findings.into_iter().find(|f| f.id == finding_id) {
+            return Ok(Some(finding));
+        }
+    }
+    Ok(None)
+}
+
 pub fn repo_fingerprint(repo_root: &Path, remote_url: Option<&str>) -> String {
     let mut hasher = Sha256::new();
     hasher.update(remote_url.unwrap_or(&repo_root.to_string_lossy()).as_bytes());
@@ -123,4 +150,70 @@ pub fn run_history_sync(repo_root: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use autoreview_schema::{
+        DiffStats, FindingFingerprints, FindingSource, FindingSourceKind, Location, LocationRange, PlanBudgets, ReviewPlan, ReviewSummary, ReviewTarget, RunCosts, Severity, Side, Tier,
+    };
+    use std::collections::HashMap;
+
+    fn make_finding(id: &str) -> Finding {
+        Finding {
+            id: id.to_string(),
+            fingerprints: FindingFingerprints { primary: format!("fp-{id}"), secondary: None },
+            source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "ast-grep".into(), rule_id: Some("go-no-self-comparison".into()), aspect: None, backend: None },
+            category: "correctness".into(),
+            severity: Severity::Medium,
+            confidence: 1.0,
+            title: "t".into(),
+            message: "m".into(),
+            location: Location { path: "a.go".into(), range: LocationRange { start_line: 1, start_col: None, end_line: None, end_col: None }, snippet: "x".into(), side: Side::New },
+            related_locations: None,
+            suggestion: None,
+            tags: None,
+            meta: None,
+        }
+    }
+
+    fn write_report(history_dir: &Path, run_id: &str, findings: Vec<Finding>) {
+        let run_dir = history_dir.join("runs").join(run_id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let report = autoreview_schema::ReviewReport {
+            schema_version: "1".into(),
+            run_id: run_id.into(),
+            created_at: "2026-07-12T00:00:00Z".into(),
+            target: ReviewTarget { repo_root: "/repo".into(), base_ref: "main~1".into(), head_ref: "main".into(), diff_stats: DiffStats { files: 1, additions: 1, deletions: 0, languages: HashMap::new() } },
+            plan: ReviewPlan { tier: Tier::Quick, score: 1.0, signals: vec![], specialists: vec![], budgets: PlanBudgets { max_agents: 1, total_token_cap: 1, wall_clock_sec: 1 }, overrides: vec![] },
+            findings,
+            suppressed: vec![],
+            costs: RunCosts { total: autoreview_schema::CostEntry { input_tokens: 0, output_tokens: 0, usd: None, wall_ms: 0 }, per_stage: HashMap::new() },
+            summary: ReviewSummary { by_severity: HashMap::new(), by_category: HashMap::new(), gate: None },
+            spec_verdicts: vec![],
+        };
+        std::fs::write(run_dir.join("report.json"), serde_json::to_string(&report).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn finds_a_finding_by_id_across_run_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        write_report(dir.path(), "run-1", vec![make_finding("f-abc")]);
+        let found = find_finding_in_run_reports(dir.path(), "f-abc").unwrap();
+        assert_eq!(found.unwrap().id, "f-abc");
+    }
+
+    #[test]
+    fn returns_none_for_an_unknown_id() {
+        let dir = tempfile::tempdir().unwrap();
+        write_report(dir.path(), "run-1", vec![make_finding("f-abc")]);
+        assert!(find_finding_in_run_reports(dir.path(), "f-nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_missing_history_dir_returns_none_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(find_finding_in_run_reports(&dir.path().join("nonexistent"), "f-abc").unwrap().is_none());
+    }
 }

@@ -151,6 +151,46 @@ pub fn semantic_rule_ids(registered_packs: &[ResolvedRulePack]) -> std::collecti
     set
 }
 
+/// The exact rule file backing a given rule id, resolved back to its raw
+/// YAML text — `autoreview explain`'s ground truth for what a rule-sourced
+/// finding actually checked, rather than just the finding's own free-text
+/// message. Searched in the same precedence order `rule_roots` builds:
+/// builtin first, then each registered pack.
+#[derive(Debug, Clone)]
+pub struct RuleDefinition {
+    pub id: String,
+    /// `"builtin"` or the id of the registered pack the rule came from.
+    pub source_label: String,
+    pub kind: String,
+    pub category: String,
+    pub semantic: bool,
+    pub yaml: String,
+}
+
+pub fn find_rule_definition(rule_id: &str, registered_packs: &[ResolvedRulePack]) -> Option<RuleDefinition> {
+    for root in rule_roots(registered_packs) {
+        let source_label = match &root {
+            RuleRoot::Embedded(_) => "builtin".to_string(),
+            RuleRoot::Disk { id, .. } => id.to_string(),
+        };
+        let mut found = None;
+        walk_rule_contents(std::slice::from_ref(&root), &mut |contents| {
+            if found.is_some() {
+                return;
+            }
+            if let Some(meta) = parse_rule_meta(contents) {
+                if meta.id == rule_id {
+                    found = Some(RuleDefinition { id: meta.id, source_label: source_label.clone(), kind: meta.kind, category: meta.category, semantic: meta.semantic, yaml: contents.to_string() });
+                }
+            }
+        });
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
 /// A `ruleId -> metadata` lookup for every rule that declares a `metadata:`
 /// block, regardless of `kind` — used to populate `AgentFinding.meta`.
 /// Rules with no `metadata:` block simply don't appear here (not inserted
@@ -873,6 +913,36 @@ mod tests {
         assert!(ids.contains("java-object-instantiation-in-loop"));
         assert!(ids.contains("go-unclosed-http-response-body"));
         assert!(!ids.contains("go-no-self-comparison"), "a plain rule with no semantic: true field must not be included");
+    }
+
+    #[test]
+    fn find_rule_definition_returns_a_builtin_rules_raw_yaml() {
+        let def = find_rule_definition("go-no-self-comparison", &[]).expect("go-no-self-comparison is a builtin rule");
+        assert_eq!(def.id, "go-no-self-comparison");
+        assert_eq!(def.source_label, "builtin");
+        assert_eq!(def.kind, "pattern");
+        assert!(!def.semantic);
+        assert!(def.yaml.contains("pattern: $A == $A"), "should return the rule's own raw YAML text, got:\n{}", def.yaml);
+    }
+
+    #[test]
+    fn find_rule_definition_returns_none_for_an_unknown_id() {
+        assert!(find_rule_definition("no-such-rule-id", &[]).is_none());
+    }
+
+    #[test]
+    fn find_rule_definition_finds_a_registered_packs_rule_and_labels_it_by_pack_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack_dir = dir.path().join("acme-pack");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::write(pack_dir.join("rulepack.yaml"), "id: acme-pack\nversion: \"1.0.0\"\n").unwrap();
+        std::fs::write(pack_dir.join("custom-rule.yml"), "id: acme-custom-rule\nlanguage: Go\ncategory: design\nseverity: warning\nmessage: acme's own rule\nrule:\n  pattern: foo($X)\n").unwrap();
+        let packs = vec![crate::rule_packs::ResolvedRulePack { id: "acme-pack".to_string(), local_path: pack_dir, trust: autoreview_schema::RulePackTrust::Full }];
+
+        let def = find_rule_definition("acme-custom-rule", &packs).expect("should find the pack's rule");
+        assert_eq!(def.source_label, "acme-pack");
+        assert_eq!(def.category, "design");
+        assert!(def.yaml.contains("acme's own rule"));
     }
 
     #[test]
