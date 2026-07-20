@@ -58,7 +58,11 @@ pub fn discover_go_module_path(repo_root: &Path) -> Option<String> {
     contents.lines().find_map(|line| line.trim().strip_prefix("module ").map(|m| m.trim().to_string()))
 }
 
-fn extract_go_imports(content: &str) -> Vec<String> {
+/// Every import path a Go file declares, single-line or block form —
+/// `pub` so other resolution needs (e.g. `dataflow_check.rs`'s cross-
+/// package interprocedural summaries for `typed-nil-interface-return`)
+/// can reuse the same parsing instead of re-deriving it.
+pub fn extract_go_imports(content: &str) -> Vec<String> {
     let mut imports = Vec::new();
     let mut in_block = false;
     for raw_line in content.lines() {

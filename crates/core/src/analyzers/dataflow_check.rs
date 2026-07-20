@@ -11,18 +11,22 @@
 //! implementations). `run_practices_check`'s Go branch no longer calls
 //! any of the four old heuristics for this reason.
 //!
-//! `typed-nil-interface-return`'s interprocedural call resolution is
-//! same-package (same-directory) aware (see `autoreview_dataflow::rules::
-//! go_typed_nil_interface_return`'s module docs for the two-pass design):
-//! pass 1's summaries come from `package_summaries`, which scans every
-//! `.go` file in the changed file's directory (Go's directory=package
-//! convention), not just the changed file itself. A call to a function
-//! declared in a genuinely different package is still treated as an
-//! unknown boundary (not flagged). This deliberately doesn't go through
-//! `autoreview_symindex::SymbolIndex` — its Go extractor only indexes
-//! receiver methods whose struct is declared in the same file, so it
-//! can't resolve the free-function case this rule needs; `package_summaries`
-//! is a self-contained scan instead.
+//! `typed-nil-interface-return`'s interprocedural call resolution covers
+//! both same-package and cross-package calls (see `autoreview_dataflow::
+//! rules::go_typed_nil_interface_return`'s module docs for the two-pass
+//! design): pass 1's summaries come from `package_summaries` (every `.go`
+//! file in the changed file's own directory — Go's directory=package
+//! convention) merged with `imported_package_summaries` (the same scan
+//! repeated for every *other* in-module package the file imports,
+//! resolved via `go.mod`'s module path plus the import's own path suffix,
+//! keyed by `pkgname.Func` to match a qualified call's own lowered form).
+//! A call into a genuinely external (non-module) package is still an
+//! unknown boundary — there's no source here to derive a summary from.
+//! This deliberately doesn't go through `autoreview_symindex::SymbolIndex`
+//! — its Go extractor only indexes receiver methods whose struct is
+//! declared in the same file, so it can't resolve the free-function case
+//! this rule needs; `package_summaries`/`imported_package_summaries` are a
+//! self-contained scan instead.
 //!
 //! Taint rules (`go-command-injection-taint` and friends) used to be
 //! hand-written Rust `TaintSpec` constants, one per rule, each with its
@@ -186,24 +190,24 @@ fn run_append_shared_backing_array(path: &str, lowered: &[(Node, Cfg<Stmt>)]) ->
     findings
 }
 
-/// Package-wide (same-directory) summaries for every pointer-returning
-/// function, feeding pass 1 of `run_typed_nil_interface_return` below —
-/// scans every `.go` file in `file_path`'s directory (Go's
-/// directory=package convention), including `file_path` itself, rather
-/// than just the one file being checked. Best-effort: a sibling file
-/// that fails to read or parse is silently skipped rather than failing
-/// the whole check, since the current file's own findings still matter
-/// even if a sibling can't be read.
-fn package_summaries(repo_root: &Path, file_path: &str) -> HashMap<String, bool> {
+/// Scans every `.go` file in `dir` for pointer-returning function
+/// summaries, keyed by bare function name — the shared core of same-
+/// package (`package_summaries`) and cross-package
+/// (`imported_package_summaries`) resolution below; they differ only in
+/// which directory gets scanned and whether the result is given a
+/// package-name prefix afterward. Best-effort: a file that fails to read
+/// or parse is silently skipped rather than failing the whole scan, since
+/// the current file's own findings still matter even if a sibling or an
+/// imported package's file can't be read.
+fn scan_dir_for_pointer_summaries(dir: &Path) -> HashMap<String, bool> {
     let mut summaries = HashMap::new();
-    let Some(dir) = repo_root.join(file_path).parent().map(Path::to_path_buf) else { return summaries };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return summaries };
+    let Ok(entries) = std::fs::read_dir(dir) else { return summaries };
     for entry in entries.filter_map(Result::ok) {
-        let sibling_path = entry.path();
-        if sibling_path.extension().and_then(|e| e.to_str()) != Some("go") {
+        let candidate_path = entry.path();
+        if candidate_path.extension().and_then(|e| e.to_str()) != Some("go") {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(&sibling_path) else { continue };
+        let Ok(content) = std::fs::read_to_string(&candidate_path) else { continue };
         let Some(mut parser) = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Go) else { continue };
         let Some(tree) = parser.parse(&content, None) else { continue };
         let source = content.as_bytes();
@@ -219,10 +223,58 @@ fn package_summaries(repo_root: &Path, file_path: &str) -> HashMap<String, bool>
     summaries
 }
 
+/// Package-wide (same-directory) summaries for every pointer-returning
+/// function, feeding pass 1 of `run_typed_nil_interface_return` below —
+/// scans every `.go` file in `file_path`'s directory (Go's
+/// directory=package convention), including `file_path` itself, rather
+/// than just the one file being checked.
+fn package_summaries(repo_root: &Path, file_path: &str) -> HashMap<String, bool> {
+    let Some(dir) = repo_root.join(file_path).parent().map(Path::to_path_buf) else { return HashMap::new() };
+    scan_dir_for_pointer_summaries(&dir)
+}
+
+/// Generalizes same-package resolution to the module's *other* internal
+/// packages too, via `file_path`'s own import statements — a qualified
+/// call (`pkg.Func(...)`) to a function declared in a different package
+/// entirely was previously always an unresolved boundary (never flagged),
+/// even when that package is part of the same module and its source is
+/// right there to scan. Keyed by `"pkgname.Func"`, matching the qualified
+/// form `lower::go::call_target_name` already produces for a selector
+/// call, so lookups against these summaries and same-package ones share
+/// one map with no special-casing at the call site.
+///
+/// Only imports resolving under this repo's own module path are followed
+/// (an external or stdlib import has no source here to scan, and no
+/// pointer-returning function of ours could be behind it anyway). The
+/// package name a qualified call uses is assumed to be the import path's
+/// last segment — Go's overwhelmingly common convention, but not a
+/// language guarantee; a package whose own `package` declaration disagrees
+/// with its directory name (a rare, deliberately confusing pattern) won't
+/// resolve through this heuristic.
+fn imported_package_summaries(repo_root: &Path, file_path: &str) -> HashMap<String, bool> {
+    let mut summaries = HashMap::new();
+    let Some(module_path) = autoreview_archgraph::discover_go_module_path(repo_root) else { return summaries };
+    let Ok(content) = std::fs::read_to_string(repo_root.join(file_path)) else { return summaries };
+    for import in autoreview_archgraph::extract_go_imports(&content) {
+        let Some(suffix) = import.strip_prefix(&module_path) else { continue };
+        let suffix = suffix.trim_start_matches('/');
+        if suffix.is_empty() {
+            continue;
+        }
+        let Some(pkg_name) = suffix.rsplit('/').next() else { continue };
+        for (name, summary) in scan_dir_for_pointer_summaries(&repo_root.join(suffix)) {
+            summaries.insert(format!("{pkg_name}.{name}"), summary);
+        }
+    }
+    summaries
+}
+
 fn run_typed_nil_interface_return(repo_root: &Path, path: &str, source: &[u8], lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
-    // Pass 1: package-wide (same-directory) summaries for every
-    // pointer-returning function — see `package_summaries` above.
-    let summaries = package_summaries(repo_root, path);
+    // Pass 1: same-package summaries plus every other in-module package
+    // this file imports — see `package_summaries`/`imported_package_summaries`
+    // above.
+    let mut summaries = package_summaries(repo_root, path);
+    summaries.extend(imported_package_summaries(repo_root, path));
 
     // Pass 2: check every function declaring an `error` return against
     // those summaries.
@@ -461,6 +513,24 @@ mod tests {
         assert!(
             findings.iter().any(|f| f.source.rule_id.as_deref() == Some("typed-nil-interface-return")),
             "got: {findings:#?} — same-file-only resolution couldn't have caught this, `helper` is declared in a sibling file"
+        );
+    }
+
+    #[test]
+    fn flags_an_interprocedural_typed_nil_return_across_two_different_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module example.com/x\n\ngo 1.22\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("helper")).unwrap();
+        std::fs::write(dir.path().join("helper/helper.go"), "package helper\n\nfunc Helper() *myError {\n\tvar e *myError\n\treturn e\n}\n").unwrap();
+        std::fs::write(
+            dir.path().join("caller.go"),
+            "package main\n\nimport \"example.com/x/helper\"\n\nfunc Do() error {\n\te := helper.Helper()\n\treturn e\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["caller.go".to_string()], &[]);
+        assert!(
+            findings.iter().any(|f| f.source.rule_id.as_deref() == Some("typed-nil-interface-return")),
+            "got: {findings:#?} — same-package-only resolution couldn't have caught this, `helper.Helper` is declared in a different package entirely"
         );
     }
 
