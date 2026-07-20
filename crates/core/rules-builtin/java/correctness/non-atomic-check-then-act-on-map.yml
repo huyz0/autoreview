@@ -1,0 +1,11 @@
+id: java-non-atomic-check-then-act-on-map
+language: Java
+category: correctness
+severity: warning
+semantic: true
+message: "`containsKey` then `put` is two separate operations — if `$MAP` can be accessed from more than one thread, another thread can insert between the check and the act, so this either silently overwrites a concurrent insert or (worse) both threads believe they're the one initializing the entry. Use `$MAP.putIfAbsent($K, $V)` or `$MAP.computeIfAbsent($K, ...)` instead, which are atomic on a `ConcurrentHashMap` (and still simpler even on a non-shared map)."
+rule:
+  pattern: |
+    if (!$MAP.containsKey($K)) {
+      $MAP.put($K, $V);
+    }

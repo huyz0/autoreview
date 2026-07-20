@@ -1,0 +1,12 @@
+id: java-non-thread-safe-static-date-field
+language: Java
+category: correctness
+severity: warning
+message: "`SimpleDateFormat`/`Calendar` are not thread-safe — every field/method they mutate (parsed state, calendar fields) is shared across every caller once held in a `static` field, so concurrent use corrupts results or throws unpredictably. Use `java.time`'s `DateTimeFormatter`/`java.time.*` types instead (immutable, thread-safe), or make the field non-static (one instance per use) if `java.time` isn't an option."
+rule:
+  pattern:
+    context: "class C { static $TYPE $VAR = $INIT; }"
+    selector: field_declaration
+constraints:
+  TYPE:
+    regex: ^(SimpleDateFormat|Calendar)$
