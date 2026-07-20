@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 
 use autoreview_schema::{AgentBackendKind, Tier};
 use commands::apply::run_apply;
-use commands::diff::{run_diff, DiffCommandOptions};
+use commands::diff::{run_diff_or_watch, DiffCommandOptions};
 use commands::doctor::run_doctor;
 use commands::explain::run_explain;
 use commands::feedback::{run_feedback, run_missed_report};
@@ -44,6 +44,13 @@ enum Commands {
         /// Which agent backend drives specialists: claude-code (default), pi, or local-llm
         #[arg(long)]
         backend: Option<String>,
+        /// Re-run automatically whenever base...head changes (e.g. a new
+        /// commit lands on head) instead of running once and exiting
+        #[arg(long)]
+        watch: bool,
+        /// Seconds between change checks in --watch mode
+        #[arg(long, default_value_t = 3)]
+        watch_interval: u64,
     },
     /// Apply a finding's suggested patch, gated by a `git apply --check` sanity check
     Apply { finding_id: String },
@@ -248,17 +255,21 @@ fn main() -> anyhow::Result<()> {
         Commands::Doctor => {
             run_doctor(&repo_root);
         }
-        Commands::Diff { base, head, tier, aspects, max_usd, incremental, backend } => {
-            run_diff(DiffCommandOptions {
-                repo_root,
-                base_ref: base,
-                head_ref: head,
-                tier: tier.and_then(|t| parse_tier(&t)),
-                aspects: aspects.map(|a| a.split(',').map(|s| s.to_string()).collect()),
-                max_usd,
-                incremental,
-                backend: backend.and_then(|b| parse_backend(&b)),
-            })?;
+        Commands::Diff { base, head, tier, aspects, max_usd, incremental, backend, watch, watch_interval } => {
+            run_diff_or_watch(
+                DiffCommandOptions {
+                    repo_root,
+                    base_ref: base,
+                    head_ref: head,
+                    tier: tier.and_then(|t| parse_tier(&t)),
+                    aspects: aspects.map(|a| a.split(',').map(|s| s.to_string()).collect()),
+                    max_usd,
+                    incremental,
+                    backend: backend.and_then(|b| parse_backend(&b)),
+                },
+                watch,
+                watch_interval,
+            )?;
         }
         Commands::Apply { finding_id } => run_apply(&repo_root, &finding_id)?,
         Commands::Explain { finding_id } => run_explain(&repo_root, &finding_id)?,

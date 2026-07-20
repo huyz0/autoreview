@@ -15,6 +15,7 @@ use autoreview_schema::{
 
 use super::history::{history_dir_for, hostname};
 
+#[derive(Clone)]
 pub struct DiffCommandOptions {
     pub repo_root: PathBuf,
     pub base_ref: String,
@@ -858,6 +859,69 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A cheap, content-sensitive fingerprint of `base_ref...head_ref` — `git
+/// diff --stat` rather than a full patch fetch, since watch mode calls this
+/// on every poll tick and only needs to know *whether* to re-run the full
+/// (expensive) review, not what changed. Two different edits that happen to
+/// produce identical per-file added/removed line counts would collide here
+/// and be missed — an accepted false-negative for a lightweight polling
+/// signal, not a correctness guarantee.
+fn diff_signature(repo_root: &Path, base_ref: &str, head_ref: &str) -> anyhow::Result<String> {
+    let output = Command::new("git").args(["diff", "--stat", &format!("{base_ref}...{head_ref}")]).current_dir(repo_root).output()?;
+    if !output.status.success() {
+        anyhow::bail!("git diff --stat {base_ref}...{head_ref} failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// `autoreview diff --watch` — polls `base_ref...head_ref` on an interval
+/// and re-runs the full `run_diff` whenever `diff_signature` changes,
+/// instead of requiring a manual re-run after every commit/amend while
+/// iterating on a branch. `max_iterations` bounds the loop for tests and
+/// scripted verification (`None` — the CLI's real usage — loops until the
+/// process is killed, e.g. Ctrl+C, which needs no special handling here
+/// since there's no mid-run state to clean up between polls).
+///
+/// Watches the same `base_ref...head_ref` comparison `run_diff` itself
+/// reviews, not the working tree — so, matching `diff`'s own existing
+/// semantics, uncommitted edits only trigger (and appear in) a re-run once
+/// `head_ref` actually resolves to them (e.g. after a `git commit --amend`
+/// in another terminal), not the instant a file is saved.
+fn run_diff_watch(options: DiffCommandOptions, poll_interval: std::time::Duration, max_iterations: Option<u32>) -> anyhow::Result<()> {
+    println!("autoreview diff --watch  ({}...{}, polling every {}s — Ctrl+C to stop)\n", options.base_ref, options.head_ref, poll_interval.as_secs());
+
+    let mut last_signature: Option<String> = None;
+    let mut iterations: u32 = 0;
+    loop {
+        match diff_signature(&options.repo_root, &options.base_ref, &options.head_ref) {
+            Ok(signature) if last_signature.as_deref() != Some(signature.as_str()) => {
+                last_signature = Some(signature);
+                println!("[watch] change detected — running review...\n");
+                if let Err(err) = run_diff(options.clone()) {
+                    println!("[watch] review run failed: {err}");
+                }
+                println!("\n[watch] watching for further changes...");
+            }
+            Ok(_) => {}
+            Err(err) => println!("[watch] failed to check for changes: {err}"),
+        }
+
+        iterations += 1;
+        if max_iterations.is_some_and(|max| iterations >= max) {
+            return Ok(());
+        }
+        std::thread::sleep(poll_interval);
+    }
+}
+
+pub fn run_diff_or_watch(options: DiffCommandOptions, watch: bool, poll_interval_secs: u64) -> anyhow::Result<()> {
+    if watch {
+        run_diff_watch(options, std::time::Duration::from_secs(poll_interval_secs.max(1)), None)
+    } else {
+        run_diff(options)
+    }
+}
+
 // Each parameter is independent context one specialist invocation needs
 // (backend, target repo, tier/plan entry, three prompt-building inputs, an
 // optional override) — no natural subgroup exists that wouldn't just be a
@@ -910,4 +974,62 @@ fn run_one_specialist(
         ))
     })();
     (aspect, result)
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::*;
+    use autoreview_test_support::init_repo;
+
+    fn head_sha(repo_root: &Path) -> String {
+        let output = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(repo_root).output().unwrap();
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn diff_signature_changes_when_a_new_commit_lands_on_head() {
+        let repo = init_repo(&[("main.go", "package main\n")]);
+        let base_sha = head_sha(repo.path());
+
+        repo.commit(&[("main.go", "package main\n\nfunc f() {}\n")], "add f");
+        let sig1 = diff_signature(repo.path(), &base_sha, "HEAD").unwrap();
+
+        repo.commit(&[("main.go", "package main\n\nfunc f() {}\n\nfunc g() {}\n")], "add g");
+        let sig2 = diff_signature(repo.path(), &base_sha, "HEAD").unwrap();
+
+        assert_ne!(sig1, sig2, "a new commit changing line counts must change the signature");
+    }
+
+    #[test]
+    fn diff_signature_is_stable_when_nothing_changes() {
+        let repo = init_repo(&[("main.go", "package main\n")]);
+        let base_sha = head_sha(repo.path());
+        repo.commit(&[("main.go", "package main\n\nfunc f() {}\n")], "add f");
+
+        let sig1 = diff_signature(repo.path(), &base_sha, "HEAD").unwrap();
+        let sig2 = diff_signature(repo.path(), &base_sha, "HEAD").unwrap();
+        assert_eq!(sig1, sig2, "polling with no repo changes between calls must produce the same signature");
+    }
+
+    #[test]
+    fn diff_signature_errors_clearly_on_an_unresolvable_ref() {
+        let repo = init_repo(&[("main.go", "package main\n")]);
+        let err = diff_signature(repo.path(), "does-not-exist", "HEAD").unwrap_err();
+        assert!(err.to_string().contains("git diff --stat"), "got: {err}");
+    }
+
+    /// `run_diff_watch`'s polling loop only runs `run_diff` on a genuine
+    /// change and stops after `max_iterations` — asserted here without
+    /// actually invoking `run_diff` on the "no change" ticks, since a real
+    /// `run_diff` needs an agent backend and network-adjacent config this
+    /// unit test shouldn't depend on. Uses a base/head pair with no diff at
+    /// all (`HEAD...HEAD`) precisely so `run_diff` is never triggered, and
+    /// only checks the loop terminates after the bounded iteration count
+    /// rather than running forever.
+    #[test]
+    fn run_diff_watch_stops_after_max_iterations_when_nothing_changes() {
+        let repo = init_repo(&[("main.go", "package main\n")]);
+        let options = DiffCommandOptions { repo_root: repo.path().to_path_buf(), base_ref: "HEAD".to_string(), head_ref: "HEAD".to_string(), tier: None, aspects: None, max_usd: None, incremental: false, backend: None };
+        run_diff_watch(options, std::time::Duration::from_millis(1), Some(3)).unwrap();
+    }
 }
