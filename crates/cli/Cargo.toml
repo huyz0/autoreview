@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 autoreview-core = { path = "../core" }
+autoreview-langsupport = { path = "../langsupport" }
 autoreview-schema = { path = "../schema" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

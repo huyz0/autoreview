@@ -6,8 +6,9 @@ use autoreview_core::{
     append_event_log, assign_fingerprints, collect_context, collect_diff_facts, compile_skill,
     dedupe_exact, dedupe_fuzzy, discover_manifests, events_from_report, load_config, plan_review,
     render_context_block, run_ast_grep, run_golangci_lint, run_specialist, to_finding,
-    AgentBackend, HistoryStore, InvokeRequest, PlanOverrides, SpecialistStatus,
+    AgentBackend, ApplyCondition, HistoryStore, InvokeRequest, PlanOverrides, SpecialistStatus,
 };
+use autoreview_langsupport::Language;
 use autoreview_schema::{
     AgentBackendKind, AutoreviewConfig, CostEntry, DiffStats, Finding, ReviewReport, ReviewSummary, ReviewTarget, RunCosts, Tier,
 };
@@ -163,6 +164,12 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     // Stage 1: deterministic analyzers, always run (near-free), before Stage 2
     // triage so analyzer finding density can factor into the tier decision.
     let changed_file_paths: Vec<String> = facts.files.iter().map(|f| f.path.clone()).collect();
+    // Computed once, shared by every rule-group apply-condition gate below —
+    // "which languages does this diff touch," the deterministic fast-path
+    // question every language-scoped analyzer would otherwise re-derive
+    // internally on every call.
+    let languages_present = autoreview_langsupport::languages_present(changed_file_paths.iter().map(String::as_str));
+    const STRUCTURAL_RULE_LANGUAGES: ApplyCondition = ApplyCondition::AnyLanguage(&[Language::Go, Language::Java, Language::Kotlin, Language::TypeScript, Language::Tsx, Language::JavaScript]);
     let mut stage1_agent_findings = Vec::new();
     match run_ast_grep(&options.repo_root, &changed_file_paths) {
         Ok(findings) => stage1_agent_findings.extend(findings),
@@ -176,10 +183,17 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         Ok(findings) => stage1_agent_findings.extend(findings),
         Err(err) => println!("  [warn] clippy run failed: {err}"),
     }
+    // Duplication detection is deliberately NOT gated by language here: its
+    // sliding-window line-hash algorithm is language-agnostic and already
+    // fires on non-source text files (.sql/.proto/.md/etc) — gating it to
+    // the tracked source-language set would silently drop that coverage,
+    // a behavior change, not a speed win.
     stage1_agent_findings.extend(autoreview_core::run_duplication_check(&options.repo_root, &changed_file_paths));
     stage1_agent_findings.extend(autoreview_core::run_cross_file_duplication_check(&options.repo_root, &changed_file_paths));
-    stage1_agent_findings.extend(autoreview_core::run_complexity_check(&options.repo_root, &changed_file_paths));
-    stage1_agent_findings.extend(autoreview_core::run_practices_check(&options.repo_root, &changed_file_paths));
+    if STRUCTURAL_RULE_LANGUAGES.applies(&languages_present) {
+        stage1_agent_findings.extend(autoreview_core::run_complexity_check(&options.repo_root, &changed_file_paths));
+        stage1_agent_findings.extend(autoreview_core::run_practices_check(&options.repo_root, &changed_file_paths));
+    }
     // Architecture layer check is opt-in: only runs when the repo has a
     // .autoreview/architecture.yaml declaring layers, per the plan ("no sane
     // generic default for what a repo's layers are").
