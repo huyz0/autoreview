@@ -17,6 +17,7 @@ pub use agents::contract::*;
 pub use agents::embedding::{cosine_similarity, embedding_from_bytes, embedding_to_bytes, fetch_embedding, parse_embedding_response};
 pub use agents::local_llm::{local_llm_available, parse_chat_completion_response, LocalLlmBackend};
 pub use agents::pi::{parse_pi_json_output, PiBackend};
+pub use analyzers::apply_condition::ApplyCondition;
 pub use analyzers::archgraph_check::run_archgraph_check;
 pub use analyzers::architecture::{load_architecture_config, run_architecture_check};
 pub use analyzers::ast_grep::{run_ast_grep, semantic_rule_ids};

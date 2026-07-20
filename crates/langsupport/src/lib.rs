@@ -14,7 +14,7 @@
 //! on JSX syntax, and vice versa a `.ts` file parsed with the Tsx grammar
 //! technically works but is the wrong grammar to advertise.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Language {
     Go,
     Java,
@@ -36,6 +36,15 @@ pub fn language_for_path(path: &std::path::Path) -> Option<Language> {
         "js" | "jsx" | "mjs" | "cjs" => Some(Language::JavaScript),
         _ => None,
     }
+}
+
+/// Classifies every path into a `Language` (dropping any that don't match
+/// a known extension) and collects the distinct set present — the "which
+/// languages does this diff touch" question every rule-group apply
+/// condition is ultimately answering, computed once and shared rather
+/// than re-derived per analyzer.
+pub fn languages_present<'a>(paths: impl IntoIterator<Item = &'a str>) -> std::collections::HashSet<Language> {
+    paths.into_iter().filter_map(|p| language_for_path(std::path::Path::new(p))).collect()
 }
 
 fn ts_language(language: Language) -> tree_sitter::Language {
@@ -81,6 +90,17 @@ mod tests {
         assert_eq!(language_for_path(std::path::Path::new("foo.mjs")), Some(Language::JavaScript));
         assert_eq!(language_for_path(std::path::Path::new("foo.cjs")), Some(Language::JavaScript));
         assert_eq!(language_for_path(std::path::Path::new("foo.py")), None);
+    }
+
+    #[test]
+    fn languages_present_collects_the_distinct_set_and_drops_unknown_extensions() {
+        let present = languages_present(["main.go", "helper.go", "App.java", "README.md"]);
+        assert_eq!(present, [Language::Go, Language::Java].into_iter().collect());
+    }
+
+    #[test]
+    fn languages_present_is_empty_for_no_matching_files() {
+        assert!(languages_present(["README.md", "config.yaml"]).is_empty());
     }
 
     #[test]

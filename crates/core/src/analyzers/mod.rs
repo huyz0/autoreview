@@ -1,3 +1,4 @@
+pub mod apply_condition;
 pub mod architecture;
 pub mod archgraph_check;
 pub mod ast_grep;
