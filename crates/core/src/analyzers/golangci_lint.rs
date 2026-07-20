@@ -103,10 +103,69 @@ fn issue_to_finding(issue: &GolangciIssue) -> AgentFinding {
     }
 }
 
+/// One attempt's outcome, distinguishing a real analysis failure (a
+/// malformed config, a genuine compile error in the target repo — not
+/// worth retrying, the next attempt would fail the same way) from a
+/// transient one (golangci-lint's own `go/packages` context-loading step
+/// failed outright before writing any output at all — observed, under
+/// heavy concurrent subprocess load, to intermittently produce a
+/// corrupted/truncated error rather than a clean failure; a contended
+/// shared Go build cache is the most likely cause, and a short retry
+/// reliably clears it).
+enum GolangciRunError {
+    Retryable(String),
+    Other(anyhow::Error),
+}
+
+const GOLANGCI_LINT_MAX_ATTEMPTS: u32 = 3;
+const GOLANGCI_LINT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+fn run_golangci_lint_once(repo_root: &Path, go_files: &[&str]) -> Result<Option<Vec<AgentFinding>>, GolangciRunError> {
+    let temp_dir = tempfile::tempdir().map_err(|err| GolangciRunError::Other(err.into()))?;
+    let json_path = temp_dir.path().join("golangci-out.json");
+
+    let output = match Command::new("golangci-lint").arg("run").arg("--output.json.path").arg(&json_path).args(go_files).current_dir(repo_root).output() {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(GolangciRunError::Other(err.into())),
+    };
+
+    // golangci-lint exits non-zero whenever it finds any issues at all —
+    // that's the normal case, not a tool failure. Only treat it as a real
+    // failure if the JSON file was never written (the flag itself failing,
+    // a config error, etc), which the read below surfaces naturally.
+    let json_text = match std::fs::read_to_string(&json_path) {
+        Ok(text) => text,
+        Err(_) => return Err(GolangciRunError::Retryable(String::from_utf8_lossy(&output.stderr).to_string())),
+    };
+
+    let parsed: GolangciOutput = serde_json::from_str(&json_text).map_err(|err| GolangciRunError::Other(err.into()))?;
+    if let Some(report_error) = parsed.report.as_ref().and_then(|r| r.error.as_ref()) {
+        return Err(GolangciRunError::Other(anyhow::anyhow!("golangci-lint reported a package-level error (results may be incomplete or empty): {report_error}")));
+    }
+    let changed_set: std::collections::HashSet<&str> = go_files.iter().copied().collect();
+
+    Ok(Some(
+        parsed
+            .issues
+            .iter()
+            .map(issue_to_finding)
+            // Scanning by explicit file args can still surface package-level
+            // issues attributed to a file outside our diff; keep only issues
+            // whose (possibly recovered) location is one of the files we asked about.
+            .filter(|f| changed_set.contains(f.location.path.as_str()))
+            .collect(),
+    ))
+}
+
 /// Runs golangci-lint against the given changed Go files and normalizes its
 /// issues into analyzer findings. Returns an empty list (not an error) if
 /// there are no changed Go files, or if `golangci-lint` isn't on PATH —
 /// Stage 1 degrades gracefully rather than blocking the rest of the review.
+/// Retries up to `GOLANGCI_LINT_MAX_ATTEMPTS` times on the transient
+/// "produced no output at all" failure mode (see `GolangciRunError`); any
+/// other failure (a real config/compile problem) surfaces immediately,
+/// unretried.
 pub fn run_golangci_lint(repo_root: &Path, changed_files: &[String]) -> anyhow::Result<Vec<AgentFinding>> {
     // A deleted file's path still shows up in `git diff --numstat`, but
     // passing a nonexistent path to golangci-lint doesn't just skip that one
@@ -118,41 +177,21 @@ pub fn run_golangci_lint(repo_root: &Path, changed_files: &[String]) -> anyhow::
         return Ok(vec![]);
     }
 
-    let temp_dir = tempfile::tempdir()?;
-    let json_path = temp_dir.path().join("golangci-out.json");
-
-    let output = match Command::new("golangci-lint").arg("run").arg("--output.json.path").arg(&json_path).args(&go_files).current_dir(repo_root).output() {
-        Ok(output) => output,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(err) => return Err(err.into()),
-    };
-
-    // golangci-lint exits non-zero whenever it finds any issues at all —
-    // that's the normal case, not a tool failure. Only treat it as a real
-    // failure if the JSON file was never written (the flag itself failing,
-    // a config error, etc), which the read below surfaces naturally.
-    let json_text = match std::fs::read_to_string(&json_path) {
-        Ok(text) => text,
-        Err(_) => {
-            anyhow::bail!("golangci-lint did not produce an output file: {}", String::from_utf8_lossy(&output.stderr));
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match run_golangci_lint_once(repo_root, &go_files) {
+            Ok(None) => return Ok(vec![]),
+            Ok(Some(findings)) => return Ok(findings),
+            Err(GolangciRunError::Other(err)) => return Err(err),
+            Err(GolangciRunError::Retryable(stderr)) => {
+                if attempt >= GOLANGCI_LINT_MAX_ATTEMPTS {
+                    anyhow::bail!("golangci-lint did not produce an output file after {attempt} attempt(s): {stderr}");
+                }
+                std::thread::sleep(GOLANGCI_LINT_RETRY_DELAY);
+            }
         }
-    };
-
-    let parsed: GolangciOutput = serde_json::from_str(&json_text)?;
-    if let Some(report_error) = parsed.report.as_ref().and_then(|r| r.error.as_ref()) {
-        anyhow::bail!("golangci-lint reported a package-level error (results may be incomplete or empty): {report_error}");
     }
-    let changed_set: std::collections::HashSet<&str> = go_files.iter().copied().collect();
-
-    Ok(parsed
-        .issues
-        .iter()
-        .map(issue_to_finding)
-        // Scanning by explicit file args can still surface package-level
-        // issues attributed to a file outside our diff; keep only issues
-        // whose (possibly recovered) location is one of the files we asked about.
-        .filter(|f| changed_set.contains(f.location.path.as_str()))
-        .collect())
 }
 
 #[cfg(test)]
@@ -226,6 +265,27 @@ mod tests {
         let findings = run_golangci_lint(dir.path(), &["main.go".to_string(), "deleted.go".to_string()]).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].source.rule_id.as_deref(), Some("errcheck"));
+    }
+
+    #[test]
+    fn retries_the_transient_no_output_failure_before_giving_up() {
+        if !golangci_lint_available() {
+            eprintln!("skipping: golangci-lint not on PATH");
+            return;
+        }
+        // An unparseable .golangci.yml reliably reproduces golangci-lint's
+        // own "fails before writing any output at all" failure mode
+        // deterministically (the same shape observed intermittently under
+        // heavy concurrent test load, from a corrupted go/packages load
+        // rather than a config error, but indistinguishable from this
+        // function's own point of view — see `GolangciRunError`) — proves
+        // the retry loop actually retries (the error names the attempt
+        // count) and still surfaces a clear failure once exhausted, rather
+        // than hanging or panicking.
+        let dir = write_go_module(&[("main.go", "package main\n\nfunc main() {}\n")]);
+        std::fs::write(dir.path().join(".golangci.yml"), "this is not: valid: yaml: [structure\n").unwrap();
+        let err = run_golangci_lint(dir.path(), &["main.go".to_string()]).unwrap_err();
+        assert!(err.to_string().contains(&format!("after {GOLANGCI_LINT_MAX_ATTEMPTS} attempt(s)")), "got: {err}");
     }
 
     #[test]
