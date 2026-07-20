@@ -9,10 +9,9 @@ use commands::diff::{run_diff, DiffCommandOptions};
 use commands::doctor::run_doctor;
 use commands::feedback::{run_feedback, run_missed_report};
 use commands::history::run_history_sync;
-use commands::rules::{run_rules_bench, run_rules_mine, run_rules_mine_comments, run_rules_packs, run_rules_review, run_rules_shadow_log};
+use commands::rules::{run_rules_bench, run_rules_mine, run_rules_mine_comments, run_rules_packs, run_rules_review, run_rules_rollback, run_rules_shadow_log};
 use commands::skills::{run_skills_list, run_skills_mine, run_skills_review, run_skills_stub};
 use commands::skills_bench::run_skills_bench;
-use commands::stubs::run_rules_stub;
 
 #[derive(Parser)]
 #[command(name = "autoreview", version, about = "Portable, hierarchical, deterministic-first code review CLI")]
@@ -229,7 +228,7 @@ fn main() -> anyhow::Result<()> {
             RulesAction::Bench { cluster_id } => run_rules_bench(&repo_root, &cluster_id)?,
             RulesAction::Review { approve, reject, reason } => run_rules_review(&repo_root, approve, reject, reason)?,
             RulesAction::ShadowLog { rule_id } => run_rules_shadow_log(&repo_root, &rule_id)?,
-            RulesAction::Rollback { rule_id } => run_rules_stub(&format!("rollback {rule_id}")),
+            RulesAction::Rollback { rule_id } => run_rules_rollback(&repo_root, &rule_id)?,
             RulesAction::Packs => run_rules_packs(&repo_root)?,
         },
         Commands::Skills { action } => match action {

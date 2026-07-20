@@ -11,7 +11,8 @@
 //! shadow/promoted rule for spot-checking (`rule_factory::shadow`, wired
 //! into every `diff` run — see `commands::diff`), and gives a human the
 //! actual `--approve`/`--reject` gate the plan calls for before a candidate
-//! ever reaches shadow mode. Rollback stays a stub (`run_rules_stub`).
+//! ever reaches shadow mode, and `rules rollback` for the manual override
+//! sitting alongside the automatic promote/demote gate `diff.rs` runs.
 //! `rules packs` lists registered external rule packs
 //! (`.autoreview/rulepacks.yaml`) — mirrors `skills list`'s "list
 //! registered things" precedent.
@@ -21,6 +22,7 @@ use autoreview_schema::AgentBackendKind;
 use serde::Deserialize;
 
 use super::backend::{backend_available, build_backend};
+use super::diff::move_shadow_rule_file;
 use super::history::history_dir_for;
 
 fn cheap_model_for(kind: AgentBackendKind, config: &autoreview_schema::AutoreviewConfig) -> &str {
@@ -359,4 +361,108 @@ pub fn run_rules_packs(repo_root: &std::path::Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Manually reverses a shadow/promoted rule's most recent lifecycle step —
+/// the human override sitting alongside the automatic `should_promote`/
+/// `should_demote` gate `diff.rs` already runs on every review. A
+/// `"promoted"` rule demotes back to `"shadow"` (same status flip and
+/// on-disk file move `diff.rs` does automatically on a real demotion, just
+/// triggered by hand instead of the firing-history gate). A `"shadow"`
+/// rule rolls all the way back to `"rejected"` — undoing the original
+/// `rules review --approve` — moving its file to `.autoreview/rules/
+/// rejected/` (kept, not deleted, so it can be inspected or manually
+/// restored) and stamping `invalid_at` on its history row.
+pub fn run_rules_rollback(repo_root: &std::path::Path, rule_id: &str) -> anyhow::Result<()> {
+    let history_dir = history_dir_for(repo_root);
+    let store = HistoryStore::open(&history_dir)?;
+
+    let Some(state) = store.rule_state(rule_id)? else {
+        anyhow::bail!("rule '{rule_id}' is not tracked (never fired in shadow/promoted mode) — nothing to roll back");
+    };
+
+    match state.status.as_str() {
+        "promoted" => {
+            store.set_rule_status(rule_id, "shadow")?;
+            move_shadow_rule_file(repo_root, rule_id, "promoted", "shadow");
+            println!("Rolled back '{rule_id}': promoted -> shadow.");
+        }
+        "shadow" => {
+            store.set_rule_status(rule_id, "rejected")?;
+            store.invalidate_rule(rule_id, &chrono::Utc::now().to_rfc3339())?;
+            move_shadow_rule_file(repo_root, rule_id, "shadow", "rejected");
+            println!("Rolled back '{rule_id}': shadow -> rejected (rule file moved to .autoreview/rules/rejected/, not deleted).");
+        }
+        other => anyhow::bail!("rule '{rule_id}' has status '{other}' — rollback only applies to a 'shadow' or 'promoted' rule"),
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use autoreview_test_support::init_repo;
+
+    fn write_rule_file(repo_root: &std::path::Path, status: &str, rule_id: &str) {
+        let dir = repo_root.join(".autoreview").join("rules").join(status);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{rule_id}.yaml")), format!("id: {rule_id}\nlanguage: Go\ncategory: correctness\nseverity: warning\nmessage: m\nrule:\n  pattern: $A == $A\n")).unwrap();
+    }
+
+    #[test]
+    fn rollback_of_an_untracked_rule_errors_clearly() {
+        let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+        let err = run_rules_rollback(repo.path(), "never-seen-rule").unwrap_err();
+        assert!(err.to_string().contains("not tracked"), "got: {err}");
+    }
+
+    #[test]
+    fn rollback_demotes_a_promoted_rule_back_to_shadow() {
+        let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+        write_rule_file(repo.path(), "promoted", "go-example");
+        let history_dir = history_dir_for(repo.path());
+        let store = HistoryStore::open(&history_dir).unwrap();
+        store.ensure_rule_tracked("go-example", "shadow", "2026-07-01T00:00:00Z").unwrap();
+        store.set_rule_status("go-example", "promoted").unwrap();
+        drop(store);
+
+        run_rules_rollback(repo.path(), "go-example").unwrap();
+
+        let store = HistoryStore::open(&history_dir).unwrap();
+        let state = store.rule_state("go-example").unwrap().unwrap();
+        assert_eq!(state.status, "shadow");
+        assert!(repo.path().join(".autoreview/rules/shadow/go-example.yaml").exists());
+        assert!(!repo.path().join(".autoreview/rules/promoted/go-example.yaml").exists());
+    }
+
+    #[test]
+    fn rollback_rejects_a_shadow_rule_and_moves_its_file_without_deleting_it() {
+        let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+        write_rule_file(repo.path(), "shadow", "go-example");
+        let history_dir = history_dir_for(repo.path());
+        let store = HistoryStore::open(&history_dir).unwrap();
+        store.ensure_rule_tracked("go-example", "shadow", "2026-07-01T00:00:00Z").unwrap();
+        drop(store);
+
+        run_rules_rollback(repo.path(), "go-example").unwrap();
+
+        let store = HistoryStore::open(&history_dir).unwrap();
+        let state = store.rule_state("go-example").unwrap().unwrap();
+        assert_eq!(state.status, "rejected");
+        assert!(state.invalid_at.is_some());
+        assert!(repo.path().join(".autoreview/rules/rejected/go-example.yaml").exists());
+        assert!(!repo.path().join(".autoreview/rules/shadow/go-example.yaml").exists());
+    }
+
+    #[test]
+    fn rollback_of_an_already_rejected_rule_errors_with_a_clear_message() {
+        let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+        let history_dir = history_dir_for(repo.path());
+        let store = HistoryStore::open(&history_dir).unwrap();
+        store.ensure_rule_tracked("go-example", "rejected", "2026-07-01T00:00:00Z").unwrap();
+        drop(store);
+
+        let err = run_rules_rollback(repo.path(), "go-example").unwrap_err();
+        assert!(err.to_string().contains("rejected"), "got: {err}");
+    }
 }

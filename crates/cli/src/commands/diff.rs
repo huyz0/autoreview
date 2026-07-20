@@ -90,8 +90,10 @@ fn diff_context(
 /// Physically relocates a rule file between `.autoreview/rules/{from,to}/`
 /// on promotion/demotion — best-effort (a failure here doesn't block the
 /// status transition already recorded in the history store, it just means
-/// the on-disk file needs a manual move next time someone looks).
-fn move_shadow_rule_file(repo_root: &Path, rule_id: &str, from: &str, to: &str) {
+/// the on-disk file needs a manual move next time someone looks). Also
+/// used by `commands::rules::run_rules_rollback` for a manual demotion/
+/// rejection, same file-move semantics as the automatic gate.
+pub(crate) fn move_shadow_rule_file(repo_root: &Path, rule_id: &str, from: &str, to: &str) {
     let rule_files = autoreview_core::discover_shadow_rule_files(repo_root);
     for rule_file in rule_files {
         if rule_file.status != from {

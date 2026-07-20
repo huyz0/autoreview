@@ -279,10 +279,11 @@ fn skills_list_reports_all_builtin_skills() {
 }
 
 #[test]
-fn rules_rollback_is_an_explicit_stub_not_silent_or_erroring() {
-    // `mine`/`bench`/`review` all graduated out of the stub as their
-    // pieces of the rule factory landed — `rollback` still is one, since
-    // there's no promotion history to roll back yet.
+fn rules_rollback_of_an_untracked_rule_fails_clearly_not_silently() {
+    // The full promote/demote/reject state-machine behavior is unit-tested
+    // directly in commands::rules (no subprocess round-trip needed there);
+    // this just confirms the CLI wiring surfaces a real error instead of
+    // succeeding silently or falling back to stub text.
     let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
 
     Command::cargo_bin("autoreview")
@@ -290,8 +291,8 @@ fn rules_rollback_is_an_explicit_stub_not_silent_or_erroring() {
         .current_dir(repo.path())
         .args(["rules", "rollback", "some-rule"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("not implemented yet"));
+        .failure()
+        .stderr(predicate::str::contains("not tracked"));
 }
 
 #[test]

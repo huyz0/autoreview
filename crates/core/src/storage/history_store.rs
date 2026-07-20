@@ -384,7 +384,7 @@ impl HistoryStore {
     /// been through `ensure_rule_tracked` (i.e. never fired in shadow mode).
     pub fn rule_state(&self, rule_id: &str) -> anyhow::Result<Option<RuleState>> {
         let result = self.conn.query_row(
-            "SELECT status, firings, agent_agreed, agent_disagreed, valid_from FROM rules WHERE id = ?1",
+            "SELECT status, firings, agent_agreed, agent_disagreed, valid_from, invalid_at FROM rules WHERE id = ?1",
             [rule_id],
             |row| {
                 Ok(RuleState {
@@ -393,6 +393,7 @@ impl HistoryStore {
                     agent_agreed: row.get(2)?,
                     agent_disagreed: row.get(3)?,
                     valid_from: row.get(4)?,
+                    invalid_at: row.get(5)?,
                 })
             },
         );
@@ -446,6 +447,17 @@ impl HistoryStore {
         Ok(())
     }
 
+    /// Sets `invalid_at` on a tracked rule — the bi-temporal "this row is
+    /// superseded" marker the schema's own doc comment anticipated for
+    /// "the demotion/rollback machinery in M3" (`ensure_schema`'s doc
+    /// comment). Used by `rules rollback` when a shadow rule is rejected
+    /// outright (not just demoted from promoted back to shadow, which
+    /// keeps the row live via `set_rule_status` alone).
+    pub fn invalidate_rule(&self, rule_id: &str, invalid_at: &str) -> anyhow::Result<()> {
+        self.conn.execute("UPDATE rules SET invalid_at = ?2 WHERE id = ?1", rusqlite::params![rule_id, invalid_at])?;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub fn count_findings(&self) -> anyhow::Result<i64> {
         Ok(self.conn.query_row("SELECT COUNT(*) FROM findings", [], |row| row.get(0))?)
@@ -493,6 +505,7 @@ pub struct RuleState {
     pub agent_agreed: u32,
     pub agent_disagreed: u32,
     pub valid_from: String,
+    pub invalid_at: Option<String>,
 }
 
 /// One recorded shadow/promoted rule firing, as `rules shadow-log` lists it.
@@ -733,6 +746,17 @@ mod tests {
         store.ensure_rule_tracked("go-example", "shadow", "2026-07-01T00:00:00Z").unwrap();
         let state = store.rule_state("go-example").unwrap().unwrap();
         assert_eq!(state.status, "promoted");
+    }
+
+    #[test]
+    fn invalidate_rule_sets_invalid_at_without_touching_status() {
+        let store = HistoryStore::open_in_memory().unwrap();
+        store.ensure_rule_tracked("go-example", "shadow", "2026-07-01T00:00:00Z").unwrap();
+        assert!(store.rule_state("go-example").unwrap().unwrap().invalid_at.is_none());
+        store.invalidate_rule("go-example", "2026-07-10T00:00:00Z").unwrap();
+        let state = store.rule_state("go-example").unwrap().unwrap();
+        assert_eq!(state.invalid_at.as_deref(), Some("2026-07-10T00:00:00Z"));
+        assert_eq!(state.status, "shadow", "invalidating must not change the status column");
     }
 
     #[test]
