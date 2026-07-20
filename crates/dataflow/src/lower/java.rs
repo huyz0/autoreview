@@ -134,9 +134,23 @@ fn lower_statement(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: Node
         }
         "expression_statement" => {
             if let Some(inner) = stmt.named_child(0) {
-                if inner.kind() == "assignment_expression" {
-                    cfg.nodes[current].stmts.push(lower_assignment_expression(inner, source));
-                    return current;
+                match inner.kind() {
+                    "assignment_expression" => {
+                        cfg.nodes[current].stmts.push(lower_assignment_expression(inner, source));
+                        return current;
+                    }
+                    // A bare call statement (`stmt.executeUpdate(sql);`, no
+                    // assignment) — without this, a sink whose return value
+                    // is discarded (the common case for e.g. `Statement`'s
+                    // mutating methods) would be invisible to the taint
+                    // engine, which only inspects `Stmt::Call` nodes.
+                    "method_invocation" => {
+                        if let Some(name) = inner.child_by_field_name("name") {
+                            cfg.nodes[current].stmts.push(Stmt::Call { target: crate::cfg::CallTarget::Named(text(name, source).to_string()), args: call_arg_identifiers(inner, source), assigned_to: None });
+                            return current;
+                        }
+                    }
+                    _ => {}
                 }
             }
             cfg.nodes[current].stmts.push(Stmt::Other(text(stmt, source).to_string()));
@@ -260,6 +274,16 @@ mod tests {
     fn lowers_a_while_loop_with_a_back_edge() {
         let cfg = lower("class Foo {\n    void f() {\n        while (true) {\n            int y = 1;\n        }\n    }\n}\n");
         assert!(cfg.edges.iter().any(|(_, _, kind)| *kind == EdgeKind::Loop));
+    }
+
+    #[test]
+    fn recognizes_a_bare_method_call_statement_with_no_assignment() {
+        let cfg = lower("class Foo {\n    void f(String sql) {\n        stmt.executeUpdate(sql);\n    }\n}\n");
+        assert!(
+            cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), assigned_to: None, args } if name == "executeUpdate" && args.contains(&"sql".to_string())))),
+            "got: {:#?}",
+            cfg.nodes
+        );
     }
 
     #[test]

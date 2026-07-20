@@ -29,8 +29,11 @@
 //! own `run_*_taint` wrapper here. They're now declarative YAML
 //! (`kind: taint` in `crates/core/rules-builtin/`), loaded at runtime by
 //! `taint_rules::load_taint_rules` and run generically via
-//! `run_loaded_taint_rules` — adding a new taint rule no longer touches
-//! this file at all.
+//! `run_loaded_taint_rules` — adding a new taint rule for a language that
+//! already has a lowering pass doesn't touch this file at all.
+//!
+//! Java (`lower::java`) and Kotlin (`lower::kotlin`) only get taint rules
+//! run against them for now — see `run_dataflow_check`'s own doc comment.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -90,6 +93,52 @@ fn go_functions(tree: &tree_sitter::Tree) -> Vec<tree_sitter::Node<'_>> {
 /// underlying functions.
 fn lower_all_functions<'a>(source: &[u8], tree: &'a Tree) -> Vec<(Node<'a>, Cfg<Stmt>)> {
     go_functions(tree).into_iter().map(|fn_node| (fn_node, autoreview_dataflow::lower::go::lower_function(source, fn_node))).collect()
+}
+
+/// Every `method_declaration`/`constructor_declaration` anywhere in a
+/// parsed Java file, at any nesting depth — unlike Go's top-level-only
+/// `function_declaration`s, Java methods always sit inside a
+/// `class_declaration`'s `class_body` (possibly several classes deep for
+/// nested/inner classes), so this walks the whole tree rather than just
+/// `root_node()`'s immediate children.
+fn java_functions(tree: &Tree) -> Vec<Node<'_>> {
+    fn walk<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
+        if node.kind() == "method_declaration" || node.kind() == "constructor_declaration" {
+            out.push(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            walk(child, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(tree.root_node(), &mut out);
+    out
+}
+
+/// Every `function_declaration` anywhere in a parsed Kotlin file — same
+/// nested-class rationale as `java_functions`.
+fn kotlin_functions(tree: &Tree) -> Vec<Node<'_>> {
+    fn walk<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
+        if node.kind() == "function_declaration" {
+            out.push(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            walk(child, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(tree.root_node(), &mut out);
+    out
+}
+
+fn lower_all_java_functions<'a>(source: &[u8], tree: &'a Tree) -> Vec<(Node<'a>, Cfg<Stmt>)> {
+    java_functions(tree).into_iter().map(|fn_node| (fn_node, autoreview_dataflow::lower::java::lower_function(source, fn_node))).collect()
+}
+
+fn lower_all_kotlin_functions<'a>(source: &[u8], tree: &'a Tree) -> Vec<(Node<'a>, Cfg<Stmt>)> {
+    kotlin_functions(tree).into_iter().map(|fn_node| (fn_node, autoreview_dataflow::lower::kotlin::lower_function(source, fn_node))).collect()
 }
 
 fn run_append_shared_backing_array(path: &str, lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
@@ -221,8 +270,15 @@ fn render_taint_message(template: &str, hit: &autoreview_dataflow::taint::TaintH
     template.replace("{tainted_arg}", &hit.tainted_arg).replace("{sink_call}", &hit.sink_call)
 }
 
+/// Deliberately doesn't name the source (e.g. "an HTTP form field") the
+/// way an earlier, Go-only version of this string did — now that taint
+/// rules cover multiple languages and source families (HTTP form values,
+/// request parameters, ...), a single hardcoded source description would
+/// misdescribe whichever rules don't match it. The rule's own `message`
+/// (YAML `message:` field) is where a rule-specific, accurate source
+/// description belongs.
 fn taint_title(hit: &autoreview_dataflow::taint::TaintHit) -> String {
-    format!("`{}` reaches `{}` with an unsanitized value from an HTTP form field", hit.tainted_arg, hit.sink_call)
+    format!("`{}` reaches `{}` with an unsanitized value from an untrusted source", hit.tainted_arg, hit.sink_call)
 }
 
 /// Runs every `kind: taint` rule declared in `rules-builtin/` or a
@@ -230,8 +286,8 @@ fn taint_title(hit: &autoreview_dataflow::taint::TaintHit) -> String {
 /// `language` matches, against one file's already-lowered functions.
 /// Adding a new taint rule means adding a new YAML file — this function
 /// doesn't change.
-fn run_loaded_taint_rules(path: &str, lowered: &[(Node, Cfg<Stmt>)], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
-    let rules: Vec<_> = taint_rules::load_taint_rules(registered_packs).into_iter().filter(|r| r.language == "Go").collect();
+fn run_loaded_taint_rules(path: &str, language: &str, lowered: &[(Node, Cfg<Stmt>)], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
+    let rules: Vec<_> = taint_rules::load_taint_rules(registered_packs).into_iter().filter(|r| r.language == language).collect();
     if rules.is_empty() {
         return Vec::new();
     }
@@ -249,31 +305,55 @@ fn run_loaded_taint_rules(path: &str, lowered: &[(Node, Cfg<Stmt>)], registered_
     findings
 }
 
+/// Reads and parses one file, for the checks below to lower — a shared
+/// early-return-on-any-failure helper since all three language branches in
+/// `run_dataflow_check` do exactly this before lowering.
+fn read_and_parse(repo_root: &Path, path: &str, language: autoreview_langsupport::Language) -> Option<(String, Tree)> {
+    let content = std::fs::read_to_string(repo_root.join(path)).ok()?;
+    let mut parser = autoreview_langsupport::parser_for(language)?;
+    let tree = parser.parse(&content, None)?;
+    Some((content, tree))
+}
+
 /// Runs all dataflow-powered checks against one changed file's current
-/// content. Go-only for now (Phase 3/4/5); Java/Kotlin land once their
-/// lowering passes do (Phase 6/7). Parses and lowers each file's functions
-/// exactly once (`lower_all_functions`), shared across all four rule
-/// families below rather than each re-parsing/re-lowering independently.
+/// content. Go gets the full rule set (Phase 3/4/5: append-shared-
+/// backing-array, typed-nil-interface-return, loopvar, plus taint rules).
+/// Java/Kotlin (Phase 6/7 lowering) only get taint rules so far — no
+/// Java/Kotlin-specific hand-written rule (the append/typed-nil-return/
+/// loopvar families) exists yet, but the generic taint engine already
+/// works against any lowered `Cfg`, so a Java/Kotlin `kind: taint` YAML
+/// rule needs no dataflow-crate changes to run. Parses and lowers each
+/// file's functions exactly once per language, shared across that
+/// language's rule families rather than each re-parsing/re-lowering
+/// independently.
 pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
     let go_pre_1_22 = crate::analyzers::practices::go_module_targets_pre_1_22(repo_root);
     changed_files
         .iter()
-        .filter(|path| path.ends_with(".go"))
         .filter_map(|path| {
-            let full_path = repo_root.join(path);
-            let content = std::fs::read_to_string(&full_path).ok()?;
-            let mut parser = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Go)?;
-            let tree = parser.parse(&content, None)?;
-            let source = content.as_bytes();
-            let lowered = lower_all_functions(source, &tree);
+            if path.ends_with(".go") {
+                let (content, tree) = read_and_parse(repo_root, path, autoreview_langsupport::Language::Go)?;
+                let source = content.as_bytes();
+                let lowered = lower_all_functions(source, &tree);
 
-            let mut findings = run_append_shared_backing_array(path, &lowered);
-            findings.extend(run_typed_nil_interface_return(repo_root, path, source, &lowered));
-            findings.extend(run_loaded_taint_rules(path, &lowered, registered_packs));
-            if go_pre_1_22 {
-                findings.extend(run_loopvar_checks(path, &lowered));
+                let mut findings = run_append_shared_backing_array(path, &lowered);
+                findings.extend(run_typed_nil_interface_return(repo_root, path, source, &lowered));
+                findings.extend(run_loaded_taint_rules(path, "Go", &lowered, registered_packs));
+                if go_pre_1_22 {
+                    findings.extend(run_loopvar_checks(path, &lowered));
+                }
+                Some(findings)
+            } else if path.ends_with(".java") {
+                let (content, tree) = read_and_parse(repo_root, path, autoreview_langsupport::Language::Java)?;
+                let lowered = lower_all_java_functions(content.as_bytes(), &tree);
+                Some(run_loaded_taint_rules(path, "Java", &lowered, registered_packs))
+            } else if path.ends_with(".kt") || path.ends_with(".kts") {
+                let (content, tree) = read_and_parse(repo_root, path, autoreview_langsupport::Language::Kotlin)?;
+                let lowered = lower_all_kotlin_functions(content.as_bytes(), &tree);
+                Some(run_loaded_taint_rules(path, "Kotlin", &lowered, registered_packs))
+            } else {
+                None
             }
-            Some(findings)
         })
         .flatten()
         .collect()
@@ -534,5 +614,45 @@ mod tests {
         let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         let finding = findings.iter().find(|f| f.source.rule_id.as_deref() == Some("go-command-injection-taint")).unwrap_or_else(|| panic!("got: {findings:#?}"));
         assert!(finding.meta.is_none());
+    }
+
+    #[test]
+    fn flags_a_request_parameter_reaching_a_java_sql_sink_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Main.java"),
+            "class Main {\n    void handle(HttpServletRequest req, Statement stmt) {\n        String q = req.getParameter(\"q\");\n        stmt.executeQuery(q);\n    }\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["Main.java".to_string()], &[]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("java-sql-injection-taint")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_java_sql_sink_reached_with_a_literal_query() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Main.java"), "class Main {\n    void handle(Statement stmt) {\n        stmt.executeQuery(\"SELECT 1\");\n    }\n}\n").unwrap();
+        let findings = run_dataflow_check(dir.path(), &["Main.java".to_string()], &[]);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("java-sql-injection-taint")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_request_parameter_reaching_a_kotlin_sql_sink_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Main.kt"),
+            "class Main {\n    fun handle(req: HttpServletRequest, stmt: Statement) {\n        val q = req.getParameter(\"q\")\n        stmt.executeQuery(q)\n    }\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["Main.kt".to_string()], &[]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("kotlin-sql-injection-taint")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_kotlin_sql_sink_reached_with_a_literal_query() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Main.kt"), "class Main {\n    fun handle(stmt: Statement) {\n        stmt.executeQuery(\"SELECT 1\")\n    }\n}\n").unwrap();
+        let findings = run_dataflow_check(dir.path(), &["Main.kt".to_string()], &[]);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("kotlin-sql-injection-taint")), "got: {findings:#?}");
     }
 }

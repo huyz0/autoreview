@@ -1,0 +1,13 @@
+id: java-command-injection-taint
+language: Java
+category: security
+severity: error
+kind: taint
+semantic: true
+message: "`{tainted_arg}` reaches `{sink_call}` with an unsanitized value from an HTTP request parameter"
+sources:
+  - call: getParameter
+  - call: getQueryString
+sinks:
+  - call: exec
+sanitizers: []

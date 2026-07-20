@@ -51,6 +51,31 @@ fn classify_rhs(node: Node, source: &[u8]) -> RhsShape {
     }
 }
 
+/// Resolves a `call_expression`'s callee to a name usable for taint-rule
+/// matching: a bare `f(...)` call lowers to `"f"`; a member call
+/// (`recv.method(...)`, grammar shape `call_expression -> navigation_expression
+/// -> [identifier, ".", identifier]` — verified against the real
+/// `tree-sitter-kotlin-ng` crate, see this module's doc comment) lowers to
+/// `"recv.method"`, matching Go's own qualified-selector convention so a
+/// taint rule's sink/source pattern can match on either the bare trailing
+/// name or the full qualified form.
+fn call_target_name(call: Node, source: &[u8]) -> Option<String> {
+    let callee = call.named_child(0)?;
+    match callee.kind() {
+        "identifier" => Some(text(callee, source).to_string()),
+        "navigation_expression" => {
+            let receiver = callee.named_child(0)?;
+            let method = callee.named_child(1).filter(|n| n.kind() == "identifier")?;
+            Some(format!("{}.{}", text(receiver, source), text(method, source)))
+        }
+        _ => None,
+    }
+}
+
+fn call_arg_identifiers(call: Node, source: &[u8]) -> Vec<String> {
+    first_child_of_kind(call, "value_arguments").map(|a| children_of_kind(a, "value_argument").iter().filter_map(|va| first_child_of_kind(*va, "identifier")).map(|n| text(n, source).to_string()).collect()).unwrap_or_default()
+}
+
 /// Lowers `val x = expr` / `var x = expr`
 /// (`property_declaration -> variable_declaration -> identifier`, with
 /// the initializer as `property_declaration`'s own last child that isn't
@@ -67,9 +92,8 @@ fn lower_property_declaration(node: Node, source: &[u8]) -> Stmt {
     let Some(value) = value else { return fallback() };
 
     if value.kind() == "call_expression" {
-        if let Some(func) = first_child_of_kind(value, "identifier") {
-            let args = first_child_of_kind(value, "value_arguments").map(|a| children_of_kind(a, "value_argument").iter().filter_map(|va| first_child_of_kind(*va, "identifier")).map(|n| text(n, source).to_string()).collect()).unwrap_or_default();
-            return Stmt::Call { target: crate::cfg::CallTarget::Named(text(func, source).to_string()), args, assigned_to: Some(lhs) };
+        if let Some(name) = call_target_name(value, source) {
+            return Stmt::Call { target: crate::cfg::CallTarget::Named(name), args: call_arg_identifiers(value, source), assigned_to: Some(lhs) };
         }
     }
 
@@ -114,6 +138,18 @@ fn lower_statement(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: Node
         }
         "if_expression" => lower_if(cfg, stmt, source, current),
         "for_statement" | "while_statement" => lower_loop(cfg, stmt, source, current),
+        // A bare call statement (`stmt.executeUpdate(sql)`, no `val`/`var`)
+        // — unlike Java, Kotlin has no `expression_statement` wrapper, so a
+        // `call_expression` can appear directly as a block statement.
+        // Without this, a sink whose return value is discarded would be
+        // invisible to the taint engine, which only inspects `Stmt::Call`.
+        "call_expression" => {
+            let lowered = call_target_name(stmt, source)
+                .map(|name| Stmt::Call { target: crate::cfg::CallTarget::Named(name), args: call_arg_identifiers(stmt, source), assigned_to: None })
+                .unwrap_or_else(|| Stmt::Other(text(stmt, source).to_string()));
+            cfg.nodes[current].stmts.push(lowered);
+            current
+        }
         _ => {
             cfg.nodes[current].stmts.push(Stmt::Other(text(stmt, source).to_string()));
             current
@@ -224,6 +260,30 @@ mod tests {
         let cfg = lower("class Foo {\n    fun f(): Int {\n        val e = helper()\n        return e\n    }\n}\n");
         assert!(
             cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), assigned_to: Some(a), .. } if name == "helper" && a == "e"))),
+            "got: {:#?}",
+            cfg.nodes
+        );
+    }
+
+    #[test]
+    fn recognizes_a_member_call_assigned_to_a_variable() {
+        let cfg = lower("class Foo {\n    fun f(stmt: Any, sql: String): Any {\n        val e = stmt.executeQuery(sql)\n        return e\n    }\n}\n");
+        assert!(
+            cfg.nodes.iter().any(|n| n.stmts.iter().any(
+                |s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(a) } if name == "stmt.executeQuery" && a == "e" && args.contains(&"sql".to_string()))
+            )),
+            "got: {:#?}",
+            cfg.nodes
+        );
+    }
+
+    #[test]
+    fn recognizes_a_bare_member_call_statement_with_no_assignment() {
+        let cfg = lower("class Foo {\n    fun f(stmt: Any, sql: String) {\n        stmt.executeUpdate(sql)\n    }\n}\n");
+        assert!(
+            cfg.nodes.iter().any(|n| n.stmts.iter().any(
+                |s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: None } if name == "stmt.executeUpdate" && args.contains(&"sql".to_string()))
+            )),
             "got: {:#?}",
             cfg.nodes
         );

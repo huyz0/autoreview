@@ -146,6 +146,18 @@ mod tests {
     }
 
     #[test]
+    fn loads_the_builtin_java_and_kotlin_taint_rules() {
+        let rules = load_taint_rules(&[]);
+        let by_lang = |lang: &str| -> Vec<&str> { rules.iter().filter(|r| r.language == lang).map(|r| r.id.as_str()).collect() };
+        let java_ids = by_lang("Java");
+        assert!(java_ids.contains(&"java-sql-injection-taint"), "got: {java_ids:?}");
+        assert!(java_ids.contains(&"java-command-injection-taint"), "got: {java_ids:?}");
+        let kotlin_ids = by_lang("Kotlin");
+        assert!(kotlin_ids.contains(&"kotlin-sql-injection-taint"), "got: {kotlin_ids:?}");
+        assert!(kotlin_ids.contains(&"kotlin-command-injection-taint"), "got: {kotlin_ids:?}");
+    }
+
+    #[test]
     fn a_pattern_kind_rule_is_not_loaded_as_a_taint_rule() {
         let rules = load_taint_rules(&[]);
         assert!(!rules.iter().any(|r| r.id == "go-weak-hash"), "a plain ast-grep rule must not parse as a taint rule");
