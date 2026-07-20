@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # A hung subprocess (golangci-lint/ast-grep) shouldn't consume a CI
+    # runner indefinitely — well above the ~2min this suite normally
+    # takes, so this is a backstop, not a tuned budget.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Go and golangci-lint back two of autoreview's own analyzers
+      # (crates/core/src/analyzers/golangci_lint.rs) and the Go-language
+      # test fixtures throughout the suite — installed so the tests that
+      # exercise those paths actually run instead of gracefully skipping
+      # (every such test checks for the tool on PATH first and skips with
+      # a clear message rather than failing when it's absent, so CI stays
+      # green either way, but installing them here gets real coverage).
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Install golangci-lint
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # Same reasoning as golangci-lint above, for the ast-grep-dependent
+      # pattern-rule tests (rule_pack_conformance.rs and friends).
+      - name: Install ast-grep
+        run: cargo install ast-grep --locked
+
+      - name: Build
+        run: cargo build --workspace --tests --locked
+
+      # --test-threads=4 avoids CPU-contention flakiness observed in
+      # subprocess-heavy tests (golangci-lint/ast-grep invocations racing
+      # each other) under full default parallelism.
+      - name: Test
+        run: cargo test --workspace --locked -- --test-threads=4
+
+      # Not -D warnings: the workspace carries a small pre-existing
+      # warning baseline (tracked separately for cleanup) that isn't
+      # this gate's job to block on — this step is here to keep new
+      # warnings visible in CI output, not to fail the build on them yet.
+      - name: Clippy
+        run: cargo clippy --workspace --tests --locked
