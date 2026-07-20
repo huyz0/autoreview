@@ -567,6 +567,38 @@ pub fn run_rules_packs_validate(pack_path: &std::path::Path) -> anyhow::Result<(
     }
 }
 
+/// `autoreview rules packs refresh` — forces a fresh fetch for every
+/// registered `kind: git` pack and reports whether its resolved commit
+/// changed. Local-source packs are silently skipped (nothing to refresh —
+/// see `refresh_git_rule_packs`'s own docs). Errors on individual packs
+/// are reported per-pack, not aborting the rest.
+pub fn run_rules_packs_refresh(repo_root: &std::path::Path) -> anyhow::Result<()> {
+    let config_path = autoreview_core::rule_packs_config_path(repo_root);
+    let configured = autoreview_core::load_rule_packs_config(&config_path)?;
+    let git_packs: Vec<_> = configured.iter().filter(|p| matches!(p.source, autoreview_schema::RulePackSourceConfig::Git { .. })).collect();
+    if git_packs.is_empty() {
+        println!("No git-source rule packs registered ({} has none, or doesn't exist).", config_path.display());
+        return Ok(());
+    }
+
+    let cache_root = autoreview_core::default_rule_packs_cache_root();
+    for (id, result) in autoreview_core::refresh_git_rule_packs(&cache_root, &configured) {
+        match result {
+            Ok(refreshed) => match refreshed.before {
+                None => println!("  {id}: cloned fresh at {}", short_sha(&refreshed.after)),
+                Some(before) if before == refreshed.after => println!("  {id}: up to date at {}", short_sha(&refreshed.after)),
+                Some(before) => println!("  {id}: updated {} -> {}", short_sha(&before), short_sha(&refreshed.after)),
+            },
+            Err(err) => println!("  {id}: failed to refresh: {err}"),
+        }
+    }
+    Ok(())
+}
+
+fn short_sha(sha: &str) -> &str {
+    &sha[..sha.len().min(12)]
+}
+
 /// Manually reverses a shadow/promoted rule's most recent lifecycle step —
 /// the human override sitting alongside the automatic `should_promote`/
 /// `should_demote` gate `diff.rs` already runs on every review. A

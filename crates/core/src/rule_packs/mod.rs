@@ -153,6 +153,49 @@ fn resolve_git_source(cache_root: &Path, url: &str, r#ref: Option<&str>, subpath
     Ok(root)
 }
 
+/// One git-source pack's commit before and after an explicit refresh
+/// (`autoreview rules packs refresh`) — `before` is `None` the first time
+/// a pack is refreshed (no prior clone in the cache yet), so the caller
+/// can tell "just cloned" apart from "already up to date" and "updated".
+#[derive(Debug, PartialEq, Eq)]
+pub struct RefreshResult {
+    pub before: Option<String>,
+    pub after: String,
+}
+
+/// Forces a fresh `fetch`+checkout for every registered `kind: git` pack
+/// (local-source packs have nothing to refresh — they're read live off
+/// disk on every resolve already) and reports each one's commit before
+/// and after. Every normal resolve (`resolve_rule_packs`, run on every
+/// `autoreview diff`) already re-fetches a git pack's configured `ref`
+/// fresh each time, so this doesn't add a new caching layer — it's a
+/// manual, explicit trigger for checking pack health/freshness (CI
+/// pre-warming, "did anything change" diagnostics) independent of running
+/// a full review, the same "you can already get this passively, but here's
+/// an explicit trigger" relationship `history sync` has to `diff`'s own
+/// best-effort sync.
+pub fn refresh_git_rule_packs(cache_root: &Path, configured: &[RulePackConfig]) -> Vec<(String, anyhow::Result<RefreshResult>)> {
+    configured
+        .iter()
+        .filter_map(|pack| match &pack.source {
+            RulePackSourceConfig::Git { url, r#ref, subpath } => Some((pack, url, r#ref, subpath)),
+            RulePackSourceConfig::Local { .. } => None,
+        })
+        .map(|(pack, url, r#ref, subpath)| (pack.id.clone(), refresh_one_git_pack(cache_root, &pack.id, url, r#ref.as_deref(), subpath.as_deref())))
+        .collect()
+}
+
+fn refresh_one_git_pack(cache_root: &Path, expected_id: &str, url: &str, r#ref: Option<&str>, subpath: Option<&str>) -> anyhow::Result<RefreshResult> {
+    let cache_dir = git_cache_dir(cache_root, url, r#ref);
+    let before = if cache_dir.join(".git").exists() { run_git(&cache_dir, &["rev-parse", "HEAD"]).ok().map(|s| s.trim().to_string()) } else { None };
+
+    let local_path = resolve_git_source(cache_root, url, r#ref, subpath)?;
+    validate_pack_manifest(expected_id, &local_path)?;
+    let after = run_git(&cache_dir, &["rev-parse", "HEAD"])?.trim().to_string();
+
+    Ok(RefreshResult { before, after })
+}
+
 /// Resolves `source` without an id to check against — the reverse of
 /// `resolve_rule_pack`, used by `autoreview rules packs add <source>`
 /// before the pack has been registered under any id at all. Returns the
@@ -380,5 +423,68 @@ mod tests {
         let config = RulePackConfig { id: "acme-git-pack".to_string(), source: RulePackSourceConfig::Git { url: bogus_url, r#ref: None, subpath: None }, trust: RulePackTrust::Full };
         let results = resolve_rule_packs(root.path(), unused_cache_root().path(), &[config]);
         assert!(results[0].1.is_err());
+    }
+
+    #[test]
+    fn refresh_reports_no_prior_clone_the_first_time() {
+        let remote = init_remote_with_pack("acme-git-pack");
+        let url = remote.path().to_string_lossy().to_string();
+        let config = RulePackConfig { id: "acme-git-pack".to_string(), source: RulePackSourceConfig::Git { url, r#ref: None, subpath: None }, trust: RulePackTrust::Full };
+        let cache_root = tempfile::tempdir().unwrap();
+
+        let results = refresh_git_rule_packs(cache_root.path(), &[config]);
+        assert_eq!(results.len(), 1);
+        let (id, result) = &results[0];
+        assert_eq!(id, "acme-git-pack");
+        let refreshed = result.as_ref().unwrap_or_else(|e| panic!("expected Ok, got {e}"));
+        assert!(refreshed.before.is_none(), "no prior clone existed, got: {refreshed:?}");
+        assert!(!refreshed.after.is_empty());
+    }
+
+    #[test]
+    fn refresh_reports_the_same_commit_when_nothing_changed_upstream() {
+        let remote = init_remote_with_pack("acme-git-pack");
+        let url = remote.path().to_string_lossy().to_string();
+        let config = RulePackConfig { id: "acme-git-pack".to_string(), source: RulePackSourceConfig::Git { url, r#ref: None, subpath: None }, trust: RulePackTrust::Full };
+        let cache_root = tempfile::tempdir().unwrap();
+
+        let first = refresh_git_rule_packs(cache_root.path(), std::slice::from_ref(&config));
+        let first_after = first[0].1.as_ref().unwrap().after.clone();
+
+        let second = refresh_git_rule_packs(cache_root.path(), &[config]);
+        let refreshed = second[0].1.as_ref().unwrap();
+        assert_eq!(refreshed.before.as_deref(), Some(first_after.as_str()));
+        assert_eq!(refreshed.after, first_after);
+    }
+
+    #[test]
+    fn refresh_reports_a_new_commit_after_the_remote_advances() {
+        let remote = init_remote_with_pack("acme-git-pack");
+        let url = remote.path().to_string_lossy().to_string();
+        let config = RulePackConfig { id: "acme-git-pack".to_string(), source: RulePackSourceConfig::Git { url, r#ref: None, subpath: None }, trust: RulePackTrust::Full };
+        let cache_root = tempfile::tempdir().unwrap();
+
+        let first = refresh_git_rule_packs(cache_root.path(), std::slice::from_ref(&config));
+        let first_after = first[0].1.as_ref().unwrap().after.clone();
+
+        write(&remote.path().join("go/security/no-println.yml"), "id: acme-no-println\nlanguage: Go\ncategory: security\nseverity: error\nmessage: updated\nrule:\n  pattern: println($$$ARGS)\n");
+        run(remote.path(), &["add", "-A"]);
+        run(remote.path(), &["commit", "-q", "-m", "update rule"]);
+
+        let second = refresh_git_rule_packs(cache_root.path(), &[config]);
+        let refreshed = second[0].1.as_ref().unwrap();
+        assert_eq!(refreshed.before.as_deref(), Some(first_after.as_str()));
+        assert_ne!(refreshed.after, first_after, "the commit should have advanced");
+    }
+
+    #[test]
+    fn refresh_skips_local_source_packs() {
+        let root = tempfile::tempdir().unwrap();
+        let repo_root = root.path().join("repo");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        write(&root.path().join("shared/acme-security/rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n");
+        let config = RulePackConfig { id: "acme-security".to_string(), source: RulePackSourceConfig::Local { path: "../shared/acme-security".to_string() }, trust: RulePackTrust::Full };
+        let results = refresh_git_rule_packs(unused_cache_root().path(), &[config]);
+        assert!(results.is_empty(), "local packs have nothing to refresh: {results:?}");
     }
 }

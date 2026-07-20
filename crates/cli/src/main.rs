@@ -9,7 +9,7 @@ use commands::diff::{run_diff, DiffCommandOptions};
 use commands::doctor::run_doctor;
 use commands::feedback::{run_feedback, run_missed_report};
 use commands::history::run_history_sync;
-use commands::rules::{run_rules_bench, run_rules_mine, run_rules_mine_code, run_rules_mine_comments, run_rules_packs, run_rules_packs_add, run_rules_packs_validate, run_rules_review, run_rules_rollback, run_rules_shadow_log};
+use commands::rules::{run_rules_bench, run_rules_mine, run_rules_mine_code, run_rules_mine_comments, run_rules_packs, run_rules_packs_add, run_rules_packs_refresh, run_rules_packs_validate, run_rules_review, run_rules_rollback, run_rules_shadow_log};
 use commands::skills::{run_skills_list, run_skills_mine, run_skills_review, run_skills_rollback};
 use commands::skills_bench::run_skills_bench;
 
@@ -147,6 +147,13 @@ enum PacksAction {
     /// touch .autoreview/rulepacks.yaml, so it works on a pack that isn't
     /// registered anywhere yet.
     Validate { path: String },
+    /// Forces a fresh fetch for every registered git-source pack and
+    /// reports whether its commit changed. Every `autoreview diff` already
+    /// re-fetches a git pack's ref fresh on every run, so this doesn't
+    /// change what a review sees — it's a manual, explicit health/freshness
+    /// check (CI pre-warming, "did anything change") independent of
+    /// running a full review.
+    Refresh,
 }
 
 #[derive(Subcommand)]
@@ -261,6 +268,7 @@ fn main() -> anyhow::Result<()> {
             RulesAction::Packs { action: None } => run_rules_packs(&repo_root)?,
             RulesAction::Packs { action: Some(PacksAction::Add { source }) } => run_rules_packs_add(&repo_root, &source)?,
             RulesAction::Packs { action: Some(PacksAction::Validate { path }) } => run_rules_packs_validate(std::path::Path::new(&path))?,
+            RulesAction::Packs { action: Some(PacksAction::Refresh) } => run_rules_packs_refresh(&repo_root)?,
         },
         Commands::Skills { action } => match action {
             SkillsAction::List => run_skills_list(&repo_root)?,

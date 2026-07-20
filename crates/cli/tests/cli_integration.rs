@@ -202,6 +202,42 @@ fn rules_packs_validate_fails_clearly_on_a_broken_pattern_rule() {
     cmd.assert().failure().stderr(predicate::str::contains("validation problem"));
 }
 
+fn run_git(cwd: &std::path::Path, args: &[&str]) {
+    let status = StdCommand::new("git").args(args).current_dir(cwd).status().unwrap();
+    assert!(status.success(), "git {args:?} failed in {}", cwd.display());
+}
+
+#[test]
+fn rules_packs_refresh_reports_a_freshly_cloned_git_pack() {
+    let remote = tempfile::tempdir().unwrap();
+    run_git(remote.path(), &["init", "-q"]);
+    run_git(remote.path(), &["config", "user.email", "t@t.com"]);
+    run_git(remote.path(), &["config", "user.name", "T"]);
+    std::fs::write(remote.path().join("rulepack.yaml"), "id: acme-git-pack\nversion: \"1.0.0\"\n").unwrap();
+    run_git(remote.path(), &["add", "-A"]);
+    run_git(remote.path(), &["commit", "-q", "-m", "init"]);
+
+    let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+    std::fs::create_dir_all(repo.path().join(".autoreview")).unwrap();
+    std::fs::write(
+        repo.path().join(".autoreview/rulepacks.yaml"),
+        format!("packs:\n  - id: acme-git-pack\n    source:\n      kind: git\n      url: {}\n", remote.path().display()),
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("autoreview").unwrap();
+    cmd.current_dir(repo.path()).args(["rules", "packs", "refresh"]);
+    cmd.assert().success().stdout(predicate::str::contains("acme-git-pack: cloned fresh at"));
+}
+
+#[test]
+fn rules_packs_refresh_reports_no_git_packs_registered_when_none_configured() {
+    let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+    let mut cmd = Command::cargo_bin("autoreview").unwrap();
+    cmd.current_dir(repo.path()).args(["rules", "packs", "refresh"]);
+    cmd.assert().success().stdout(predicate::str::contains("No git-source rule packs registered"));
+}
+
 #[test]
 fn aspects_filter_scopes_out_complexity_findings_outside_the_requested_category() {
     let repo = init_repo_with_diff(
