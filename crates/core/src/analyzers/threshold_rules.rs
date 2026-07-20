@@ -13,11 +13,13 @@
 //! that stay hardcoded because they're entangled with more than a single
 //! numeric limit).
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 use autoreview_schema::Severity;
 
-use super::ast_grep::{rule_roots, walk_rule_contents, RuleMeta};
+use super::ast_grep::{pack_rule_provenance, rule_roots, walk_rule_contents, RuleMeta};
 use super::complexity::ComplexityThresholds;
 use crate::rule_packs::ResolvedRulePack;
 
@@ -49,6 +51,13 @@ pub struct ThresholdRuleDef {
     pub category: String,
     #[allow(dead_code)]
     pub severity: Severity,
+    /// `Some(packId)` when this rule came from a registered pack rather
+    /// than the embedded builtin tree — keyed by the rule's own `id`
+    /// (looked up via `ast_grep::pack_rule_provenance`), NOT `metric`,
+    /// since a pack can name its rule anything while still overriding a
+    /// builtin metric name (e.g. `id: acme-tight-cyclomatic-complexity`,
+    /// `metric: cyclomatic-complexity`).
+    pub pack_id: Option<String>,
 }
 
 fn parse_threshold_rule(contents: &str) -> Option<ThresholdRuleDef> {
@@ -56,16 +65,18 @@ fn parse_threshold_rule(contents: &str) -> Option<ThresholdRuleDef> {
     if yaml.common.kind != "threshold" {
         return None;
     }
-    Some(ThresholdRuleDef { id: yaml.common.id.clone(), metric: yaml.metric, threshold: yaml.threshold, category: yaml.common.category, severity: severity_from_str(&yaml.severity) })
+    Some(ThresholdRuleDef { id: yaml.common.id.clone(), metric: yaml.metric, threshold: yaml.threshold, category: yaml.common.category, severity: severity_from_str(&yaml.severity), pack_id: None })
 }
 
 /// Every `kind: threshold` rule declared in `rules-builtin/` plus any
 /// registered pack.
 pub fn load_threshold_rules(registered_packs: &[ResolvedRulePack]) -> Vec<ThresholdRuleDef> {
     let roots = rule_roots(registered_packs);
+    let provenance = pack_rule_provenance(registered_packs);
     let mut defs = Vec::new();
     walk_rule_contents(&roots, &mut |contents| {
-        if let Some(def) = parse_threshold_rule(contents) {
+        if let Some(mut def) = parse_threshold_rule(contents) {
+            def.pack_id = provenance.get(&def.id).cloned();
             defs.push(def);
         }
     });
@@ -75,10 +86,16 @@ pub fn load_threshold_rules(registered_packs: &[ResolvedRulePack]) -> Vec<Thresh
 /// Builds a `ComplexityThresholds` starting from its defaults, overridden
 /// per matching `metric:` name by any loaded `kind: threshold` rule — a
 /// metric with no matching rule keeps its default, so this never panics
-/// or leaves a threshold unset.
-pub fn resolve_complexity_thresholds(registered_packs: &[ResolvedRulePack]) -> ComplexityThresholds {
+/// or leaves a threshold unset. Also returns a `metric -> packId` map for
+/// provenance tagging (only present for metrics a registered pack, not
+/// the builtin tree, overrode).
+pub fn resolve_complexity_thresholds_with_provenance(registered_packs: &[ResolvedRulePack]) -> (ComplexityThresholds, HashMap<String, String>) {
     let mut thresholds = ComplexityThresholds::default();
+    let mut pack_ids_by_metric = HashMap::new();
     for rule in load_threshold_rules(registered_packs) {
+        if let Some(pack_id) = &rule.pack_id {
+            pack_ids_by_metric.insert(rule.metric.clone(), pack_id.clone());
+        }
         match rule.metric.as_str() {
             "cyclomatic-complexity" => thresholds.cyclomatic_complexity = rule.threshold,
             "too-many-returns" => thresholds.too_many_returns = rule.threshold,
@@ -92,7 +109,14 @@ pub fn resolve_complexity_thresholds(registered_packs: &[ResolvedRulePack]) -> C
             _ => {}
         }
     }
-    thresholds
+    (thresholds, pack_ids_by_metric)
+}
+
+/// `resolve_complexity_thresholds_with_provenance` without the provenance
+/// map, for callers (most existing tests, and any caller not tagging
+/// findings with pack ids) that only need the resolved thresholds.
+pub fn resolve_complexity_thresholds(registered_packs: &[ResolvedRulePack]) -> ComplexityThresholds {
+    resolve_complexity_thresholds_with_provenance(registered_packs).0
 }
 
 #[cfg(test)]
@@ -124,5 +148,33 @@ mod tests {
         // number is sacred).
         assert_eq!(thresholds.cyclomatic_complexity, 10);
         assert_eq!(thresholds.too_many_returns, 4);
+    }
+
+    #[test]
+    fn a_builtin_threshold_rule_has_no_pack_id() {
+        let rules = load_threshold_rules(&[]);
+        let rule = rules.iter().find(|r| r.id == "cyclomatic-complexity").expect("rule should load");
+        assert!(rule.pack_id.is_none());
+    }
+
+    #[test]
+    fn a_pack_sourced_threshold_rule_carries_its_pack_id_keyed_by_metric_not_id() {
+        // The pack rule's own id differs from the metric it overrides,
+        // exactly the case pack_ids_by_metric (keyed by metric, built from
+        // pack_id looked up by id) needs to handle correctly.
+        let root = tempfile::tempdir().unwrap();
+        let pack_dir = root.path().join("pack");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::write(pack_dir.join("rulepack.yaml"), "id: acme-thresholds\nversion: \"1.0.0\"\n").unwrap();
+        std::fs::write(
+            pack_dir.join("tight.yml"),
+            "id: acme-tight-cyclomatic-complexity\nkind: threshold\nlanguage: Go\ncategory: correctness\nseverity: warning\nmetric: cyclomatic-complexity\nthreshold: 2\nmessage: m\n",
+        )
+        .unwrap();
+        let packs = vec![crate::rule_packs::ResolvedRulePack { id: "acme-thresholds".to_string(), local_path: pack_dir }];
+
+        let (thresholds, pack_ids_by_metric) = resolve_complexity_thresholds_with_provenance(&packs);
+        assert_eq!(thresholds.cyclomatic_complexity, 2, "the pack's threshold value should win");
+        assert_eq!(pack_ids_by_metric.get("cyclomatic-complexity").map(String::as_str), Some("acme-thresholds"));
     }
 }

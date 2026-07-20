@@ -320,10 +320,11 @@ pub fn run_ast_grep(repo_root: &Path, changed_files: &[String], registered_packs
 /// id — stamped into `AgentFinding.meta["rulePackId"]` so a pack-sourced
 /// finding is identifiable in a report. Worth doing precisely because
 /// packs run "full trust immediately" (no shadow-mode staging gate that
-/// would otherwise visually set them apart from builtin findings).
-/// Pattern-kind rules only for now — taint/threshold provenance isn't
-/// wired yet, a deliberate scope cut, not an oversight.
-fn pack_rule_provenance(registered_packs: &[ResolvedRulePack]) -> HashMap<String, String> {
+/// would otherwise visually set them apart from builtin findings). Shared
+/// across all three execution backends (`taint_rules.rs`/`complexity.rs`
+/// also call this) since a rule id is unique across `kind`s regardless of
+/// which backend executes it.
+pub(crate) fn pack_rule_provenance(registered_packs: &[ResolvedRulePack]) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for pack in registered_packs {
         walk_disk_dir(&pack.local_path, &mut |contents| {

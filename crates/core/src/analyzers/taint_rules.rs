@@ -12,7 +12,7 @@ use serde::Deserialize;
 use autoreview_dataflow::taint::{NamePattern, TaintSink, TaintSpec};
 use autoreview_schema::Severity;
 
-use super::ast_grep::{rule_roots, walk_rule_contents, RuleMeta};
+use super::ast_grep::{pack_rule_provenance, rule_roots, walk_rule_contents, RuleMeta};
 use crate::rule_packs::ResolvedRulePack;
 
 fn severity_from_str(s: &str) -> Severity {
@@ -81,6 +81,9 @@ pub struct TaintRuleDef {
     /// by the caller from a `TaintHit`.
     pub message: String,
     pub spec: TaintSpec,
+    /// `Some(packId)` when this rule came from a registered pack rather
+    /// than the embedded builtin tree — see `ast_grep::pack_rule_provenance`.
+    pub pack_id: Option<String>,
 }
 
 fn parse_taint_rule(contents: &str) -> Option<TaintRuleDef> {
@@ -107,6 +110,7 @@ fn parse_taint_rule(contents: &str) -> Option<TaintRuleDef> {
         severity: severity_from_str(&yaml.severity),
         message: yaml.message,
         spec: TaintSpec { rule_id: yaml.common.id, sources, sinks, sanitizers },
+        pack_id: None,
     })
 }
 
@@ -117,9 +121,11 @@ fn parse_taint_rule(contents: &str) -> Option<TaintRuleDef> {
 /// filtering here.
 pub fn load_taint_rules(registered_packs: &[ResolvedRulePack]) -> Vec<TaintRuleDef> {
     let roots = rule_roots(registered_packs);
+    let provenance = pack_rule_provenance(registered_packs);
     let mut defs = Vec::new();
     walk_rule_contents(&roots, &mut |contents| {
-        if let Some(def) = parse_taint_rule(contents) {
+        if let Some(mut def) = parse_taint_rule(contents) {
+            def.pack_id = provenance.get(&def.id).cloned();
             defs.push(def);
         }
     });
@@ -164,5 +170,30 @@ mod tests {
         // rather than panicking or including a bogus pattern.
         let def = parse_taint_rule(contents).expect("rule should still parse structurally");
         assert!(def.spec.sources.is_empty(), "the ambiguous call+callRegex entry should be dropped, not included");
+    }
+
+    #[test]
+    fn a_builtin_taint_rule_has_no_pack_id() {
+        let rules = load_taint_rules(&[]);
+        let rule = rules.iter().find(|r| r.id == "go-command-injection-taint").expect("rule should load");
+        assert!(rule.pack_id.is_none());
+    }
+
+    #[test]
+    fn a_pack_sourced_taint_rule_carries_its_pack_id() {
+        let root = tempfile::tempdir().unwrap();
+        let pack_dir = root.path().join("pack");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::write(pack_dir.join("rulepack.yaml"), "id: acme-taint\nversion: \"1.0.0\"\n").unwrap();
+        std::fs::write(
+            pack_dir.join("env-taint.yml"),
+            "id: acme-env-taint\nkind: taint\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\nsources:\n  - call: Getenv\nsinks:\n  - call: Println\nsanitizers: []\n",
+        )
+        .unwrap();
+        let packs = vec![crate::rule_packs::ResolvedRulePack { id: "acme-taint".to_string(), local_path: pack_dir }];
+
+        let rules = load_taint_rules(&packs);
+        let rule = rules.iter().find(|r| r.id == "acme-env-taint").expect("pack rule should load");
+        assert_eq!(rule.pack_id.as_deref(), Some("acme-taint"));
     }
 }

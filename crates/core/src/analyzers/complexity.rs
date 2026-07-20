@@ -10,6 +10,8 @@
 //! real parse, so unusual formatting (Allman brace style, e.g.) can throw
 //! it off. Verified against real representative samples per language.
 
+use std::collections::HashMap;
+
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
 const DEFAULT_MAX_METHOD_LINES: usize = 80;
@@ -261,7 +263,7 @@ enum SpanKind {
     Interface { member_count: usize },
 }
 
-fn make_finding(rule_id: &str, path: &str, start_line: u32, end_line: u32, title: String, message: String) -> AgentFinding {
+fn build_finding(rule_id: &str, path: &str, start_line: u32, end_line: u32, title: String, message: String, meta: Option<HashMap<String, serde_json::Value>>) -> AgentFinding {
     AgentFinding {
         source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-complexity".to_string(), rule_id: Some(rule_id.to_string()), aspect: None, backend: None },
         category: "design".to_string(),
@@ -273,7 +275,7 @@ fn make_finding(rule_id: &str, path: &str, start_line: u32, end_line: u32, title
         related_locations: None,
         suggestion: None,
         tags: None,
-        meta: None,
+        meta,
         suggested_patch: None,
     }
 }
@@ -285,14 +287,25 @@ fn make_finding(rule_id: &str, path: &str, start_line: u32, end_line: u32, title
 /// caller not concerned with YAML-configured thresholds) don't need to
 /// pass one explicitly.
 pub fn detect_complexity_in_file(path: &str, content: &str, language: ComplexityLanguage) -> Vec<AgentFinding> {
-    detect_complexity_in_file_with_thresholds(path, content, language, &ComplexityThresholds::default())
+    detect_complexity_in_file_with_thresholds(path, content, language, &ComplexityThresholds::default(), &HashMap::new())
 }
 
 /// Scans one file's content for long methods, long parameter lists, deep
 /// nesting, and (Java/Kotlin only) god classes. A single brace-depth pass:
 /// opening a function or class pushes a tracked span; closing braces that
 /// return to a span's start depth close it and evaluate its thresholds.
-pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, language: ComplexityLanguage, thresholds: &ComplexityThresholds) -> Vec<AgentFinding> {
+/// `pack_ids_by_metric` (metric name -> pack id) tags a finding's `meta`
+/// with `rulePackId` when the threshold that fired came from a registered
+/// pack rather than the builtin default.
+pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, language: ComplexityLanguage, thresholds: &ComplexityThresholds, pack_ids_by_metric: &HashMap<String, String>) -> Vec<AgentFinding> {
+    let make_finding = |rule_id: &str, path: &str, start_line: u32, end_line: u32, title: String, message: String| -> AgentFinding {
+        let meta = pack_ids_by_metric.get(rule_id).map(|pack_id| {
+            let mut m = HashMap::new();
+            m.insert("rulePackId".to_string(), serde_json::Value::String(pack_id.clone()));
+            m
+        });
+        build_finding(rule_id, path, start_line, end_line, title, message, meta)
+    };
     let mut findings = Vec::new();
     let mut depth: i32 = 0;
     let mut stack: Vec<OpenSpan> = Vec::new();
@@ -570,14 +583,14 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
 }
 
 pub fn run_complexity_check(repo_root: &std::path::Path, changed_files: &[String], registered_packs: &[crate::rule_packs::ResolvedRulePack]) -> Vec<AgentFinding> {
-    let thresholds = super::threshold_rules::resolve_complexity_thresholds(registered_packs);
+    let (thresholds, pack_ids_by_metric) = super::threshold_rules::resolve_complexity_thresholds_with_provenance(registered_packs);
     changed_files
         .iter()
         .filter_map(|path| {
             let language = language_for_file(path)?;
             let full_path = repo_root.join(path);
             let content = std::fs::read_to_string(&full_path).ok()?;
-            Some(detect_complexity_in_file_with_thresholds(path, &content, language, &thresholds))
+            Some(detect_complexity_in_file_with_thresholds(path, &content, language, &thresholds, &pack_ids_by_metric))
         })
         .flatten()
         .collect()
@@ -627,8 +640,8 @@ mod tests {
         let strict = ComplexityThresholds { cyclomatic_complexity: 5, ..ComplexityThresholds::default() };
         let lenient = ComplexityThresholds { cyclomatic_complexity: 20, ..ComplexityThresholds::default() };
 
-        let strict_findings = detect_complexity_in_file_with_thresholds("main.go", &content, ComplexityLanguage::Go, &strict);
-        let lenient_findings = detect_complexity_in_file_with_thresholds("main.go", &content, ComplexityLanguage::Go, &lenient);
+        let strict_findings = detect_complexity_in_file_with_thresholds("main.go", &content, ComplexityLanguage::Go, &strict, &HashMap::new());
+        let lenient_findings = detect_complexity_in_file_with_thresholds("main.go", &content, ComplexityLanguage::Go, &lenient, &HashMap::new());
 
         assert!(strict_findings.iter().any(|f| f.source.rule_id.as_deref() == Some("cyclomatic-complexity")), "got: {strict_findings:#?}");
         assert!(!lenient_findings.iter().any(|f| f.source.rule_id.as_deref() == Some("cyclomatic-complexity")), "got: {lenient_findings:#?}");
@@ -937,5 +950,40 @@ mod tests {
         std::fs::write(dir.path().join("main.go"), "func doIt(a int, b int, c int, d int, e int, f int) {\n\t_ = a\n}\n").unwrap();
         let findings = run_complexity_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(!findings.is_empty());
+    }
+
+    #[test]
+    fn a_pack_sourced_threshold_finding_carries_rule_pack_id_in_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut content = String::from("func doIt(x int) {\n");
+        for i in 0..5 {
+            content.push_str(&format!("\tif x == {i} {{\n\t\tprintln({i})\n\t}}\n"));
+        }
+        content.push_str("}\n");
+        std::fs::write(dir.path().join("main.go"), &content).unwrap();
+
+        let pack_dir = dir.path().join("pack");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::write(pack_dir.join("rulepack.yaml"), "id: acme-thresholds\nversion: \"1.0.0\"\n").unwrap();
+        std::fs::write(
+            pack_dir.join("tight.yml"),
+            "id: acme-tight-cyclomatic-complexity\nkind: threshold\nlanguage: Go\ncategory: correctness\nseverity: warning\nmetric: cyclomatic-complexity\nthreshold: 2\nmessage: m\n",
+        )
+        .unwrap();
+        let packs = vec![crate::rule_packs::ResolvedRulePack { id: "acme-thresholds".to_string(), local_path: pack_dir }];
+
+        let findings = run_complexity_check(dir.path(), &["main.go".to_string()], &packs);
+        let finding = findings.iter().find(|f| f.source.rule_id.as_deref() == Some("cyclomatic-complexity")).unwrap_or_else(|| panic!("got: {findings:#?}"));
+        let meta = finding.meta.as_ref().expect("expected meta to carry rulePackId");
+        assert_eq!(meta.get("rulePackId").and_then(|v| v.as_str()), Some("acme-thresholds"));
+    }
+
+    #[test]
+    fn a_builtin_threshold_finding_has_no_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.go"), "func doIt(a int, b int, c int, d int, e int, f int) {\n\t_ = a\n}\n").unwrap();
+        let findings = run_complexity_check(dir.path(), &["main.go".to_string()], &[]);
+        let finding = findings.iter().find(|f| f.source.rule_id.as_deref() == Some("long-parameter-list")).unwrap_or_else(|| panic!("got: {findings:#?}"));
+        assert!(finding.meta.is_none());
     }
 }

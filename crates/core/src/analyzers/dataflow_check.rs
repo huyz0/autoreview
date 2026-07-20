@@ -58,6 +58,16 @@ fn make_finding(rule_id: &str, category: &str, severity: Severity, path: &str, l
     }
 }
 
+/// Builds the `meta` map carrying `rulePackId` when `rule`'s taint rule
+/// definition came from a registered pack — `None` for builtin rules,
+/// matching `ast_grep.rs`'s own pattern-rule provenance tagging.
+fn taint_pack_meta(rule: &taint_rules::TaintRuleDef) -> Option<HashMap<String, serde_json::Value>> {
+    let pack_id = rule.pack_id.as_ref()?;
+    let mut meta = HashMap::new();
+    meta.insert("rulePackId".to_string(), serde_json::Value::String(pack_id.clone()));
+    Some(meta)
+}
+
 /// Every top-level `func`/method declaration in a parsed Go file.
 fn go_functions(tree: &tree_sitter::Tree) -> Vec<tree_sitter::Node<'_>> {
     let mut out = Vec::new();
@@ -200,7 +210,9 @@ fn run_loaded_taint_rules(path: &str, lowered: &[(Node, Cfg<Stmt>)], registered_
     for (_, cfg) in lowered {
         for rule in &rules {
             for hit in autoreview_dataflow::taint::check(&rule.spec, cfg) {
-                findings.push(make_finding(&rule.id, &rule.category, rule.severity, path, hit.source_line, taint_title(&hit), render_taint_message(&rule.message, &hit)));
+                let mut finding = make_finding(&rule.id, &rule.category, rule.severity, path, hit.source_line, taint_title(&hit), render_taint_message(&rule.message, &hit));
+                finding.meta = taint_pack_meta(rule);
+                findings.push(finding);
             }
         }
     }
@@ -426,5 +438,39 @@ mod tests {
         std::fs::write(dir.path().join("Foo.java"), "class Foo {}\n").unwrap();
         let findings = run_dataflow_check(dir.path(), &["Foo.java".to_string()], &[]);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn a_pack_sourced_taint_finding_carries_rule_pack_id_in_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.go"), "package main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\nfunc f() {\n\tv := os.Getenv(\"SECRET\")\n\tfmt.Println(v)\n}\n").unwrap();
+
+        let pack_dir = dir.path().join("pack");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::write(pack_dir.join("rulepack.yaml"), "id: acme-taint\nversion: \"1.0.0\"\n").unwrap();
+        std::fs::write(
+            pack_dir.join("env-taint.yml"),
+            "id: acme-env-taint\nkind: taint\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\nsources:\n  - call: Getenv\nsinks:\n  - call: Println\nsanitizers: []\n",
+        )
+        .unwrap();
+        let packs = vec![crate::rule_packs::ResolvedRulePack { id: "acme-taint".to_string(), local_path: pack_dir }];
+
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &packs);
+        let finding = findings.iter().find(|f| f.source.rule_id.as_deref() == Some("acme-env-taint")).unwrap_or_else(|| panic!("got: {findings:#?}"));
+        let meta = finding.meta.as_ref().expect("expected meta to carry rulePackId");
+        assert_eq!(meta.get("rulePackId").and_then(|v| v.as_str()), Some("acme-taint"));
+    }
+
+    #[test]
+    fn a_builtin_taint_finding_has_no_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.go"),
+            "package main\n\nimport (\n\t\"net/http\"\n\t\"os/exec\"\n)\n\nfunc f(r *http.Request) {\n\tcmd := r.FormValue(\"cmd\")\n\texec.Command(cmd)\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
+        let finding = findings.iter().find(|f| f.source.rule_id.as_deref() == Some("go-command-injection-taint")).unwrap_or_else(|| panic!("got: {findings:#?}"));
+        assert!(finding.meta.is_none());
     }
 }
