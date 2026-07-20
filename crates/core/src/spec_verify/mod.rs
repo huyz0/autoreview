@@ -14,6 +14,7 @@
 //! be actively misleading for a check whose entire point is trustworthy
 //! answers to "does this diff actually do what it claims."
 
+pub mod draft;
 pub mod parse;
 
 use std::path::Path;
@@ -23,6 +24,7 @@ use autoreview_schema::{AcceptanceSpec, CriterionResult, CriterionVerdict};
 use crate::agents::claude_code::{AgentBackend, InvokeRequest, Usage};
 use crate::agents::contract::extract_last_fenced_block;
 
+pub use draft::{draft_spec, DraftedSpec};
 pub use parse::parse_spec;
 
 fn build_spec_verify_prompt(spec: &AcceptanceSpec, diff_text: &str) -> String {

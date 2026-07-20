@@ -12,6 +12,7 @@ use commands::history::run_history_sync;
 use commands::rules::{run_rules_bench, run_rules_mine, run_rules_mine_code, run_rules_mine_comments, run_rules_packs, run_rules_packs_add, run_rules_packs_refresh, run_rules_packs_validate, run_rules_review, run_rules_rollback, run_rules_shadow_log};
 use commands::skills::{run_skills_list, run_skills_mine, run_skills_review, run_skills_rollback};
 use commands::skills_bench::run_skills_bench;
+use commands::spec::{run_spec_draft, SpecDraftOptions};
 
 #[derive(Parser)]
 #[command(name = "autoreview", version, about = "Portable, hierarchical, deterministic-first code review CLI")]
@@ -89,6 +90,28 @@ enum Commands {
     History {
         #[command(subcommand)]
         action: HistoryAction,
+    },
+    /// Manage .autoreview/spec.md, the optional acceptance-criteria spec
+    /// `autoreview diff` checks the change against (Initiative 3)
+    Spec {
+        #[command(subcommand)]
+        action: SpecAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SpecAction {
+    /// Draft .autoreview/spec.md from the base...head diff via the
+    /// configured agent backend — a starting point to review and edit, not
+    /// a final answer.
+    Draft {
+        #[arg(long, default_value = "origin/main")]
+        base: String,
+        #[arg(long, default_value = "HEAD")]
+        head: String,
+        /// Overwrite an existing .autoreview/spec.md
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -282,6 +305,9 @@ fn main() -> anyhow::Result<()> {
         },
         Commands::History { action } => match action {
             HistoryAction::Sync => run_history_sync(&repo_root)?,
+        },
+        Commands::Spec { action } => match action {
+            SpecAction::Draft { base, head, force } => run_spec_draft(SpecDraftOptions { repo_root, base_ref: base, head_ref: head, force })?,
         },
     }
 
