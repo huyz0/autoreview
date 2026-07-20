@@ -1,0 +1,18 @@
+id: kotlin-spel-injection
+language: Kotlin
+category: security
+severity: warning
+semantic: true
+message: "`parseExpression(...)` is called with a non-literal argument — if that value comes from user input, Spring Expression Language (SpEL) can execute arbitrary code, not just evaluate a data expression. Semgrep's own upstream rule for this rates Confidence/Likelihood LOW despite HIGH impact, since a syntactic match alone can't tell whether the argument is actually attacker-controlled — worth the same caution here. If the input is trusted or already validated against an allowlist, this is a false positive; otherwise, avoid evaluating user-supplied SpEL, or use `SimpleEvaluationContext` to restrict what the expression can do."
+metadata:
+  cwe: ["CWE-94"]
+  owasp: ["A03:2021"]
+  confidence: LOW
+  references:
+    - "https://semgrep.dev/r/java.spring.security.audit.spel-injection"
+rule:
+  pattern: $PARSER.parseExpression($EXPR)
+  not:
+    has:
+      stopBy: end
+      kind: string_literal

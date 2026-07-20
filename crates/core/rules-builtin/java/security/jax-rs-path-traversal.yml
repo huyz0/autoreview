@@ -1,0 +1,23 @@
+id: java-jax-rs-path-traversal
+language: Java
+category: security
+severity: warning
+semantic: true
+message: "This method takes a JAX-RS `@PathParam` parameter and constructs a `File` somewhere in its body. If the path parameter's raw value reaches `new File(...)` unsanitized, a request path segment like `../../etc/passwd` escapes the intended directory. This is a coarse, method-scoped match (not proven data flow from the specific parameter to this specific `File` call), so confirm the value passed to `new File(...)` is actually the tainted parameter and isn't already sanitized (e.g. via `FilenameUtils.getName(...)`) before treating this as real."
+metadata:
+  cwe: ["CWE-22"]
+  owasp: ["A01:2021"]
+  confidence: LOW
+  references:
+    - "https://semgrep.dev/r/java.jax-rs.security.jax-rs-path-traversal"
+rule:
+  pattern: new File($$$ARGS)
+  inside:
+    kind: method_declaration
+    stopBy: end
+    has:
+      stopBy: end
+      kind: annotation
+      has:
+        field: name
+        regex: ^PathParam$

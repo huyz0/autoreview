@@ -2,7 +2,7 @@ id: java-insecure-deserialization
 language: Java
 category: security
 severity: warning
-message: "Deserializing untrusted input can execute arbitrary code via a gadget chain: raw `ObjectInputStream.readObject()` (unless a class allowlist via `ObjectInputFilter` is configured), Jackson's `ObjectMapper.enableDefaultTyping()`/`activateDefaultTyping()` (globally enables polymorphic type resolution from the input itself — Jackson's own docs call this pattern dangerous), or SnakeYAML's default `new Yaml().load(...)` (constructs arbitrary Java objects from YAML tags unless built with a `SafeConstructor`). Verify the source is trusted, or use a restricted/allowlisted deserializer instead."
+message: "Deserializing untrusted input can execute arbitrary code via a gadget chain: raw `ObjectInputStream.readObject()` (unless a class allowlist via `ObjectInputFilter` is configured), Jackson's `ObjectMapper.enableDefaultTyping()`/`activateDefaultTyping()` (globally enables polymorphic type resolution from the input itself — Jackson's own docs call this pattern dangerous), SnakeYAML's default `new Yaml().load(...)` (constructs arbitrary Java objects from YAML tags unless built with a `SafeConstructor`), or XStream's `fromXML(...)` (constructs arbitrary Java objects from XML unless a `TypePermission` allowlist is configured). Verify the source is trusted, or use a restricted/allowlisted deserializer instead."
 metadata:
   cwe: ["CWE-502"]
   owasp: ["A08:2021"]
@@ -15,3 +15,4 @@ rule:
     - pattern: $MAPPER.enableDefaultTyping($$$ARGS)
     - pattern: $MAPPER.activateDefaultTyping($$$ARGS)
     - pattern: new Yaml().load($$$ARGS)
+    - pattern: $XSTREAM.fromXML($$$ARGS)

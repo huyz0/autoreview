@@ -1,0 +1,13 @@
+id: java-gcm-static-iv
+language: Java
+category: security
+severity: error
+message: "AES-GCM's security guarantee depends entirely on never reusing a (key, IV/nonce) pair — a hardcoded/static IV means every message encrypted with the same key reuses the same nonce, which for GCM doesn't just weaken the cipher, it breaks confidentiality and integrity outright (the keystream repeats, and an attacker who sees two ciphertexts can recover the XOR of the two plaintexts and forge tags). Generate a fresh, random 12-byte IV per encryption with `SecureRandom` instead."
+metadata:
+  cwe: ["CWE-329"]
+  owasp: ["A02:2021"]
+  confidence: HIGH
+  references:
+    - "https://cwe.mitre.org/data/definitions/329.html"
+rule:
+  pattern: new GCMParameterSpec($TAGLEN, new byte[]{$$$BYTES})
