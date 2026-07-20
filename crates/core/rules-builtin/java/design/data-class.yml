@@ -1,0 +1,8 @@
+id: data-class
+language: Java
+category: design
+severity: warning
+kind: threshold
+metric: data-class-min-accessors
+threshold: 3
+message: "Possible Data Class (all trivial accessors, no other behavior)"

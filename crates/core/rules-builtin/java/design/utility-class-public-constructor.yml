@@ -1,0 +1,8 @@
+id: utility-class-public-constructor
+language: Java
+category: design
+severity: warning
+kind: threshold
+metric: utility-class-min-static-methods
+threshold: 2
+message: "Utility class with a public constructor"

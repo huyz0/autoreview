@@ -55,15 +55,19 @@ const DEFAULT_MAX_COGNITIVE_COMPLEXITY: usize = 15;
 /// detekt's ComplexInterface default.
 const MAX_INTERFACE_MEMBERS: usize = 10;
 
-/// The subset of this file's thresholds that are YAML-configurable via
-/// `kind: threshold` rules (see `crates/core/src/analyzers/threshold_rules.rs`)
-/// — every bare `metric > threshold` comparison in this file. `data-class`
-/// and `utility-class-public-constructor` stay hardcoded Rust constants:
-/// both are entangled with more struct-shaped logic (trivial-accessor
-/// ratios, static/constructor detection) than a single numeric limit, and
-/// need their own look before flattening into this schema. `Default`
-/// reproduces today's hardcoded behavior exactly, so `detect_complexity_in_file`
-/// (used by dozens of existing unit tests) keeps working unchanged.
+/// Every bare `metric > threshold` (or `>=`, for the two accessor/method
+/// -count floors below) comparison in this file, YAML-configurable via
+/// `kind: threshold` rules (see
+/// `crates/core/src/analyzers/threshold_rules.rs`). `data_class_min_accessors`
+/// and `utility_class_min_static_methods` sit inside more struct-shaped
+/// logic (trivial-accessor ratios, static/constructor detection) than a
+/// bare comparison, but the numeric limit itself is still a single value
+/// each check reads once — the surrounding boolean gates (`is_java`,
+/// `all_methods_static`, ...) stay hardcoded Rust logic regardless, the
+/// same way `god_class`/`complex_interface`'s own surrounding `SpanKind`
+/// matching already does. `Default` reproduces today's hardcoded behavior
+/// exactly, so `detect_complexity_in_file` (used by dozens of existing
+/// unit tests) keeps working unchanged.
 #[derive(Debug, Clone, Copy)]
 pub struct ComplexityThresholds {
     pub cyclomatic_complexity: usize,
@@ -75,6 +79,8 @@ pub struct ComplexityThresholds {
     pub god_class: usize,
     pub large_switch: usize,
     pub complex_interface: usize,
+    pub data_class_min_accessors: usize,
+    pub utility_class_min_static_methods: usize,
 }
 
 impl Default for ComplexityThresholds {
@@ -89,6 +95,8 @@ impl Default for ComplexityThresholds {
             god_class: DEFAULT_MAX_CLASS_MEMBERS,
             large_switch: DEFAULT_MAX_SWITCH_CASES,
             complex_interface: MAX_INTERFACE_MEMBERS,
+            data_class_min_accessors: MIN_DATA_CLASS_ACCESSORS,
+            utility_class_min_static_methods: MIN_UTILITY_CLASS_STATIC_METHODS,
         }
     }
 }
@@ -528,7 +536,7 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
                                 format!("This class defines {member_count} methods (over the {}-method threshold) — a class this large is often doing more than one job; consider splitting it by responsibility.", thresholds.god_class),
                             ));
                         }
-                        if is_java && member_count >= MIN_DATA_CLASS_ACCESSORS && trivial_accessor_count == member_count {
+                        if is_java && member_count >= thresholds.data_class_min_accessors && trivial_accessor_count == member_count {
                             findings.push(make_finding(
                                 "data-class",
                                 path,
@@ -538,7 +546,7 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
                                 format!("Every method in this class ({member_count} of them) is a short get/set/is accessor — the class holds data but no behavior (Fowler's Data Class smell). Heuristic — a DTO/value holder is often intentional, so confirm this actually needs behavior before restructuring; if it's genuinely just data, a Java `record` may be a better fit than manual accessors."),
                             ));
                         }
-                        if is_java && saw_any_method && all_methods_static && !has_private_constructor && member_count >= MIN_UTILITY_CLASS_STATIC_METHODS {
+                        if is_java && saw_any_method && all_methods_static && !has_private_constructor && member_count >= thresholds.utility_class_min_static_methods {
                             findings.push(make_finding(
                                 "utility-class-public-constructor",
                                 path,

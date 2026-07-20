@@ -8,10 +8,11 @@
 //! existing check functions read instead of a hardcoded Rust constant.
 //!
 //! Every bare `metric > threshold` comparison in `complexity.rs` is
-//! YAML-configurable this way (see `complexity::ComplexityThresholds`'s own
-//! docs for the two — `data-class`/`utility-class-public-constructor` —
-//! that stay hardcoded because they're entangled with more than a single
-//! numeric limit).
+//! YAML-configurable this way, including `data-class`/`utility-class-
+//! public-constructor`'s own accessor/static-method-count floors (see
+//! `complexity::ComplexityThresholds`'s own docs for why those two still
+//! carry surrounding hardcoded Rust logic despite the numeric limit
+//! itself being YAML-configurable).
 
 use std::collections::HashMap;
 
@@ -106,6 +107,8 @@ pub fn resolve_complexity_thresholds_with_provenance(registered_packs: &[Resolve
             "god-class" => thresholds.god_class = rule.threshold,
             "large-switch" => thresholds.large_switch = rule.threshold,
             "complex-interface" => thresholds.complex_interface = rule.threshold,
+            "data-class-min-accessors" => thresholds.data_class_min_accessors = rule.threshold,
+            "utility-class-min-static-methods" => thresholds.utility_class_min_static_methods = rule.threshold,
             _ => {}
         }
     }
