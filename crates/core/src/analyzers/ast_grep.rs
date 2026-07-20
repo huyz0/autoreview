@@ -8,6 +8,27 @@ use autoreview_langsupport::Language;
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
 use super::rule_pack::{run_ast_grep_scan, write_rule_file};
+use crate::rule_packs::{ResolvedRulePack, MANIFEST_FILE_NAME};
+
+/// One source of rule files to scan: the compiled-in builtin pack, or a
+/// registered external pack resolved to a real directory on disk. Every
+/// rule-discovery function below (`rule_categories`/`semantic_rule_ids`/
+/// `rule_metadata`/`extract_pattern_rules`) walks a `&[RuleRoot]` instead
+/// of the embedded tree alone — this is the actual integration point that
+/// makes a registered pack's rules run exactly like builtin ones, no
+/// separate execution path.
+pub(crate) enum RuleRoot<'a> {
+    Embedded(&'a Dir<'a>),
+    Disk { id: &'a str, path: &'a Path },
+}
+
+/// Builds the full root list for a run: the embedded builtin pack first,
+/// then one `Disk` root per registered, resolved pack.
+pub(crate) fn rule_roots(registered_packs: &[ResolvedRulePack]) -> Vec<RuleRoot<'_>> {
+    let mut roots = vec![RuleRoot::Embedded(&BUILTIN_RULES)];
+    roots.extend(registered_packs.iter().map(|p| RuleRoot::Disk { id: &p.id, path: p.local_path.as_path() }));
+    roots
+}
 
 /// Maps a rule pack's top-level `rules-builtin/<language>/` directory name
 /// to the `Language` value(s) present in it — derived from the directory
@@ -102,24 +123,27 @@ fn parse_rule_meta(contents: &str) -> Option<RuleMeta> {
     serde_yaml::from_str(contents).ok()
 }
 
-/// Builds a `ruleId -> category` lookup by parsing every embedded rule file
-/// for just its `id`/`category` fields. Rules that fail to parse (shouldn't
-/// happen for our own builtin files, but this must never be the reason a
-/// whole scan fails) are silently skipped — their findings fall back to the
-/// default category via `unwrap_or`.
-fn rule_categories() -> HashMap<String, String> {
+/// Builds a `ruleId -> category` lookup by parsing every rule file across
+/// `roots` for just its `id`/`category` fields. Rules that fail to parse
+/// (shouldn't happen for our own builtin files, but this must never be the
+/// reason a whole scan fails) are silently skipped — their findings fall
+/// back to the default category via `unwrap_or`.
+fn rule_categories(roots: &[RuleRoot]) -> HashMap<String, String> {
     let mut map = HashMap::new();
-    walk_rule_files(&BUILTIN_RULES, &mut |meta| {
+    walk_rule_files(roots, &mut |meta| {
         map.insert(meta.id.clone(), meta.category.clone());
     });
     map
 }
 
-/// The set of builtin rule ids declaring `semantic: true` — see
-/// `RuleMeta::semantic`'s docs for what that means and why.
-pub fn semantic_rule_ids() -> std::collections::HashSet<String> {
+/// The set of rule ids declaring `semantic: true` across `registered_packs`
+/// plus the builtin pack — see `RuleMeta::semantic`'s docs for what that
+/// means and why. A registered pack's `semantic: true` rules get exactly
+/// the same Stage 3.5 confirmation treatment as builtin ones, for free.
+pub fn semantic_rule_ids(registered_packs: &[ResolvedRulePack]) -> std::collections::HashSet<String> {
+    let roots = rule_roots(registered_packs);
     let mut set = std::collections::HashSet::new();
-    walk_rule_files(&BUILTIN_RULES, &mut |meta| {
+    walk_rule_files(&roots, &mut |meta| {
         if meta.semantic {
             set.insert(meta.id.clone());
         }
@@ -132,9 +156,9 @@ pub fn semantic_rule_ids() -> std::collections::HashSet<String> {
 /// Rules with no `metadata:` block simply don't appear here (not inserted
 /// as an empty entry), so callers should treat a missing key as "no
 /// metadata was declared," not "metadata was declared empty."
-pub fn rule_metadata() -> HashMap<String, RuleMetadataBlock> {
+fn rule_metadata(roots: &[RuleRoot]) -> HashMap<String, RuleMetadataBlock> {
     let mut map = HashMap::new();
-    walk_rule_files(&BUILTIN_RULES, &mut |meta| {
+    walk_rule_files(roots, &mut |meta| {
         if let Some(metadata) = &meta.metadata {
             map.insert(meta.id.clone(), metadata.clone());
         }
@@ -142,24 +166,33 @@ pub fn rule_metadata() -> HashMap<String, RuleMetadataBlock> {
     map
 }
 
-/// Shared recursive walk over every embedded `.yml`/`.yaml` rule file,
-/// parsing each into `RuleMeta` and handing it to `visit` — the one place
-/// all of `rule_categories`/`semantic_rule_ids`/`rule_metadata` (and
-/// `extract_pattern_rules`'s filtering) read the embedded tree from.
-fn walk_rule_files(dir: &Dir, visit: &mut impl FnMut(&RuleMeta)) {
-    walk_rule_contents(dir, &mut |contents| {
+/// Shared walk over every rule file across `roots`, parsing each into
+/// `RuleMeta` and handing it to `visit` — the one place all of
+/// `rule_categories`/`semantic_rule_ids`/`rule_metadata` (and
+/// `extract_pattern_rules`'s filtering) read rule sources from.
+fn walk_rule_files(roots: &[RuleRoot], visit: &mut impl FnMut(&RuleMeta)) {
+    walk_rule_contents(roots, &mut |contents| {
         if let Some(meta) = parse_rule_meta(contents) {
             visit(&meta);
         }
     });
 }
 
-/// Same recursive walk, but hands back each `.yml`/`.yaml` file's raw text
-/// instead of the parsed `RuleMeta` — used by non-pattern-kind loaders
-/// (e.g. `taint_rules.rs`) that need to deserialize their own kind-specific
-/// body (`sources:`/`sinks:`/...) from the same files, not just the common
+/// Same walk, but hands back each `.yml`/`.yaml` file's raw text instead of
+/// the parsed `RuleMeta` — used by non-pattern-kind loaders (e.g.
+/// `taint_rules.rs`) that need to deserialize their own kind-specific body
+/// (`sources:`/`sinks:`/...) from the same files, not just the common
 /// fields `RuleMeta` covers.
-pub(crate) fn walk_rule_contents(dir: &Dir, visit: &mut impl FnMut(&str)) {
+pub(crate) fn walk_rule_contents(roots: &[RuleRoot], visit: &mut impl FnMut(&str)) {
+    for root in roots {
+        match root {
+            RuleRoot::Embedded(dir) => walk_embedded_dir(dir, visit),
+            RuleRoot::Disk { path, .. } => walk_disk_dir(path, visit),
+        }
+    }
+}
+
+fn walk_embedded_dir(dir: &Dir, visit: &mut impl FnMut(&str)) {
     for file in dir.files() {
         let is_yaml = file.path().extension().is_some_and(|ext| ext == "yml" || ext == "yaml");
         if !is_yaml {
@@ -170,7 +203,32 @@ pub(crate) fn walk_rule_contents(dir: &Dir, visit: &mut impl FnMut(&str)) {
         }
     }
     for subdir in dir.dirs() {
-        walk_rule_contents(subdir, visit);
+        walk_embedded_dir(subdir, visit);
+    }
+}
+
+/// Recursive `.yml`/`.yaml` walk over a registered pack's real directory —
+/// the disk-root counterpart to `walk_embedded_dir`. Skips the pack's own
+/// `rulepack.yaml` (its identity manifest, not a rule file) and, unlike the
+/// embedded builtin tree, applies no language-subtree gating: a pack isn't
+/// required to organize its rules by language directory the way
+/// `rules-builtin/` does, so there's no directory-name convention to gate
+/// on.
+fn walk_disk_dir(path: &Path, visit: &mut impl FnMut(&str)) {
+    let Ok(entries) = std::fs::read_dir(path) else { return };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            walk_disk_dir(&entry_path, visit);
+            continue;
+        }
+        let is_yaml = entry_path.extension().is_some_and(|ext| ext == "yml" || ext == "yaml");
+        if !is_yaml || entry_path.file_name().and_then(|n| n.to_str()) == Some(MANIFEST_FILE_NAME) {
+            continue;
+        }
+        if let Ok(contents) = std::fs::read_to_string(&entry_path) {
+            visit(&contents);
+        }
     }
 }
 
@@ -211,12 +269,13 @@ pub(crate) fn title_from_rule_id(rule_id: &str) -> String {
         .join(" ")
 }
 
-/// Runs the embedded ast-grep rule pack against the given changed files and
+/// Runs the ast-grep rule pack — the embedded builtin rules plus any
+/// registered, resolved rule packs — against the given changed files and
 /// normalizes matches into analyzer findings. Returns an empty list (not an
 /// error) if none of the changed files match a language we ship rules for,
 /// or if the `ast-grep` binary isn't on PATH — Stage 1 is meant to degrade
 /// gracefully, not block the rest of the review.
-pub fn run_ast_grep(repo_root: &Path, changed_files: &[String]) -> anyhow::Result<Vec<AgentFinding>> {
+pub fn run_ast_grep(repo_root: &Path, changed_files: &[String], registered_packs: &[ResolvedRulePack]) -> anyhow::Result<Vec<AgentFinding>> {
     // A deleted file's path still shows up in `git diff --numstat` — ast-grep
     // tolerates a missing path (skips it with a stderr warning, still scans
     // the rest), but filtering up front avoids the noise and the wasted work.
@@ -227,13 +286,17 @@ pub fn run_ast_grep(repo_root: &Path, changed_files: &[String]) -> anyhow::Resul
 
     // Rule-group apply condition: only extract pattern rules for languages
     // actually present in this diff — a Go-only diff never needs to see
-    // the Java/Kotlin/TypeScript/JavaScript rule subtrees at all.
+    // the Java/Kotlin/TypeScript/JavaScript rule subtrees at all. This gate
+    // only applies to the embedded builtin tree's own language-directory
+    // convention — a registered pack isn't required to organize by
+    // language, so its rules are never skipped by this check.
     let languages_present = autoreview_langsupport::languages_present(relevant.iter().copied());
 
     let temp_dir = tempfile::tempdir()?;
     let rules_dir = temp_dir.path().join("rules");
     std::fs::create_dir_all(&rules_dir)?;
-    let written = extract_pattern_rules(&BUILTIN_RULES, &rules_dir, &languages_present)?;
+    let roots = rule_roots(registered_packs);
+    let written = extract_pattern_rules(&roots, &rules_dir, &languages_present)?;
     // Defensive, not expected to trigger today (SOURCE_EXTENSIONS and
     // RULE_DIR_LANGUAGES are in lockstep) — future-proofs against the two
     // lists drifting apart, e.g. a new source extension added to one and
@@ -247,25 +310,38 @@ pub fn run_ast_grep(repo_root: &Path, changed_files: &[String]) -> anyhow::Resul
         None => return Ok(vec![]),
     };
 
-    let categories = rule_categories();
-    let metadata = rule_metadata();
+    let categories = rule_categories(&roots);
+    let metadata = rule_metadata(&roots);
     Ok(matches.iter().filter_map(|m| match_to_finding(m, &categories, &metadata)).collect())
 }
 
-/// Copies only `kind: pattern` (or `kind`-absent) rule files from `dir`
-/// into `dest`, preserving their relative paths, and only for a language
-/// subdirectory that has at least one representative in
-/// `languages_present` — the rule-group apply condition, gating whole
-/// language subtrees before any per-file work happens. ast-grep's CLI
-/// errors if any file under its `ruleDirs` lacks a valid `rule:` key, so a
-/// `kind: taint`/`kind: threshold` file (which has no `rule:` block at
-/// all — its body is `sources:`/`sinks:`/`metric:`/`threshold:` instead)
-/// must never reach the subprocess. This is what makes "one rules
-/// directory, three execution backends" possible: every rule lives in the
-/// same `rules-builtin/<lang>/<category>/<id>.yml` tree, but only the
-/// pattern-kind, language-relevant ones are ever visible to `ast-grep scan`.
-/// Returns the number of files actually written.
-fn extract_pattern_rules(dir: &Dir, dest: &Path, languages_present: &HashSet<Language>) -> anyhow::Result<usize> {
+/// Copies every `kind: pattern` (or `kind`-absent) rule file across `roots`
+/// into `dest`. ast-grep's CLI errors if any file under its `ruleDirs`
+/// lacks a valid `rule:` key, so a `kind: taint`/`kind: threshold` file
+/// (which has no `rule:` block at all — its body is
+/// `sources:`/`sinks:`/`metric:`/`threshold:` instead) must never reach the
+/// subprocess. This is what makes "one rules directory [per root], three
+/// execution backends" possible: every rule lives in the same source tree
+/// (`rules-builtin/<lang>/<category>/<id>.yml`, or a pack's own layout),
+/// but only the pattern-kind ones are ever visible to `ast-grep scan`.
+/// Returns the number of files actually written, across all roots.
+fn extract_pattern_rules(roots: &[RuleRoot], dest: &Path, languages_present: &HashSet<Language>) -> anyhow::Result<usize> {
+    let mut written = 0usize;
+    for root in roots {
+        written += match root {
+            RuleRoot::Embedded(dir) => extract_pattern_rules_embedded(dir, dest, languages_present)?,
+            RuleRoot::Disk { id, path } => extract_pattern_rules_disk(id, path, dest)?,
+        };
+    }
+    Ok(written)
+}
+
+/// Only for a language subdirectory that has at least one representative
+/// in `languages_present` — the rule-group apply condition, gating whole
+/// language subtrees before any per-file work happens. Specific to the
+/// embedded builtin tree's own `<language>/<category>/<id>.yml` directory
+/// convention.
+fn extract_pattern_rules_embedded(dir: &Dir, dest: &Path, languages_present: &HashSet<Language>) -> anyhow::Result<usize> {
     let mut written = 0usize;
     for file in dir.files() {
         let is_yaml = file.path().extension().is_some_and(|ext| ext == "yml" || ext == "yaml");
@@ -288,9 +364,43 @@ fn extract_pattern_rules(dir: &Dir, dest: &Path, languages_present: &HashSet<Lan
                 }
             }
         }
-        written += extract_pattern_rules(subdir, dest, languages_present)?;
+        written += extract_pattern_rules_embedded(subdir, dest, languages_present)?;
     }
     Ok(written)
+}
+
+/// Disk-root counterpart, no language-subtree gating (see `walk_disk_dir`'s
+/// docs for why) — writes under `dest/packs/<pack_id>/<relative path>` so
+/// two packs (or a pack and the builtin tree) can never collide on the
+/// same relative filename inside the shared tempdir.
+fn extract_pattern_rules_disk(pack_id: &str, pack_root: &Path, dest: &Path) -> anyhow::Result<usize> {
+    let mut written = 0usize;
+    extract_pattern_rules_disk_inner(pack_root, pack_root, pack_id, dest, &mut written)?;
+    Ok(written)
+}
+
+fn extract_pattern_rules_disk_inner(current: &Path, pack_root: &Path, pack_id: &str, dest: &Path, written: &mut usize) -> anyhow::Result<()> {
+    let Ok(entries) = std::fs::read_dir(current) else { return Ok(()) };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            extract_pattern_rules_disk_inner(&path, pack_root, pack_id, dest, written)?;
+            continue;
+        }
+        let is_yaml = path.extension().is_some_and(|ext| ext == "yml" || ext == "yaml");
+        if !is_yaml || path.file_name().and_then(|n| n.to_str()) == Some(MANIFEST_FILE_NAME) {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else { continue };
+        let kind = parse_rule_meta(&contents).map(|m| m.kind).unwrap_or_else(default_kind);
+        if kind != "pattern" {
+            continue;
+        }
+        let relative = path.strip_prefix(pack_root).unwrap_or(&path);
+        write_rule_file(&dest.join("packs").join(pack_id).join(relative), &contents)?;
+        *written += 1;
+    }
+    Ok(())
 }
 
 fn match_to_finding(m: &serde_json::Value, categories: &HashMap<String, String>, metadata: &HashMap<String, RuleMetadataBlock>) -> Option<AgentFinding> {
@@ -351,7 +461,7 @@ mod tests {
     fn returns_empty_without_invoking_when_no_relevant_files() {
         // This must short-circuit before spawning ast-grep at all, so it's a
         // meaningful test even in environments without the binary installed.
-        let result = run_ast_grep(Path::new("/nonexistent"), &["README.md".to_string(), "package.json".to_string()]).unwrap();
+        let result = run_ast_grep(Path::new("/nonexistent"), &["README.md".to_string(), "package.json".to_string()], &[]).unwrap();
         assert!(result.is_empty());
     }
 
@@ -364,7 +474,7 @@ mod tests {
             return;
         }
         let dir = write_repo(&[("main.go", "package main\nfunc main() {}\n")]);
-        let result = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        let result = run_ast_grep(dir.path(), &["main.go".to_string()], &[]).unwrap();
         assert!(result.is_empty());
     }
 
@@ -377,7 +487,7 @@ mod tests {
             return;
         }
         let dir = write_repo(&[("main.go", "package main\n\nfunc main() {\n\tif true == true {\n\t}\n}\n")]);
-        let findings = run_ast_grep(dir.path(), &["main.go".to_string(), "deleted.go".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string(), "deleted.go".to_string()], &[]).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].source.rule_id.as_deref(), Some("go-no-self-comparison"));
     }
@@ -389,7 +499,7 @@ mod tests {
             return;
         }
         let dir = write_repo(&[("main.go", "package main\n\nfunc main() {\n\tif true == true {\n\t}\n}\n")]);
-        let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()], &[]).unwrap();
 
         assert_eq!(findings.len(), 1);
         let finding = &findings[0];
@@ -405,7 +515,7 @@ mod tests {
     fn extract_pattern_rules_for_go_only_copies_no_other_language_subtree() {
         let dest = tempfile::tempdir().unwrap();
         let languages_present: HashSet<Language> = [Language::Go].into_iter().collect();
-        let written = extract_pattern_rules(&BUILTIN_RULES, dest.path(), &languages_present).unwrap();
+        let written = extract_pattern_rules(&[RuleRoot::Embedded(&BUILTIN_RULES)], dest.path(), &languages_present).unwrap();
         assert!(written > 0, "expected at least one Go pattern rule to be written");
         for other in ["java", "kotlin", "typescript", "javascript"] {
             assert!(!dest.path().join(other).exists(), "expected no {other} subtree to be copied for a Go-only diff");
@@ -416,7 +526,7 @@ mod tests {
     #[test]
     fn extract_pattern_rules_for_no_languages_writes_nothing() {
         let dest = tempfile::tempdir().unwrap();
-        let written = extract_pattern_rules(&BUILTIN_RULES, dest.path(), &HashSet::new()).unwrap();
+        let written = extract_pattern_rules(&[RuleRoot::Embedded(&BUILTIN_RULES)], dest.path(), &HashSet::new()).unwrap();
         assert_eq!(written, 0);
     }
 
@@ -430,7 +540,7 @@ mod tests {
             "main.go",
             "package main\n\nimport \"encoding/gob\"\n\nfunc handle(body []byte) {\n\tvar v MyType\n\tgob.NewDecoder(body).Decode(&v)\n}\n",
         )]);
-        let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()], &[]).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].source.rule_id.as_deref(), Some("go-insecure-deserialization"));
         assert_eq!(findings[0].category, "security");
@@ -443,7 +553,7 @@ mod tests {
             return;
         }
         let dir = write_repo(&[("main.go", "package main\n\nfunc f(x int) int {\n\treturn x\n\tprintln(\"unreachable\")\n}\n")]);
-        let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()], &[]).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].source.rule_id.as_deref(), Some("go-unreachable-code"));
     }
@@ -455,7 +565,7 @@ mod tests {
             return;
         }
         let dir = write_repo(&[("main.go", "package main\n\nfunc f(x int) int {\n\tif x > 0 {\n\t\treturn x\n\t}\n\treturn 0\n}\n")]);
-        let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()], &[]).unwrap();
         assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("go-unreachable-code")));
     }
 
@@ -466,7 +576,7 @@ mod tests {
             return;
         }
         let dir = write_repo(&[("main.go", "package main\n\ntype Marker interface {\n}\n")]);
-        let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()], &[]).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].source.rule_id.as_deref(), Some("go-empty-interface"));
         assert_eq!(findings[0].category, "design");
@@ -479,7 +589,7 @@ mod tests {
             return;
         }
         let dir = write_repo(&[("main.go", "package main\n\ntype Reader interface {\n\tRead(p []byte) (int, error)\n}\n")]);
-        let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()], &[]).unwrap();
         assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("go-empty-interface")));
     }
 
@@ -490,7 +600,7 @@ mod tests {
             return;
         }
         let dir = write_repo(&[("main_test.go", "package main\n\nimport \"testing\"\n\nfunc TestNothing(t *testing.T) {\n\tx := doSomething()\n\t_ = x\n}\n")]);
-        let findings = run_ast_grep(dir.path(), &["main_test.go".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["main_test.go".to_string()], &[]).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].source.rule_id.as_deref(), Some("go-test-without-assertions"));
     }
@@ -505,7 +615,7 @@ mod tests {
             "main_test.go",
             "package main\n\nimport \"testing\"\n\nfunc TestGood(t *testing.T) {\n\tif got := doSomething(); got != 5 {\n\t\tt.Errorf(\"got %d\", got)\n\t}\n}\n",
         )]);
-        let findings = run_ast_grep(dir.path(), &["main_test.go".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["main_test.go".to_string()], &[]).unwrap();
         assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("go-test-without-assertions")));
     }
 
@@ -516,7 +626,7 @@ mod tests {
             return;
         }
         let dir = write_repo(&[("main.go", "package main\n\nfunc TestingHelperNotATest() int {\n\treturn 1\n}\n")]);
-        let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()], &[]).unwrap();
         assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("go-test-without-assertions")));
     }
 
@@ -527,7 +637,7 @@ mod tests {
             return;
         }
         let dir = write_repo(&[("Foo.java", "public class Foo {\n    void g() {\n        throw new RuntimeException(\"boom\");\n        System.out.println(\"dead\");\n    }\n}\n")]);
-        let findings = run_ast_grep(dir.path(), &["Foo.java".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["Foo.java".to_string()], &[]).unwrap();
         assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("java-unreachable-code")), "got: {findings:#?}");
     }
 
@@ -538,7 +648,7 @@ mod tests {
             return;
         }
         let dir = write_repo(&[("Foo.java", "public class Foo {\n    int k(int x) {\n        if (x > 0) {\n            return x;\n        }\n        return 0;\n    }\n}\n")]);
-        let findings = run_ast_grep(dir.path(), &["Foo.java".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["Foo.java".to_string()], &[]).unwrap();
         assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("java-unreachable-code")));
     }
 
@@ -549,7 +659,7 @@ mod tests {
             return;
         }
         let dir = write_repo(&[("Foo.kt", "class Foo {\n    fun h(x: Int) {\n        exitProcess(1)\n        println(\"dead2\")\n    }\n}\n")]);
-        let findings = run_ast_grep(dir.path(), &["Foo.kt".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["Foo.kt".to_string()], &[]).unwrap();
         assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("kotlin-unreachable-code")), "got: {findings:#?}");
     }
 
@@ -560,7 +670,7 @@ mod tests {
             return;
         }
         let dir = write_repo(&[("Foo.kt", "class Foo {\n    fun k(x: Int): Int {\n        if (x > 0) {\n            return x\n        }\n        return 0\n    }\n}\n")]);
-        let findings = run_ast_grep(dir.path(), &["Foo.kt".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["Foo.kt".to_string()], &[]).unwrap();
         assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("kotlin-unreachable-code")));
     }
 
@@ -574,7 +684,7 @@ mod tests {
             "FooTest.java",
             "import org.junit.Test;\n\npublic class FooTest {\n    @Test\n    public void testNothing() {\n        int x = doSomething();\n    }\n}\n",
         )]);
-        let findings = run_ast_grep(dir.path(), &["FooTest.java".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["FooTest.java".to_string()], &[]).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].source.rule_id.as_deref(), Some("java-test-without-assertions"));
     }
@@ -589,7 +699,7 @@ mod tests {
             "FooTest.java",
             "import org.junit.Test;\nimport static org.junit.Assert.assertEquals;\n\npublic class FooTest {\n    @Test\n    public void testGood() {\n        assertEquals(5, doSomething());\n    }\n}\n",
         )]);
-        let findings = run_ast_grep(dir.path(), &["FooTest.java".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["FooTest.java".to_string()], &[]).unwrap();
         assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("java-test-without-assertions")));
     }
 
@@ -603,7 +713,7 @@ mod tests {
             "FooTest.kt",
             "import org.junit.Test\n\nclass FooTest {\n    @Test\n    fun testNothing() {\n        val x = doSomething()\n    }\n}\n",
         )]);
-        let findings = run_ast_grep(dir.path(), &["FooTest.kt".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["FooTest.kt".to_string()], &[]).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].source.rule_id.as_deref(), Some("kotlin-test-without-assertions"));
     }
@@ -618,7 +728,7 @@ mod tests {
             "FooTest.kt",
             "import org.junit.Test\nimport org.junit.Assert.assertEquals\n\nclass FooTest {\n    @Test\n    fun testGood() {\n        assertEquals(5, doSomething())\n    }\n}\n",
         )]);
-        let findings = run_ast_grep(dir.path(), &["FooTest.kt".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["FooTest.kt".to_string()], &[]).unwrap();
         assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("kotlin-test-without-assertions")));
     }
 
@@ -632,7 +742,7 @@ mod tests {
             "main.go",
             "package main\n\nfunc doIt() error { return nil }\n\nfunc main() {\n\tif err := doIt(); err != nil {\n\t}\n}\n",
         )]);
-        let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()], &[]).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].source.rule_id.as_deref(), Some("go-empty-error-check"));
     }
@@ -647,7 +757,7 @@ mod tests {
             "main.go",
             "package main\n\nimport \"fmt\"\n\nfunc doIt() error { return nil }\n\nfunc main() {\n\tif err := doIt(); err != nil {\n\t\tfmt.Println(err)\n\t}\n}\n",
         )]);
-        let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()], &[]).unwrap();
         assert!(findings.is_empty());
     }
 
@@ -661,7 +771,7 @@ mod tests {
             "Sample.java",
             "public class Sample {\n    void run() {\n        try {\n            doThing();\n        } catch (Exception e) {\n        }\n    }\n    void doThing() {}\n}\n",
         )]);
-        let findings = run_ast_grep(dir.path(), &["Sample.java".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["Sample.java".to_string()], &[]).unwrap();
         assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("java-empty-catch-block")), "got: {findings:#?}");
     }
 
@@ -672,7 +782,7 @@ mod tests {
             return;
         }
         let dir = write_repo(&[("Sample.kt", "fun main() {\n    val s: String? = null\n    println(s!!.length)\n}\n")]);
-        let findings = run_ast_grep(dir.path(), &["Sample.kt".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["Sample.kt".to_string()], &[]).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].source.rule_id.as_deref(), Some("kotlin-avoid-not-null-assertion"));
     }
@@ -684,7 +794,7 @@ mod tests {
 
     #[test]
     fn rule_categories_reads_the_declared_category_for_every_builtin_rule() {
-        let categories = rule_categories();
+        let categories = rule_categories(&[RuleRoot::Embedded(&BUILTIN_RULES)]);
         assert_eq!(categories.get("go-no-self-comparison").map(String::as_str), Some("correctness"));
         assert_eq!(categories.get("kotlin-avoid-not-null-assertion").map(String::as_str), Some("correctness"));
         assert_eq!(categories.get("go-hardcoded-credential").map(String::as_str), Some("security"));
@@ -713,7 +823,7 @@ mod tests {
 
     #[test]
     fn rule_metadata_only_contains_rules_that_declare_a_metadata_block() {
-        let metadata = rule_metadata();
+        let metadata = rule_metadata(&[RuleRoot::Embedded(&BUILTIN_RULES)]);
         let weak_hash = metadata.get("go-weak-hash").expect("go-weak-hash should declare metadata");
         assert_eq!(weak_hash.cwe, vec!["CWE-327".to_string()]);
         assert!(!metadata.contains_key("go-no-self-comparison"), "a rule with no metadata: block must not appear");
@@ -726,7 +836,7 @@ mod tests {
             return;
         }
         let dir = write_repo(&[("main.go", "package main\n\nimport \"crypto/md5\"\n\nfunc f() {\n\tmd5.New()\n}\n")]);
-        let findings = run_ast_grep(dir.path(), &["main.go".to_string()]).unwrap();
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()], &[]).unwrap();
         let finding = findings.iter().find(|f| f.source.rule_id.as_deref() == Some("go-weak-hash")).expect("go-weak-hash should fire");
         let meta = finding.meta.as_ref().expect("go-weak-hash declares a metadata: block, meta should be Some");
         assert_eq!(meta.get("cwe").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|v| v.as_str()), Some("CWE-327"));
@@ -734,7 +844,7 @@ mod tests {
 
     #[test]
     fn semantic_rule_ids_reads_rules_declaring_semantic_true() {
-        let ids = semantic_rule_ids();
+        let ids = semantic_rule_ids(&[]);
         assert!(ids.contains("go-nested-loop-linear-search"));
         assert!(ids.contains("java-object-instantiation-in-loop"));
         assert!(ids.contains("go-unclosed-http-response-body"));

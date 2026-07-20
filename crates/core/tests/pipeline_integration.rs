@@ -30,7 +30,7 @@ fn run_pipeline(repo_root: &std::path::Path, base: &str, head: &str) -> (Vec<aut
 
     let changed_paths: Vec<String> = facts.files.iter().map(|f| f.path.clone()).collect();
     let mut stage1 = Vec::new();
-    stage1.extend(run_ast_grep(repo_root, &changed_paths).unwrap());
+    stage1.extend(run_ast_grep(repo_root, &changed_paths, &[]).unwrap());
     stage1.extend(run_golangci_lint(repo_root, &changed_paths).unwrap());
     stage1.extend(autoreview_core::run_symindex_check(repo_root, &changed_paths));
     let stage1_count = stage1.len();

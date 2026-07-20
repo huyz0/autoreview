@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 use autoreview_schema::Severity;
 
-use super::ast_grep::{walk_rule_contents, RuleMeta, BUILTIN_RULES};
+use super::ast_grep::{walk_rule_contents, RuleMeta, RuleRoot, BUILTIN_RULES};
 use super::complexity::ComplexityThresholds;
 
 fn severity_from_str(s: &str) -> Severity {
@@ -58,10 +58,12 @@ fn parse_threshold_rule(contents: &str) -> Option<ThresholdRuleDef> {
     Some(ThresholdRuleDef { id: yaml.common.id.clone(), metric: yaml.metric, threshold: yaml.threshold, category: yaml.common.category, severity: severity_from_str(&yaml.severity) })
 }
 
-/// Every `kind: threshold` rule declared in `rules-builtin/`.
+/// Every `kind: threshold` rule declared in `rules-builtin/`. Registered-
+/// pack threshold rules aren't loaded yet (rule-packs Phase 3) — this
+/// walks the embedded builtin tree only for now.
 pub fn load_threshold_rules() -> Vec<ThresholdRuleDef> {
     let mut defs = Vec::new();
-    walk_rule_contents(&BUILTIN_RULES, &mut |contents| {
+    walk_rule_contents(&[RuleRoot::Embedded(&BUILTIN_RULES)], &mut |contents| {
         if let Some(def) = parse_threshold_rule(contents) {
             defs.push(def);
         }

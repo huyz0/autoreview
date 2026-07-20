@@ -12,7 +12,7 @@ use serde::Deserialize;
 use autoreview_dataflow::taint::{NamePattern, TaintSink, TaintSpec};
 use autoreview_schema::Severity;
 
-use super::ast_grep::{walk_rule_contents, RuleMeta, BUILTIN_RULES};
+use super::ast_grep::{walk_rule_contents, RuleMeta, RuleRoot, BUILTIN_RULES};
 
 fn severity_from_str(s: &str) -> Severity {
     match s {
@@ -113,9 +113,11 @@ fn parse_taint_rule(contents: &str) -> Option<TaintRuleDef> {
 /// languages — callers filter by `language` themselves (see
 /// `dataflow_check.rs::run_dataflow_check`), the same way `run_ast_grep`
 /// leaves language dispatch to file extension rather than filtering here.
+/// Registered-pack taint rules aren't loaded yet (rule-packs Phase 3) —
+/// this walks the embedded builtin tree only for now.
 pub fn load_taint_rules() -> Vec<TaintRuleDef> {
     let mut defs = Vec::new();
-    walk_rule_contents(&BUILTIN_RULES, &mut |contents| {
+    walk_rule_contents(&[RuleRoot::Embedded(&BUILTIN_RULES)], &mut |contents| {
         if let Some(def) = parse_taint_rule(contents) {
             defs.push(def);
         }

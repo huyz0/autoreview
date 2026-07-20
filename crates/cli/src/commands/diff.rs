@@ -170,8 +170,30 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     // internally on every call.
     let languages_present = autoreview_langsupport::languages_present(changed_file_paths.iter().map(String::as_str));
     const STRUCTURAL_RULE_LANGUAGES: ApplyCondition = ApplyCondition::AnyLanguage(&[Language::Go, Language::Java, Language::Kotlin, Language::TypeScript, Language::Tsx, Language::JavaScript]);
+
+    // Registered external rule packs (.autoreview/rulepacks.yaml) — resolved
+    // once here, run "full trust immediately" (no shadow/promoted staging
+    // gate), and threaded into every backend that reads the rule tree.
+    // Opt-in via file presence, same convention as architecture.yaml; a
+    // pack that fails to resolve is warned about and skipped, not fatal to
+    // the rest of the review.
+    let configured_packs = match autoreview_core::load_rule_packs_config(&autoreview_core::rule_packs_config_path(&options.repo_root)) {
+        Ok(configured) => configured,
+        Err(err) => {
+            println!("  [warn] failed to parse .autoreview/rulepacks.yaml: {err}");
+            Vec::new()
+        }
+    };
+    let mut registered_packs = Vec::new();
+    for (id, result) in autoreview_core::resolve_rule_packs(&options.repo_root, &configured_packs) {
+        match result {
+            Ok(resolved) => registered_packs.push(resolved),
+            Err(err) => println!("  [warn] failed to resolve rule pack '{id}': {err}"),
+        }
+    }
+
     let mut stage1_agent_findings = Vec::new();
-    match run_ast_grep(&options.repo_root, &changed_file_paths) {
+    match run_ast_grep(&options.repo_root, &changed_file_paths, &registered_packs) {
         Ok(findings) => stage1_agent_findings.extend(findings),
         Err(err) => println!("  [warn] ast-grep run failed: {err}"),
     }
@@ -441,7 +463,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         // in particular is a syntactic proxy (comment volume vs. body
         // volume) for a semantic claim ("this comment is stale/no longer
         // useful") it can't verify on its own, so it needs the LLM check.
-        let mut semantic_ids = autoreview_core::semantic_rule_ids();
+        let mut semantic_ids = autoreview_core::semantic_rule_ids(&registered_packs);
         semantic_ids.extend([
             "message-chain".to_string(),
             "feature-envy".to_string(),

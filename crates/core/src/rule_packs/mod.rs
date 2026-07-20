@@ -17,7 +17,10 @@ use std::path::{Path, PathBuf};
 use autoreview_schema::{RulePackConfig, RulePackManifest, RulePackSourceConfig, RulePacksFile};
 
 const RULEPACKS_FILE_NAME: &str = "rulepacks.yaml";
-const MANIFEST_FILE_NAME: &str = "rulepack.yaml";
+/// A pack's own self-identity file at its root — not a rule file, so rule
+/// discovery (`analyzers::ast_grep`'s disk-root walk) must skip it even
+/// though it's a `.yaml` file sitting in the same tree it recursively scans.
+pub(crate) const MANIFEST_FILE_NAME: &str = "rulepack.yaml";
 
 /// Reads and parses `.autoreview/rulepacks.yaml`. Returns an empty list
 /// (not an error) when the file doesn't exist — registering rule packs is

@@ -134,7 +134,7 @@ fn every_builtin_rule_fires_on_its_positive_fixture_and_stays_silent_on_its_nega
         };
 
         let positive_dir = write_single_file(filename, &positive);
-        let positive_findings = run_ast_grep(positive_dir.path(), &[filename.to_string()]).unwrap();
+        let positive_findings = run_ast_grep(positive_dir.path(), &[filename.to_string()], &[]).unwrap();
         let positive_matches: Vec<_> = positive_findings.iter().filter(|f| f.source.rule_id.as_deref() == Some(rule.id.as_str())).collect();
         if positive_matches.len() != 1 {
             failures.push(format!(
@@ -146,7 +146,7 @@ fn every_builtin_rule_fires_on_its_positive_fixture_and_stays_silent_on_its_nega
         }
 
         let negative_dir = write_single_file(filename, &negative);
-        let negative_findings = run_ast_grep(negative_dir.path(), &[filename.to_string()]).unwrap();
+        let negative_findings = run_ast_grep(negative_dir.path(), &[filename.to_string()], &[]).unwrap();
         let negative_matches: Vec<_> = negative_findings.iter().filter(|f| f.source.rule_id.as_deref() == Some(rule.id.as_str())).collect();
         if !negative_matches.is_empty() {
             failures.push(format!("{}: expected 0 matches on negative fixture, got {}", rule.id, negative_matches.len()));
