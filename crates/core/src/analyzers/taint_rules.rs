@@ -157,7 +157,7 @@ mod tests {
         let rule = rules.iter().find(|r| r.id == "go-command-injection-taint").expect("rule should load");
         assert_eq!(rule.category, "security");
         assert_eq!(rule.severity, Severity::High);
-        assert_eq!(rule.spec.sinks.len(), 4);
+        assert_eq!(rule.spec.sinks.len(), 5);
         assert_eq!(rule.spec.sources.len(), 2);
     }
 

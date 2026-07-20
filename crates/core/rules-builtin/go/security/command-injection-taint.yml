@@ -13,4 +13,5 @@ sinks:
   - call: exec.CommandContext
   - call: syscall.Exec
   - call: syscall.ForkExec
+  - call: exec.Cmd{Path}
 sanitizers: []

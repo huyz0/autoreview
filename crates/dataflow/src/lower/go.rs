@@ -130,12 +130,64 @@ fn call_target_name(call: Node, source: &[u8]) -> Option<String> {
     }
 }
 
-fn lower_assign_like(node: Node, source: &[u8]) -> Stmt {
+/// A `pkg.Type{Field: value, ...}` composite literal's type name (`"exec.Cmd"`),
+/// unwrapping an optional leading `&`. Only `qualified_type` (`pkg.Type`) and
+/// bare `type_identifier` (a same-package type) are recognized, matching
+/// `call_target_name`'s own scope — anything else (generic instantiation,
+/// array/slice literal types) isn't a struct sink candidate.
+fn composite_literal_operand(rhs_node: Node) -> Option<Node> {
+    match rhs_node.kind() {
+        "composite_literal" => Some(rhs_node),
+        "unary_expression" => rhs_node.child_by_field_name("operand").filter(|o| o.kind() == "composite_literal"),
+        _ => None,
+    }
+}
+
+/// Lowers `pkg.Type{Field: value, ...}` composite literal construction
+/// (see `composite_literal_operand` for the recognized shapes) into one
+/// synthetic `Stmt::Call` per keyed field whose value is a plain
+/// identifier — `target: Named("pkg.Type{Field}")`, so a taint rule's
+/// sink pattern can single out exactly the dangerous field (e.g.
+/// `exec.Cmd{Path}`) rather than treating every field of the struct as
+/// equally sensitive. Modeling the literal as the sink itself (rather
+/// than waiting for a later `cmd.Run()`) matches how `exec.Command(...)`
+/// is already treated as dangerous at the call site, not at whatever
+/// later line actually executes it. Fields whose value isn't a bare
+/// identifier (a literal, a nested expression) are skipped — same
+/// precision-over-generality tradeoff as `call_arg_identifiers`.
+fn lower_composite_literal_fields(composite: Node, source: &[u8]) -> Vec<Stmt> {
+    let Some(type_node) = composite.child_by_field_name("type") else { return Vec::new() };
+    let type_name = match type_node.kind() {
+        "qualified_type" => {
+            let (Some(pkg), Some(name)) = (type_node.child_by_field_name("package"), type_node.child_by_field_name("name")) else { return Vec::new() };
+            format!("{}.{}", text(pkg, source), text(name, source))
+        }
+        "type_identifier" => text(type_node, source).to_string(),
+        _ => return Vec::new(),
+    };
+    let Some(body) = composite.child_by_field_name("body") else { return Vec::new() };
+    let mut cursor = body.walk();
+    body.named_children(&mut cursor)
+        .filter(|n| n.kind() == "keyed_element")
+        .filter_map(|kv| {
+            let key = kv.child_by_field_name("key")?;
+            let value = kv.child_by_field_name("value")?;
+            let value_ident = value.named_child(0).filter(|n| n.kind() == "identifier")?;
+            Some(Stmt::Call {
+                target: crate::cfg::CallTarget::Named(format!("{type_name}{{{}}}", text(key, source))),
+                args: vec![text(value_ident, source).to_string()],
+                assigned_to: None,
+            })
+        })
+        .collect()
+}
+
+fn lower_assign_like(node: Node, source: &[u8]) -> Vec<Stmt> {
     let (Some(left), Some(right)) = (node.child_by_field_name("left"), node.child_by_field_name("right")) else {
-        return Stmt::Other(text(node, source).to_string());
+        return vec![Stmt::Other(text(node, source).to_string())];
     };
     if right.named_child_count() != 1 {
-        return Stmt::Other(text(node, source).to_string());
+        return vec![Stmt::Other(text(node, source).to_string())];
     }
     let rhs_node = right.named_child(0).unwrap();
 
@@ -150,29 +202,36 @@ fn lower_assign_like(node: Node, source: &[u8]) -> Stmt {
         if primary.kind() == "identifier" && text(primary, source) != "_" {
             if let Some(name) = call_target_name(rhs_node, source) {
                 let args = call_arg_identifiers(rhs_node, source);
-                return Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(text(primary, source).to_string()) };
+                return vec![Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(text(primary, source).to_string()) }];
             }
         }
-        return Stmt::Other(text(node, source).to_string());
+        return vec![Stmt::Other(text(node, source).to_string())];
     }
 
     if left.named_child_count() != 1 {
-        return Stmt::Other(text(node, source).to_string());
+        return vec![Stmt::Other(text(node, source).to_string())];
     }
     let lhs_node = left.named_child(0).unwrap();
     if lhs_node.kind() != "identifier" {
-        return Stmt::Other(text(node, source).to_string());
+        return vec![Stmt::Other(text(node, source).to_string())];
     }
     let lhs = text(lhs_node, source).to_string();
 
     if rhs_node.kind() == "call_expression" {
         if let Some(name) = call_target_name(rhs_node, source) {
             let args = call_arg_identifiers(rhs_node, source);
-            return Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(lhs) };
+            return vec![Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(lhs) }];
         }
     }
 
-    Stmt::Assign { lhs, rhs: classify_rhs(rhs_node, source) }
+    if let Some(composite) = composite_literal_operand(rhs_node) {
+        let synthetic = lower_composite_literal_fields(composite, source);
+        if !synthetic.is_empty() {
+            return synthetic;
+        }
+    }
+
+    vec![Stmt::Assign { lhs, rhs: classify_rhs(rhs_node, source) }]
 }
 
 /// Lowers `var x *T` (no initializer — starts out nil) or `var x *T =
@@ -284,7 +343,7 @@ fn lower_block(cfg: &mut Cfg<Stmt>, block: Node, source: &[u8], mut current: Nod
 fn lower_statement(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {
     match stmt.kind() {
         "short_var_declaration" | "assignment_statement" => {
-            cfg.nodes[current].stmts.push(lower_assign_like(stmt, source));
+            cfg.nodes[current].stmts.extend(lower_assign_like(stmt, source));
             current
         }
         "var_declaration" => {
@@ -483,9 +542,9 @@ fn lower_closure_capture(stmt: Node, source: &[u8], kind: crate::cfg::ClosureKin
     if let Some(list) = body.named_children(&mut cursor).find(|n| n.kind() == "statement_list") {
         if let Some(first) = list.named_child(0) {
             if first.kind() == "short_var_declaration" {
-                if let Stmt::Assign { lhs, rhs: RhsShape::Var(rhs) } = lower_assign_like(first, source) {
+                if let [Stmt::Assign { lhs, rhs: RhsShape::Var(rhs) }] = lower_assign_like(first, source).as_slice() {
                     if lhs == rhs {
-                        captured.retain(|v| *v != lhs);
+                        captured.retain(|v| v != lhs);
                     }
                 }
             }
@@ -673,6 +732,28 @@ mod tests {
                 |n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(a) } if name == "exec.Command" && a == "cmd" && args.contains(&"userInput".to_string())))
             ),
             "got: {:#?}",
+            cfg.nodes
+        );
+    }
+
+    #[test]
+    fn recognizes_an_address_of_struct_literal_field_as_a_synthetic_call() {
+        let cfg = lower("package p\nfunc f(userInput string) {\n\tcmd := &exec.Cmd{Path: userInput, Dir: \"/tmp\"}\n\t_ = cmd\n}\n");
+        assert!(
+            cfg.nodes.iter().any(|n| n.stmts.iter().any(
+                |s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: None } if name == "exec.Cmd{Path}" && args == &vec!["userInput".to_string()])
+            )),
+            "got: {:#?}",
+            cfg.nodes
+        );
+    }
+
+    #[test]
+    fn a_struct_literal_field_set_to_a_string_literal_is_not_lowered_to_a_synthetic_call() {
+        let cfg = lower("package p\nfunc f() {\n\tcmd := &exec.Cmd{Dir: \"/tmp\"}\n\t_ = cmd\n}\n");
+        assert!(
+            !cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), .. } if name.starts_with("exec.Cmd")))),
+            "a literal field value shouldn't lower to a synthetic call: {:#?}",
             cfg.nodes
         );
     }

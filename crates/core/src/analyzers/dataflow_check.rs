@@ -427,6 +427,26 @@ mod tests {
     }
 
     #[test]
+    fn flags_a_form_value_reaching_an_exec_cmd_struct_literals_path_field_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.go"),
+            "package main\n\nfunc handle(r *http.Request) {\n\tuserInput := r.FormValue(\"cmd\")\n\tc := &exec.Cmd{Path: userInput}\n\tc.Run()\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("go-command-injection-taint")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_an_exec_cmd_struct_literal_with_only_a_literal_path_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.go"), "package main\n\nfunc f() {\n\tc := &exec.Cmd{Path: \"/bin/ls\"}\n\tc.Run()\n}\n").unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("go-command-injection-taint")), "got: {findings:#?}");
+    }
+
+    #[test]
     fn flags_a_form_value_reaching_sql_query_end_to_end() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(

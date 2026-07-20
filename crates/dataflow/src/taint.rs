@@ -248,6 +248,26 @@ mod tests {
     }
 
     #[test]
+    fn flags_a_source_reaching_an_exec_cmd_struct_literals_path_field() {
+        let mut spec = spec();
+        spec.sinks.push(TaintSink { call: NamePattern::suffix("exec.Cmd{Path}"), tainted_arg_positions: None });
+        let cfg = lower("package p\nfunc f(r *Req) {\n\tcmd := r.FormValue(\"cmd\")\n\tc := &exec.Cmd{Path: cmd}\n\t_ = c\n}\n");
+        let hits = check(&spec, &cfg);
+        assert_eq!(hits.len(), 1, "got: {hits:#?}");
+        assert_eq!(hits[0].tainted_arg, "cmd");
+        assert_eq!(hits[0].sink_call, "exec.Cmd{Path}");
+    }
+
+    #[test]
+    fn does_not_flag_an_untainted_exec_cmd_struct_literals_path_field() {
+        let mut spec = spec();
+        spec.sinks.push(TaintSink { call: NamePattern::suffix("exec.Cmd{Path}"), tainted_arg_positions: None });
+        let cfg = lower("package p\nfunc f() {\n\tc := &exec.Cmd{Path: \"/bin/ls\"}\n\t_ = c\n}\n");
+        let hits = check(&spec, &cfg);
+        assert!(hits.is_empty(), "got: {hits:#?}");
+    }
+
+    #[test]
     fn does_not_flag_a_call_matching_neither_source_nor_sink_pattern() {
         let cfg = lower("package p\nfunc f() {\n\tx := os.Getenv(\"PATH\")\n\texec.Command(\"echo\", x)\n}\n");
         // os.Getenv isn't a declared source, and taint-through-call
