@@ -424,6 +424,50 @@ pub struct SymindexConfig {
     pub tier4_go: bool,
 }
 
+/// One sequential `gh api .../comments` call per PR (see
+/// `mine_from_comments::mine_from_pr_comments`) took ~2-3s/PR against a
+/// real, active public repo (verified manually — 40 PRs took 103s) — this
+/// default trades a first run staying under ~2 minutes against scanning
+/// enough history to actually find recurring patterns. A repo that wants
+/// deeper history should raise this explicitly, accepting the longer wait.
+fn default_lookback_prs() -> usize {
+    30
+}
+
+fn default_gh_binary() -> String {
+    "gh".to_string()
+}
+
+/// Opt-in second input source for `rule_factory::mine`'s clustering,
+/// alongside autoreview's own past agent findings: recurring human PR
+/// review comments, mined via the `gh` CLI. Off by default because it
+/// shells out to `gh api` against GitHub (needs `gh auth login` done
+/// already, and makes real, sequential network calls per `autoreview
+/// rules mine --from-comments` invocation — see `default_lookback_prs`'s
+/// own doc comment for measured latency) — modeled on Aviator Verify's
+/// "mine invariants from PR history" input, per SESSION_NOTES.md.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MineFromCommentsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// How many of the repo's most recently merged PRs to scan — a fixed
+    /// count, not a date window, so this stays a bounded number of `gh`
+    /// calls (list PRs once, fetch comments once per PR) regardless of how
+    /// active the repo is. Roughly linear in runtime — see
+    /// `default_lookback_prs`'s doc comment for the measured rate.
+    #[serde(default = "default_lookback_prs")]
+    pub lookback_prs: usize,
+    #[serde(default = "default_gh_binary")]
+    pub gh_binary: String,
+}
+
+impl Default for MineFromCommentsConfig {
+    fn default() -> Self {
+        Self { enabled: false, lookback_prs: default_lookback_prs(), gh_binary: default_gh_binary() }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoreviewConfig {
@@ -441,6 +485,8 @@ pub struct AutoreviewConfig {
     pub agents: AgentsConfig,
     #[serde(default)]
     pub symindex: SymindexConfig,
+    #[serde(default)]
+    pub mine_from_comments: MineFromCommentsConfig,
 }
 
 impl Default for AutoreviewConfig {
@@ -453,6 +499,7 @@ impl Default for AutoreviewConfig {
             verify: VerifyConfig::default(),
             agents: AgentsConfig::default(),
             symindex: SymindexConfig::default(),
+            mine_from_comments: MineFromCommentsConfig::default(),
         }
     }
 }

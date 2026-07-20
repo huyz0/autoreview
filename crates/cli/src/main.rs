@@ -9,7 +9,7 @@ use commands::diff::{run_diff, DiffCommandOptions};
 use commands::doctor::run_doctor;
 use commands::feedback::{run_feedback, run_missed_report};
 use commands::history::run_history_sync;
-use commands::rules::{run_rules_bench, run_rules_mine, run_rules_review, run_rules_shadow_log};
+use commands::rules::{run_rules_bench, run_rules_mine, run_rules_mine_comments, run_rules_review, run_rules_shadow_log};
 use commands::skills::{run_skills_list, run_skills_mine, run_skills_review, run_skills_stub};
 use commands::skills_bench::run_skills_bench;
 use commands::stubs::run_rules_stub;
@@ -98,8 +98,13 @@ enum HistoryAction {
 
 #[derive(Subcommand)]
 enum RulesAction {
-    /// Mine recurring agent findings into rule candidates
-    Mine,
+    /// Mine recurring agent findings into rule candidates. With
+    /// --from-comments, mines recurring human PR review comments via `gh`
+    /// instead (opt-in — see mineFromComments in .autoreview/config.yaml)
+    Mine {
+        #[arg(long)]
+        from_comments: bool,
+    },
     /// Bench a candidate rule against its self-test + historical precision
     Bench { cluster_id: String },
     /// Human review queue for candidate rules — lists candidates by default;
@@ -211,7 +216,13 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Rules { action } => match action {
-            RulesAction::Mine => run_rules_mine(&repo_root)?,
+            RulesAction::Mine { from_comments } => {
+                if from_comments {
+                    run_rules_mine_comments(&repo_root)?
+                } else {
+                    run_rules_mine(&repo_root)?
+                }
+            }
             RulesAction::Bench { cluster_id } => run_rules_bench(&repo_root, &cluster_id)?,
             RulesAction::Review { approve, reject, reason } => run_rules_review(&repo_root, approve, reject, reason)?,
             RulesAction::ShadowLog { rule_id } => run_rules_shadow_log(&repo_root, &rule_id)?,

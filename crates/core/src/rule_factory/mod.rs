@@ -1,10 +1,11 @@
-//! Self-improving rule factory (M3): mine recurring agent findings into
-//! deterministic-rule candidates, then (later stages, not yet built) draft,
-//! bench, shadow, and promote them. Only `mine` is implemented so far —
-//! see this module's `mine` submodule for the clustering algorithm and
-//! `CandidateSeed`'s docs for exactly what "recurring" means here.
+//! Self-improving rule factory (M3): mine recurring agent findings (or,
+//! opt-in, recurring human PR review comments via `mine_from_comments`)
+//! into deterministic-rule candidates, then draft, bench, shadow, and
+//! promote them. See `mine`'s submodule docs for the clustering algorithm
+//! and `CandidateSeed`'s docs for exactly what "recurring" means here.
 
 pub mod bench;
 pub mod draft;
 pub mod mine;
+pub mod mine_from_comments;
 pub mod shadow;

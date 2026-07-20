@@ -1,6 +1,8 @@
-//! `autoreview rules mine`/`rules bench`/`rules shadow-log`/`rules review`
-//! — the first five real (non-stub) pieces of the M3 rule factory: clusters
-//! recorded agent findings into candidate seeds
+//! `autoreview rules mine`/`rules mine --from-comments`/`rules bench`/
+//! `rules shadow-log`/`rules review` — the first five real (non-stub)
+//! pieces of the M3 rule factory: clusters recorded agent findings (or,
+//! opt-in, recurring human PR review comments — see
+//! `rule_factory::mine_from_comments`) into candidate seeds
 //! (`.autoreview/rules/candidates/<clusterId>/seed.json`), attempts to
 //! draft an ast-grep rule for each seed via the configured agent backend,
 //! 5x ensemble-agreement filtered (`rule_factory::draft`), benches a
@@ -11,7 +13,7 @@
 //! actual `--approve`/`--reject` gate the plan calls for before a candidate
 //! ever reaches shadow mode. Rollback stays a stub (`run_rules_stub`).
 
-use autoreview_core::{draft_candidate, mine_candidates, run_bench, write_seed_file, BenchVerdict, DraftOutcome, HistoryStore};
+use autoreview_core::{draft_candidate, mine_candidates, mine_from_pr_comments, run_bench, write_seed_file, BenchVerdict, CandidateSeed, DraftOutcome, HistoryStore};
 use autoreview_schema::AgentBackendKind;
 use serde::Deserialize;
 
@@ -25,30 +27,19 @@ fn cheap_model_for(kind: AgentBackendKind, config: &autoreview_schema::Autorevie
     }
 }
 
-pub fn run_rules_mine(repo_root: &std::path::Path) -> anyhow::Result<()> {
-    let history_dir = history_dir_for(repo_root);
-    let store = HistoryStore::open(&history_dir)?;
-    let findings = store.agent_findings_for_mining()?;
-
-    if findings.is_empty() {
-        println!("No agent findings recorded yet on this machine — nothing to mine. Run `autoreview diff` a few times first.");
-        return Ok(());
-    }
-
-    let seeds = mine_candidates(findings);
-    if seeds.is_empty() {
-        println!("No recurring clusters found (need >= 3 similar findings spanning >= 2 distinct runs).");
-        return Ok(());
-    }
-
-    let config = autoreview_core::load_config(&repo_root.join(".autoreview").join("config.yaml"))?;
+/// Shared by both mining sources: writes each seed's file, attempts a
+/// draft against the configured backend (skipped, not failed, when none is
+/// available), and prints progress. `repo_root`/`config` are threaded
+/// through rather than re-derived, since the comments-mining caller has
+/// already loaded `config` for its own opt-in check.
+fn draft_and_write_seeds(repo_root: &std::path::Path, config: &autoreview_schema::AutoreviewConfig, seeds: &[CandidateSeed]) -> anyhow::Result<()> {
     let backend_kind = config.agents.backend;
-    let can_draft = backend_available(backend_kind, &config);
-    let backend = can_draft.then(|| build_backend(backend_kind, &config));
-    let model = cheap_model_for(backend_kind, &config).to_string();
+    let can_draft = backend_available(backend_kind, config);
+    let backend = can_draft.then(|| build_backend(backend_kind, config));
+    let model = cheap_model_for(backend_kind, config).to_string();
 
     println!("Found {} candidate cluster(s):", seeds.len());
-    for seed in &seeds {
+    for seed in seeds {
         let seed_path = write_seed_file(repo_root, seed)?;
         println!(
             "  {} ({}, {} member(s) across {} run(s)) -> {}",
@@ -79,6 +70,55 @@ pub fn run_rules_mine(repo_root: &std::path::Path) -> anyhow::Result<()> {
     }
     println!("\n(Review/shadow/promote are not yet implemented. Run `autoreview rules bench <clusterId>` on a drafted candidate once you've added tests/positive and tests/negative fixtures under its candidate directory.)");
     Ok(())
+}
+
+pub fn run_rules_mine(repo_root: &std::path::Path) -> anyhow::Result<()> {
+    let history_dir = history_dir_for(repo_root);
+    let store = HistoryStore::open(&history_dir)?;
+    let findings = store.agent_findings_for_mining()?;
+
+    if findings.is_empty() {
+        println!("No agent findings recorded yet on this machine — nothing to mine. Run `autoreview diff` a few times first.");
+        return Ok(());
+    }
+
+    let seeds = mine_candidates(findings);
+    if seeds.is_empty() {
+        println!("No recurring clusters found (need >= 3 similar findings spanning >= 2 distinct runs).");
+        return Ok(());
+    }
+
+    let config = autoreview_core::load_config(&repo_root.join(".autoreview").join("config.yaml"))?;
+    draft_and_write_seeds(repo_root, &config, &seeds)
+}
+
+/// `autoreview rules mine --from-comments` — mines recurring human PR
+/// review comments instead of autoreview's own past agent findings. Opt-in
+/// (`mineFromComments.enabled: true` in `.autoreview/config.yaml`) since it
+/// shells out to `gh api` against the real GitHub API for the configured
+/// repo, unlike the default `agent_findings_for_mining` source which only
+/// ever reads this machine's local history store.
+pub fn run_rules_mine_comments(repo_root: &std::path::Path) -> anyhow::Result<()> {
+    let config = autoreview_core::load_config(&repo_root.join(".autoreview").join("config.yaml"))?;
+    if !config.mine_from_comments.enabled {
+        println!("mineFromComments.enabled is false in .autoreview/config.yaml — nothing to do. Set it to true to mine recurring PR review comments via `gh`.");
+        return Ok(());
+    }
+
+    println!("Fetching the {} most recently merged PRs' review comments via `gh`...", config.mine_from_comments.lookback_prs);
+    let findings = mine_from_pr_comments(&config.mine_from_comments.gh_binary, config.mine_from_comments.lookback_prs)?;
+    if findings.is_empty() {
+        println!("No substantive review comments found on recent merged PRs — nothing to mine.");
+        return Ok(());
+    }
+
+    let seeds = mine_candidates(findings);
+    if seeds.is_empty() {
+        println!("No recurring clusters found (need >= 3 similar comments spanning >= 2 distinct PRs).");
+        return Ok(());
+    }
+
+    draft_and_write_seeds(repo_root, &config, &seeds)
 }
 
 pub fn run_rules_bench(repo_root: &std::path::Path, cluster_id: &str) -> anyhow::Result<()> {
