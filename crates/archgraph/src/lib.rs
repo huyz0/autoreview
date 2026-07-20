@@ -2,8 +2,18 @@
 //! cross-file dependency graph Tier 1's per-file import scan structurally
 //! can't be: a whole-repo package import graph, cycle detection, and
 //! fan-in/fan-out metrics. Go-only first slice, per the plan's own scoping
-//! ("simplest module resolution, no classpath ambiguity") — Java/Kotlin
-//! graph extraction is real, separate follow-on work, not attempted here.
+//! ("simplest module resolution, no classpath ambiguity").
+//!
+//! Java/Kotlin followed as a second slice (`build_java_kotlin_import_graph`)
+//! with a deliberately different package-resolution strategy than Go's:
+//! Go's package is its file's *directory* (a language guarantee), but
+//! Java/Kotlin's package is whatever the file's own `package` statement
+//! declares — directory layout conventionally mirrors it but isn't
+//! guaranteed the way Go's is, so this reads the declaration directly
+//! rather than inferring from the path. That also removes the need for a
+//! `go.mod`-style "what's our module path" discovery step: a package is
+//! "internal" simply by being declared somewhere in this repo's own
+//! source tree (collected in one pass), no external manifest to parse.
 //!
 //! Deliberately a pure graph library with no knowledge of `autoreview-
 //! schema`'s `Finding` type — the plan's repo layout describes this crate
@@ -84,7 +94,7 @@ fn extract_quoted(s: &str) -> Option<String> {
     Some(s[start + 1..end].to_string())
 }
 
-const SKIP_DIRS: &[&str] = &[".git", "vendor", "node_modules", "testdata"];
+const SKIP_DIRS: &[&str] = &[".git", "vendor", "node_modules", "testdata", "target", "build", ".gradle", "out"];
 
 fn walk_go_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -124,6 +134,92 @@ pub fn build_go_import_graph(repo_root: &Path, module_path: &str) -> ImportGraph
         for import in extract_go_imports(&content) {
             if import.starts_with(module_path) && import != package {
                 entry.insert(import);
+            }
+        }
+    }
+
+    graph
+}
+
+/// Extracts a file's own `package foo.bar;` (Java) / `package foo.bar`
+/// (Kotlin, no semicolon required) declaration — public since
+/// `autoreview-core`'s finding-mapping layer needs the same extraction to
+/// resolve a *changed* file's own package (mirroring how Go's
+/// `package_for_file` lives outside this crate, except Java/Kotlin's needs
+/// this crate's own parsing rather than a pure path computation).
+pub fn declared_package(content: &str) -> Option<String> {
+    content.lines().map(str::trim).find_map(|line| line.strip_prefix("package ").map(|rest| rest.trim_end_matches(';').trim().to_string()))
+}
+
+/// Extracts every `import foo.bar.Baz;`/`import foo.bar.*;` (Java) or
+/// `import foo.bar.Baz`/`import foo.bar.*` (Kotlin) target — `import
+/// static foo.Bar.baz;`'s `static` keyword is stripped so the member's
+/// owning package still resolves correctly.
+fn extract_java_kotlin_imports(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("import ").map(|rest| rest.strip_prefix("static ").unwrap_or(rest).trim_end_matches(';').trim().to_string()))
+        .collect()
+}
+
+/// An import target's own package: `foo.bar.Baz` -> `foo.bar`, and a
+/// wildcard `foo.bar.*` -> `foo.bar` directly (no trailing member to
+/// strip).
+fn import_package(import_path: &str) -> String {
+    match import_path.strip_suffix(".*") {
+        Some(prefix) => prefix.to_string(),
+        None => match import_path.rfind('.') {
+            Some(idx) => import_path[..idx].to_string(),
+            None => import_path.to_string(),
+        },
+    }
+}
+
+fn walk_java_kotlin_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if SKIP_DIRS.contains(&name) {
+                continue;
+            }
+            walk_java_kotlin_files(&path, out);
+        } else if matches!(path.extension().and_then(|e| e.to_str()), Some("java") | Some("kt")) {
+            out.push(path);
+        }
+    }
+}
+
+/// Builds the whole-repo Java/Kotlin package import graph. Unlike Go's
+/// directory-derived package, a package here is whatever each file's own
+/// `package` statement declares (see this module's doc comment) — a
+/// package is "internal" simply by being declared somewhere in this
+/// repo's own `.java`/`.kt` files, discovered in the same walk rather than
+/// needing an external module-path manifest. Files with no `package`
+/// statement (Java's default/unnamed package, or a parse miss) are
+/// skipped — there's no package name to anchor a node on.
+pub fn build_java_kotlin_import_graph(repo_root: &Path) -> ImportGraph {
+    let mut files = Vec::new();
+    walk_java_kotlin_files(repo_root, &mut files);
+
+    let mut file_packages: Vec<(String, String)> = Vec::new();
+    let mut declared_packages: HashSet<String> = HashSet::new();
+    for file in &files {
+        let Ok(content) = std::fs::read_to_string(file) else { continue };
+        let Some(package) = declared_package(&content) else { continue };
+        declared_packages.insert(package.clone());
+        file_packages.push((package, content));
+    }
+
+    let mut graph = ImportGraph::default();
+    for (package, content) in &file_packages {
+        let entry = graph.edges.entry(package.clone()).or_default();
+        for import in extract_java_kotlin_imports(content) {
+            let target = import_package(&import);
+            if target != *package && declared_packages.contains(&target) {
+                entry.insert(target);
             }
         }
     }
@@ -263,5 +359,60 @@ mod tests {
 
         let graph = build_go_import_graph(dir.path(), "github.com/example/myapp");
         assert_eq!(graph.packages().count(), 1);
+    }
+
+    fn write_source_file(dir: &Path, rel_path: &str, content: &str) {
+        let path = dir.join(rel_path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn declared_package_reads_the_package_statement() {
+        assert_eq!(declared_package("package com.example.foo;\n\nclass Foo {}\n"), Some("com.example.foo".to_string()));
+        assert_eq!(declared_package("package com.example.foo\n\nclass Foo\n"), Some("com.example.foo".to_string()), "Kotlin has no trailing semicolon");
+        assert_eq!(declared_package("class Foo {}\n"), None);
+    }
+
+    #[test]
+    fn build_java_kotlin_import_graph_creates_edges_only_for_internal_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        write_source_file(dir.path(), "src/com/example/a/A.java", "package com.example.a;\n\nimport com.example.b.B;\nimport java.util.List;\n\nclass A {\n    B b;\n    List<String> items;\n}\n");
+        write_source_file(dir.path(), "src/com/example/b/B.java", "package com.example.b;\n\nclass B {}\n");
+
+        let graph = build_java_kotlin_import_graph(dir.path());
+        assert!(graph.edges.get("com.example.a").unwrap().contains("com.example.b"));
+        assert!(!graph.edges.get("com.example.a").unwrap().contains("java.util"), "stdlib imports must not become graph edges");
+    }
+
+    #[test]
+    fn build_java_kotlin_import_graph_resolves_a_wildcard_import() {
+        let dir = tempfile::tempdir().unwrap();
+        write_source_file(dir.path(), "src/com/example/a/A.java", "package com.example.a;\n\nimport com.example.b.*;\n\nclass A {\n    B b;\n}\n");
+        write_source_file(dir.path(), "src/com/example/b/B.java", "package com.example.b;\n\nclass B {}\n");
+
+        let graph = build_java_kotlin_import_graph(dir.path());
+        assert!(graph.edges.get("com.example.a").unwrap().contains("com.example.b"));
+    }
+
+    #[test]
+    fn build_java_kotlin_import_graph_works_across_java_and_kotlin_files_in_the_same_package() {
+        let dir = tempfile::tempdir().unwrap();
+        write_source_file(dir.path(), "src/com/example/a/A.kt", "package com.example.a\n\nimport com.example.b.B\n\nclass A {\n    val b: B? = null\n}\n");
+        write_source_file(dir.path(), "src/com/example/b/B.java", "package com.example.b;\n\nclass B {}\n");
+
+        let graph = build_java_kotlin_import_graph(dir.path());
+        assert!(graph.edges.get("com.example.a").unwrap().contains("com.example.b"));
+    }
+
+    #[test]
+    fn detect_cycles_finds_a_real_two_package_java_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        write_source_file(dir.path(), "src/com/example/a/A.java", "package com.example.a;\n\nimport com.example.b.B;\n\nclass A {\n    B b;\n}\n");
+        write_source_file(dir.path(), "src/com/example/b/B.java", "package com.example.b;\n\nimport com.example.a.A;\n\nclass B {\n    A a;\n}\n");
+
+        let graph = build_java_kotlin_import_graph(dir.path());
+        let cycles = detect_cycles(&graph);
+        assert_eq!(cycles.len(), 1, "got: {cycles:#?}");
     }
 }

@@ -1,24 +1,25 @@
-//! Turns `autoreview-archgraph`'s Go-only import-cycle detection into
-//! reportable findings — the crate itself has no knowledge of the schema's
-//! `Finding` type, per its own module docs, so that mapping lives here.
+//! Turns `autoreview-archgraph`'s import-cycle detection into reportable
+//! findings — the crate itself has no knowledge of the schema's `Finding`
+//! type, per its own module docs, so that mapping lives here.
 //!
 //! Deliberately diff-relevant, not a whole-repo audit dump: archgraph
 //! builds the graph over the *entire* repo (a cycle can't be seen from one
 //! file), but this only reports a cycle when at least one of its packages
 //! contains a file the current diff actually touched — otherwise every
 //! `autoreview diff` on an unrelated change would repeat the same
-//! pre-existing cycles it can't do anything about in this review.
+//! pre-existing cycles it can't do anything about in this review. Go and
+//! Java/Kotlin are checked independently (two separate graphs, two
+//! separate package-resolution strategies — see `autoreview_archgraph`'s
+//! own module doc for why) and their findings are simply concatenated.
 
 use std::collections::HashSet;
 use std::path::Path;
 
-use autoreview_archgraph::{build_go_import_graph, detect_cycles, discover_go_module_path};
+use autoreview_archgraph::{build_go_import_graph, build_java_kotlin_import_graph, declared_package, detect_cycles, discover_go_module_path, ImportGraph};
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
-fn package_for_file(repo_root: &Path, file: &str, module_path: &str) -> Option<String> {
-    let rel = Path::new(file);
-    let parent = rel.parent()?;
-    let _ = repo_root;
+fn go_package_for_file(file: &str, module_path: &str) -> Option<String> {
+    let parent = Path::new(file).parent()?;
     if parent.as_os_str().is_empty() {
         Some(module_path.to_string())
     } else {
@@ -26,24 +27,23 @@ fn package_for_file(repo_root: &Path, file: &str, module_path: &str) -> Option<S
     }
 }
 
-/// Runs archgraph's cycle detection over the whole repo and reports any
-/// cycle that includes a package the current diff touched. Returns an
-/// empty list (not an error) when the repo isn't a Go module at all — this
-/// is Go-only, per the plan's own scoping.
-pub fn run_archgraph_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
-    let Some(module_path) = discover_go_module_path(repo_root) else { return Vec::new() };
-    let changed_go_files: Vec<&String> = changed_files.iter().filter(|f| f.ends_with(".go")).collect();
-    if changed_go_files.is_empty() {
-        return Vec::new();
-    }
+fn java_kotlin_package_for_file(repo_root: &Path, file: &str) -> Option<String> {
+    let content = std::fs::read_to_string(repo_root.join(file)).ok()?;
+    declared_package(&content)
+}
 
-    let graph = build_go_import_graph(repo_root, &module_path);
-    let cycles = detect_cycles(&graph);
+/// Runs cycle detection over `graph` and reports any cycle that includes
+/// a package one of `changed_files` belongs to (via `package_for_file`),
+/// anchoring each finding at one of those changed files. Shared between
+/// the Go and Java/Kotlin call sites below — only the graph and the
+/// package-resolution strategy differ between them.
+fn report_cycles_touching_changed_files(graph: &ImportGraph, changed_files: &[&String], package_for_file: impl Fn(&str) -> Option<String>) -> Vec<AgentFinding> {
+    let cycles = detect_cycles(graph);
     if cycles.is_empty() {
         return Vec::new();
     }
 
-    let changed_packages: HashSet<String> = changed_go_files.iter().filter_map(|f| package_for_file(repo_root, f, &module_path)).collect();
+    let changed_packages: HashSet<String> = changed_files.iter().filter_map(|f| package_for_file(f)).collect();
 
     let mut findings = Vec::new();
     let mut reported: HashSet<Vec<String>> = HashSet::new();
@@ -67,7 +67,7 @@ pub fn run_archgraph_check(repo_root: &Path, changed_files: &[String]) -> Vec<Ag
 
         // Anchor the finding at one of the actually-changed files that
         // belongs to a package in this cycle.
-        let anchor_file = changed_go_files.iter().find(|f| package_for_file(repo_root, f, &module_path).map(|p| cycle_packages.contains(&p)).unwrap_or(false));
+        let anchor_file = changed_files.iter().find(|f| package_for_file(f).map(|p| cycle_packages.contains(&p)).unwrap_or(false));
         let Some(anchor_file) = anchor_file else { continue };
 
         let cycle_description = cycle.join(" -> ");
@@ -87,6 +87,30 @@ pub fn run_archgraph_check(repo_root: &Path, changed_files: &[String]) -> Vec<Ag
             meta: None,
             suggested_patch: None,
         });
+    }
+
+    findings
+}
+
+/// Runs archgraph's cycle detection over the whole repo (Go, then
+/// Java/Kotlin) and reports any cycle that includes a package the current
+/// diff touched. A repo with neither a `go.mod` nor any `.java`/`.kt`
+/// files contributes no findings from either half.
+pub fn run_archgraph_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
+    let mut findings = Vec::new();
+
+    if let Some(module_path) = discover_go_module_path(repo_root) {
+        let changed_go_files: Vec<&String> = changed_files.iter().filter(|f| f.ends_with(".go")).collect();
+        if !changed_go_files.is_empty() {
+            let graph = build_go_import_graph(repo_root, &module_path);
+            findings.extend(report_cycles_touching_changed_files(&graph, &changed_go_files, |f| go_package_for_file(f, &module_path)));
+        }
+    }
+
+    let changed_java_kotlin_files: Vec<&String> = changed_files.iter().filter(|f| f.ends_with(".java") || f.ends_with(".kt")).collect();
+    if !changed_java_kotlin_files.is_empty() {
+        let graph = build_java_kotlin_import_graph(repo_root);
+        findings.extend(report_cycles_touching_changed_files(&graph, &changed_java_kotlin_files, |f| java_kotlin_package_for_file(repo_root, f)));
     }
 
     findings
@@ -152,6 +176,53 @@ mod tests {
         write_go_file(dir.path(), "internal/b/b.go", "package b\n\nfunc G() {}\n");
 
         let findings = run_archgraph_check(dir.path(), &["internal/a/a.go".to_string()]);
+        assert!(findings.is_empty());
+    }
+
+    fn write_source_file(dir: &Path, rel_path: &str, content: &str) {
+        let path = dir.join(rel_path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn returns_empty_when_no_java_or_kotlin_files_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let findings = run_archgraph_check(dir.path(), &["README.md".to_string()]);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn reports_a_java_cycle_that_touches_a_changed_package() {
+        let dir = tempfile::tempdir().unwrap();
+        write_source_file(dir.path(), "src/com/example/a/A.java", "package com.example.a;\n\nimport com.example.b.B;\n\nclass A {\n    B b;\n}\n");
+        write_source_file(dir.path(), "src/com/example/b/B.java", "package com.example.b;\n\nimport com.example.a.A;\n\nclass B {\n    A a;\n}\n");
+
+        let findings = run_archgraph_check(dir.path(), &["src/com/example/a/A.java".to_string()]);
+        assert_eq!(findings.len(), 1, "got: {findings:#?}");
+        assert_eq!(findings[0].category, "architecture");
+        assert!(findings[0].message.contains("com.example.a"));
+        assert!(findings[0].message.contains("com.example.b"));
+    }
+
+    #[test]
+    fn reports_a_kotlin_to_java_cycle_that_touches_a_changed_package() {
+        let dir = tempfile::tempdir().unwrap();
+        write_source_file(dir.path(), "src/com/example/a/A.kt", "package com.example.a\n\nimport com.example.b.B\n\nclass A {\n    val b: B? = null\n}\n");
+        write_source_file(dir.path(), "src/com/example/b/B.java", "package com.example.b;\n\nimport com.example.a.A;\n\nclass B {\n    A a;\n}\n");
+
+        let findings = run_archgraph_check(dir.path(), &["src/com/example/a/A.kt".to_string()]);
+        assert_eq!(findings.len(), 1, "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_report_a_java_cycle_the_diff_never_touches() {
+        let dir = tempfile::tempdir().unwrap();
+        write_source_file(dir.path(), "src/com/example/a/A.java", "package com.example.a;\n\nimport com.example.b.B;\n\nclass A {\n    B b;\n}\n");
+        write_source_file(dir.path(), "src/com/example/b/B.java", "package com.example.b;\n\nimport com.example.a.A;\n\nclass B {\n    A a;\n}\n");
+        write_source_file(dir.path(), "src/com/example/unrelated/U.java", "package com.example.unrelated;\n\nclass U {}\n");
+
+        let findings = run_archgraph_check(dir.path(), &["src/com/example/unrelated/U.java".to_string()]);
         assert!(findings.is_empty());
     }
 }
