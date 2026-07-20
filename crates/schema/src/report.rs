@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::finding::Finding;
+use crate::spec::CriterionResult;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -143,4 +144,11 @@ pub struct ReviewReport {
     pub suppressed: Vec<SuppressedFinding>,
     pub costs: RunCosts,
     pub summary: ReviewSummary,
+    /// Empty when no `.autoreview/spec.md` was present (the common case
+    /// today) or its Acceptance Criteria section had nothing to check —
+    /// additive field, `#[serde(default)]` so older `report.json` files
+    /// (and any external tooling reading `schema_version: "1"`) keep
+    /// parsing without needing to know about this.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spec_verdicts: Vec<CriterionResult>,
 }

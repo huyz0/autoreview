@@ -57,6 +57,7 @@ mod tests {
             suppressed,
             costs: RunCosts { total: autoreview_schema::CostEntry { input_tokens: 0, output_tokens: 0, usd: None, wall_ms: 0 }, per_stage: HashMap::new() },
             summary: ReviewSummary { by_severity: HashMap::new(), by_category: HashMap::new(), gate: None },
+            spec_verdicts: vec![],
         }
     }
 

@@ -494,6 +494,51 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         }
     }
 
+    // Acceptance-criteria verification: opt-in via the mere presence of
+    // `.autoreview/spec.md` (same "no file = opt-out" convention as
+    // architecture.yaml above — no separate config flag), distilled from
+    // Aviator Verify's spec-first review model (see SESSION_NOTES.md).
+    // Budget-gated the same as the verify pass above, and skipped in quick
+    // tier for the same reason: it's a real LLM cost on top of the
+    // finding-based review, not a replacement for it.
+    let mut spec_verdicts = Vec::new();
+    if !over_budget && plan.tier != Tier::Quick && backend_available(backend_kind, &config) {
+        let spec_path = options.repo_root.join(".autoreview").join("spec.md");
+        match std::fs::read_to_string(&spec_path) {
+            Ok(contents) => match autoreview_core::parse_spec(&contents) {
+                Some(spec) => {
+                    println!("\n  spec:           checking {} acceptance criterion/criteria against the diff...", spec.criteria.len());
+                    let diff_text = diff_context(&options.repo_root, &options.base_ref, &options.head_ref, &facts.files);
+                    let backend = build_backend(backend_kind, &config);
+                    let spec_result = autoreview_core::run_spec_verify(backend.as_ref(), &spec, &diff_text, cheap_model_for(backend_kind, &config), 4, &options.repo_root);
+                    for r in &spec_result.results {
+                        let marker = match r.verdict {
+                            autoreview_schema::CriterionVerdict::Satisfied => "✓",
+                            autoreview_schema::CriterionVerdict::NotSatisfied => "✗",
+                            autoreview_schema::CriterionVerdict::Uncertain => "?",
+                        };
+                        println!("    {marker} {}", r.criterion);
+                    }
+                    total_input_tokens += spec_result.usage.input_tokens;
+                    total_output_tokens += spec_result.usage.output_tokens;
+                    total_wall_ms += spec_result.wall_ms;
+                    if let Some(usd) = spec_result.usage.usd {
+                        total_usd += usd;
+                        any_usd_reported = true;
+                    }
+                    per_stage_costs.insert(
+                        "spec_verify".to_string(),
+                        CostEntry { input_tokens: spec_result.usage.input_tokens, output_tokens: spec_result.usage.output_tokens, usd: spec_result.usage.usd, wall_ms: spec_result.wall_ms },
+                    );
+                    spec_verdicts = spec_result.results;
+                }
+                None => println!("  [warn] .autoreview/spec.md has no title or no Acceptance Criteria bullets — skipping spec verification"),
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => println!("  [warn] failed to read .autoreview/spec.md: {err}"),
+        }
+    }
+
     let exact_result = dedupe_exact(findings);
     // Fuzzy dedupe runs second, over what exact dedupe left behind — it's
     // the one that catches a Stage-1 analyzer and a Stage-3 specialist
@@ -701,6 +746,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
             by_category,
             gate: None,
         },
+        spec_verdicts,
     };
 
     let report_path = run_dir.join("report.json");

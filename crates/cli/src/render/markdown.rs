@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use autoreview_schema::{Finding, ReviewReport, Severity};
+use autoreview_schema::{CriterionResult, CriterionVerdict, Finding, ReviewReport, Severity};
 
 fn severity_rank(s: Severity) -> u8 {
     match s {
@@ -43,6 +43,24 @@ fn render_finding(f: &Finding) -> String {
     out
 }
 
+fn verdict_marker(v: CriterionVerdict) -> &'static str {
+    match v {
+        CriterionVerdict::Satisfied => "✅",
+        CriterionVerdict::NotSatisfied => "❌",
+        CriterionVerdict::Uncertain => "❓",
+    }
+}
+
+fn render_spec_verdicts(verdicts: &[CriterionResult]) -> String {
+    let mut out = String::new();
+    out.push_str("## Acceptance Criteria\n\n");
+    for r in verdicts {
+        out.push_str(&format!("- {} **{}** — {}\n", verdict_marker(r.verdict), r.criterion, r.evidence));
+    }
+    out.push('\n');
+    out
+}
+
 /// Renders a `ReviewReport` as a human-readable Markdown document, grouped
 /// by severity then category — the semantic-grouping half of the plan's
 /// "one report, rendered for humans and for machines" design (report.json
@@ -72,6 +90,10 @@ pub fn render_markdown(report: &ReviewReport) -> String {
         ));
     }
     out.push('\n');
+
+    if !report.spec_verdicts.is_empty() {
+        out.push_str(&render_spec_verdicts(&report.spec_verdicts));
+    }
 
     if report.findings.is_empty() {
         out.push_str("No findings. ✅\n");
