@@ -569,8 +569,8 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
     findings
 }
 
-pub fn run_complexity_check(repo_root: &std::path::Path, changed_files: &[String]) -> Vec<AgentFinding> {
-    let thresholds = super::threshold_rules::resolve_complexity_thresholds();
+pub fn run_complexity_check(repo_root: &std::path::Path, changed_files: &[String], registered_packs: &[crate::rule_packs::ResolvedRulePack]) -> Vec<AgentFinding> {
+    let thresholds = super::threshold_rules::resolve_complexity_thresholds(registered_packs);
     changed_files
         .iter()
         .filter_map(|path| {
@@ -920,14 +920,14 @@ mod tests {
     fn run_complexity_check_skips_files_it_has_no_language_for() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("README.md"), "# hi\n").unwrap();
-        let findings = run_complexity_check(dir.path(), &["README.md".to_string()]);
+        let findings = run_complexity_check(dir.path(), &["README.md".to_string()], &[]);
         assert!(findings.is_empty());
     }
 
     #[test]
     fn run_complexity_check_skips_files_that_no_longer_exist() {
         let dir = tempfile::tempdir().unwrap();
-        let findings = run_complexity_check(dir.path(), &["deleted.go".to_string()]);
+        let findings = run_complexity_check(dir.path(), &["deleted.go".to_string()], &[]);
         assert!(findings.is_empty());
     }
 
@@ -935,7 +935,7 @@ mod tests {
     fn run_complexity_check_finds_issues_in_a_real_file_on_disk() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("main.go"), "func doIt(a int, b int, c int, d int, e int, f int) {\n\t_ = a\n}\n").unwrap();
-        let findings = run_complexity_check(dir.path(), &["main.go".to_string()]);
+        let findings = run_complexity_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(!findings.is_empty());
     }
 }

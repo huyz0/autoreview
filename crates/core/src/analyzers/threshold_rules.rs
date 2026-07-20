@@ -17,8 +17,9 @@ use serde::Deserialize;
 
 use autoreview_schema::Severity;
 
-use super::ast_grep::{walk_rule_contents, RuleMeta, RuleRoot, BUILTIN_RULES};
+use super::ast_grep::{rule_roots, walk_rule_contents, RuleMeta};
 use super::complexity::ComplexityThresholds;
+use crate::rule_packs::ResolvedRulePack;
 
 fn severity_from_str(s: &str) -> Severity {
     match s {
@@ -58,12 +59,12 @@ fn parse_threshold_rule(contents: &str) -> Option<ThresholdRuleDef> {
     Some(ThresholdRuleDef { id: yaml.common.id.clone(), metric: yaml.metric, threshold: yaml.threshold, category: yaml.common.category, severity: severity_from_str(&yaml.severity) })
 }
 
-/// Every `kind: threshold` rule declared in `rules-builtin/`. Registered-
-/// pack threshold rules aren't loaded yet (rule-packs Phase 3) — this
-/// walks the embedded builtin tree only for now.
-pub fn load_threshold_rules() -> Vec<ThresholdRuleDef> {
+/// Every `kind: threshold` rule declared in `rules-builtin/` plus any
+/// registered pack.
+pub fn load_threshold_rules(registered_packs: &[ResolvedRulePack]) -> Vec<ThresholdRuleDef> {
+    let roots = rule_roots(registered_packs);
     let mut defs = Vec::new();
-    walk_rule_contents(&[RuleRoot::Embedded(&BUILTIN_RULES)], &mut |contents| {
+    walk_rule_contents(&roots, &mut |contents| {
         if let Some(def) = parse_threshold_rule(contents) {
             defs.push(def);
         }
@@ -75,9 +76,9 @@ pub fn load_threshold_rules() -> Vec<ThresholdRuleDef> {
 /// per matching `metric:` name by any loaded `kind: threshold` rule — a
 /// metric with no matching rule keeps its default, so this never panics
 /// or leaves a threshold unset.
-pub fn resolve_complexity_thresholds() -> ComplexityThresholds {
+pub fn resolve_complexity_thresholds(registered_packs: &[ResolvedRulePack]) -> ComplexityThresholds {
     let mut thresholds = ComplexityThresholds::default();
-    for rule in load_threshold_rules() {
+    for rule in load_threshold_rules(registered_packs) {
         match rule.metric.as_str() {
             "cyclomatic-complexity" => thresholds.cyclomatic_complexity = rule.threshold,
             "too-many-returns" => thresholds.too_many_returns = rule.threshold,
@@ -100,7 +101,7 @@ mod tests {
 
     #[test]
     fn loads_the_builtin_threshold_rules() {
-        let rules = load_threshold_rules();
+        let rules = load_threshold_rules(&[]);
         let ids: Vec<&str> = rules.iter().map(|r| r.id.as_str()).collect();
         for expected in ["cyclomatic-complexity", "too-many-returns", "cognitive-complexity", "long-method", "long-parameter-list", "deep-nesting", "god-class", "large-switch", "complex-interface"] {
             assert!(ids.contains(&expected), "got: {ids:?}");
@@ -109,13 +110,13 @@ mod tests {
 
     #[test]
     fn a_taint_kind_rule_is_not_loaded_as_a_threshold_rule() {
-        let rules = load_threshold_rules();
+        let rules = load_threshold_rules(&[]);
         assert!(!rules.iter().any(|r| r.id == "go-command-injection-taint"), "a kind: taint rule must not parse as kind: threshold");
     }
 
     #[test]
     fn resolve_complexity_thresholds_reflects_the_builtin_yaml_values() {
-        let thresholds = resolve_complexity_thresholds();
+        let thresholds = resolve_complexity_thresholds(&[]);
         // Matches cyclomatic-complexity.yml / too-many-returns.yml's
         // declared `threshold:` values — if those files change, this
         // test's expectation should change with them, on purpose (it's

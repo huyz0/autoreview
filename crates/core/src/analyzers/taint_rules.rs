@@ -12,7 +12,8 @@ use serde::Deserialize;
 use autoreview_dataflow::taint::{NamePattern, TaintSink, TaintSpec};
 use autoreview_schema::Severity;
 
-use super::ast_grep::{walk_rule_contents, RuleMeta, RuleRoot, BUILTIN_RULES};
+use super::ast_grep::{rule_roots, walk_rule_contents, RuleMeta};
+use crate::rule_packs::ResolvedRulePack;
 
 fn severity_from_str(s: &str) -> Severity {
     match s {
@@ -109,15 +110,15 @@ fn parse_taint_rule(contents: &str) -> Option<TaintRuleDef> {
     })
 }
 
-/// Every `kind: taint` rule declared in `rules-builtin/`, across all
-/// languages — callers filter by `language` themselves (see
-/// `dataflow_check.rs::run_dataflow_check`), the same way `run_ast_grep`
-/// leaves language dispatch to file extension rather than filtering here.
-/// Registered-pack taint rules aren't loaded yet (rule-packs Phase 3) —
-/// this walks the embedded builtin tree only for now.
-pub fn load_taint_rules() -> Vec<TaintRuleDef> {
+/// Every `kind: taint` rule declared in `rules-builtin/` plus any
+/// registered pack, across all languages — callers filter by `language`
+/// themselves (see `dataflow_check.rs::run_dataflow_check`), the same way
+/// `run_ast_grep` leaves language dispatch to file extension rather than
+/// filtering here.
+pub fn load_taint_rules(registered_packs: &[ResolvedRulePack]) -> Vec<TaintRuleDef> {
+    let roots = rule_roots(registered_packs);
     let mut defs = Vec::new();
-    walk_rule_contents(&[RuleRoot::Embedded(&BUILTIN_RULES)], &mut |contents| {
+    walk_rule_contents(&roots, &mut |contents| {
         if let Some(def) = parse_taint_rule(contents) {
             defs.push(def);
         }
@@ -131,7 +132,7 @@ mod tests {
 
     #[test]
     fn loads_the_three_builtin_go_taint_rules() {
-        let rules = load_taint_rules();
+        let rules = load_taint_rules(&[]);
         let ids: Vec<&str> = rules.iter().map(|r| r.id.as_str()).collect();
         assert!(ids.contains(&"go-command-injection-taint"), "got: {ids:?}");
         assert!(ids.contains(&"go-sql-injection-taint"), "got: {ids:?}");
@@ -140,13 +141,13 @@ mod tests {
 
     #[test]
     fn a_pattern_kind_rule_is_not_loaded_as_a_taint_rule() {
-        let rules = load_taint_rules();
+        let rules = load_taint_rules(&[]);
         assert!(!rules.iter().any(|r| r.id == "go-weak-hash"), "a plain ast-grep rule must not parse as a taint rule");
     }
 
     #[test]
     fn command_injection_taint_rule_has_the_expected_sinks() {
-        let rules = load_taint_rules();
+        let rules = load_taint_rules(&[]);
         let rule = rules.iter().find(|r| r.id == "go-command-injection-taint").expect("rule should load");
         assert_eq!(rule.category, "security");
         assert_eq!(rule.severity, Severity::High);

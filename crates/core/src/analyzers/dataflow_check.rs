@@ -39,6 +39,7 @@ use autoreview_dataflow::rules::{go_append_shared_backing_array, go_loopvar, go_
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
 use super::taint_rules;
+use crate::rule_packs::ResolvedRulePack;
 
 fn make_finding(rule_id: &str, category: &str, severity: Severity, path: &str, line: u32, title: String, message: String) -> AgentFinding {
     AgentFinding {
@@ -184,12 +185,13 @@ fn taint_title(hit: &autoreview_dataflow::taint::TaintHit) -> String {
     format!("`{}` reaches `{}` with an unsanitized value from an HTTP form field", hit.tainted_arg, hit.sink_call)
 }
 
-/// Runs every `kind: taint` rule declared in `rules-builtin/` (loaded via
-/// `taint_rules::load_taint_rules`) whose `language` matches, against one
-/// file's already-lowered functions. Adding a new taint rule means adding
-/// a new YAML file — this function doesn't change.
-fn run_loaded_taint_rules(path: &str, lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
-    let rules: Vec<_> = taint_rules::load_taint_rules().into_iter().filter(|r| r.language == "Go").collect();
+/// Runs every `kind: taint` rule declared in `rules-builtin/` or a
+/// registered pack (loaded via `taint_rules::load_taint_rules`) whose
+/// `language` matches, against one file's already-lowered functions.
+/// Adding a new taint rule means adding a new YAML file — this function
+/// doesn't change.
+fn run_loaded_taint_rules(path: &str, lowered: &[(Node, Cfg<Stmt>)], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
+    let rules: Vec<_> = taint_rules::load_taint_rules(registered_packs).into_iter().filter(|r| r.language == "Go").collect();
     if rules.is_empty() {
         return Vec::new();
     }
@@ -210,7 +212,7 @@ fn run_loaded_taint_rules(path: &str, lowered: &[(Node, Cfg<Stmt>)]) -> Vec<Agen
 /// lowering passes do (Phase 6/7). Parses and lowers each file's functions
 /// exactly once (`lower_all_functions`), shared across all four rule
 /// families below rather than each re-parsing/re-lowering independently.
-pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
+pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
     let go_pre_1_22 = crate::analyzers::practices::go_module_targets_pre_1_22(repo_root);
     changed_files
         .iter()
@@ -225,7 +227,7 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String]) -> Vec<Age
 
             let mut findings = run_append_shared_backing_array(path, &lowered);
             findings.extend(run_typed_nil_interface_return(path, source, &lowered));
-            findings.extend(run_loaded_taint_rules(path, &lowered));
+            findings.extend(run_loaded_taint_rules(path, &lowered, registered_packs));
             if go_pre_1_22 {
                 findings.extend(run_loopvar_checks(path, &lowered));
             }
@@ -243,7 +245,7 @@ mod tests {
     fn flags_append_that_may_overwrite_a_reused_slices_backing_array() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("main.go"), "package main\n\nfunc f(full []int) []int {\n\tsub := full[2:4]\n\tsub = append(sub, 9)\n\tprintln(full[0])\n\treturn sub\n}\n").unwrap();
-        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         assert_eq!(findings.len(), 1, "got: {findings:#?}");
         assert_eq!(findings[0].source.rule_id.as_deref(), Some("append-shared-backing-array"));
     }
@@ -256,7 +258,7 @@ mod tests {
             "package main\n\nfunc f(full []int, other []int) []int {\n\tsub := full[2:4]\n\tsub = other\n\tsub = append(sub, 9)\n\tprintln(full[0])\n\treturn sub\n}\n",
         )
         .unwrap();
-        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(findings.is_empty(), "got: {findings:#?}");
     }
 
@@ -268,7 +270,7 @@ mod tests {
             "package main\n\nfunc do() error {\n\tvar e *myError\n\tif somethingBad {\n\t\te = &myError{}\n\t}\n\treturn e\n}\n",
         )
         .unwrap();
-        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("typed-nil-interface-return")), "got: {findings:#?}");
     }
 
@@ -280,7 +282,7 @@ mod tests {
             "package main\n\nfunc helper() *myError {\n\tvar e *myError\n\treturn e\n}\n\nfunc Do() error {\n\te := helper()\n\treturn e\n}\n",
         )
         .unwrap();
-        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(
             findings.iter().any(|f| f.source.rule_id.as_deref() == Some("typed-nil-interface-return")),
             "got: {findings:#?} — same-function-only heuristic couldn't have caught this"
@@ -295,7 +297,7 @@ mod tests {
             "package main\n\nfunc do() error {\n\tvar e *myError\n\tif somethingBad {\n\t\te = &myError{}\n\t}\n\tif e != nil {\n\t\treturn e\n\t}\n\treturn nil\n}\n",
         )
         .unwrap();
-        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("typed-nil-interface-return")), "got: {findings:#?}");
     }
 
@@ -308,7 +310,7 @@ mod tests {
             "package main\n\nfunc f(items []string) {\n\tfor _, item := range items {\n\t\tgo func() {\n\t\t\tprintln(item)\n\t\t}()\n\t}\n}\n",
         )
         .unwrap();
-        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("loopvar-capture-pre-1.22")), "got: {findings:#?}");
     }
 
@@ -321,7 +323,7 @@ mod tests {
             "package main\n\nfunc f(items []string) []*string {\n\tvar out []*string\n\tfor _, item := range items {\n\t\tout = append(out, &item)\n\t}\n\treturn out\n}\n",
         )
         .unwrap();
-        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("loopvar-address-pre-1.22")), "got: {findings:#?}");
     }
 
@@ -334,7 +336,7 @@ mod tests {
             "package main\n\nfunc f(items []string) {\n\tfor _, item := range items {\n\t\tgo func() {\n\t\t\tprintln(item)\n\t\t}()\n\t}\n}\n",
         )
         .unwrap();
-        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("loopvar-capture-pre-1.22")), "got: {findings:#?}");
     }
 
@@ -346,7 +348,7 @@ mod tests {
             "package main\n\nfunc f(items []string) {\n\tfor _, item := range items {\n\t\tgo func() {\n\t\t\tprintln(item)\n\t\t}()\n\t}\n}\n",
         )
         .unwrap();
-        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("loopvar-capture-pre-1.22")), "got: {findings:#?}");
     }
 
@@ -358,7 +360,7 @@ mod tests {
             "package main\n\nfunc handle(r *http.Request) {\n\tuserInput := r.FormValue(\"cmd\")\n\texec.Command(\"sh\", \"-c\", userInput)\n}\n",
         )
         .unwrap();
-        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("go-command-injection-taint")), "got: {findings:#?}");
     }
 
@@ -366,7 +368,7 @@ mod tests {
     fn does_not_flag_a_literal_only_exec_command_end_to_end() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("main.go"), "package main\n\nfunc f() {\n\texec.Command(\"ls\", \"-la\")\n}\n").unwrap();
-        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("go-command-injection-taint")), "got: {findings:#?}");
     }
 
@@ -378,7 +380,7 @@ mod tests {
             "package main\n\nfunc handle(r *http.Request, db *sql.DB) {\n\tid := r.FormValue(\"id\")\n\trows, err := db.Query(id)\n\t_ = rows\n\t_ = err\n}\n",
         )
         .unwrap();
-        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("go-sql-injection-taint")), "got: {findings:#?}");
     }
 
@@ -390,7 +392,7 @@ mod tests {
             "package main\n\nfunc handle(r *http.Request, db *sql.DB) {\n\tid := r.FormValue(\"id\")\n\tq := \"DELETE FROM users WHERE id=\" + id\n\tres, err := db.Exec(q)\n\t_ = res\n\t_ = err\n}\n",
         )
         .unwrap();
-        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("go-sql-injection-taint")), "got: {findings:#?}");
     }
 
@@ -402,7 +404,7 @@ mod tests {
             "package main\n\nfunc handle(r *http.Request) {\n\tname := r.FormValue(\"file\")\n\tf, err := os.Open(name)\n\t_ = f\n\t_ = err\n}\n",
         )
         .unwrap();
-        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("go-path-traversal-taint")), "got: {findings:#?}");
     }
 
@@ -414,7 +416,7 @@ mod tests {
             "package main\n\nfunc f(db *sql.DB) {\n\trows, err := db.Query(\"SELECT * FROM users\")\n\t_ = rows\n\t_ = err\n\tdata, err2 := os.ReadFile(\"/etc/config.json\")\n\t_ = data\n\t_ = err2\n}\n",
         )
         .unwrap();
-        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()]);
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("go-sql-injection-taint") || f.source.rule_id.as_deref() == Some("go-path-traversal-taint")), "got: {findings:#?}");
     }
 
@@ -422,7 +424,7 @@ mod tests {
     fn skips_non_go_files() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Foo.java"), "class Foo {}\n").unwrap();
-        let findings = run_dataflow_check(dir.path(), &["Foo.java".to_string()]);
+        let findings = run_dataflow_check(dir.path(), &["Foo.java".to_string()], &[]);
         assert!(findings.is_empty());
     }
 }
