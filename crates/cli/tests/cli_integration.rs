@@ -151,6 +151,36 @@ fn a_shadow_trust_rule_packs_finding_is_suppressed_not_surfaced() {
 }
 
 #[test]
+fn rules_packs_add_registers_a_local_source_pack() {
+    let pack_dir = tempfile::tempdir().unwrap();
+    std::fs::write(pack_dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+
+    let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+
+    let mut cmd = Command::cargo_bin("autoreview").unwrap();
+    cmd.current_dir(repo.path()).args(["rules", "packs", "add", &pack_dir.path().to_string_lossy()]);
+    cmd.assert().success().stdout(predicate::str::contains("Registered rule pack 'acme-security'"));
+
+    let config_contents = std::fs::read_to_string(repo.path().join(".autoreview/rulepacks.yaml")).unwrap();
+    assert!(config_contents.contains("acme-security"), "got: {config_contents}");
+    assert!(config_contents.contains(&pack_dir.path().to_string_lossy().to_string()), "got: {config_contents}");
+}
+
+#[test]
+fn rules_packs_add_fails_clearly_for_an_already_registered_id() {
+    let pack_dir = tempfile::tempdir().unwrap();
+    std::fs::write(pack_dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+
+    let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+    std::fs::create_dir_all(repo.path().join(".autoreview")).unwrap();
+    std::fs::write(repo.path().join(".autoreview/rulepacks.yaml"), format!("packs:\n  - id: acme-security\n    source:\n      kind: local\n      path: {}\n", pack_dir.path().display())).unwrap();
+
+    let mut cmd = Command::cargo_bin("autoreview").unwrap();
+    cmd.current_dir(repo.path()).args(["rules", "packs", "add", &pack_dir.path().to_string_lossy()]);
+    cmd.assert().failure().stderr(predicate::str::contains("already registered"));
+}
+
+#[test]
 fn aspects_filter_scopes_out_complexity_findings_outside_the_requested_category() {
     let repo = init_repo_with_diff(
         &[("main.go", "package main\n\nfunc main() {}\n")],

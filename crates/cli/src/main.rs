@@ -9,7 +9,7 @@ use commands::diff::{run_diff, DiffCommandOptions};
 use commands::doctor::run_doctor;
 use commands::feedback::{run_feedback, run_missed_report};
 use commands::history::run_history_sync;
-use commands::rules::{run_rules_bench, run_rules_mine, run_rules_mine_code, run_rules_mine_comments, run_rules_packs, run_rules_review, run_rules_rollback, run_rules_shadow_log};
+use commands::rules::{run_rules_bench, run_rules_mine, run_rules_mine_code, run_rules_mine_comments, run_rules_packs, run_rules_packs_add, run_rules_review, run_rules_rollback, run_rules_shadow_log};
 use commands::skills::{run_skills_list, run_skills_mine, run_skills_review, run_skills_rollback};
 use commands::skills_bench::run_skills_bench;
 
@@ -126,8 +126,22 @@ enum RulesAction {
     /// Roll back a promoted/shadow rule to its prior state
     Rollback { rule_id: String },
     /// List registered external rule packs (.autoreview/rulepacks.yaml) and
-    /// how many rules of each kind each one resolved to
-    Packs,
+    /// how many rules of each kind each one resolved to. With a subcommand,
+    /// manages the registration instead of listing it.
+    Packs {
+        #[command(subcommand)]
+        action: Option<PacksAction>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PacksAction {
+    /// Register a new external rule pack. `source` is a local filesystem
+    /// path (relative to the repo root) or a git URL — the pack's id comes
+    /// from its own rulepack.yaml, not a flag, since resolving the source
+    /// is what proves it's a real pack before anything gets written to
+    /// .autoreview/rulepacks.yaml.
+    Add { source: String },
 }
 
 #[derive(Subcommand)]
@@ -239,7 +253,8 @@ fn main() -> anyhow::Result<()> {
             RulesAction::Review { approve, reject, reason } => run_rules_review(&repo_root, approve, reject, reason)?,
             RulesAction::ShadowLog { rule_id } => run_rules_shadow_log(&repo_root, &rule_id)?,
             RulesAction::Rollback { rule_id } => run_rules_rollback(&repo_root, &rule_id)?,
-            RulesAction::Packs => run_rules_packs(&repo_root)?,
+            RulesAction::Packs { action: None } => run_rules_packs(&repo_root)?,
+            RulesAction::Packs { action: Some(PacksAction::Add { source }) } => run_rules_packs_add(&repo_root, &source)?,
         },
         Commands::Skills { action } => match action {
             SkillsAction::List => run_skills_list(&repo_root)?,

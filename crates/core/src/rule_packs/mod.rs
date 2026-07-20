@@ -153,6 +153,34 @@ fn resolve_git_source(cache_root: &Path, url: &str, r#ref: Option<&str>, subpath
     Ok(root)
 }
 
+/// Resolves `source` without an id to check against — the reverse of
+/// `resolve_rule_pack`, used by `autoreview rules packs add <source>`
+/// before the pack has been registered under any id at all. Returns the
+/// pack's own self-declared id (read from its `rulepack.yaml`) alongside
+/// the local path it resolved to, so the caller can register it under
+/// that id.
+pub fn discover_pack_source(repo_root: &Path, cache_root: &Path, source: &RulePackSourceConfig) -> anyhow::Result<(String, PathBuf)> {
+    let local_path = match source {
+        RulePackSourceConfig::Local { path } => resolve_local_source(repo_root, path)?,
+        RulePackSourceConfig::Git { url, r#ref, subpath } => resolve_git_source(cache_root, url, r#ref.as_deref(), subpath.as_deref())?,
+    };
+    let manifest_path = local_path.join(MANIFEST_FILE_NAME);
+    let contents = std::fs::read_to_string(&manifest_path).map_err(|err| anyhow::anyhow!("failed to read {}: {err}", manifest_path.display()))?;
+    let manifest: RulePackManifest = serde_yaml::from_str(&contents).map_err(|err| anyhow::anyhow!("failed to parse {}: {err}", manifest_path.display()))?;
+    Ok((manifest.id, local_path))
+}
+
+/// Writes `.autoreview/rulepacks.yaml`, creating the parent directory if
+/// needed — the write-side counterpart to `load_rule_packs_config`.
+pub fn save_rule_packs_config(path: &Path, file: &RulePacksFile) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let yaml = serde_yaml::to_string(file)?;
+    std::fs::write(path, yaml)?;
+    Ok(())
+}
+
 /// Reads `<local_path>/rulepack.yaml` and checks its declared `id` matches
 /// `expected_id` (the id it was registered under in `rulepacks.yaml`) —
 /// catches "pointed at the wrong directory" early with a clear error
@@ -298,6 +326,51 @@ mod tests {
         let results = resolve_rule_packs(tempfile::tempdir().unwrap().path(), unused_cache_root().path(), &[config]);
         let err = results[0].1.as_ref().unwrap_err();
         assert!(err.to_string().contains("actual-id"), "got: {err}");
+    }
+
+    #[test]
+    fn discover_pack_source_reads_the_id_from_a_local_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let repo_root = root.path().join("repo");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        write(&root.path().join("shared/acme-security/rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n");
+        let source = RulePackSourceConfig::Local { path: "../shared/acme-security".to_string() };
+        let (id, local_path) = discover_pack_source(&repo_root, unused_cache_root().path(), &source).unwrap();
+        assert_eq!(id, "acme-security");
+        assert!(local_path.join("rulepack.yaml").exists());
+    }
+
+    #[test]
+    fn discover_pack_source_reads_the_id_from_a_git_manifest() {
+        let remote = init_remote_with_pack("acme-git-pack");
+        let url = remote.path().to_string_lossy().to_string();
+        let source = RulePackSourceConfig::Git { url, r#ref: None, subpath: None };
+        let cache_root = tempfile::tempdir().unwrap();
+        let (id, local_path) = discover_pack_source(tempfile::tempdir().unwrap().path(), cache_root.path(), &source).unwrap();
+        assert_eq!(id, "acme-git-pack");
+        assert!(local_path.join("rulepack.yaml").exists());
+    }
+
+    #[test]
+    fn discover_pack_source_fails_clearly_when_the_manifest_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let repo_root = root.path().join("repo");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        std::fs::create_dir_all(root.path().join("shared/no-manifest")).unwrap();
+        let source = RulePackSourceConfig::Local { path: "../shared/no-manifest".to_string() };
+        let err = discover_pack_source(&repo_root, unused_cache_root().path(), &source).unwrap_err();
+        assert!(err.to_string().contains("rulepack.yaml"), "got: {err}");
+    }
+
+    #[test]
+    fn save_and_load_rule_packs_config_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".autoreview").join("rulepacks.yaml");
+        let file = RulePacksFile { packs: vec![RulePackConfig { id: "acme-security".to_string(), source: RulePackSourceConfig::Local { path: "../shared/acme-security".to_string() }, trust: RulePackTrust::Full }] };
+        save_rule_packs_config(&path, &file).unwrap();
+        let loaded = load_rule_packs_config(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "acme-security");
     }
 
     #[test]

@@ -407,6 +407,45 @@ pub fn run_rules_packs(repo_root: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Recognizes a `kind: git` source by shape — anything else is treated as
+/// a `kind: local` filesystem path. Deliberately simple (no network probe,
+/// no `git ls-remote` check): the same shorthand `git clone` itself
+/// accepts, so a user who'd type it into `git clone <source>` can type the
+/// same thing here.
+fn looks_like_git_source(source: &str) -> bool {
+    source.starts_with("http://") || source.starts_with("https://") || source.starts_with("git@") || source.ends_with(".git")
+}
+
+/// `autoreview rules packs add <source>` — registers a new external rule
+/// pack in `.autoreview/rulepacks.yaml`. `source` is either a local
+/// filesystem path (relative to `repo_root`) or a git URL/shorthand
+/// (`looks_like_git_source`); the pack's own id comes from its
+/// `rulepack.yaml`, not from an extra flag — resolving the source is what
+/// proves it's a real, valid pack before anything gets written.
+pub fn run_rules_packs_add(repo_root: &std::path::Path, source: &str) -> anyhow::Result<()> {
+    let source_config = if looks_like_git_source(source) {
+        autoreview_schema::RulePackSourceConfig::Git { url: source.to_string(), r#ref: None, subpath: None }
+    } else {
+        autoreview_schema::RulePackSourceConfig::Local { path: source.to_string() }
+    };
+
+    let cache_root = autoreview_core::default_rule_packs_cache_root();
+    let (id, local_path) = autoreview_core::discover_pack_source(repo_root, &cache_root, &source_config)?;
+
+    let config_path = autoreview_core::rule_packs_config_path(repo_root);
+    let mut configured = autoreview_core::load_rule_packs_config(&config_path)?;
+    if let Some(existing) = configured.iter().find(|p| p.id == id) {
+        anyhow::bail!("a pack with id '{id}' is already registered (source: {:?}) — remove it from {} first if you meant to replace it", existing.source, config_path.display());
+    }
+
+    configured.push(autoreview_schema::RulePackConfig { id: id.clone(), source: source_config, trust: autoreview_schema::RulePackTrust::Full });
+    autoreview_core::save_rule_packs_config(&config_path, &autoreview_schema::RulePacksFile { packs: configured })?;
+
+    println!("Registered rule pack '{id}' (resolved to {}).", local_path.display());
+    println!("Wrote {}. It runs at full trust by default — edit `trust: shadow` there to stage it first.", config_path.display());
+    Ok(())
+}
+
 /// Manually reverses a shadow/promoted rule's most recent lifecycle step —
 /// the human override sitting alongside the automatic `should_promote`/
 /// `should_demote` gate `diff.rs` already runs on every review. A
