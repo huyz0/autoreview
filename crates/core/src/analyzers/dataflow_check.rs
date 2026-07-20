@@ -32,8 +32,10 @@
 //! `run_loaded_taint_rules` — adding a new taint rule for a language that
 //! already has a lowering pass doesn't touch this file at all.
 //!
-//! Java (`lower::java`) and Kotlin (`lower::kotlin`) only get taint rules
-//! run against them for now — see `run_dataflow_check`'s own doc comment.
+//! Java (`lower::java`), Kotlin (`lower::kotlin`), and JavaScript/
+//! TypeScript/TSX (`lower::javascript`, one lowering module shared across
+//! all three — see its own doc comment) only get taint rules run against
+//! them for now — see `run_dataflow_check`'s own doc comment.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -133,12 +135,34 @@ fn kotlin_functions(tree: &Tree) -> Vec<Node<'_>> {
     out
 }
 
+/// Every `function_declaration` anywhere in a parsed JavaScript/TypeScript/
+/// TSX file — same nested-scope rationale as `java_functions`, since a
+/// function can sit inside a module, namespace, or another function's body.
+fn javascript_functions(tree: &Tree) -> Vec<Node<'_>> {
+    fn walk<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
+        if node.kind() == "function_declaration" {
+            out.push(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            walk(child, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(tree.root_node(), &mut out);
+    out
+}
+
 fn lower_all_java_functions<'a>(source: &[u8], tree: &'a Tree) -> Vec<(Node<'a>, Cfg<Stmt>)> {
     java_functions(tree).into_iter().map(|fn_node| (fn_node, autoreview_dataflow::lower::java::lower_function(source, fn_node))).collect()
 }
 
 fn lower_all_kotlin_functions<'a>(source: &[u8], tree: &'a Tree) -> Vec<(Node<'a>, Cfg<Stmt>)> {
     kotlin_functions(tree).into_iter().map(|fn_node| (fn_node, autoreview_dataflow::lower::kotlin::lower_function(source, fn_node))).collect()
+}
+
+fn lower_all_javascript_functions<'a>(source: &[u8], tree: &'a Tree) -> Vec<(Node<'a>, Cfg<Stmt>)> {
+    javascript_functions(tree).into_iter().map(|fn_node| (fn_node, autoreview_dataflow::lower::javascript::lower_function(source, fn_node))).collect()
 }
 
 fn run_append_shared_backing_array(path: &str, lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
@@ -318,12 +342,12 @@ fn read_and_parse(repo_root: &Path, path: &str, language: autoreview_langsupport
 /// Runs all dataflow-powered checks against one changed file's current
 /// content. Go gets the full rule set (Phase 3/4/5: append-shared-
 /// backing-array, typed-nil-interface-return, loopvar, plus taint rules).
-/// Java/Kotlin (Phase 6/7 lowering) only get taint rules so far — no
-/// Java/Kotlin-specific hand-written rule (the append/typed-nil-return/
-/// loopvar families) exists yet, but the generic taint engine already
-/// works against any lowered `Cfg`, so a Java/Kotlin `kind: taint` YAML
-/// rule needs no dataflow-crate changes to run. Parses and lowers each
-/// file's functions exactly once per language, shared across that
+/// Java/Kotlin/JavaScript/TypeScript/TSX only get taint rules so far — no
+/// hand-written rule (the append/typed-nil-return/loopvar families) exists
+/// for them yet, but the generic taint engine already works against any
+/// lowered `Cfg`, so a `kind: taint` YAML rule for any of them needs no
+/// dataflow-crate changes to run. Parses and lowers each file's functions
+/// exactly once per language, shared across that
 /// language's rule families rather than each re-parsing/re-lowering
 /// independently.
 pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
@@ -351,6 +375,23 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
                 let (content, tree) = read_and_parse(repo_root, path, autoreview_langsupport::Language::Kotlin)?;
                 let lowered = lower_all_kotlin_functions(content.as_bytes(), &tree);
                 Some(run_loaded_taint_rules(path, "Kotlin", &lowered, registered_packs))
+            } else if path.ends_with(".tsx") {
+                let (content, tree) = read_and_parse(repo_root, path, autoreview_langsupport::Language::Tsx)?;
+                let lowered = lower_all_javascript_functions(content.as_bytes(), &tree);
+                // Reuses the "TypeScript" taint rules rather than a separate
+                // "Tsx" bucket — TSX's grammar only adds JSX syntax on top
+                // of TypeScript's, so the same taint rules apply verbatim; a
+                // duplicate set of Tsx-only YAML files would just be the
+                // same rules twice.
+                Some(run_loaded_taint_rules(path, "TypeScript", &lowered, registered_packs))
+            } else if path.ends_with(".ts") || path.ends_with(".mts") || path.ends_with(".cts") {
+                let (content, tree) = read_and_parse(repo_root, path, autoreview_langsupport::Language::TypeScript)?;
+                let lowered = lower_all_javascript_functions(content.as_bytes(), &tree);
+                Some(run_loaded_taint_rules(path, "TypeScript", &lowered, registered_packs))
+            } else if path.ends_with(".js") || path.ends_with(".jsx") || path.ends_with(".mjs") || path.ends_with(".cjs") {
+                let (content, tree) = read_and_parse(repo_root, path, autoreview_langsupport::Language::JavaScript)?;
+                let lowered = lower_all_javascript_functions(content.as_bytes(), &tree);
+                Some(run_loaded_taint_rules(path, "JavaScript", &lowered, registered_packs))
             } else {
                 None
             }
@@ -654,5 +695,37 @@ mod tests {
         std::fs::write(dir.path().join("Main.kt"), "class Main {\n    fun handle(stmt: Statement) {\n        stmt.executeQuery(\"SELECT 1\")\n    }\n}\n").unwrap();
         let findings = run_dataflow_check(dir.path(), &["Main.kt".to_string()], &[]);
         assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("kotlin-sql-injection-taint")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_request_parameter_reaching_a_javascript_command_injection_sink_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.js"), "function handle(req, cp) {\n  const cmd = req.param(\"cmd\");\n  cp.exec(cmd);\n}\n").unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.js".to_string()], &[]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("javascript-command-injection-taint")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_javascript_sink_reached_with_a_literal_argument() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.js"), "function handle(cp) {\n  cp.exec(\"ls -la\");\n}\n").unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.js".to_string()], &[]);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("javascript-command-injection-taint")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_request_parameter_reaching_a_typescript_sql_sink_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.ts"), "function handle(req: any, db: any) {\n  const q: string = req.param(\"q\");\n  db.query(q);\n}\n").unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.ts".to_string()], &[]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("typescript-sql-injection-taint")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_request_parameter_reaching_a_tsx_command_injection_sink_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.tsx"), "function handle(req: any, cp: any) {\n  const cmd: string = req.param(\"cmd\");\n  cp.execSync(cmd);\n}\n").unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.tsx".to_string()], &[]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("typescript-command-injection-taint")), "got: {findings:#?}");
     }
 }
