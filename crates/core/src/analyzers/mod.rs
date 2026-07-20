@@ -2,6 +2,7 @@ pub mod apply_condition;
 pub mod architecture;
 pub mod archgraph_check;
 pub mod ast_grep;
+pub mod bidi_check;
 pub mod churn;
 pub mod clippy;
 pub mod complexity;

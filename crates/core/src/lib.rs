@@ -22,6 +22,7 @@ pub use analyzers::apply_condition::ApplyCondition;
 pub use analyzers::archgraph_check::run_archgraph_check;
 pub use analyzers::architecture::{load_architecture_config, run_architecture_check};
 pub use analyzers::ast_grep::{run_ast_grep, semantic_rule_ids};
+pub use analyzers::bidi_check::run_bidi_control_character_check;
 pub use analyzers::clippy::run_clippy;
 pub use analyzers::churn::{detect_shotgun_surgery, run_divergent_change_check};
 pub use analyzers::complexity::run_complexity_check;

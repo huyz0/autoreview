@@ -247,6 +247,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     stage1_agent_findings.extend(autoreview_core::run_dataflow_check(&options.repo_root, &changed_file_paths, &registered_packs));
     stage1_agent_findings.extend(autoreview_core::detect_shotgun_surgery(&facts.files));
     stage1_agent_findings.extend(autoreview_core::run_divergent_change_check(&options.repo_root, &changed_file_paths));
+    stage1_agent_findings.extend(autoreview_core::run_bidi_control_character_check(&options.repo_root, &changed_file_paths));
     // Rule-pack shadow trust: a pack's rule still ran (its finding was
     // computed and provenance-tagged like any `trust: full` pack's), but a
     // `trust: shadow` pack's findings never surface, don't count toward
