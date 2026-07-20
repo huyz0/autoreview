@@ -53,12 +53,19 @@ pub fn hostname() -> String {
 /// without also running a full review.
 pub fn run_history_sync(repo_root: &Path) -> anyhow::Result<()> {
     let config = autoreview_core::load_config(&repo_root.join(".autoreview").join("config.yaml"))?;
-    if config.storage.sync.mode != autoreview_schema::SyncMode::Git {
-        println!("storage.sync.mode is not \"git\" in .autoreview/config.yaml — nothing to sync.");
-        return Ok(());
-    }
     let history_dir = history_dir_for(repo_root);
-    let pulled = autoreview_core::sync_pull(repo_root, &history_dir, &config.storage.sync)?;
-    println!("Pulled {pulled} event log file(s) from the team's sync branch ({}).", config.storage.sync.branch);
+    match config.storage.sync.mode {
+        autoreview_schema::SyncMode::None => {
+            println!("storage.sync.mode is \"none\" in .autoreview/config.yaml — nothing to sync.");
+        }
+        autoreview_schema::SyncMode::Git => {
+            let pulled = autoreview_core::sync_pull(repo_root, &history_dir, &config.storage.sync)?;
+            println!("Pulled {pulled} event log file(s) from the team's sync branch ({}).", config.storage.sync.branch);
+        }
+        autoreview_schema::SyncMode::Remote => {
+            let pulled = autoreview_core::sync_pull(repo_root, &history_dir, &config.storage.sync)?;
+            println!("Pulled {pulled} event log file(s) from the shared directory ({}).", config.storage.sync.location.as_deref().unwrap_or("(none configured)"));
+        }
+    }
     Ok(())
 }

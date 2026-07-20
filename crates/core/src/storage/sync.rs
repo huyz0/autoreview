@@ -97,42 +97,66 @@ fn sync_repo_dir(history_dir: &Path) -> PathBuf {
     history_dir.join("sync-repo")
 }
 
-/// Pushes this machine's event log to the team's sync branch — best-effort,
+/// Pushes this machine's event log to the team's sync target — best-effort,
 /// per the plan ("push at the end of a run, never blocks the review on
 /// network failure"): any error is swallowed, not propagated, so a diff run
-/// on a flaky or offline network still succeeds. No-op when
-/// `sync.mode != Git`.
+/// on a flaky or offline network/mount still succeeds. No-op when
+/// `sync.mode == None`.
+///
+/// `Git` mode maintains a local clone of an orphan branch and pushes to it.
+/// `Remote` mode is the plain-filesystem alternative for a team that
+/// already has a shared, writable directory (an NFS/SMB mount, a synced
+/// cloud-drive folder) and doesn't want to stand up a dedicated git branch
+/// for this: `location` is that directory, and push/pull are direct file
+/// copies via the same `copy_event_files` helper `Git` mode already uses
+/// internally — no git subprocess at all. Filenames are already
+/// host+date-scoped (`<date>-<host>.jsonl`), so concurrent machines writing
+/// into the same shared directory don't collide.
 pub fn sync_push(repo_root: &Path, history_dir: &Path, sync: &StorageSyncConfig) {
-    if sync.mode != SyncMode::Git {
-        return;
+    match sync.mode {
+        SyncMode::None => {}
+        SyncMode::Git => {
+            let _ = (|| -> anyhow::Result<()> {
+                let location = sync.location.as_deref().unwrap_or("origin");
+                let sync_repo = sync_repo_dir(history_dir);
+                ensure_sync_repo(repo_root, &sync_repo, location, &sync.branch)?;
+                copy_event_files(&history_dir.join("events"), &sync_repo.join("events"))?;
+                run_git(&sync_repo, &["add", "-A"])?;
+                // A no-op commit (nothing changed since last push) is expected and
+                // fine to swallow — that's not a sync failure, just nothing new.
+                let _ = run_git(&sync_repo, &["commit", "-q", "-m", "sync: update event logs"]);
+                run_git(&sync_repo, &["push", "-q", "origin", &sync.branch])?;
+                Ok(())
+            })();
+        }
+        SyncMode::Remote => {
+            if let Some(location) = &sync.location {
+                let _ = copy_event_files(&history_dir.join("events"), Path::new(location));
+            }
+        }
     }
-    let _ = (|| -> anyhow::Result<()> {
-        let location = sync.location.as_deref().unwrap_or("origin");
-        let sync_repo = sync_repo_dir(history_dir);
-        ensure_sync_repo(repo_root, &sync_repo, location, &sync.branch)?;
-        copy_event_files(&history_dir.join("events"), &sync_repo.join("events"))?;
-        run_git(&sync_repo, &["add", "-A"])?;
-        // A no-op commit (nothing changed since last push) is expected and
-        // fine to swallow — that's not a sync failure, just nothing new.
-        let _ = run_git(&sync_repo, &["commit", "-q", "-m", "sync: update event logs"]);
-        run_git(&sync_repo, &["push", "-q", "origin", &sync.branch])?;
-        Ok(())
-    })();
 }
 
-/// Pulls every host's event files reachable on the team's sync branch down
+/// Pulls every host's event files reachable on the team's sync target down
 /// into this machine's local `events/` directory. Returns the count of
-/// `.jsonl` files pulled — `0` (not an error) if `sync.mode != Git`, the
-/// branch doesn't exist yet, or the remote is unreachable, so callers can
-/// report "nothing synced" without treating it as a hard failure.
+/// `.jsonl` files pulled — `0` (not an error) if `sync.mode == None`, the
+/// git branch doesn't exist yet, or the remote/mount is unreachable, so
+/// callers can report "nothing synced" without treating it as a hard
+/// failure. See `sync_push`'s docs for what `Remote` mode actually does.
 pub fn sync_pull(repo_root: &Path, history_dir: &Path, sync: &StorageSyncConfig) -> anyhow::Result<usize> {
-    if sync.mode != SyncMode::Git {
-        return Ok(0);
+    match sync.mode {
+        SyncMode::None => Ok(0),
+        SyncMode::Git => {
+            let location = sync.location.as_deref().unwrap_or("origin");
+            let sync_repo = sync_repo_dir(history_dir);
+            ensure_sync_repo(repo_root, &sync_repo, location, &sync.branch)?;
+            copy_event_files(&sync_repo.join("events"), &history_dir.join("events"))
+        }
+        SyncMode::Remote => {
+            let location = sync.location.as_deref().ok_or_else(|| anyhow::anyhow!("storage.sync.mode is 'remote' but no location is configured — set storage.sync.location to a shared directory path"))?;
+            copy_event_files(Path::new(location), &history_dir.join("events"))
+        }
     }
-    let location = sync.location.as_deref().unwrap_or("origin");
-    let sync_repo = sync_repo_dir(history_dir);
-    ensure_sync_repo(repo_root, &sync_repo, location, &sync.branch)?;
-    copy_event_files(&sync_repo.join("events"), &history_dir.join("events"))
 }
 
 #[cfg(test)]
@@ -211,5 +235,66 @@ mod tests {
         let history_dir_c = tempfile::tempdir().unwrap();
         let pulled = sync_pull(repo_root_c.path(), history_dir_c.path(), &sync_config(&remote_url)).unwrap();
         assert_eq!(pulled, 2, "machine C should see both hostA's and hostB's event files");
+    }
+
+    fn remote_sync_config(location: &str) -> StorageSyncConfig {
+        StorageSyncConfig { mode: SyncMode::Remote, location: Some(location.to_string()), branch: "unused-for-remote-mode".to_string() }
+    }
+
+    #[test]
+    fn remote_mode_push_then_pull_round_trips_via_a_plain_shared_directory() {
+        let shared_dir = tempfile::tempdir().unwrap();
+
+        let repo_root_a = tempfile::tempdir().unwrap();
+        let history_dir_a = tempfile::tempdir().unwrap();
+        write_event_file(&history_dir_a.path().join("events"), "2026-07-14-hostA.jsonl", "{\"host\":\"hostA\"}\n");
+        sync_push(repo_root_a.path(), history_dir_a.path(), &remote_sync_config(&shared_dir.path().to_string_lossy()));
+
+        let repo_root_b = tempfile::tempdir().unwrap();
+        let history_dir_b = tempfile::tempdir().unwrap();
+        let pulled = sync_pull(repo_root_b.path(), history_dir_b.path(), &remote_sync_config(&shared_dir.path().to_string_lossy())).unwrap();
+        assert_eq!(pulled, 1);
+        assert!(history_dir_b.path().join("events").join("2026-07-14-hostA.jsonl").exists());
+    }
+
+    #[test]
+    fn remote_mode_no_git_subprocess_directory_is_created() {
+        // Confirms this really is a plain file copy, not a disguised git
+        // flow — no sync-repo/.git working copy should ever appear.
+        let shared_dir = tempfile::tempdir().unwrap();
+        let repo_root = tempfile::tempdir().unwrap();
+        let history_dir = tempfile::tempdir().unwrap();
+        write_event_file(&history_dir.path().join("events"), "2026-07-14-hostA.jsonl", "{\"host\":\"hostA\"}\n");
+        sync_push(repo_root.path(), history_dir.path(), &remote_sync_config(&shared_dir.path().to_string_lossy()));
+        assert!(!sync_repo_dir(history_dir.path()).exists());
+        assert!(shared_dir.path().join("2026-07-14-hostA.jsonl").exists());
+    }
+
+    #[test]
+    fn remote_mode_pull_errors_clearly_when_no_location_is_configured() {
+        let repo_root = tempfile::tempdir().unwrap();
+        let history_dir = tempfile::tempdir().unwrap();
+        let sync = StorageSyncConfig { mode: SyncMode::Remote, location: None, branch: "x".to_string() };
+        let err = sync_pull(repo_root.path(), history_dir.path(), &sync).unwrap_err();
+        assert!(err.to_string().contains("location"), "got: {err}");
+    }
+
+    #[test]
+    fn remote_mode_push_is_a_silent_no_op_when_no_location_is_configured() {
+        let repo_root = tempfile::tempdir().unwrap();
+        let history_dir = tempfile::tempdir().unwrap();
+        write_event_file(&history_dir.path().join("events"), "2026-07-14-hostA.jsonl", "{\"host\":\"hostA\"}\n");
+        let sync = StorageSyncConfig { mode: SyncMode::Remote, location: None, branch: "x".to_string() };
+        sync_push(repo_root.path(), history_dir.path(), &sync); // must not panic
+    }
+
+    #[test]
+    fn remote_mode_pull_returns_zero_when_the_shared_directory_does_not_exist_yet() {
+        let root = tempfile::tempdir().unwrap();
+        let missing_location = root.path().join("not-created-yet");
+        let repo_root = tempfile::tempdir().unwrap();
+        let history_dir = tempfile::tempdir().unwrap();
+        let pulled = sync_pull(repo_root.path(), history_dir.path(), &remote_sync_config(&missing_location.to_string_lossy())).unwrap();
+        assert_eq!(pulled, 0);
     }
 }
