@@ -27,28 +27,48 @@ fn print_finding_summary(finding: &Finding) {
     }
 }
 
-/// Looks for `rule_id` first among the builtin/registered-pack rules
-/// (`find_rule_definition`), then among this repo's own shadow/promoted
-/// rules (`.autoreview/rules/{shadow,promoted}/*.yaml`) — the two places a
-/// deterministic (`Analyzer`/`LearnedRule`-sourced) finding's rule
-/// definition can actually live. Several analyzers set `rule_id` to a
-/// check name that was never a YAML rule at all (an external linter's own
-/// check code, or an autoreview analyzer whose logic lives directly in
-/// Rust) — `tool` distinguishes that expected case from an actual gap
-/// (a builtin/pack rule id that no longer resolves), so the two get
-/// different, honest explanations instead of one generic "not found."
+/// Analyzers whose findings are never backed by a declarative YAML rule
+/// file — their check logic is plain Rust, so a missing `find_rule_
+/// definition`/shadow-file match for one of these is expected, not a gap.
+/// Deliberately NOT a blanket `tool.starts_with("autoreview-")` check:
+/// `autoreview-dataflow` (taint rules), `autoreview-complexity` (threshold
+/// rules), and `autoreview-shadow-rule` (shadow/promoted rules) all share
+/// that prefix but ARE genuinely YAML-backed — for those, a failed lookup
+/// really does mean the rule was renamed/removed, and saying otherwise
+/// would be a false explanation from the one command whose whole job is
+/// truthful ones.
+const CODE_ONLY_ANALYZER_TOOLS: &[&str] = &["autoreview-duplication", "autoreview-practices", "autoreview-architecture", "autoreview-archgraph", "autoreview-symindex", "autoreview-churn"];
+
+fn print_definition_text(header_detail: &str, text: &str) {
+    println!("\nRule definition ({header_detail}):");
+    println!("---");
+    print!("{text}");
+    if !text.ends_with('\n') {
+        println!();
+    }
+}
+
+/// Looks for `rule_id` first among builtin rules (no I/O beyond reading the
+/// embedded rule tree already compiled into the binary), then — only if
+/// that misses — resolves registered rule packs (which may re-fetch a
+/// git-source pack over the network) and searches those, then finally
+/// this repo's own shadow/promoted rules
+/// (`.autoreview/rules/{shadow,promoted}/*.yaml`). Deferring pack
+/// resolution until after the free builtin check means explaining a
+/// builtin-rule finding (the common case) never pays for a git pack
+/// fetch it doesn't need.
 fn print_rule_definition(repo_root: &Path, tool: &str, rule_id: &str) {
+    if let Some(def) = autoreview_core::find_rule_definition(rule_id, &[]) {
+        print_definition_text(&format!("{}, kind: {}{}", def.source_label, def.kind, if def.semantic { ", semantic: true" } else { "" }), &def.yaml);
+        return;
+    }
+
     let configured_packs = autoreview_core::load_rule_packs_config(&autoreview_core::rule_packs_config_path(repo_root)).unwrap_or_default();
     let rule_packs_cache_root = autoreview_core::default_rule_packs_cache_root();
     let registered_packs: Vec<_> = autoreview_core::resolve_rule_packs(repo_root, &rule_packs_cache_root, &configured_packs).into_iter().filter_map(|(_, r)| r.ok()).collect();
 
     if let Some(def) = autoreview_core::find_rule_definition(rule_id, &registered_packs) {
-        println!("\nRule definition ({}, kind: {}{}):", def.source_label, def.kind, if def.semantic { ", semantic: true" } else { "" });
-        println!("---");
-        print!("{}", def.yaml);
-        if !def.yaml.ends_with('\n') {
-            println!();
-        }
+        print_definition_text(&format!("{}, kind: {}{}", def.source_label, def.kind, if def.semantic { ", semantic: true" } else { "" }), &def.yaml);
         return;
     }
 
@@ -62,21 +82,25 @@ fn print_rule_definition(repo_root: &Path, tool: &str, rule_id: &str) {
         if parsed.id != rule_id {
             continue;
         }
-        println!("\nRule definition ({} rule, {}):", shadow_file.status, shadow_file.path.display());
-        println!("---");
-        print!("{text}");
-        if !text.ends_with('\n') {
-            println!();
-        }
+        print_definition_text(&format!("{} rule, {}", shadow_file.status, shadow_file.path.display()), &text);
         return;
     }
 
+    println!("\n{}", no_definition_found_message(tool, rule_id));
+}
+
+/// The message printed when neither a builtin/pack rule nor a shadow/
+/// promoted rule file matches `rule_id` — a pure function of `tool`/
+/// `rule_id` so the tool-classification logic (which of the two possible
+/// explanations applies) is unit-testable without the file-system/network
+/// I/O the rest of `print_rule_definition` does.
+fn no_definition_found_message(tool: &str, rule_id: &str) -> String {
     if tool == "golangci-lint" || tool == "clippy" {
-        println!("\n'{rule_id}' is {tool}'s own check, not one of autoreview's declarative rules — there's no YAML rule to show. See {tool}'s own documentation for what '{rule_id}' means.");
-    } else if tool.starts_with("autoreview-") {
-        println!("\nThis check's logic lives directly in autoreview's {tool} analyzer code (crates/core/src/analyzers/), not a declarative YAML rule file — there's no rule text to show beyond the message above.");
+        format!("'{rule_id}' is {tool}'s own check, not one of autoreview's declarative rules — there's no YAML rule to show. See {tool}'s own documentation for what '{rule_id}' means.")
+    } else if CODE_ONLY_ANALYZER_TOOLS.contains(&tool) {
+        format!("This check's logic lives directly in autoreview's {tool} analyzer code (crates/core/src/analyzers/), not a declarative YAML rule file — there's no rule text to show beyond the message above.")
     } else {
-        println!("\nNo rule definition for '{rule_id}' was found among builtin rules, registered rule packs, or this repo's .autoreview/rules/{{shadow,promoted}}/ — it may have been renamed or removed since this finding was reported.");
+        format!("No rule definition for '{rule_id}' was found among builtin rules, registered rule packs, or this repo's .autoreview/rules/{{shadow,promoted}}/ — it may have been renamed or removed since this finding was reported.")
     }
 }
 
@@ -117,4 +141,41 @@ pub fn run_explain(repo_root: &Path, finding_id: &str) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_yaml_backed_tool_whose_rule_no_longer_resolves_gets_the_renamed_or_removed_message() {
+        // Regression test: `autoreview-dataflow` (taint rules),
+        // `autoreview-complexity` (threshold rules), and
+        // `autoreview-shadow-rule` (shadow/promoted rules) are all
+        // genuinely YAML-backed despite sharing the "autoreview-" prefix
+        // with the Rust-only analyzers — a blanket `starts_with("autoreview-")`
+        // check previously misclassified them as code-only, wrongly
+        // claiming their (real, just-missing) YAML rule didn't exist.
+        for tool in ["autoreview-dataflow", "autoreview-complexity", "autoreview-shadow-rule"] {
+            let message = no_definition_found_message(tool, "some-removed-rule-id");
+            assert!(message.contains("may have been renamed or removed"), "tool '{tool}' got the wrong message: {message}");
+            assert!(!message.contains("lives directly in"), "tool '{tool}' is YAML-backed and must not get the code-only message: {message}");
+        }
+    }
+
+    #[test]
+    fn a_genuinely_code_only_analyzer_gets_the_code_only_message() {
+        for tool in CODE_ONLY_ANALYZER_TOOLS {
+            let message = no_definition_found_message(tool, "some-rule-id");
+            assert!(message.contains("lives directly in"), "tool '{tool}' got the wrong message: {message}");
+        }
+    }
+
+    #[test]
+    fn an_external_linter_gets_pointed_at_its_own_docs() {
+        for tool in ["golangci-lint", "clippy"] {
+            let message = no_definition_found_message(tool, "some-check");
+            assert!(message.contains("own check"), "tool '{tool}' got the wrong message: {message}");
+        }
+    }
 }

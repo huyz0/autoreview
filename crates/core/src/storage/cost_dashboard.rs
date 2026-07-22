@@ -78,10 +78,15 @@ pub struct CostDashboard {
 /// `None`) — summed only over runs that reported it, with
 /// `any_usd_reported` telling the caller whether the totals mean "$0.00
 /// spent" or "no backend here reports USD, don't trust this number."
+///
+/// `records` need not be pre-sorted: day totals are bucketed by a
+/// `HashMap` keyed on the day string (same approach `by_stage` already
+/// uses), not by coalescing adjacent same-day entries, so out-of-order
+/// input can't silently fragment a day's total into multiple entries.
 pub fn summarize(records: &[&RunCostRecord]) -> CostDashboard {
     let mut dashboard = CostDashboard { run_count: records.len(), ..Default::default() };
     let mut by_stage: HashMap<String, f64> = HashMap::new();
-    let mut by_day: Vec<(String, f64)> = Vec::new();
+    let mut by_day: HashMap<String, f64> = HashMap::new();
 
     for record in records {
         dashboard.total_input_tokens += record.total.input_tokens;
@@ -91,10 +96,7 @@ pub fn summarize(records: &[&RunCostRecord]) -> CostDashboard {
             dashboard.any_usd_reported = true;
             dashboard.total_usd += usd;
             let day = record.created_at.get(..10).unwrap_or(&record.created_at).to_string();
-            match by_day.last_mut() {
-                Some((last_day, total)) if *last_day == day => *total += usd,
-                _ => by_day.push((day, usd)),
-            }
+            *by_day.entry(day).or_insert(0.0) += usd;
         }
         for (stage, entry) in &record.per_stage {
             if let Some(usd) = entry.usd {
@@ -107,9 +109,8 @@ pub fn summarize(records: &[&RunCostRecord]) -> CostDashboard {
     by_stage.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     dashboard.by_stage_usd = by_stage;
 
-    // `records` is already sorted oldest-first by the loader, but `by_day`
-    // is only append-coalesced correctly if same-day runs are adjacent —
-    // true given that ordering, so no separate sort is needed here.
+    let mut by_day: Vec<(String, f64)> = by_day.into_iter().collect();
+    by_day.sort_by(|a, b| a.0.cmp(&b.0));
     dashboard.by_day_usd = by_day;
 
     dashboard
@@ -208,5 +209,25 @@ mod tests {
         assert!(!dashboard.any_usd_reported);
         assert_eq!(dashboard.total_usd, 0.0);
         assert_eq!(dashboard.total_input_tokens, 100, "token totals must still aggregate even with no usd reported");
+    }
+
+    #[test]
+    fn summarize_merges_same_day_totals_correctly_even_when_records_are_out_of_order() {
+        // `summarize` takes `&[&RunCostRecord]` directly — callers aren't
+        // required to route through `load_run_cost_records`'s sort, so this
+        // constructs out-of-order, non-adjacent same-day records by hand to
+        // prove day totals bucket by day rather than by adjacency.
+        let a = RunCostRecord { run_id: "a".into(), created_at: "2026-07-12T09:00:00Z".into(), base_ref: "m".into(), head_ref: "h".into(), total: CostEntry { input_tokens: 0, output_tokens: 0, usd: Some(1.0), wall_ms: 0 }, per_stage: HashMap::new() };
+        let b = RunCostRecord { run_id: "b".into(), created_at: "2026-07-13T09:00:00Z".into(), base_ref: "m".into(), head_ref: "h".into(), total: CostEntry { input_tokens: 0, output_tokens: 0, usd: Some(5.0), wall_ms: 0 }, per_stage: HashMap::new() };
+        let c = RunCostRecord { run_id: "c".into(), created_at: "2026-07-12T15:00:00Z".into(), base_ref: "m".into(), head_ref: "h".into(), total: CostEntry { input_tokens: 0, output_tokens: 0, usd: Some(2.0), wall_ms: 0 }, per_stage: HashMap::new() };
+
+        // Deliberately out of chronological order: a (07-12), b (07-13), c (07-12) again.
+        let dashboard = summarize(&[&a, &b, &c]);
+
+        assert_eq!(
+            dashboard.by_day_usd,
+            vec![("2026-07-12".to_string(), 3.0), ("2026-07-13".to_string(), 5.0)],
+            "the two 07-12 records must merge into one $3.00 entry even though a 07-13 record sits between them in the input"
+        );
     }
 }
