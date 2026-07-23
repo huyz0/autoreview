@@ -41,8 +41,10 @@
 //! all three — see its own doc comment) only get taint rules run against
 //! them for now — see `run_dataflow_check`'s own doc comment.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use tree_sitter::{Node, Tree};
 
@@ -52,6 +54,51 @@ use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location
 
 use super::taint_rules;
 use crate::rule_packs::ResolvedRulePack;
+
+/// A read+parse cache shared across one `run_dataflow_check` invocation —
+/// Rule engine roadmap item 1 (see `RULE_ENGINE_RESEARCH.md`): every
+/// interprocedural rule's same-package/cross-package resolution
+/// (`package_summaries`, `imported_package_summaries`,
+/// `npe_package_summaries`, `npe_imported_package_summaries`) previously
+/// independently re-read and re-parsed the same sibling/imported files
+/// from scratch, once per changed file that needed them — if N changed
+/// files in one diff import the same package, that package's files got
+/// parsed N times. This cache makes each file's read+parse pay its cost
+/// at most once per `run_dataflow_check` call, regardless of how many
+/// changed files or rules end up needing it. `Rc` rather than a plain
+/// owned return because `Tree`'s clone is cheap (an internal refcount
+/// bump, backed by tree-sitter's own C library) but re-parsing is not —
+/// sharing one parse via `Rc` avoids paying for a second clone of the
+/// tree on every cache hit.
+type ParsedFile = Rc<(String, Tree)>;
+
+struct ParseCache {
+    entries: RefCell<HashMap<PathBuf, Option<ParsedFile>>>,
+}
+
+impl ParseCache {
+    fn new() -> Self {
+        ParseCache { entries: RefCell::new(HashMap::new()) }
+    }
+
+    /// Returns the cached (content, tree) for `path`, parsing and caching
+    /// it on first request. `None` on a read or parse failure — cached as
+    /// `None` too, so a missing/unparseable file isn't retried on every
+    /// subsequent lookup within this run.
+    fn get(&self, path: &Path, language: autoreview_langsupport::Language) -> Option<ParsedFile> {
+        if let Some(cached) = self.entries.borrow().get(path) {
+            return cached.clone();
+        }
+        let parsed = (|| {
+            let content = std::fs::read_to_string(path).ok()?;
+            let mut parser = autoreview_langsupport::parser_for(language)?;
+            let tree = parser.parse(&content, None)?;
+            Some(Rc::new((content, tree)))
+        })();
+        self.entries.borrow_mut().insert(path.to_path_buf(), parsed.clone());
+        parsed
+    }
+}
 
 fn make_finding(rule_id: &str, category: &str, severity: Severity, path: &str, line: u32, title: String, message: String) -> AgentFinding {
     AgentFinding {
@@ -199,7 +246,7 @@ fn run_append_shared_backing_array(path: &str, lowered: &[(Node, Cfg<Stmt>)]) ->
 /// or parse is silently skipped rather than failing the whole scan, since
 /// the current file's own findings still matter even if a sibling or an
 /// imported package's file can't be read.
-fn scan_dir_for_pointer_summaries(dir: &Path) -> HashMap<String, bool> {
+fn scan_dir_for_pointer_summaries(dir: &Path, cache: &ParseCache) -> HashMap<String, bool> {
     let mut summaries = HashMap::new();
     let Ok(entries) = std::fs::read_dir(dir) else { return summaries };
     for entry in entries.filter_map(Result::ok) {
@@ -207,11 +254,10 @@ fn scan_dir_for_pointer_summaries(dir: &Path) -> HashMap<String, bool> {
         if candidate_path.extension().and_then(|e| e.to_str()) != Some("go") {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(&candidate_path) else { continue };
-        let Some(mut parser) = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Go) else { continue };
-        let Some(tree) = parser.parse(&content, None) else { continue };
+        let Some(cached) = cache.get(&candidate_path, autoreview_langsupport::Language::Go) else { continue };
+        let (content, tree) = cached.as_ref();
         let source = content.as_bytes();
-        for fn_node in go_functions(&tree) {
+        for fn_node in go_functions(tree) {
             if autoreview_dataflow::lower::go::function_returns_pointer(fn_node) {
                 if let Some(name) = autoreview_dataflow::lower::go::function_name(fn_node, source) {
                     let cfg = autoreview_dataflow::lower::go::lower_function(source, fn_node);
@@ -228,9 +274,9 @@ fn scan_dir_for_pointer_summaries(dir: &Path) -> HashMap<String, bool> {
 /// scans every `.go` file in `file_path`'s directory (Go's
 /// directory=package convention), including `file_path` itself, rather
 /// than just the one file being checked.
-fn package_summaries(repo_root: &Path, file_path: &str) -> HashMap<String, bool> {
+fn package_summaries(repo_root: &Path, file_path: &str, cache: &ParseCache) -> HashMap<String, bool> {
     let Some(dir) = repo_root.join(file_path).parent().map(Path::to_path_buf) else { return HashMap::new() };
-    scan_dir_for_pointer_summaries(&dir)
+    scan_dir_for_pointer_summaries(&dir, cache)
 }
 
 /// Generalizes same-package resolution to the module's *other* internal
@@ -251,30 +297,31 @@ fn package_summaries(repo_root: &Path, file_path: &str) -> HashMap<String, bool>
 /// language guarantee; a package whose own `package` declaration disagrees
 /// with its directory name (a rare, deliberately confusing pattern) won't
 /// resolve through this heuristic.
-fn imported_package_summaries(repo_root: &Path, file_path: &str) -> HashMap<String, bool> {
+fn imported_package_summaries(repo_root: &Path, file_path: &str, cache: &ParseCache) -> HashMap<String, bool> {
     let mut summaries = HashMap::new();
     let Some(module_path) = autoreview_archgraph::discover_go_module_path(repo_root) else { return summaries };
-    let Ok(content) = std::fs::read_to_string(repo_root.join(file_path)) else { return summaries };
-    for import in autoreview_archgraph::extract_go_imports(&content) {
+    let Some(cached) = cache.get(&repo_root.join(file_path), autoreview_langsupport::Language::Go) else { return summaries };
+    let content = &cached.0;
+    for import in autoreview_archgraph::extract_go_imports(content) {
         let Some(suffix) = import.strip_prefix(&module_path) else { continue };
         let suffix = suffix.trim_start_matches('/');
         if suffix.is_empty() {
             continue;
         }
         let Some(pkg_name) = suffix.rsplit('/').next() else { continue };
-        for (name, summary) in scan_dir_for_pointer_summaries(&repo_root.join(suffix)) {
+        for (name, summary) in scan_dir_for_pointer_summaries(&repo_root.join(suffix), cache) {
             summaries.insert(format!("{pkg_name}.{name}"), summary);
         }
     }
     summaries
 }
 
-fn run_typed_nil_interface_return(repo_root: &Path, path: &str, source: &[u8], lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
+fn run_typed_nil_interface_return(repo_root: &Path, path: &str, source: &[u8], lowered: &[(Node, Cfg<Stmt>)], cache: &ParseCache) -> Vec<AgentFinding> {
     // Pass 1: same-package summaries plus every other in-module package
     // this file imports — see `package_summaries`/`imported_package_summaries`
     // above.
-    let mut summaries = package_summaries(repo_root, path);
-    summaries.extend(imported_package_summaries(repo_root, path));
+    let mut summaries = package_summaries(repo_root, path, cache);
+    summaries.extend(imported_package_summaries(repo_root, path, cache));
 
     // Pass 2: check every function declaring an `error` return against
     // those summaries.
@@ -308,25 +355,26 @@ fn run_typed_nil_interface_return(repo_root: &Path, path: &str, source: &[u8], l
 /// with Go's own summary keying). Best-effort: a file that fails to read
 /// or parse is silently skipped, same "current file's findings still
 /// matter" rationale as Go's `scan_dir_for_pointer_summaries`.
-fn add_npe_summaries_from_file(path: &Path, summaries: &mut HashMap<String, bool>) {
-    let Ok(content) = std::fs::read_to_string(path) else { return };
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("java") => {
-            let Some(mut parser) = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Java) else { return };
-            let Some(tree) = parser.parse(&content, None) else { return };
-            let source = content.as_bytes();
-            for fn_node in java_functions(&tree) {
+fn add_npe_summaries_from_file(path: &Path, summaries: &mut HashMap<String, bool>, cache: &ParseCache) {
+    let language = match path.extension().and_then(|e| e.to_str()) {
+        Some("java") => autoreview_langsupport::Language::Java,
+        Some("kt") | Some("kts") => autoreview_langsupport::Language::Kotlin,
+        _ => return,
+    };
+    let Some(cached) = cache.get(path, language) else { return };
+    let (content, tree) = cached.as_ref();
+    let source = content.as_bytes();
+    match language {
+        autoreview_langsupport::Language::Java => {
+            for fn_node in java_functions(tree) {
                 if let Some(name) = autoreview_dataflow::lower::java::function_name(fn_node, source) {
                     let cfg = autoreview_dataflow::lower::java::lower_function(source, fn_node);
                     summaries.insert(name, autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary(&cfg));
                 }
             }
         }
-        Some("kt") | Some("kts") => {
-            let Some(mut parser) = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Kotlin) else { return };
-            let Some(tree) = parser.parse(&content, None) else { return };
-            let source = content.as_bytes();
-            for fn_node in kotlin_functions(&tree) {
+        autoreview_langsupport::Language::Kotlin => {
+            for fn_node in kotlin_functions(tree) {
                 if let Some(name) = autoreview_dataflow::lower::kotlin::function_name(fn_node, source) {
                     let cfg = autoreview_dataflow::lower::kotlin::lower_function(source, fn_node);
                     summaries.insert(name, autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary(&cfg));
@@ -344,18 +392,25 @@ fn add_npe_summaries_from_file(path: &Path, summaries: &mut HashMap<String, bool
 /// directory == package isn't a language guarantee here the way it is for
 /// Go (see `autoreview_archgraph`'s module docs on why Java/Kotlin's
 /// package resolution reads the real declaration instead of inferring
-/// from the path).
-fn npe_package_summaries(repo_root: &Path, file_path: &str, own_package: &str) -> HashMap<String, bool> {
+/// from the path). Routes the declared-package check through the same
+/// cache `add_npe_summaries_from_file` then consults, so each candidate
+/// file is read and parsed at most once even though both steps need it.
+fn npe_package_summaries(repo_root: &Path, file_path: &str, own_package: &str, cache: &ParseCache) -> HashMap<String, bool> {
     let mut summaries = HashMap::new();
     let Some(dir) = repo_root.join(file_path).parent().map(Path::to_path_buf) else { return summaries };
     let Ok(entries) = std::fs::read_dir(&dir) else { return summaries };
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
-        let Ok(content) = std::fs::read_to_string(&path) else { continue };
-        if autoreview_archgraph::declared_package(&content).as_deref() != Some(own_package) {
+        let language = match path.extension().and_then(|e| e.to_str()) {
+            Some("java") => autoreview_langsupport::Language::Java,
+            Some("kt") | Some("kts") => autoreview_langsupport::Language::Kotlin,
+            _ => continue,
+        };
+        let Some(cached) = cache.get(&path, language) else { continue };
+        if autoreview_archgraph::declared_package(&cached.0).as_deref() != Some(own_package) {
             continue;
         }
-        add_npe_summaries_from_file(&path, &mut summaries);
+        add_npe_summaries_from_file(&path, &mut summaries, cache);
     }
     summaries
 }
@@ -365,12 +420,12 @@ fn npe_package_summaries(repo_root: &Path, file_path: &str, own_package: &str) -
 /// `find_java_kotlin_files_declaring_package`'s own docs cover why this
 /// is a whole-repo scan rather than a module-path-relative directory jump
 /// the way Go's cross-package resolution is.
-fn npe_imported_package_summaries(repo_root: &Path, own_content: &str) -> HashMap<String, bool> {
+fn npe_imported_package_summaries(repo_root: &Path, own_content: &str, cache: &ParseCache) -> HashMap<String, bool> {
     let mut summaries = HashMap::new();
     for import in autoreview_archgraph::extract_java_kotlin_imports(own_content) {
         let pkg = autoreview_archgraph::import_package(&import);
         for path in autoreview_archgraph::find_java_kotlin_files_declaring_package(repo_root, &pkg) {
-            add_npe_summaries_from_file(&path, &mut summaries);
+            add_npe_summaries_from_file(&path, &mut summaries, cache);
         }
     }
     summaries
@@ -385,16 +440,16 @@ fn npe_imported_package_summaries(repo_root: &Path, own_content: &str) -> HashMa
 /// default/unnamed package) falls back to summarizing just its own
 /// functions, so same-file resolution still works even without cross-file
 /// scope.
-fn run_npe_risk(repo_root: &Path, path: &str, own_content: &str, lowered: &[(Node, Cfg<Stmt>)], null_safe_methods: &[&str]) -> Vec<AgentFinding> {
+fn run_npe_risk(repo_root: &Path, path: &str, own_content: &str, lowered: &[(Node, Cfg<Stmt>)], null_safe_methods: &[&str], cache: &ParseCache) -> Vec<AgentFinding> {
     let mut summaries = match autoreview_archgraph::declared_package(own_content) {
-        Some(package) => npe_package_summaries(repo_root, path, &package),
+        Some(package) => npe_package_summaries(repo_root, path, &package, cache),
         None => {
             let mut own_only = HashMap::new();
-            add_npe_summaries_from_file(&repo_root.join(path), &mut own_only);
+            add_npe_summaries_from_file(&repo_root.join(path), &mut own_only, cache);
             own_only
         }
     };
-    summaries.extend(npe_imported_package_summaries(repo_root, own_content));
+    summaries.extend(npe_imported_package_summaries(repo_root, own_content, cache));
 
     let mut findings = Vec::new();
     for (_, cfg) in lowered {
@@ -498,12 +553,13 @@ fn run_loaded_taint_rules(path: &str, language: &str, lowered: &[(Node, Cfg<Stmt
 
 /// Reads and parses one file, for the checks below to lower — a shared
 /// early-return-on-any-failure helper since all three language branches in
-/// `run_dataflow_check` do exactly this before lowering.
-fn read_and_parse(repo_root: &Path, path: &str, language: autoreview_langsupport::Language) -> Option<(String, Tree)> {
-    let content = std::fs::read_to_string(repo_root.join(path)).ok()?;
-    let mut parser = autoreview_langsupport::parser_for(language)?;
-    let tree = parser.parse(&content, None)?;
-    Some((content, tree))
+/// `run_dataflow_check` do exactly this before lowering. Routed through
+/// `ParseCache` so a changed file that's also a sibling/imported
+/// dependency of another changed file in the same diff is only read and
+/// parsed once across the whole `run_dataflow_check` call, not once per
+/// role it plays.
+fn read_and_parse(repo_root: &Path, path: &str, language: autoreview_langsupport::Language, cache: &ParseCache) -> Option<ParsedFile> {
+    cache.get(&repo_root.join(path), language)
 }
 
 /// Runs all dataflow-powered checks against one changed file's current
@@ -517,43 +573,50 @@ fn read_and_parse(repo_root: &Path, path: &str, language: autoreview_langsupport
 /// them needs no dataflow-crate changes to run. Parses and lowers each
 /// file's functions exactly once per language, shared across that
 /// language's rule families rather than each re-parsing/re-lowering
-/// independently.
+/// independently — and, via `ParseCache`, shared across every
+/// interprocedural rule's own same-package/cross-package resolution too
+/// (rule engine roadmap item 1, see `RULE_ENGINE_RESEARCH.md`).
 pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
     let go_pre_1_22 = crate::analyzers::practices::go_module_targets_pre_1_22(repo_root);
+    let cache = ParseCache::new();
     changed_files
         .iter()
         .filter_map(|path| {
             if path.ends_with(".go") {
-                let (content, tree) = read_and_parse(repo_root, path, autoreview_langsupport::Language::Go)?;
+                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Go, &cache)?;
+                let (content, tree) = cached.as_ref();
                 let source = content.as_bytes();
-                let lowered = lower_all_functions(source, &tree);
+                let lowered = lower_all_functions(source, tree);
 
                 let mut findings = run_append_shared_backing_array(path, &lowered);
-                findings.extend(run_typed_nil_interface_return(repo_root, path, source, &lowered));
+                findings.extend(run_typed_nil_interface_return(repo_root, path, source, &lowered, &cache));
                 findings.extend(run_loaded_taint_rules(path, "Go", &lowered, registered_packs));
                 if go_pre_1_22 {
                     findings.extend(run_loopvar_checks(path, &lowered));
                 }
                 Some(findings)
             } else if path.ends_with(".java") {
-                let (content, tree) = read_and_parse(repo_root, path, autoreview_langsupport::Language::Java)?;
-                let lowered = lower_all_java_functions(content.as_bytes(), &tree);
-                let mut findings = run_npe_risk(repo_root, path, &content, &lowered, &[]);
+                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Java, &cache)?;
+                let (content, tree) = cached.as_ref();
+                let lowered = lower_all_java_functions(content.as_bytes(), tree);
+                let mut findings = run_npe_risk(repo_root, path, content, &lowered, &[], &cache);
                 findings.extend(run_loaded_taint_rules(path, "Java", &lowered, registered_packs));
                 Some(findings)
             } else if path.ends_with(".kt") || path.ends_with(".kts") {
-                let (content, tree) = read_and_parse(repo_root, path, autoreview_langsupport::Language::Kotlin)?;
-                let lowered = lower_all_kotlin_functions(content.as_bytes(), &tree);
+                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Kotlin, &cache)?;
+                let (content, tree) = cached.as_ref();
+                let lowered = lower_all_kotlin_functions(content.as_bytes(), tree);
                 // Kotlin's stdlib defines Any?.toString() as a null-safe
                 // extension (see java_kotlin_npe_risk's own docs) — the
                 // only call this rule's dereference-walk must not treat as
                 // risky on a nullable receiver in Kotlin specifically.
-                let mut findings = run_npe_risk(repo_root, path, &content, &lowered, &["toString"]);
+                let mut findings = run_npe_risk(repo_root, path, content, &lowered, &["toString"], &cache);
                 findings.extend(run_loaded_taint_rules(path, "Kotlin", &lowered, registered_packs));
                 Some(findings)
             } else if path.ends_with(".tsx") {
-                let (content, tree) = read_and_parse(repo_root, path, autoreview_langsupport::Language::Tsx)?;
-                let lowered = lower_all_javascript_functions(content.as_bytes(), &tree);
+                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Tsx, &cache)?;
+                let (content, tree) = cached.as_ref();
+                let lowered = lower_all_javascript_functions(content.as_bytes(), tree);
                 // Reuses the "TypeScript" taint rules rather than a separate
                 // "Tsx" bucket — TSX's grammar only adds JSX syntax on top
                 // of TypeScript's, so the same taint rules apply verbatim; a
@@ -561,12 +624,14 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
                 // same rules twice.
                 Some(run_loaded_taint_rules(path, "TypeScript", &lowered, registered_packs))
             } else if path.ends_with(".ts") || path.ends_with(".mts") || path.ends_with(".cts") {
-                let (content, tree) = read_and_parse(repo_root, path, autoreview_langsupport::Language::TypeScript)?;
-                let lowered = lower_all_javascript_functions(content.as_bytes(), &tree);
+                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::TypeScript, &cache)?;
+                let (content, tree) = cached.as_ref();
+                let lowered = lower_all_javascript_functions(content.as_bytes(), tree);
                 Some(run_loaded_taint_rules(path, "TypeScript", &lowered, registered_packs))
             } else if path.ends_with(".js") || path.ends_with(".jsx") || path.ends_with(".mjs") || path.ends_with(".cjs") {
-                let (content, tree) = read_and_parse(repo_root, path, autoreview_langsupport::Language::JavaScript)?;
-                let lowered = lower_all_javascript_functions(content.as_bytes(), &tree);
+                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::JavaScript, &cache)?;
+                let (content, tree) = cached.as_ref();
+                let lowered = lower_all_javascript_functions(content.as_bytes(), tree);
                 Some(run_loaded_taint_rules(path, "JavaScript", &lowered, registered_packs))
             } else {
                 None
@@ -579,6 +644,32 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_cache_returns_the_same_parse_on_repeated_lookups_of_the_same_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.go");
+        std::fs::write(&path, "package main\n\nfunc f() {}\n").unwrap();
+
+        let cache = ParseCache::new();
+        let first = cache.get(&path, autoreview_langsupport::Language::Go).unwrap();
+        let second = cache.get(&path, autoreview_langsupport::Language::Go).unwrap();
+        assert!(Rc::ptr_eq(&first, &second), "a second lookup of the same path must reuse the cached parse, not re-read/re-parse the file");
+    }
+
+    #[test]
+    fn parse_cache_caches_a_miss_too_so_a_missing_file_is_not_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = ParseCache::new();
+        assert!(cache.get(&dir.path().join("nonexistent.go"), autoreview_langsupport::Language::Go).is_none());
+        // A second lookup of the same missing path must also cleanly return
+        // None (not panic on a stale cache entry, and not attempt a second
+        // real filesystem read — verified indirectly: this only matters if
+        // some other assertion about the cache's internal HashMap.len()
+        // would be relevant, which it isn't here; the contract under test
+        // is just "repeated misses stay misses, no panic").
+        assert!(cache.get(&dir.path().join("nonexistent.go"), autoreview_langsupport::Language::Go).is_none());
+    }
 
     #[test]
     fn flags_append_that_may_overwrite_a_reused_slices_backing_array() {
