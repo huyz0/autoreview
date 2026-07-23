@@ -15,22 +15,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use autoreview_archgraph::{build_go_import_graph, build_java_kotlin_import_graph, declared_package, detect_cycles, discover_go_module_path, ImportGraph};
+use autoreview_archgraph::{build_go_import_graph, build_java_kotlin_import_graph, detect_cycles, discover_go_module_path, go_package_for_file, java_kotlin_package_for_file, ImportGraph};
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
-
-fn go_package_for_file(file: &str, module_path: &str) -> Option<String> {
-    let parent = Path::new(file).parent()?;
-    if parent.as_os_str().is_empty() {
-        Some(module_path.to_string())
-    } else {
-        Some(format!("{module_path}/{}", parent.to_string_lossy().replace('\\', "/")))
-    }
-}
-
-fn java_kotlin_package_for_file(repo_root: &Path, file: &str) -> Option<String> {
-    let content = std::fs::read_to_string(repo_root.join(file)).ok()?;
-    declared_package(&content)
-}
 
 /// Renders a cycle with the specific import(s) crossing each edge —
 /// rule engine roadmap item 3 (`RULE_ENGINE_RESEARCH.md`): `ImportGraph`

@@ -334,6 +334,69 @@ fn dfs(node: &str, graph: &ImportGraph, visited: &mut HashSet<String>, on_stack:
     on_stack_set.remove(node);
 }
 
+/// The file's own package identity in a Go `ImportGraph`'s node space
+/// (`module_path` + the file's directory, matching exactly how
+/// `build_go_import_graph` derives each node) — public so both
+/// `autoreview-core`'s cycle-reporting and its (rule engine roadmap item
+/// 4) transitive layer-violation check resolve a changed file to a graph
+/// node the same way, rather than two independent re-derivations.
+pub fn go_package_for_file(file: &str, module_path: &str) -> Option<String> {
+    let parent = Path::new(file).parent()?;
+    if parent.as_os_str().is_empty() {
+        Some(module_path.to_string())
+    } else {
+        Some(format!("{module_path}/{}", parent.to_string_lossy().replace('\\', "/")))
+    }
+}
+
+/// The file's own declared package (Java/Kotlin) — a thin, named wrapper
+/// around `declared_package` reading the file directly, for the same
+/// "one shared resolution, not independently re-derived per consumer"
+/// reason as `go_package_for_file`.
+pub fn java_kotlin_package_for_file(repo_root: &Path, file: &str) -> Option<String> {
+    let content = std::fs::read_to_string(repo_root.join(file)).ok()?;
+    declared_package(&content)
+}
+
+/// Breadth-first search from `from` through `graph`'s edges for the
+/// shortest path to any node `is_target` accepts — `None` if no such node
+/// is reachable at all. Deliberately excludes the zero-hop case (`from`
+/// itself satisfying `is_target`): this exists for *transitive*
+/// reachability specifically (rule engine roadmap item 4 — closing
+/// `architecture.rs`'s own documented "direct-import-only" gap), and a
+/// caller checking whether `from` itself is already a target has a much
+/// cheaper, more direct way to ask that question than a graph search.
+/// Ties broken by lexicographic node order, for deterministic output
+/// independent of `HashMap` iteration order.
+pub fn shortest_path_to(graph: &ImportGraph, from: &str, is_target: impl Fn(&str) -> bool) -> Option<Vec<String>> {
+    use std::collections::VecDeque;
+
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(from.to_string());
+    let mut queue: VecDeque<Vec<String>> = VecDeque::new();
+    queue.push_back(vec![from.to_string()]);
+
+    while let Some(path) = queue.pop_front() {
+        let last = path.last().expect("path is never empty").clone();
+        let Some(targets) = graph.edges.get(&last) else { continue };
+        let mut sorted: Vec<&String> = targets.keys().collect();
+        sorted.sort();
+        for target in sorted {
+            if visited.contains(target) {
+                continue;
+            }
+            visited.insert(target.clone());
+            let mut next_path = path.clone();
+            next_path.push(target.clone());
+            if is_target(target) {
+                return Some(next_path);
+            }
+            queue.push_back(next_path);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,6 +498,54 @@ mod tests {
         write_go_file(dir.path(), "internal/a/a.go", "package a\n\nfunc F() {}\n");
         let graph = build_go_import_graph(dir.path(), "github.com/example/myapp");
         assert!(graph.symbols_crossing("github.com/example/myapp/internal/a", "github.com/example/myapp/internal/nonexistent").is_none());
+    }
+
+    #[test]
+    fn shortest_path_to_finds_a_transitive_two_hop_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        write_go_file(dir.path(), "internal/a/a.go", "package a\n\nimport \"github.com/example/myapp/internal/b\"\n\nfunc F() { b.G() }\n");
+        write_go_file(dir.path(), "internal/b/b.go", "package b\n\nimport \"github.com/example/myapp/internal/c\"\n\nfunc G() { c.H() }\n");
+        write_go_file(dir.path(), "internal/c/c.go", "package c\n\nfunc H() {}\n");
+        let graph = build_go_import_graph(dir.path(), "github.com/example/myapp");
+
+        let path = shortest_path_to(&graph, "github.com/example/myapp/internal/a", |pkg| pkg == "github.com/example/myapp/internal/c");
+        assert_eq!(
+            path,
+            Some(vec![
+                "github.com/example/myapp/internal/a".to_string(),
+                "github.com/example/myapp/internal/b".to_string(),
+                "github.com/example/myapp/internal/c".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn shortest_path_to_returns_none_when_unreachable() {
+        let dir = tempfile::tempdir().unwrap();
+        write_go_file(dir.path(), "internal/a/a.go", "package a\n\nfunc F() {}\n");
+        write_go_file(dir.path(), "internal/b/b.go", "package b\n\nfunc G() {}\n");
+        let graph = build_go_import_graph(dir.path(), "github.com/example/myapp");
+        assert!(shortest_path_to(&graph, "github.com/example/myapp/internal/a", |pkg| pkg == "github.com/example/myapp/internal/b").is_none());
+    }
+
+    #[test]
+    fn shortest_path_to_does_not_treat_the_start_node_itself_as_a_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        write_go_file(dir.path(), "internal/a/a.go", "package a\n\nfunc F() {}\n");
+        let graph = build_go_import_graph(dir.path(), "github.com/example/myapp");
+        // `is_target` would accept the start node immediately if this
+        // function didn't deliberately exclude the zero-hop case — must
+        // stay None since there's nowhere to actually go from `a`.
+        assert!(shortest_path_to(&graph, "github.com/example/myapp/internal/a", |pkg| pkg == "github.com/example/myapp/internal/a").is_none());
+    }
+
+    #[test]
+    fn shortest_path_to_does_not_loop_forever_on_a_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        write_go_file(dir.path(), "internal/a/a.go", "package a\n\nimport \"github.com/example/myapp/internal/b\"\n\nfunc F() { b.G() }\n");
+        write_go_file(dir.path(), "internal/b/b.go", "package b\n\nimport \"github.com/example/myapp/internal/a\"\n\nfunc G() { a.F() }\n");
+        let graph = build_go_import_graph(dir.path(), "github.com/example/myapp");
+        assert!(shortest_path_to(&graph, "github.com/example/myapp/internal/a", |pkg| pkg == "github.com/example/myapp/internal/nonexistent").is_none());
     }
 
     #[test]

@@ -3,11 +3,22 @@
 //! `import-linter` and JS's `dependency-cruiser` — both prove layer rules
 //! don't strictly need a full dependency graph, just import-statement
 //! inspection per file. Catches *direct* layer violations (file A imports
-//! something in a forbidden layer); it cannot see transitive ones
-//! (A -> B -> C where only A -> C is forbidden) — that's exactly what
-//! Tier 2 (archgraph, a real cross-file dependency graph) exists for, and
-//! isn't built yet. Every finding this module emits says so explicitly, so
-//! a clean report never gets mistaken for an exhaustive one.
+//! something in a forbidden layer) via a plain per-file line scan.
+//!
+//! Rule engine roadmap item 4 (`RULE_ENGINE_RESEARCH.md`) closed this
+//! module's own long-documented gap: transitive violations (A -> B -> C
+//! where only A -> C is forbidden) are now also detected for Go and
+//! Java/Kotlin, via `autoreview_archgraph`'s whole-repo `ImportGraph` and
+//! `shortest_path_to` — built once per language per `run_architecture_check`
+//! call, lazily (only if a changed file of that language actually has a
+//! forbidden target to check against). TypeScript/JavaScript still has no
+//! archgraph-backed graph, so it stays direct-only for now. The transitive
+//! check only reports genuinely-transitive (2+ hop) violations — a direct
+//! 1-hop case is already reported precisely, with a line number, by the
+//! existing line-scan below, so it's never duplicated. It also only ever
+//! reports the single *shortest* violating chain per file, not every
+//! distinct one that might exist — a real, accepted scope limit (see
+//! `check_transitive_violation`'s own doc comment), not an oversight.
 //!
 //! Opt-in: no `architecture.yaml` means no layers are defined, so nothing
 //! is ever flagged — there's no sane generic default for what a repo's
@@ -17,7 +28,7 @@ use std::path::Path;
 
 use globset::Glob;
 
-use autoreview_schema::{AgentFinding, ArchitectureConfig, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
+use autoreview_schema::{AgentFinding, ArchitectureConfig, ArchitectureLayer, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
 /// Reads and parses `.autoreview/architecture.yaml`. Returns `None` (not an
 /// error) when the file doesn't exist — this feature is opt-in.
@@ -157,15 +168,47 @@ fn normalize_import(import_path: &str, language: ImportLanguage) -> String {
     format!("{slashed}/_")
 }
 
+/// The single shortest transitive (2+ hop) chain from `own_package` to any
+/// package resolving into one of `forbidden_targets` — `None` if there
+/// isn't one, or if the only violating path is a direct 1-hop edge
+/// (already reported precisely, with a line number, by the caller's own
+/// line-scan check; this exists specifically to find what that scan
+/// structurally cannot see). Reports at most one chain per file even if
+/// several distinct forbidden layers are transitively reachable via
+/// different paths — `shortest_path_to` finds *a* shortest violation, not
+/// every one; a real, accepted scope limit (matching this project's
+/// precision-over-recall stance: one confirmed, concrete chain beats
+/// attempting exhaustive multi-path enumeration with more surface for
+/// bugs), not an oversight.
+fn check_transitive_violation(graph: &autoreview_archgraph::ImportGraph, own_package: &str, language: ImportLanguage, layers: &[ArchitectureLayer], forbidden_targets: &[&str]) -> Option<(Vec<String>, String)> {
+    let path = autoreview_archgraph::shortest_path_to(graph, own_package, |pkg| layer_for_path(&normalize_import(pkg, language), layers).is_some_and(|l| forbidden_targets.contains(&l)))?;
+    if path.len() <= 2 {
+        return None;
+    }
+    let target_layer = layer_for_path(&normalize_import(path.last().expect("shortest_path_to never returns an empty path"), language), layers)?.to_string();
+    Some((path, target_layer))
+}
+
 /// Checks each changed file against `architecture.yaml`'s layer rules:
 /// resolves the file's own layer, and flags any import whose normalized
-/// path resolves to a layer that layer is forbidden from depending on.
+/// path resolves to a layer that layer is forbidden from depending on
+/// (direct check, all four supported languages), plus — for Go and
+/// Java/Kotlin, where `autoreview_archgraph` can build a whole-repo import
+/// graph — any transitive chain through an intermediate package that
+/// reaches a forbidden layer with no single import along the way looking
+/// forbidden on its own (see this module's own doc comment and
+/// `check_transitive_violation`'s).
 pub fn run_architecture_check(repo_root: &Path, changed_files: &[String], config: &ArchitectureConfig) -> Vec<AgentFinding> {
     if config.layers.is_empty() || config.rules.is_empty() {
         return Vec::new();
     }
 
     let mut findings = Vec::new();
+    // Built lazily, at most once each, only if some changed file of that
+    // language actually has a forbidden target to check against — a
+    // repo with no Go layers configured never pays for a Go graph walk.
+    let mut go_graph: Option<(String, autoreview_archgraph::ImportGraph)> = None;
+    let mut java_kotlin_graph: Option<autoreview_archgraph::ImportGraph> = None;
 
     for file in changed_files {
         let Some(language) = language_for_file(file) else { continue };
@@ -191,11 +234,50 @@ pub fn run_architecture_check(repo_root: &Path, changed_files: &[String], config
                 severity: Severity::High,
                 confidence: 1.0,
                 title: format!("Layer violation: {file_layer} -> {import_layer}"),
-                message: format!(
-                    "{file_layer} imports `{import_path}`, which resolves to the {import_layer} layer — {file_layer} is configured to never depend on {import_layer} in architecture.yaml. \
-                    (Direct-import check only: this doesn't see transitive violations through an intermediate file — that needs a full dependency graph, not yet available.)"
-                ),
+                message: format!("{file_layer} imports `{import_path}`, which resolves to the {import_layer} layer — {file_layer} is configured to never depend on {import_layer} in architecture.yaml."),
                 location: Location { path: file.clone(), range: LocationRange { start_line: line_no, ..Default::default() }, snippet: import_path.clone(), side: Side::New },
+                related_locations: None,
+                suggestion: None,
+                tags: None,
+                meta: None,
+                suggested_patch: None,
+            });
+        }
+
+        let transitive = match language {
+            ImportLanguage::Go => {
+                if go_graph.is_none() {
+                    go_graph = autoreview_archgraph::discover_go_module_path(repo_root).map(|module_path| {
+                        let graph = autoreview_archgraph::build_go_import_graph(repo_root, &module_path);
+                        (module_path, graph)
+                    });
+                }
+                go_graph.as_ref().and_then(|(module_path, graph)| {
+                    let own_package = autoreview_archgraph::go_package_for_file(file, module_path)?;
+                    check_transitive_violation(graph, &own_package, language, &config.layers, &forbidden_targets)
+                })
+            }
+            ImportLanguage::JavaOrKotlin => {
+                let graph = java_kotlin_graph.get_or_insert_with(|| autoreview_archgraph::build_java_kotlin_import_graph(repo_root));
+                autoreview_archgraph::java_kotlin_package_for_file(repo_root, file).and_then(|own_package| check_transitive_violation(graph, &own_package, language, &config.layers, &forbidden_targets))
+            }
+            // No archgraph-backed whole-repo import graph for JS/TS yet —
+            // stays direct-import-only, same as before this roadmap item.
+            ImportLanguage::JavaScriptOrTypeScript => None,
+        };
+
+        if let Some((path, target_layer)) = transitive {
+            let chain = path.join(" -> ");
+            findings.push(AgentFinding {
+                source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-architecture".to_string(), rule_id: Some("transitive-layer-violation".to_string()), aspect: None, backend: None },
+                category: "architecture".to_string(),
+                severity: Severity::High,
+                confidence: 1.0,
+                title: format!("Transitive layer violation: {file_layer} -> {target_layer}"),
+                message: format!(
+                    "{file_layer} transitively depends on the {target_layer} layer through: {chain}. No single import here is directly forbidden, but the dependency chain reaches {target_layer} anyway — {file_layer} is configured to never depend on it in architecture.yaml."
+                ),
+                location: Location { path: file.clone(), range: LocationRange { start_line: 1, ..Default::default() }, snippet: chain, side: Side::New },
                 related_locations: None,
                 suggestion: None,
                 tags: None,
@@ -309,6 +391,78 @@ mod tests {
         let config = make_config();
         let findings = run_architecture_check(dir.path(), &["internal/handler/login.go".to_string()], &config);
         assert!(findings.is_empty(), "handler -> service is not forbidden in this config");
+    }
+
+    #[test]
+    fn detects_a_transitive_layer_violation_in_go() {
+        // Rule engine roadmap item 4: handler doesn't import repository
+        // directly (that's already covered by the direct-violation test
+        // above) — it imports util, which imports repository. No single
+        // import in handler/login.go is itself forbidden, but the chain
+        // reaches the forbidden layer anyway.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module myapp\n\ngo 1.22\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("internal/handler")).unwrap();
+        std::fs::write(dir.path().join("internal/handler/login.go"), "package handler\n\nimport \"myapp/internal/util\"\n\nfunc Login() { util.Do() }\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("internal/util")).unwrap();
+        std::fs::write(dir.path().join("internal/util/helper.go"), "package util\n\nimport \"myapp/internal/repository\"\n\nfunc Do() { repository.Get() }\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("internal/repository")).unwrap();
+        std::fs::write(dir.path().join("internal/repository/user_repo.go"), "package repository\n\nfunc Get() {}\n").unwrap();
+
+        let config = make_config();
+        let findings = run_architecture_check(dir.path(), &["internal/handler/login.go".to_string()], &config);
+        assert_eq!(findings.len(), 1, "got: {findings:#?}");
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("transitive-layer-violation"));
+        assert!(findings[0].message.contains("handler"), "got: {}", findings[0].message);
+        assert!(findings[0].message.contains("repository"), "got: {}", findings[0].message);
+        assert!(findings[0].message.contains("util"), "the chain itself should be visible in the message, got: {}", findings[0].message);
+    }
+
+    #[test]
+    fn does_not_double_report_a_direct_violation_as_also_transitive() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module myapp\n\ngo 1.22\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("internal/handler")).unwrap();
+        std::fs::write(dir.path().join("internal/handler/login.go"), "package handler\n\nimport \"myapp/internal/repository\"\n\nfunc Login() { repository.Get() }\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("internal/repository")).unwrap();
+        std::fs::write(dir.path().join("internal/repository/user_repo.go"), "package repository\n\nfunc Get() {}\n").unwrap();
+
+        let config = make_config();
+        let findings = run_architecture_check(dir.path(), &["internal/handler/login.go".to_string()], &config);
+        assert_eq!(findings.len(), 1, "a direct 1-hop violation must be reported once (by the direct check), not also duplicated by the transitive check — got: {findings:#?}");
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("layer-violation"));
+    }
+
+    #[test]
+    fn does_not_flag_a_transitive_chain_that_never_reaches_a_forbidden_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module myapp\n\ngo 1.22\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("internal/handler")).unwrap();
+        std::fs::write(dir.path().join("internal/handler/login.go"), "package handler\n\nimport \"myapp/internal/util\"\n\nfunc Login() { util.Do() }\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("internal/util")).unwrap();
+        std::fs::write(dir.path().join("internal/util/helper.go"), "package util\n\nfunc Do() {}\n").unwrap();
+
+        let config = make_config();
+        let findings = run_architecture_check(dir.path(), &["internal/handler/login.go".to_string()], &config);
+        assert!(findings.is_empty(), "util never reaches repository, got: {findings:#?}");
+    }
+
+    #[test]
+    fn detects_a_transitive_layer_violation_in_java() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("handler")).unwrap();
+        std::fs::write(dir.path().join("handler/LoginHandler.java"), "package com.example.handler;\n\nimport com.example.util.Helper;\n\npublic class LoginHandler {}\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("util")).unwrap();
+        std::fs::write(dir.path().join("util/Helper.java"), "package com.example.util;\n\nimport com.example.repository.UserRepository;\n\npublic class Helper {}\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("repository")).unwrap();
+        std::fs::write(dir.path().join("repository/UserRepository.java"), "package com.example.repository;\n\npublic class UserRepository {}\n").unwrap();
+
+        let config = make_config();
+        let findings = run_architecture_check(dir.path(), &["handler/LoginHandler.java".to_string()], &config);
+        assert_eq!(findings.len(), 1, "got: {findings:#?}");
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("transitive-layer-violation"));
+        assert!(findings[0].message.contains("handler"), "got: {}", findings[0].message);
+        assert!(findings[0].message.contains("repository"), "got: {}", findings[0].message);
     }
 
     #[test]
