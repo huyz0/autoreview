@@ -304,7 +304,15 @@ const KOTLIN_ADAPTER: LanguageAdapter = LanguageAdapter {
 /// name isn't reliably known in advance (only the import path's last
 /// segment is — see `imported_package_summaries`'s own doc comment on
 /// why that's a heuristic, not a guarantee).
-fn scan_dir_for_summaries(dir: &Path, adapter: &LanguageAdapter, package_filter: Option<&str>, should_summarize: Option<fn(Node) -> bool>, compute_summary: fn(&Cfg<Stmt>) -> bool, cache: &ParseCache) -> HashMap<String, bool> {
+// `compute_summary` takes `&dyn Fn` rather than a plain `fn` pointer —
+// widened for rule engine roadmap item 6 (interprocedural taint), where
+// each taint rule needs its *own* summary closure capturing that rule's
+// own `TaintSpec` (`|cfg| taint::compute_source_summary(&spec, cfg)`),
+// which a bare `fn` pointer structurally can't express. A plain `fn`
+// item like `go_typed_nil_interface_return::compute_summary` still
+// works at every existing call site unchanged — `&some_fn_item` coerces
+// to `&dyn Fn` automatically.
+fn scan_dir_for_summaries(dir: &Path, adapter: &LanguageAdapter, package_filter: Option<&str>, should_summarize: Option<fn(Node) -> bool>, compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool, cache: &ParseCache) -> HashMap<String, bool> {
     let mut summaries = HashMap::new();
     let Ok(entries) = std::fs::read_dir(dir) else { return summaries };
     for entry in entries.filter_map(Result::ok) {
@@ -334,22 +342,21 @@ fn scan_dir_for_summaries(dir: &Path, adapter: &LanguageAdapter, package_filter:
     summaries
 }
 
-fn scan_dir_for_pointer_summaries(dir: &Path, package_filter: Option<&str>, cache: &ParseCache) -> HashMap<String, bool> {
-    scan_dir_for_summaries(dir, &GO_ADAPTER, package_filter, Some(autoreview_dataflow::lower::go::function_returns_pointer), go_typed_nil_interface_return::compute_summary, cache)
-}
-
-/// Package-wide (same-directory) summaries for every pointer-returning
-/// function, feeding pass 1 of `run_typed_nil_interface_return` below —
-/// scans every `.go` file in `file_path`'s directory (Go's
-/// directory=package convention) that declares the *same* package as
-/// `file_path` itself (excluding, e.g., a sibling `package foo_test`
-/// file — see `scan_dir_for_summaries`'s own doc comment), including
-/// `file_path` itself, rather than just the one file being checked.
-fn package_summaries(repo_root: &Path, file_path: &str, cache: &ParseCache) -> HashMap<String, bool> {
+/// Package-wide (same-directory) summaries for every function
+/// `should_summarize` accepts (or every function, if `None`), scanning
+/// every `.go` file in `file_path`'s directory (Go's directory=package
+/// convention) that declares the *same* package as `file_path` itself
+/// (excluding, e.g., a sibling `package foo_test` file — see
+/// `scan_dir_for_summaries`'s own doc comment). Generic over
+/// `compute_summary` (rule engine roadmap item 6) so both
+/// `typed-nil-interface-return` and every Go taint rule's own
+/// interprocedural resolution share this one implementation instead of
+/// each hand-rolling its own directory scan.
+fn go_package_summaries(repo_root: &Path, file_path: &str, should_summarize: Option<fn(Node) -> bool>, compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool, cache: &ParseCache) -> HashMap<String, bool> {
     let full_path = repo_root.join(file_path);
     let Some(dir) = full_path.parent().map(Path::to_path_buf) else { return HashMap::new() };
     let own_package = cache.get(&full_path, autoreview_langsupport::Language::Go).and_then(|cached| autoreview_archgraph::declared_package(&cached.0));
-    scan_dir_for_pointer_summaries(&dir, own_package.as_deref(), cache)
+    scan_dir_for_summaries(&dir, &GO_ADAPTER, own_package.as_deref(), should_summarize, compute_summary, cache)
 }
 
 /// Generalizes same-package resolution to the module's *other* internal
@@ -360,17 +367,18 @@ fn package_summaries(repo_root: &Path, file_path: &str, cache: &ParseCache) -> H
 /// right there to scan. Keyed by `"pkgname.Func"`, matching the qualified
 /// form `lower::go::call_target_name` already produces for a selector
 /// call, so lookups against these summaries and same-package ones share
-/// one map with no special-casing at the call site.
+/// one map with no special-casing at the call site. Generic over
+/// `compute_summary` for the same reason as `go_package_summaries`.
 ///
 /// Only imports resolving under this repo's own module path are followed
 /// (an external or stdlib import has no source here to scan, and no
-/// pointer-returning function of ours could be behind it anyway). The
-/// package name a qualified call uses is assumed to be the import path's
-/// last segment — Go's overwhelmingly common convention, but not a
-/// language guarantee; a package whose own `package` declaration disagrees
-/// with its directory name (a rare, deliberately confusing pattern) won't
-/// resolve through this heuristic.
-fn imported_package_summaries(repo_root: &Path, file_path: &str, cache: &ParseCache) -> HashMap<String, bool> {
+/// relevant function of ours could be behind it anyway). The package name
+/// a qualified call uses is assumed to be the import path's last segment
+/// — Go's overwhelmingly common convention, but not a language guarantee;
+/// a package whose own `package` declaration disagrees with its directory
+/// name (a rare, deliberately confusing pattern) won't resolve through
+/// this heuristic.
+fn go_imported_package_summaries(repo_root: &Path, file_path: &str, should_summarize: Option<fn(Node) -> bool>, compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool, cache: &ParseCache) -> HashMap<String, bool> {
     let mut summaries = HashMap::new();
     let Some(module_path) = autoreview_archgraph::discover_go_module_path(repo_root) else { return summaries };
     let Some(cached) = cache.get(&repo_root.join(file_path), autoreview_langsupport::Language::Go) else { return summaries };
@@ -382,7 +390,7 @@ fn imported_package_summaries(repo_root: &Path, file_path: &str, cache: &ParseCa
             continue;
         }
         let Some(pkg_name) = suffix.rsplit('/').next() else { continue };
-        for (name, summary) in scan_dir_for_pointer_summaries(&repo_root.join(suffix), None, cache) {
+        for (name, summary) in scan_dir_for_summaries(&repo_root.join(suffix), &GO_ADAPTER, None, should_summarize, compute_summary, cache) {
             summaries.insert(format!("{pkg_name}.{name}"), summary);
         }
     }
@@ -391,10 +399,11 @@ fn imported_package_summaries(repo_root: &Path, file_path: &str, cache: &ParseCa
 
 fn run_typed_nil_interface_return(repo_root: &Path, path: &str, source: &[u8], lowered: &[(Node, Cfg<Stmt>)], cache: &ParseCache) -> Vec<AgentFinding> {
     // Pass 1: same-package summaries plus every other in-module package
-    // this file imports — see `package_summaries`/`imported_package_summaries`
-    // above.
-    let mut summaries = package_summaries(repo_root, path, cache);
-    summaries.extend(imported_package_summaries(repo_root, path, cache));
+    // this file imports — see `go_package_summaries`/
+    // `go_imported_package_summaries` above.
+    let returns_pointer: Option<fn(Node) -> bool> = Some(autoreview_dataflow::lower::go::function_returns_pointer);
+    let mut summaries = go_package_summaries(repo_root, path, returns_pointer, &go_typed_nil_interface_return::compute_summary, cache);
+    summaries.extend(go_imported_package_summaries(repo_root, path, returns_pointer, &go_typed_nil_interface_return::compute_summary, cache));
 
     // Pass 2: check every function declaring an `error` return against
     // those summaries.
@@ -425,16 +434,14 @@ fn run_typed_nil_interface_return(repo_root: &Path, path: &str, source: &[u8], l
 /// into `summaries` (keyed by bare function name — see
 /// `autoreview_dataflow::lower::java::function_name`'s docs on the
 /// accepted same-name-conflates-across-classes imprecision this shares
-/// with Go's own summary keying). Best-effort: a file that fails to read
-/// or parse is silently skipped, same "current file's findings still
-/// matter" rationale as Go's `scan_dir_for_pointer_summaries`.
-/// Adds every function/method summary from one `.java`/`.kt`/`.kts` file
-/// into `summaries`, dispatching to the right `LanguageAdapter` by
-/// extension — used by `npe_imported_package_summaries` below, which
-/// already has a concrete file list (from
-/// `find_java_kotlin_files_declaring_package`) rather than a directory to
-/// scan, so it can't go through `scan_dir_for_summaries` directly.
-fn add_npe_summaries_from_file(path: &Path, summaries: &mut HashMap<String, bool>, cache: &ParseCache) {
+/// with Go's own summary keying), dispatching to the right
+/// `LanguageAdapter` by extension. Generic over `compute_summary` (rule
+/// engine roadmap item 6), used both by NPE-risk's own cross-package
+/// resolution and, now, every Java/Kotlin taint rule's — used where a
+/// concrete file list (from `find_java_kotlin_files_declaring_package`)
+/// is already in hand rather than a directory to scan, so it can't go
+/// through `scan_dir_for_summaries` directly.
+fn add_java_kotlin_summaries_from_file(path: &Path, summaries: &mut HashMap<String, bool>, compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool, cache: &ParseCache) {
     let adapter = match path.extension().and_then(|e| e.to_str()) {
         Some("java") => &JAVA_ADAPTER,
         Some("kt") | Some("kts") => &KOTLIN_ADAPTER,
@@ -446,26 +453,28 @@ fn add_npe_summaries_from_file(path: &Path, summaries: &mut HashMap<String, bool
     for fn_node in (adapter.extract_functions)(tree) {
         if let Some(name) = (adapter.function_name)(fn_node, source) {
             let cfg = (adapter.lower_function)(source, fn_node);
-            summaries.insert(name, autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary(&cfg));
+            summaries.insert(name, compute_summary(&cfg));
         }
     }
 }
 
-/// Same-package summaries for `file_path`'s NPE-risk pass 1: every
-/// `.java`/`.kt`/`.kts` file in the same directory whose own declared
-/// package matches `own_package` (a mixed Java/Kotlin package — common in
-/// real Gradle/Android projects — is scanned via both adapters and
-/// merged) — a fast common-case scan (mirroring Go's own-directory scan)
-/// with a correctness check on top, since directory == package isn't a
-/// language guarantee here the way it is for Go (see
-/// `autoreview_archgraph`'s module docs on why Java/Kotlin's package
-/// resolution reads the real declaration instead of inferring from the
-/// path). Fully delegates to the shared `scan_dir_for_summaries` (rule
-/// engine roadmap item 2) rather than its own hand-rolled directory walk.
-fn npe_package_summaries(repo_root: &Path, file_path: &str, own_package: &str, cache: &ParseCache) -> HashMap<String, bool> {
+/// Same-package summaries for `file_path`, feeding pass 1 of both
+/// `run_npe_risk` and (rule engine roadmap item 6) every Java/Kotlin
+/// taint rule's own interprocedural resolution: every `.java`/`.kt`/
+/// `.kts` file in the same directory whose own declared package matches
+/// `own_package` (a mixed Java/Kotlin package — common in real Gradle/
+/// Android projects — is scanned via both adapters and merged) — a fast
+/// common-case scan (mirroring Go's own-directory scan) with a
+/// correctness check on top, since directory == package isn't a language
+/// guarantee here the way it is for Go (see `autoreview_archgraph`'s
+/// module docs on why Java/Kotlin's package resolution reads the real
+/// declaration instead of inferring from the path). Fully delegates to
+/// the shared `scan_dir_for_summaries` (rule engine roadmap item 2)
+/// rather than its own hand-rolled directory walk.
+fn java_kotlin_package_summaries(repo_root: &Path, file_path: &str, own_package: &str, compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool, cache: &ParseCache) -> HashMap<String, bool> {
     let Some(dir) = repo_root.join(file_path).parent().map(Path::to_path_buf) else { return HashMap::new() };
-    let mut summaries = scan_dir_for_summaries(&dir, &JAVA_ADAPTER, Some(own_package), None, autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary, cache);
-    summaries.extend(scan_dir_for_summaries(&dir, &KOTLIN_ADAPTER, Some(own_package), None, autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary, cache));
+    let mut summaries = scan_dir_for_summaries(&dir, &JAVA_ADAPTER, Some(own_package), None, compute_summary, cache);
+    summaries.extend(scan_dir_for_summaries(&dir, &KOTLIN_ADAPTER, Some(own_package), None, compute_summary, cache));
     summaries
 }
 
@@ -473,13 +482,14 @@ fn npe_package_summaries(repo_root: &Path, file_path: &str, own_package: &str, c
 /// resolved to the real files declaring it anywhere in the repo —
 /// `find_java_kotlin_files_declaring_package`'s own docs cover why this
 /// is a whole-repo scan rather than a module-path-relative directory jump
-/// the way Go's cross-package resolution is.
-fn npe_imported_package_summaries(repo_root: &Path, own_content: &str, cache: &ParseCache) -> HashMap<String, bool> {
+/// the way Go's cross-package resolution is. Generic over
+/// `compute_summary` for the same reason as `java_kotlin_package_summaries`.
+fn java_kotlin_imported_package_summaries(repo_root: &Path, own_content: &str, compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool, cache: &ParseCache) -> HashMap<String, bool> {
     let mut summaries = HashMap::new();
     for import in autoreview_archgraph::extract_java_kotlin_imports(own_content) {
         let pkg = autoreview_archgraph::import_package(&import);
         for path in autoreview_archgraph::find_java_kotlin_files_declaring_package(repo_root, &pkg) {
-            add_npe_summaries_from_file(&path, &mut summaries, cache);
+            add_java_kotlin_summaries_from_file(&path, &mut summaries, compute_summary, cache);
         }
     }
     summaries
@@ -488,22 +498,23 @@ fn npe_imported_package_summaries(repo_root: &Path, own_content: &str, cache: &P
 /// Interprocedural NPE-risk check for one Java/Kotlin file — see
 /// `autoreview_dataflow::rules::java_kotlin_npe_risk`'s module docs for
 /// the two-pass design this wires up. Pass 1's summaries come from
-/// `npe_package_summaries` (same directory, filtered by declared package)
-/// merged with `npe_imported_package_summaries` (every other package this
-/// file imports); a file with no `package` declaration at all (Java's
-/// default/unnamed package) falls back to summarizing just its own
-/// functions, so same-file resolution still works even without cross-file
-/// scope.
+/// `java_kotlin_package_summaries` (same directory, filtered by declared
+/// package) merged with `java_kotlin_imported_package_summaries` (every
+/// other package this file imports); a file with no `package` declaration
+/// at all (Java's default/unnamed package) falls back to summarizing just
+/// its own functions, so same-file resolution still works even without
+/// cross-file scope.
 fn run_npe_risk(repo_root: &Path, path: &str, own_content: &str, lowered: &[(Node, Cfg<Stmt>)], null_safe_methods: &[&str], cache: &ParseCache) -> Vec<AgentFinding> {
+    let compute_summary = &autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary;
     let mut summaries = match autoreview_archgraph::declared_package(own_content) {
-        Some(package) => npe_package_summaries(repo_root, path, &package, cache),
+        Some(package) => java_kotlin_package_summaries(repo_root, path, &package, compute_summary, cache),
         None => {
             let mut own_only = HashMap::new();
-            add_npe_summaries_from_file(&repo_root.join(path), &mut own_only, cache);
+            add_java_kotlin_summaries_from_file(&repo_root.join(path), &mut own_only, compute_summary, cache);
             own_only
         }
     };
-    summaries.extend(npe_imported_package_summaries(repo_root, own_content, cache));
+    summaries.extend(java_kotlin_imported_package_summaries(repo_root, own_content, compute_summary, cache));
 
     let mut findings = Vec::new();
     for (_, cfg) in lowered {
@@ -586,16 +597,57 @@ fn taint_title(hit: &autoreview_dataflow::taint::TaintHit) -> String {
 /// `language` matches, against one file's already-lowered functions.
 /// Adding a new taint rule means adding a new YAML file — this function
 /// doesn't change.
-fn run_loaded_taint_rules(path: &str, language: &str, lowered: &[(Node, Cfg<Stmt>)], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
+/// Interprocedural taint-source summaries for one rule's own `sources`
+/// (rule engine roadmap item 6, `RULE_ENGINE_RESEARCH.md`): does a same-
+/// file/same-package/imported-package helper have a path where this
+/// specific rule's source reaches its own return? Closes a real gap the
+/// existing intraprocedural default (taint auto-propagates through an
+/// unrecognized call only from an already-tainted *argument*) structurally
+/// can't see — a niladic wrapper like `func getUserID() string { return
+/// req.FormValue("id") }` has no argument for that default to look at.
+/// Only Go, Java, and Kotlin have the same-package/cross-package
+/// resolution machinery this needs (see `go_package_summaries`/
+/// `java_kotlin_package_summaries` and friends) — JavaScript/TypeScript/
+/// TSX return an empty map, which `check_with_summaries` treats exactly
+/// like the "no interprocedural info" case it already handled before this
+/// change, so their behavior is unaffected.
+fn taint_interprocedural_summaries(repo_root: &Path, path: &str, own_content: &str, language: &str, spec: &autoreview_dataflow::taint::TaintSpec, cache: &ParseCache) -> HashMap<String, bool> {
+    let compute_summary = |cfg: &Cfg<Stmt>| autoreview_dataflow::taint::compute_source_summary(spec, cfg);
+    match language {
+        "Go" => {
+            let mut summaries = go_package_summaries(repo_root, path, None, &compute_summary, cache);
+            summaries.extend(go_imported_package_summaries(repo_root, path, None, &compute_summary, cache));
+            summaries
+        }
+        "Java" | "Kotlin" => {
+            let mut summaries = match autoreview_archgraph::declared_package(own_content) {
+                Some(package) => java_kotlin_package_summaries(repo_root, path, &package, &compute_summary, cache),
+                None => {
+                    let mut own_only = HashMap::new();
+                    add_java_kotlin_summaries_from_file(&repo_root.join(path), &mut own_only, &compute_summary, cache);
+                    own_only
+                }
+            };
+            summaries.extend(java_kotlin_imported_package_summaries(repo_root, own_content, &compute_summary, cache));
+            summaries
+        }
+        _ => HashMap::new(),
+    }
+}
+
+fn run_loaded_taint_rules(repo_root: &Path, path: &str, own_content: &str, language: &str, lowered: &[(Node, Cfg<Stmt>)], registered_packs: &[ResolvedRulePack], cache: &ParseCache) -> Vec<AgentFinding> {
     let rules: Vec<_> = taint_rules::load_taint_rules(registered_packs).into_iter().filter(|r| r.language == language).collect();
     if rules.is_empty() {
         return Vec::new();
     }
 
     let mut findings = Vec::new();
-    for (_, cfg) in lowered {
-        for rule in &rules {
-            for hit in autoreview_dataflow::taint::check(&rule.spec, cfg) {
+    for rule in &rules {
+        // Computed once per rule (not per function) — every function in
+        // this file shares the same same-package/imported-package scope.
+        let summaries = taint_interprocedural_summaries(repo_root, path, own_content, language, &rule.spec, cache);
+        for (_, cfg) in lowered {
+            for hit in autoreview_dataflow::taint::check_with_summaries(&rule.spec, cfg, Some(&summaries)) {
                 let mut finding = make_finding(&rule.id, &rule.category, rule.severity, path, hit.source_line, taint_title(&hit), render_taint_message(&rule.message, &hit));
                 finding.meta = taint_pack_meta(rule);
                 findings.push(finding);
@@ -644,7 +696,7 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
 
                 let mut findings = run_append_shared_backing_array(path, &lowered);
                 findings.extend(run_typed_nil_interface_return(repo_root, path, source, &lowered, &cache));
-                findings.extend(run_loaded_taint_rules(path, "Go", &lowered, registered_packs));
+                findings.extend(run_loaded_taint_rules(repo_root, path, content, "Go", &lowered, registered_packs, &cache));
                 if go_pre_1_22 {
                     findings.extend(run_loopvar_checks(path, &lowered));
                 }
@@ -654,7 +706,7 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
                 let (content, tree) = cached.as_ref();
                 let lowered = lower_all_java_functions(content.as_bytes(), tree);
                 let mut findings = run_npe_risk(repo_root, path, content, &lowered, &[], &cache);
-                findings.extend(run_loaded_taint_rules(path, "Java", &lowered, registered_packs));
+                findings.extend(run_loaded_taint_rules(repo_root, path, content, "Java", &lowered, registered_packs, &cache));
                 Some(findings)
             } else if path.ends_with(".kt") || path.ends_with(".kts") {
                 let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Kotlin, &cache)?;
@@ -665,7 +717,7 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
                 // only call this rule's dereference-walk must not treat as
                 // risky on a nullable receiver in Kotlin specifically.
                 let mut findings = run_npe_risk(repo_root, path, content, &lowered, &["toString"], &cache);
-                findings.extend(run_loaded_taint_rules(path, "Kotlin", &lowered, registered_packs));
+                findings.extend(run_loaded_taint_rules(repo_root, path, content, "Kotlin", &lowered, registered_packs, &cache));
                 Some(findings)
             } else if path.ends_with(".tsx") {
                 let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Tsx, &cache)?;
@@ -676,17 +728,17 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
                 // of TypeScript's, so the same taint rules apply verbatim; a
                 // duplicate set of Tsx-only YAML files would just be the
                 // same rules twice.
-                Some(run_loaded_taint_rules(path, "TypeScript", &lowered, registered_packs))
+                Some(run_loaded_taint_rules(repo_root, path, content, "TypeScript", &lowered, registered_packs, &cache))
             } else if path.ends_with(".ts") || path.ends_with(".mts") || path.ends_with(".cts") {
                 let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::TypeScript, &cache)?;
                 let (content, tree) = cached.as_ref();
                 let lowered = lower_all_javascript_functions(content.as_bytes(), tree);
-                Some(run_loaded_taint_rules(path, "TypeScript", &lowered, registered_packs))
+                Some(run_loaded_taint_rules(repo_root, path, content, "TypeScript", &lowered, registered_packs, &cache))
             } else if path.ends_with(".js") || path.ends_with(".jsx") || path.ends_with(".mjs") || path.ends_with(".cjs") {
                 let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::JavaScript, &cache)?;
                 let (content, tree) = cached.as_ref();
                 let lowered = lower_all_javascript_functions(content.as_bytes(), tree);
-                Some(run_loaded_taint_rules(path, "JavaScript", &lowered, registered_packs))
+                Some(run_loaded_taint_rules(repo_root, path, content, "JavaScript", &lowered, registered_packs, &cache))
             } else {
                 None
             }
@@ -879,18 +931,18 @@ mod tests {
         // A mixed Java/Kotlin package (common in real Gradle/Android
         // projects) must be resolved through both LanguageAdapters and
         // merged into one summary map — this is the case
-        // npe_package_summaries's generalization onto scan_dir_for_summaries
-        // (rule engine roadmap item 2) exists to cover directly, since a
-        // single end-to-end run_dataflow_check test can't easily exercise
-        // real cross-language bare-call resolution (Java/Kotlin
-        // interop doesn't produce a bare-callable shape either language's
-        // side of this rule resolves — see the same-class-only Java test
-        // above).
+        // java_kotlin_package_summaries's generalization onto
+        // scan_dir_for_summaries (rule engine roadmap item 2) exists to
+        // cover directly, since a single end-to-end run_dataflow_check
+        // test can't easily exercise real cross-language bare-call
+        // resolution (Java/Kotlin interop doesn't produce a bare-callable
+        // shape either language's side of this rule resolves — see the
+        // same-class-only Java test above).
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("JavaHelper.java"), "package com.example;\n\nclass JavaHelper {\n    Object risky() {\n        Object e = null;\n        return e;\n    }\n}\n").unwrap();
         std::fs::write(dir.path().join("KotlinHelper.kt"), "package com.example\n\nfun riskyKt(): String? {\n    val e: String? = null\n    return e\n}\n").unwrap();
         let cache = ParseCache::new();
-        let summaries = npe_package_summaries(dir.path(), "Caller.java", "com.example", &cache);
+        let summaries = java_kotlin_package_summaries(dir.path(), "Caller.java", "com.example", &autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary, &cache);
         assert_eq!(summaries.get("risky"), Some(&true), "got: {summaries:#?}");
         assert_eq!(summaries.get("riskyKt"), Some(&true), "got: {summaries:#?}");
     }
@@ -1031,6 +1083,27 @@ mod tests {
         .unwrap();
         let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("go-command-injection-taint")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_source_hidden_inside_a_niladic_helper_reaching_exec_command_end_to_end() {
+        // Rule engine roadmap item 6: getUserCommand() takes no
+        // arguments at all, so the pre-existing intraprocedural default
+        // (taint auto-propagates through an unrecognized call only from
+        // an already-tainted argument) has nothing to look at — only the
+        // new interprocedural source-summary resolution can see that
+        // getUserCommand()'s own body wraps a real taint source.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.go"),
+            "package main\n\nfunc getUserCommand(r *http.Request) string {\n\tcmd := r.FormValue(\"cmd\")\n\treturn cmd\n}\n\nfunc handle() {\n\tuserInput := getUserCommand(nil)\n\texec.Command(\"sh\", \"-c\", userInput)\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
+        assert!(
+            findings.iter().any(|f| f.source.rule_id.as_deref() == Some("go-command-injection-taint")),
+            "got: {findings:#?} — intraprocedural-only taint tracking couldn't have caught this, the source is hidden inside getUserCommand()'s own body"
+        );
     }
 
     #[test]

@@ -119,7 +119,23 @@ fn is_tainted(facts: &TaintFacts, var: &str) -> bool {
     facts.0.get(var).copied().unwrap_or(false)
 }
 
-fn apply(spec: &TaintSpec, facts: &TaintFacts, stmt: &Stmt) -> TaintFacts {
+/// `summaries`, when `Some`, maps a same-file/same-package/imported-
+/// package function's bare name to "does it have a path where a taint
+/// source reaches its own return value" (see [`compute_source_summary`]
+/// below) — rule engine roadmap item 6 (`RULE_ENGINE_RESEARCH.md`): the
+/// existing "unrecognized call auto-propagates taint from a tainted
+/// argument" default only ever sees taint that's already visible in
+/// *this* function's own facts. It structurally cannot see a source
+/// hidden entirely inside a niladic (or argument-independent) helper —
+/// `func getUserID() string { return req.FormValue("id") }` called as
+/// `id := getUserID()` has no tainted argument for the default rule to
+/// notice at all. `summaries` closes exactly that gap, the same "one
+/// hop of same-file/same-package/cross-package resolution propagating a
+/// coarse per-function summary" scope every other interprocedural rule
+/// in this crate already uses — not a general interprocedural fixpoint.
+/// `None` preserves this function's prior behavior exactly (existing
+/// intraprocedural-only callers are unaffected).
+fn apply(spec: &TaintSpec, facts: &TaintFacts, stmt: &Stmt, summaries: Option<&HashMap<String, bool>>) -> TaintFacts {
     let mut out = facts.0.clone();
     match stmt {
         Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(v) } => {
@@ -131,9 +147,12 @@ fn apply(spec: &TaintSpec, facts: &TaintFacts, stmt: &Stmt) -> TaintFacts {
                 // Default auto-propagation: taint flows through an
                 // unrecognized call if any of its (identifier) arguments
                 // are already tainted — matches Semgrep's own default
-                // taint-mode propagation through function calls.
-                let propagated = args.iter().any(|a| out.get(a.trim_start_matches('&')).copied().unwrap_or(false));
-                out.insert(v.clone(), propagated);
+                // taint-mode propagation through function calls. ORed
+                // with the interprocedural summary lookup: either one
+                // alone is enough to taint the result.
+                let propagated_from_args = args.iter().any(|a| out.get(a.trim_start_matches('&')).copied().unwrap_or(false));
+                let propagated_from_summary = summaries.and_then(|s| s.get(name)).copied().unwrap_or(false);
+                out.insert(v.clone(), propagated_from_args || propagated_from_summary);
             }
         }
         Stmt::Assign { lhs, rhs: crate::cfg::RhsShape::Var(rhs) } => {
@@ -165,9 +184,46 @@ pub struct TaintHit {
     pub source_line: u32,
 }
 
-/// Runs `spec` against one function's already-lowered CFG.
+/// Runs `spec` against one function's already-lowered CFG, purely
+/// intraprocedurally (`summaries: None` — see [`check_with_summaries`]
+/// for the interprocedural variant). Kept as its own entry point rather
+/// than a thin `check_with_summaries(spec, cfg, None)` wrapper only for
+/// call-site brevity — every existing caller stays unchanged.
 pub fn check(spec: &TaintSpec, cfg: &Cfg<Stmt>) -> Vec<TaintHit> {
-    let out_facts = solver::solve(cfg, |_id, node: &CfgNode<Stmt>, in_fact: &TaintFacts| node.stmts.iter().fold(in_fact.clone(), |facts, stmt| apply(spec, &facts, stmt)));
+    check_with_summaries(spec, cfg, None)
+}
+
+/// Does this function have a path from entry to `return` where a taint
+/// source reaches the returned value? Used to summarize same-file/same-
+/// package/imported-package helper functions for
+/// [`check_with_summaries`]'s interprocedural lookup — same "compute a
+/// per-function summary once, consult it via the same lattice machinery"
+/// shape as `go_typed_nil_interface_return::compute_summary` and
+/// `java_kotlin_npe_risk::compute_summary`.
+pub fn compute_source_summary(spec: &TaintSpec, cfg: &Cfg<Stmt>) -> bool {
+    let out_facts = solver::solve(cfg, |_id, node: &CfgNode<Stmt>, in_fact: &TaintFacts| node.stmts.iter().fold(in_fact.clone(), |facts, stmt| apply(spec, &facts, stmt, None)));
+
+    for (node_id, node) in cfg.nodes.iter().enumerate() {
+        let preds = cfg.predecessors(node_id);
+        let mut facts = preds.iter().fold(TaintFacts::bottom(), |acc, &p| acc.join(&out_facts[p]));
+        for stmt in &node.stmts {
+            if let Stmt::Return { value: Some(v) } = stmt {
+                if is_tainted(&facts, v) {
+                    return true;
+                }
+            }
+            facts = apply(spec, &facts, stmt, None);
+        }
+    }
+    false
+}
+
+/// Runs `spec` against one function's already-lowered CFG, resolving an
+/// unrecognized call's interprocedural taint against `summaries` (see
+/// `apply`'s own doc comment on exactly what gap this closes and how it
+/// stays scoped).
+pub fn check_with_summaries(spec: &TaintSpec, cfg: &Cfg<Stmt>, summaries: Option<&HashMap<String, bool>>) -> Vec<TaintHit> {
+    let out_facts = solver::solve(cfg, |_id, node: &CfgNode<Stmt>, in_fact: &TaintFacts| node.stmts.iter().fold(in_fact.clone(), |facts, stmt| apply(spec, &facts, stmt, summaries)));
 
     let mut hits = Vec::new();
     for (node_id, node) in cfg.nodes.iter().enumerate() {
@@ -190,7 +246,7 @@ pub fn check(spec: &TaintSpec, cfg: &Cfg<Stmt>) -> Vec<TaintHit> {
                     }
                 }
             }
-            facts = apply(spec, &facts, stmt);
+            facts = apply(spec, &facts, stmt, summaries);
         }
     }
     hits
@@ -275,6 +331,60 @@ mod tests {
         // are already tainted — os.Getenv's result starts untainted, so
         // this correctly stays silent.
         let hits = check(&spec(), &cfg);
+        assert!(hits.is_empty(), "got: {hits:#?}");
+    }
+
+    #[test]
+    fn compute_source_summary_is_true_when_a_source_reaches_the_return() {
+        let cfg = lower("package p\nfunc getUserID(r *Req) string {\n\tid := r.FormValue(\"id\")\n\treturn id\n}\n");
+        assert!(compute_source_summary(&spec(), &cfg));
+    }
+
+    #[test]
+    fn compute_source_summary_is_false_when_no_source_reaches_the_return() {
+        let cfg = lower("package p\nfunc getUserID() string {\n\treturn \"anonymous\"\n}\n");
+        assert!(!compute_source_summary(&spec(), &cfg));
+    }
+
+    #[test]
+    fn check_with_summaries_flags_a_niladic_call_to_a_summarized_source_wrapper() {
+        // The exact gap this closes: getUserID() takes no arguments at
+        // all, so the existing "unrecognized call auto-propagates from a
+        // tainted argument" default has nothing to look at — only the
+        // summary lookup can see that this call's *result* is tainted.
+        let cfg = lower("package p\nfunc f() {\n\tid := getUserID()\n\texec.Command(\"sh\", \"-c\", id)\n}\n");
+        let mut summaries = HashMap::new();
+        summaries.insert("getUserID".to_string(), true);
+        let hits = check_with_summaries(&spec(), &cfg, Some(&summaries));
+        assert_eq!(hits.len(), 1, "got: {hits:#?}");
+        assert_eq!(hits[0].tainted_arg, "id");
+    }
+
+    #[test]
+    fn check_without_summaries_does_not_flag_the_same_niladic_call() {
+        // Regression guard: plain `check` (summaries: None) must keep its
+        // exact prior behavior — this is the false negative that
+        // motivated check_with_summaries, not something check itself
+        // should start catching.
+        let cfg = lower("package p\nfunc f() {\n\tid := getUserID()\n\texec.Command(\"sh\", \"-c\", id)\n}\n");
+        let hits = check(&spec(), &cfg);
+        assert!(hits.is_empty(), "got: {hits:#?}");
+    }
+
+    #[test]
+    fn check_with_summaries_does_not_flag_a_call_to_an_unsummarized_function() {
+        let cfg = lower("package p\nfunc f() {\n\tid := getUserID()\n\texec.Command(\"sh\", \"-c\", id)\n}\n");
+        let summaries = HashMap::new();
+        let hits = check_with_summaries(&spec(), &cfg, Some(&summaries));
+        assert!(hits.is_empty(), "got: {hits:#?} — an empty/missing summaries entry is an unknown boundary, never flagged");
+    }
+
+    #[test]
+    fn check_with_summaries_still_respects_a_sanitizer_after_a_summarized_source() {
+        let cfg = lower("package p\nfunc f() {\n\tid := getUserID()\n\tclean := sanitize(id)\n\texec.Command(\"sh\", \"-c\", clean)\n}\n");
+        let mut summaries = HashMap::new();
+        summaries.insert("getUserID".to_string(), true);
+        let hits = check_with_summaries(&spec(), &cfg, Some(&summaries));
         assert!(hits.is_empty(), "got: {hits:#?}");
     }
 }
