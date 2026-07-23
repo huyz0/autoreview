@@ -237,46 +237,119 @@ fn run_append_shared_backing_array(path: &str, lowered: &[(Node, Cfg<Stmt>)]) ->
     findings
 }
 
-/// Scans every `.go` file in `dir` for pointer-returning function
-/// summaries, keyed by bare function name — the shared core of same-
-/// package (`package_summaries`) and cross-package
-/// (`imported_package_summaries`) resolution below; they differ only in
-/// which directory gets scanned and whether the result is given a
-/// package-name prefix afterward. Best-effort: a file that fails to read
-/// or parse is silently skipped rather than failing the whole scan, since
-/// the current file's own findings still matter even if a sibling or an
-/// imported package's file can't be read.
-fn scan_dir_for_pointer_summaries(dir: &Path, cache: &ParseCache) -> HashMap<String, bool> {
+/// A language's adapter into the shared cross-file summary resolver below
+/// (rule engine roadmap item 2, see `RULE_ENGINE_RESEARCH.md`): the four
+/// bare-name-keyed "scan these files, extract each function, lower it,
+/// compute a summary" loops previously duplicated once per language
+/// (Go's `scan_dir_for_pointer_summaries` and, before this, a Java branch
+/// and a Kotlin branch inside `add_npe_summaries_from_file`) are now one
+/// generic implementation (`scan_files_for_summaries`), parameterized by
+/// how each language extracts its functions/names/CFGs — every future
+/// interprocedural rule for an already-lowerable language gets same-file
+/// resolution for free by supplying one of these instead of writing a
+/// fourth bespoke scan loop. Plain `fn` pointers (not closures) since
+/// every implementation is already a top-level function with exactly this
+/// shape; a `for<'a> fn(&'a Tree) -> Vec<Node<'a>>` genuinely can't be
+/// expressed as a trait object without extra indirection, and doesn't
+/// need to be — these never vary at runtime, only per call site.
+struct LanguageAdapter {
+    language: autoreview_langsupport::Language,
+    extensions: &'static [&'static str],
+    extract_functions: for<'a> fn(&'a Tree) -> Vec<Node<'a>>,
+    function_name: fn(Node, &[u8]) -> Option<String>,
+    lower_function: fn(&[u8], Node) -> Cfg<Stmt>,
+}
+
+const GO_ADAPTER: LanguageAdapter =
+    LanguageAdapter { language: autoreview_langsupport::Language::Go, extensions: &["go"], extract_functions: go_functions, function_name: autoreview_dataflow::lower::go::function_name, lower_function: autoreview_dataflow::lower::go::lower_function };
+
+const JAVA_ADAPTER: LanguageAdapter = LanguageAdapter {
+    language: autoreview_langsupport::Language::Java,
+    extensions: &["java"],
+    extract_functions: java_functions,
+    function_name: autoreview_dataflow::lower::java::function_name,
+    lower_function: autoreview_dataflow::lower::java::lower_function,
+};
+
+const KOTLIN_ADAPTER: LanguageAdapter = LanguageAdapter {
+    language: autoreview_langsupport::Language::Kotlin,
+    extensions: &["kt", "kts"],
+    extract_functions: kotlin_functions,
+    function_name: autoreview_dataflow::lower::kotlin::function_name,
+    lower_function: autoreview_dataflow::lower::kotlin::lower_function,
+};
+
+/// The shared core every interprocedural rule's own-directory and
+/// imported-files resolution calls into: scan every already-resolved
+/// candidate `.{ext}` file under `dir` (filtered to `adapter`'s own
+/// extensions), and for each function `should_summarize` accepts (or
+/// every function, if `None` — Java/Kotlin's NPE-risk rule has no
+/// declared-return-type gate the way Go's pointer-only one does),
+/// `compute_summary` produces the value it's keyed by bare function name
+/// under. Best-effort: a file that fails to read or parse is silently
+/// skipped rather than failing the whole scan, since the current file's
+/// own findings still matter even if a sibling or an imported package's
+/// file can't be read.
+/// `package_filter`, when `Some`, skips any candidate file whose own
+/// `declared_package` (works for Go's `package main` no less than Java/
+/// Kotlin's dotted form — see `autoreview_archgraph::declared_package`'s
+/// implementation) doesn't match — needed for Java/Kotlin, where
+/// directory != package isn't a language guarantee, and a genuine
+/// correctness improvement for Go too: a directory can legally hold both
+/// `package foo` and an external test package `package foo_test` side by
+/// side, which the pre-generalization `scan_dir_for_pointer_summaries`
+/// didn't distinguish (a `foo_test` helper could leak into `foo`'s own
+/// same-package summary map). `None` is used for the cross-package/
+/// imported-directory case, where the target's exact declared package
+/// name isn't reliably known in advance (only the import path's last
+/// segment is — see `imported_package_summaries`'s own doc comment on
+/// why that's a heuristic, not a guarantee).
+fn scan_dir_for_summaries(dir: &Path, adapter: &LanguageAdapter, package_filter: Option<&str>, should_summarize: Option<fn(Node) -> bool>, compute_summary: fn(&Cfg<Stmt>) -> bool, cache: &ParseCache) -> HashMap<String, bool> {
     let mut summaries = HashMap::new();
     let Ok(entries) = std::fs::read_dir(dir) else { return summaries };
     for entry in entries.filter_map(Result::ok) {
         let candidate_path = entry.path();
-        if candidate_path.extension().and_then(|e| e.to_str()) != Some("go") {
+        let Some(ext) = candidate_path.extension().and_then(|e| e.to_str()) else { continue };
+        if !adapter.extensions.contains(&ext) {
             continue;
         }
-        let Some(cached) = cache.get(&candidate_path, autoreview_langsupport::Language::Go) else { continue };
+        let Some(cached) = cache.get(&candidate_path, adapter.language) else { continue };
         let (content, tree) = cached.as_ref();
+        if let Some(want) = package_filter {
+            if autoreview_archgraph::declared_package(content).as_deref() != Some(want) {
+                continue;
+            }
+        }
         let source = content.as_bytes();
-        for fn_node in go_functions(tree) {
-            if autoreview_dataflow::lower::go::function_returns_pointer(fn_node) {
-                if let Some(name) = autoreview_dataflow::lower::go::function_name(fn_node, source) {
-                    let cfg = autoreview_dataflow::lower::go::lower_function(source, fn_node);
-                    summaries.insert(name, go_typed_nil_interface_return::compute_summary(&cfg));
-                }
+        for fn_node in (adapter.extract_functions)(tree) {
+            if should_summarize.is_some_and(|gate| !gate(fn_node)) {
+                continue;
+            }
+            if let Some(name) = (adapter.function_name)(fn_node, source) {
+                let cfg = (adapter.lower_function)(source, fn_node);
+                summaries.insert(name, compute_summary(&cfg));
             }
         }
     }
     summaries
 }
 
+fn scan_dir_for_pointer_summaries(dir: &Path, package_filter: Option<&str>, cache: &ParseCache) -> HashMap<String, bool> {
+    scan_dir_for_summaries(dir, &GO_ADAPTER, package_filter, Some(autoreview_dataflow::lower::go::function_returns_pointer), go_typed_nil_interface_return::compute_summary, cache)
+}
+
 /// Package-wide (same-directory) summaries for every pointer-returning
 /// function, feeding pass 1 of `run_typed_nil_interface_return` below —
 /// scans every `.go` file in `file_path`'s directory (Go's
-/// directory=package convention), including `file_path` itself, rather
-/// than just the one file being checked.
+/// directory=package convention) that declares the *same* package as
+/// `file_path` itself (excluding, e.g., a sibling `package foo_test`
+/// file — see `scan_dir_for_summaries`'s own doc comment), including
+/// `file_path` itself, rather than just the one file being checked.
 fn package_summaries(repo_root: &Path, file_path: &str, cache: &ParseCache) -> HashMap<String, bool> {
-    let Some(dir) = repo_root.join(file_path).parent().map(Path::to_path_buf) else { return HashMap::new() };
-    scan_dir_for_pointer_summaries(&dir, cache)
+    let full_path = repo_root.join(file_path);
+    let Some(dir) = full_path.parent().map(Path::to_path_buf) else { return HashMap::new() };
+    let own_package = cache.get(&full_path, autoreview_langsupport::Language::Go).and_then(|cached| autoreview_archgraph::declared_package(&cached.0));
+    scan_dir_for_pointer_summaries(&dir, own_package.as_deref(), cache)
 }
 
 /// Generalizes same-package resolution to the module's *other* internal
@@ -309,7 +382,7 @@ fn imported_package_summaries(repo_root: &Path, file_path: &str, cache: &ParseCa
             continue;
         }
         let Some(pkg_name) = suffix.rsplit('/').next() else { continue };
-        for (name, summary) in scan_dir_for_pointer_summaries(&repo_root.join(suffix), cache) {
+        for (name, summary) in scan_dir_for_pointer_summaries(&repo_root.join(suffix), None, cache) {
             summaries.insert(format!("{pkg_name}.{name}"), summary);
         }
     }
@@ -355,63 +428,44 @@ fn run_typed_nil_interface_return(repo_root: &Path, path: &str, source: &[u8], l
 /// with Go's own summary keying). Best-effort: a file that fails to read
 /// or parse is silently skipped, same "current file's findings still
 /// matter" rationale as Go's `scan_dir_for_pointer_summaries`.
+/// Adds every function/method summary from one `.java`/`.kt`/`.kts` file
+/// into `summaries`, dispatching to the right `LanguageAdapter` by
+/// extension — used by `npe_imported_package_summaries` below, which
+/// already has a concrete file list (from
+/// `find_java_kotlin_files_declaring_package`) rather than a directory to
+/// scan, so it can't go through `scan_dir_for_summaries` directly.
 fn add_npe_summaries_from_file(path: &Path, summaries: &mut HashMap<String, bool>, cache: &ParseCache) {
-    let language = match path.extension().and_then(|e| e.to_str()) {
-        Some("java") => autoreview_langsupport::Language::Java,
-        Some("kt") | Some("kts") => autoreview_langsupport::Language::Kotlin,
+    let adapter = match path.extension().and_then(|e| e.to_str()) {
+        Some("java") => &JAVA_ADAPTER,
+        Some("kt") | Some("kts") => &KOTLIN_ADAPTER,
         _ => return,
     };
-    let Some(cached) = cache.get(path, language) else { return };
+    let Some(cached) = cache.get(path, adapter.language) else { return };
     let (content, tree) = cached.as_ref();
     let source = content.as_bytes();
-    match language {
-        autoreview_langsupport::Language::Java => {
-            for fn_node in java_functions(tree) {
-                if let Some(name) = autoreview_dataflow::lower::java::function_name(fn_node, source) {
-                    let cfg = autoreview_dataflow::lower::java::lower_function(source, fn_node);
-                    summaries.insert(name, autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary(&cfg));
-                }
-            }
+    for fn_node in (adapter.extract_functions)(tree) {
+        if let Some(name) = (adapter.function_name)(fn_node, source) {
+            let cfg = (adapter.lower_function)(source, fn_node);
+            summaries.insert(name, autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary(&cfg));
         }
-        autoreview_langsupport::Language::Kotlin => {
-            for fn_node in kotlin_functions(tree) {
-                if let Some(name) = autoreview_dataflow::lower::kotlin::function_name(fn_node, source) {
-                    let cfg = autoreview_dataflow::lower::kotlin::lower_function(source, fn_node);
-                    summaries.insert(name, autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary(&cfg));
-                }
-            }
-        }
-        _ => {}
     }
 }
 
 /// Same-package summaries for `file_path`'s NPE-risk pass 1: every
 /// `.java`/`.kt`/`.kts` file in the same directory whose own declared
-/// package matches `own_package` — a fast common-case scan (mirroring
-/// Go's own-directory scan) with a correctness check on top, since
-/// directory == package isn't a language guarantee here the way it is for
-/// Go (see `autoreview_archgraph`'s module docs on why Java/Kotlin's
-/// package resolution reads the real declaration instead of inferring
-/// from the path). Routes the declared-package check through the same
-/// cache `add_npe_summaries_from_file` then consults, so each candidate
-/// file is read and parsed at most once even though both steps need it.
+/// package matches `own_package` (a mixed Java/Kotlin package — common in
+/// real Gradle/Android projects — is scanned via both adapters and
+/// merged) — a fast common-case scan (mirroring Go's own-directory scan)
+/// with a correctness check on top, since directory == package isn't a
+/// language guarantee here the way it is for Go (see
+/// `autoreview_archgraph`'s module docs on why Java/Kotlin's package
+/// resolution reads the real declaration instead of inferring from the
+/// path). Fully delegates to the shared `scan_dir_for_summaries` (rule
+/// engine roadmap item 2) rather than its own hand-rolled directory walk.
 fn npe_package_summaries(repo_root: &Path, file_path: &str, own_package: &str, cache: &ParseCache) -> HashMap<String, bool> {
-    let mut summaries = HashMap::new();
-    let Some(dir) = repo_root.join(file_path).parent().map(Path::to_path_buf) else { return summaries };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return summaries };
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        let language = match path.extension().and_then(|e| e.to_str()) {
-            Some("java") => autoreview_langsupport::Language::Java,
-            Some("kt") | Some("kts") => autoreview_langsupport::Language::Kotlin,
-            _ => continue,
-        };
-        let Some(cached) = cache.get(&path, language) else { continue };
-        if autoreview_archgraph::declared_package(&cached.0).as_deref() != Some(own_package) {
-            continue;
-        }
-        add_npe_summaries_from_file(&path, &mut summaries, cache);
-    }
+    let Some(dir) = repo_root.join(file_path).parent().map(Path::to_path_buf) else { return HashMap::new() };
+    let mut summaries = scan_dir_for_summaries(&dir, &JAVA_ADAPTER, Some(own_package), None, autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary, cache);
+    summaries.extend(scan_dir_for_summaries(&dir, &KOTLIN_ADAPTER, Some(own_package), None, autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary, cache));
     summaries
 }
 
@@ -732,6 +786,25 @@ mod tests {
     }
 
     #[test]
+    fn does_not_resolve_a_helper_declared_in_a_sibling_external_test_package() {
+        // Regression test for the package_filter added when
+        // scan_dir_for_pointer_summaries was generalized into
+        // scan_dir_for_summaries: a directory can legally hold both
+        // `package main` and an external test package `package main_test`
+        // side by side (Go's own convention) — a same-named helper
+        // declared in the *test* package must not resolve for the real
+        // package's own same-package summary lookup.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("helper_test.go"), "package main_test\n\nfunc helper() *myError {\n\tvar e *myError\n\treturn e\n}\n").unwrap();
+        std::fs::write(dir.path().join("caller.go"), "package main\n\nfunc Do() error {\n\te := helper()\n\treturn e\n}\n").unwrap();
+        let findings = run_dataflow_check(dir.path(), &["caller.go".to_string()], &[]);
+        assert!(
+            !findings.iter().any(|f| f.source.rule_id.as_deref() == Some("typed-nil-interface-return")),
+            "got: {findings:#?} — `helper` is declared in a different (test) package in the same directory, must stay an unresolved boundary"
+        );
+    }
+
+    #[test]
     fn flags_an_interprocedural_typed_nil_return_across_two_different_packages() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("go.mod"), "module example.com/x\n\ngo 1.22\n").unwrap();
@@ -799,6 +872,27 @@ mod tests {
             findings.iter().any(|f| f.source.rule_id.as_deref() == Some("npe-risk-from-helper-return")),
             "got: {findings:#?} — a same-function-only heuristic couldn't have caught this, risky() is a different method"
         );
+    }
+
+    #[test]
+    fn npe_package_summaries_scans_both_java_and_kotlin_files_in_the_same_directory() {
+        // A mixed Java/Kotlin package (common in real Gradle/Android
+        // projects) must be resolved through both LanguageAdapters and
+        // merged into one summary map — this is the case
+        // npe_package_summaries's generalization onto scan_dir_for_summaries
+        // (rule engine roadmap item 2) exists to cover directly, since a
+        // single end-to-end run_dataflow_check test can't easily exercise
+        // real cross-language bare-call resolution (Java/Kotlin
+        // interop doesn't produce a bare-callable shape either language's
+        // side of this rule resolves — see the same-class-only Java test
+        // above).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("JavaHelper.java"), "package com.example;\n\nclass JavaHelper {\n    Object risky() {\n        Object e = null;\n        return e;\n    }\n}\n").unwrap();
+        std::fs::write(dir.path().join("KotlinHelper.kt"), "package com.example\n\nfun riskyKt(): String? {\n    val e: String? = null\n    return e\n}\n").unwrap();
+        let cache = ParseCache::new();
+        let summaries = npe_package_summaries(dir.path(), "Caller.java", "com.example", &cache);
+        assert_eq!(summaries.get("risky"), Some(&true), "got: {summaries:#?}");
+        assert_eq!(summaries.get("riskyKt"), Some(&true), "got: {summaries:#?}");
     }
 
     #[test]
