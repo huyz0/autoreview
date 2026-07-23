@@ -100,6 +100,113 @@ impl ParseCache {
     }
 }
 
+/// Rule engine roadmap item 5 (persistent cross-run summary cache, see
+/// `RULE_ENGINE_RESEARCH.md`): `ParseCache` above (item 1) only dedupes
+/// work *within* one `run_dataflow_check` call — a `diff --watch` session
+/// or repeated CLI invocations against the same working tree still
+/// rescan every sibling/imported file's summaries from scratch on every
+/// call, even when that file hasn't changed since the last run. This
+/// persists `(rule_id, file_path) -> (content_hash, per-function summary
+/// map)` to one JSON file per repo under
+/// `~/.cache/autoreview/dataflow-summaries/<fingerprint>.json`.
+///
+/// Content-hash keyed rather than mtime-keyed so it's correctness-neutral
+/// by construction: a hit only ever returns a summary this exact
+/// byte-for-byte file content has already produced, so a stale entry is
+/// definitionally impossible — an edited file simply gets a different
+/// hash and misses, recomputing exactly as if there were no cache at
+/// all. `rule_id` is part of the key because two rules scanning the same
+/// file want different summaries from it (e.g. "does this function ever
+/// return a nil pointer" vs. "does this function ever return tainted
+/// data") — folding them into one map keyed by function name alone would
+/// let one rule's cached answer silently leak into another's lookup.
+///
+/// Best-effort throughout: a missing, corrupt, or unwritable cache file
+/// degrades silently to an empty cache (everything recomputed, and
+/// persisted normally on success) rather than a hard error — losing this
+/// cache should never be able to break a scan, only slow it down.
+struct PersistentSummaryCache {
+    cache_path: PathBuf,
+    data: RefCell<PersistentSummaryCacheData>,
+    dirty: RefCell<bool>,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct PersistentSummaryCacheData {
+    #[serde(default)]
+    entries: HashMap<String, HashMap<String, CachedFileSummaries>>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct CachedFileSummaries {
+    content_hash: String,
+    summaries: HashMap<String, bool>,
+}
+
+impl PersistentSummaryCache {
+    fn load(repo_root: &Path) -> Self {
+        let cache_path = summary_cache_path(repo_root);
+        let data = std::fs::read_to_string(&cache_path).ok().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
+        PersistentSummaryCache { cache_path, data: RefCell::new(data), dirty: RefCell::new(false) }
+    }
+
+    fn get(&self, rule_id: &str, path: &Path, content_hash: &str) -> Option<HashMap<String, bool>> {
+        let data = self.data.borrow();
+        let entry = data.entries.get(rule_id)?.get(path.to_string_lossy().as_ref())?;
+        (entry.content_hash == content_hash).then(|| entry.summaries.clone())
+    }
+
+    fn put(&self, rule_id: &str, path: &Path, content_hash: String, summaries: HashMap<String, bool>) {
+        self.data.borrow_mut().entries.entry(rule_id.to_string()).or_default().insert(path.to_string_lossy().into_owned(), CachedFileSummaries { content_hash, summaries });
+        *self.dirty.borrow_mut() = true;
+    }
+
+    /// Writes the cache back to disk, but only if `put` actually added
+    /// something new this run — an unchanged cache has nothing worth the
+    /// write, and skipping it also means a read-only or missing
+    /// `~/.cache` never turns into spurious write attempts on every scan.
+    fn save(&self) {
+        if !*self.dirty.borrow() {
+            return;
+        }
+        let Some(parent) = self.cache_path.parent() else { return };
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        if let Ok(json) = serde_json::to_string(&*self.data.borrow()) {
+            let _ = std::fs::write(&self.cache_path, json);
+        }
+    }
+}
+
+/// One cache file per repo, named by a short hash of the repo's
+/// canonicalized path — avoids collisions between unrelated repos
+/// sharing the same cache directory without needing a full path (which
+/// can contain characters unsafe for a filename) as the name itself.
+fn summary_cache_path(repo_root: &Path) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let canonical = std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
+    let fingerprint: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("autoreview").join("dataflow-summaries").join(format!("{fingerprint}.json"))
+}
+
+fn content_hash(content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(content.as_bytes());
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+/// The in-run and cross-run caches always travel together through every
+/// summary-computation call below — bundled into one struct rather than
+/// two separate parameters purely to stay under clippy's argument-count
+/// lint on the functions that also take a rule id, package filter, and
+/// summary closure.
+struct SummaryCaches<'a> {
+    parse: &'a ParseCache,
+    persistent: &'a PersistentSummaryCache,
+}
+
 fn make_finding(rule_id: &str, category: &str, severity: Severity, path: &str, line: u32, title: String, message: String) -> AgentFinding {
     AgentFinding {
         source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-dataflow".to_string(), rule_id: Some(rule_id.to_string()), aspect: None, backend: None },
@@ -312,7 +419,15 @@ const KOTLIN_ADAPTER: LanguageAdapter = LanguageAdapter {
 // item like `go_typed_nil_interface_return::compute_summary` still
 // works at every existing call site unchanged — `&some_fn_item` coerces
 // to `&dyn Fn` automatically.
-fn scan_dir_for_summaries(dir: &Path, adapter: &LanguageAdapter, package_filter: Option<&str>, should_summarize: Option<fn(Node) -> bool>, compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool, cache: &ParseCache) -> HashMap<String, bool> {
+fn scan_dir_for_summaries(
+    dir: &Path,
+    adapter: &LanguageAdapter,
+    package_filter: Option<&str>,
+    should_summarize: Option<fn(Node) -> bool>,
+    compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool,
+    rule_id: &str,
+    caches: &SummaryCaches,
+) -> HashMap<String, bool> {
     let mut summaries = HashMap::new();
     let Ok(entries) = std::fs::read_dir(dir) else { return summaries };
     for entry in entries.filter_map(Result::ok) {
@@ -321,13 +436,19 @@ fn scan_dir_for_summaries(dir: &Path, adapter: &LanguageAdapter, package_filter:
         if !adapter.extensions.contains(&ext) {
             continue;
         }
-        let Some(cached) = cache.get(&candidate_path, adapter.language) else { continue };
+        let Some(cached) = caches.parse.get(&candidate_path, adapter.language) else { continue };
         let (content, tree) = cached.as_ref();
         if let Some(want) = package_filter {
             if autoreview_archgraph::declared_package(content).as_deref() != Some(want) {
                 continue;
             }
         }
+        let hash = content_hash(content);
+        if let Some(cached_summaries) = caches.persistent.get(rule_id, &candidate_path, &hash) {
+            summaries.extend(cached_summaries);
+            continue;
+        }
+        let mut file_summaries = HashMap::new();
         let source = content.as_bytes();
         for fn_node in (adapter.extract_functions)(tree) {
             if should_summarize.is_some_and(|gate| !gate(fn_node)) {
@@ -335,9 +456,11 @@ fn scan_dir_for_summaries(dir: &Path, adapter: &LanguageAdapter, package_filter:
             }
             if let Some(name) = (adapter.function_name)(fn_node, source) {
                 let cfg = (adapter.lower_function)(source, fn_node);
-                summaries.insert(name, compute_summary(&cfg));
+                file_summaries.insert(name, compute_summary(&cfg));
             }
         }
+        caches.persistent.put(rule_id, &candidate_path, hash, file_summaries.clone());
+        summaries.extend(file_summaries);
     }
     summaries
 }
@@ -352,11 +475,18 @@ fn scan_dir_for_summaries(dir: &Path, adapter: &LanguageAdapter, package_filter:
 /// `typed-nil-interface-return` and every Go taint rule's own
 /// interprocedural resolution share this one implementation instead of
 /// each hand-rolling its own directory scan.
-fn go_package_summaries(repo_root: &Path, file_path: &str, should_summarize: Option<fn(Node) -> bool>, compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool, cache: &ParseCache) -> HashMap<String, bool> {
+fn go_package_summaries(
+    repo_root: &Path,
+    file_path: &str,
+    should_summarize: Option<fn(Node) -> bool>,
+    compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool,
+    rule_id: &str,
+    caches: &SummaryCaches,
+) -> HashMap<String, bool> {
     let full_path = repo_root.join(file_path);
     let Some(dir) = full_path.parent().map(Path::to_path_buf) else { return HashMap::new() };
-    let own_package = cache.get(&full_path, autoreview_langsupport::Language::Go).and_then(|cached| autoreview_archgraph::declared_package(&cached.0));
-    scan_dir_for_summaries(&dir, &GO_ADAPTER, own_package.as_deref(), should_summarize, compute_summary, cache)
+    let own_package = caches.parse.get(&full_path, autoreview_langsupport::Language::Go).and_then(|cached| autoreview_archgraph::declared_package(&cached.0));
+    scan_dir_for_summaries(&dir, &GO_ADAPTER, own_package.as_deref(), should_summarize, compute_summary, rule_id, caches)
 }
 
 /// Generalizes same-package resolution to the module's *other* internal
@@ -378,10 +508,17 @@ fn go_package_summaries(repo_root: &Path, file_path: &str, should_summarize: Opt
 /// a package whose own `package` declaration disagrees with its directory
 /// name (a rare, deliberately confusing pattern) won't resolve through
 /// this heuristic.
-fn go_imported_package_summaries(repo_root: &Path, file_path: &str, should_summarize: Option<fn(Node) -> bool>, compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool, cache: &ParseCache) -> HashMap<String, bool> {
+fn go_imported_package_summaries(
+    repo_root: &Path,
+    file_path: &str,
+    should_summarize: Option<fn(Node) -> bool>,
+    compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool,
+    rule_id: &str,
+    caches: &SummaryCaches,
+) -> HashMap<String, bool> {
     let mut summaries = HashMap::new();
     let Some(module_path) = autoreview_archgraph::discover_go_module_path(repo_root) else { return summaries };
-    let Some(cached) = cache.get(&repo_root.join(file_path), autoreview_langsupport::Language::Go) else { return summaries };
+    let Some(cached) = caches.parse.get(&repo_root.join(file_path), autoreview_langsupport::Language::Go) else { return summaries };
     let content = &cached.0;
     for import in autoreview_archgraph::extract_go_imports(content) {
         let Some(suffix) = import.strip_prefix(&module_path) else { continue };
@@ -390,20 +527,21 @@ fn go_imported_package_summaries(repo_root: &Path, file_path: &str, should_summa
             continue;
         }
         let Some(pkg_name) = suffix.rsplit('/').next() else { continue };
-        for (name, summary) in scan_dir_for_summaries(&repo_root.join(suffix), &GO_ADAPTER, None, should_summarize, compute_summary, cache) {
+        for (name, summary) in scan_dir_for_summaries(&repo_root.join(suffix), &GO_ADAPTER, None, should_summarize, compute_summary, rule_id, caches) {
             summaries.insert(format!("{pkg_name}.{name}"), summary);
         }
     }
     summaries
 }
 
-fn run_typed_nil_interface_return(repo_root: &Path, path: &str, source: &[u8], lowered: &[(Node, Cfg<Stmt>)], cache: &ParseCache) -> Vec<AgentFinding> {
+fn run_typed_nil_interface_return(repo_root: &Path, path: &str, source: &[u8], lowered: &[(Node, Cfg<Stmt>)], caches: &SummaryCaches) -> Vec<AgentFinding> {
     // Pass 1: same-package summaries plus every other in-module package
     // this file imports — see `go_package_summaries`/
     // `go_imported_package_summaries` above.
     let returns_pointer: Option<fn(Node) -> bool> = Some(autoreview_dataflow::lower::go::function_returns_pointer);
-    let mut summaries = go_package_summaries(repo_root, path, returns_pointer, &go_typed_nil_interface_return::compute_summary, cache);
-    summaries.extend(go_imported_package_summaries(repo_root, path, returns_pointer, &go_typed_nil_interface_return::compute_summary, cache));
+    let rule_id = "typed-nil-interface-return";
+    let mut summaries = go_package_summaries(repo_root, path, returns_pointer, &go_typed_nil_interface_return::compute_summary, rule_id, caches);
+    summaries.extend(go_imported_package_summaries(repo_root, path, returns_pointer, &go_typed_nil_interface_return::compute_summary, rule_id, caches));
 
     // Pass 2: check every function declaring an `error` return against
     // those summaries.
@@ -441,21 +579,29 @@ fn run_typed_nil_interface_return(repo_root: &Path, path: &str, source: &[u8], l
 /// concrete file list (from `find_java_kotlin_files_declaring_package`)
 /// is already in hand rather than a directory to scan, so it can't go
 /// through `scan_dir_for_summaries` directly.
-fn add_java_kotlin_summaries_from_file(path: &Path, summaries: &mut HashMap<String, bool>, compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool, cache: &ParseCache) {
+fn add_java_kotlin_summaries_from_file(path: &Path, summaries: &mut HashMap<String, bool>, compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool, rule_id: &str, caches: &SummaryCaches) {
     let adapter = match path.extension().and_then(|e| e.to_str()) {
         Some("java") => &JAVA_ADAPTER,
         Some("kt") | Some("kts") => &KOTLIN_ADAPTER,
         _ => return,
     };
-    let Some(cached) = cache.get(path, adapter.language) else { return };
+    let Some(cached) = caches.parse.get(path, adapter.language) else { return };
     let (content, tree) = cached.as_ref();
+    let hash = content_hash(content);
+    if let Some(cached_summaries) = caches.persistent.get(rule_id, path, &hash) {
+        summaries.extend(cached_summaries);
+        return;
+    }
+    let mut file_summaries = HashMap::new();
     let source = content.as_bytes();
     for fn_node in (adapter.extract_functions)(tree) {
         if let Some(name) = (adapter.function_name)(fn_node, source) {
             let cfg = (adapter.lower_function)(source, fn_node);
-            summaries.insert(name, compute_summary(&cfg));
+            file_summaries.insert(name, compute_summary(&cfg));
         }
     }
+    caches.persistent.put(rule_id, path, hash, file_summaries.clone());
+    summaries.extend(file_summaries);
 }
 
 /// Same-package summaries for `file_path`, feeding pass 1 of both
@@ -471,10 +617,17 @@ fn add_java_kotlin_summaries_from_file(path: &Path, summaries: &mut HashMap<Stri
 /// declaration instead of inferring from the path). Fully delegates to
 /// the shared `scan_dir_for_summaries` (rule engine roadmap item 2)
 /// rather than its own hand-rolled directory walk.
-fn java_kotlin_package_summaries(repo_root: &Path, file_path: &str, own_package: &str, compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool, cache: &ParseCache) -> HashMap<String, bool> {
+fn java_kotlin_package_summaries(
+    repo_root: &Path,
+    file_path: &str,
+    own_package: &str,
+    compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool,
+    rule_id: &str,
+    caches: &SummaryCaches,
+) -> HashMap<String, bool> {
     let Some(dir) = repo_root.join(file_path).parent().map(Path::to_path_buf) else { return HashMap::new() };
-    let mut summaries = scan_dir_for_summaries(&dir, &JAVA_ADAPTER, Some(own_package), None, compute_summary, cache);
-    summaries.extend(scan_dir_for_summaries(&dir, &KOTLIN_ADAPTER, Some(own_package), None, compute_summary, cache));
+    let mut summaries = scan_dir_for_summaries(&dir, &JAVA_ADAPTER, Some(own_package), None, compute_summary, rule_id, caches);
+    summaries.extend(scan_dir_for_summaries(&dir, &KOTLIN_ADAPTER, Some(own_package), None, compute_summary, rule_id, caches));
     summaries
 }
 
@@ -484,12 +637,18 @@ fn java_kotlin_package_summaries(repo_root: &Path, file_path: &str, own_package:
 /// is a whole-repo scan rather than a module-path-relative directory jump
 /// the way Go's cross-package resolution is. Generic over
 /// `compute_summary` for the same reason as `java_kotlin_package_summaries`.
-fn java_kotlin_imported_package_summaries(repo_root: &Path, own_content: &str, compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool, cache: &ParseCache) -> HashMap<String, bool> {
+fn java_kotlin_imported_package_summaries(
+    repo_root: &Path,
+    own_content: &str,
+    compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool,
+    rule_id: &str,
+    caches: &SummaryCaches,
+) -> HashMap<String, bool> {
     let mut summaries = HashMap::new();
     for import in autoreview_archgraph::extract_java_kotlin_imports(own_content) {
         let pkg = autoreview_archgraph::import_package(&import);
         for path in autoreview_archgraph::find_java_kotlin_files_declaring_package(repo_root, &pkg) {
-            add_java_kotlin_summaries_from_file(&path, &mut summaries, compute_summary, cache);
+            add_java_kotlin_summaries_from_file(&path, &mut summaries, compute_summary, rule_id, caches);
         }
     }
     summaries
@@ -504,17 +663,18 @@ fn java_kotlin_imported_package_summaries(repo_root: &Path, own_content: &str, c
 /// at all (Java's default/unnamed package) falls back to summarizing just
 /// its own functions, so same-file resolution still works even without
 /// cross-file scope.
-fn run_npe_risk(repo_root: &Path, path: &str, own_content: &str, lowered: &[(Node, Cfg<Stmt>)], null_safe_methods: &[&str], cache: &ParseCache) -> Vec<AgentFinding> {
+fn run_npe_risk(repo_root: &Path, path: &str, own_content: &str, lowered: &[(Node, Cfg<Stmt>)], null_safe_methods: &[&str], caches: &SummaryCaches) -> Vec<AgentFinding> {
     let compute_summary = &autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary;
+    let rule_id = "npe-risk-from-helper-return";
     let mut summaries = match autoreview_archgraph::declared_package(own_content) {
-        Some(package) => java_kotlin_package_summaries(repo_root, path, &package, compute_summary, cache),
+        Some(package) => java_kotlin_package_summaries(repo_root, path, &package, compute_summary, rule_id, caches),
         None => {
             let mut own_only = HashMap::new();
-            add_java_kotlin_summaries_from_file(&repo_root.join(path), &mut own_only, compute_summary, cache);
+            add_java_kotlin_summaries_from_file(&repo_root.join(path), &mut own_only, compute_summary, rule_id, caches);
             own_only
         }
     };
-    summaries.extend(java_kotlin_imported_package_summaries(repo_root, own_content, compute_summary, cache));
+    summaries.extend(java_kotlin_imported_package_summaries(repo_root, own_content, compute_summary, rule_id, caches));
 
     let mut findings = Vec::new();
     for (_, cfg) in lowered {
@@ -611,31 +771,39 @@ fn taint_title(hit: &autoreview_dataflow::taint::TaintHit) -> String {
 /// TSX return an empty map, which `check_with_summaries` treats exactly
 /// like the "no interprocedural info" case it already handled before this
 /// change, so their behavior is unaffected.
-fn taint_interprocedural_summaries(repo_root: &Path, path: &str, own_content: &str, language: &str, spec: &autoreview_dataflow::taint::TaintSpec, cache: &ParseCache) -> HashMap<String, bool> {
+fn taint_interprocedural_summaries(
+    repo_root: &Path,
+    path: &str,
+    own_content: &str,
+    language: &str,
+    spec: &autoreview_dataflow::taint::TaintSpec,
+    rule_id: &str,
+    caches: &SummaryCaches,
+) -> HashMap<String, bool> {
     let compute_summary = |cfg: &Cfg<Stmt>| autoreview_dataflow::taint::compute_source_summary(spec, cfg);
     match language {
         "Go" => {
-            let mut summaries = go_package_summaries(repo_root, path, None, &compute_summary, cache);
-            summaries.extend(go_imported_package_summaries(repo_root, path, None, &compute_summary, cache));
+            let mut summaries = go_package_summaries(repo_root, path, None, &compute_summary, rule_id, caches);
+            summaries.extend(go_imported_package_summaries(repo_root, path, None, &compute_summary, rule_id, caches));
             summaries
         }
         "Java" | "Kotlin" => {
             let mut summaries = match autoreview_archgraph::declared_package(own_content) {
-                Some(package) => java_kotlin_package_summaries(repo_root, path, &package, &compute_summary, cache),
+                Some(package) => java_kotlin_package_summaries(repo_root, path, &package, &compute_summary, rule_id, caches),
                 None => {
                     let mut own_only = HashMap::new();
-                    add_java_kotlin_summaries_from_file(&repo_root.join(path), &mut own_only, &compute_summary, cache);
+                    add_java_kotlin_summaries_from_file(&repo_root.join(path), &mut own_only, &compute_summary, rule_id, caches);
                     own_only
                 }
             };
-            summaries.extend(java_kotlin_imported_package_summaries(repo_root, own_content, &compute_summary, cache));
+            summaries.extend(java_kotlin_imported_package_summaries(repo_root, own_content, &compute_summary, rule_id, caches));
             summaries
         }
         _ => HashMap::new(),
     }
 }
 
-fn run_loaded_taint_rules(repo_root: &Path, path: &str, own_content: &str, language: &str, lowered: &[(Node, Cfg<Stmt>)], registered_packs: &[ResolvedRulePack], cache: &ParseCache) -> Vec<AgentFinding> {
+fn run_loaded_taint_rules(repo_root: &Path, path: &str, own_content: &str, language: &str, lowered: &[(Node, Cfg<Stmt>)], registered_packs: &[ResolvedRulePack], caches: &SummaryCaches) -> Vec<AgentFinding> {
     let rules: Vec<_> = taint_rules::load_taint_rules(registered_packs).into_iter().filter(|r| r.language == language).collect();
     if rules.is_empty() {
         return Vec::new();
@@ -645,7 +813,11 @@ fn run_loaded_taint_rules(repo_root: &Path, path: &str, own_content: &str, langu
     for rule in &rules {
         // Computed once per rule (not per function) — every function in
         // this file shares the same same-package/imported-package scope.
-        let summaries = taint_interprocedural_summaries(repo_root, path, own_content, language, &rule.spec, cache);
+        // `rule.id` doubles as the persistent cache's rule key: it's
+        // already unique per taint rule, so a niladic-source-wrapper
+        // summary computed for one rule never leaks into another's
+        // lookup.
+        let summaries = taint_interprocedural_summaries(repo_root, path, own_content, language, &rule.spec, &rule.id, caches);
         for (_, cfg) in lowered {
             for hit in autoreview_dataflow::taint::check_with_summaries(&rule.spec, cfg, Some(&summaries)) {
                 let mut finding = make_finding(&rule.id, &rule.category, rule.severity, path, hit.source_line, taint_title(&hit), render_taint_message(&rule.message, &hit));
@@ -685,7 +857,9 @@ fn read_and_parse(repo_root: &Path, path: &str, language: autoreview_langsupport
 pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
     let go_pre_1_22 = crate::analyzers::practices::go_module_targets_pre_1_22(repo_root);
     let cache = ParseCache::new();
-    changed_files
+    let persistent = PersistentSummaryCache::load(repo_root);
+    let caches = SummaryCaches { parse: &cache, persistent: &persistent };
+    let findings: Vec<AgentFinding> = changed_files
         .iter()
         .filter_map(|path| {
             if path.ends_with(".go") {
@@ -695,8 +869,8 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
                 let lowered = lower_all_functions(source, tree);
 
                 let mut findings = run_append_shared_backing_array(path, &lowered);
-                findings.extend(run_typed_nil_interface_return(repo_root, path, source, &lowered, &cache));
-                findings.extend(run_loaded_taint_rules(repo_root, path, content, "Go", &lowered, registered_packs, &cache));
+                findings.extend(run_typed_nil_interface_return(repo_root, path, source, &lowered, &caches));
+                findings.extend(run_loaded_taint_rules(repo_root, path, content, "Go", &lowered, registered_packs, &caches));
                 if go_pre_1_22 {
                     findings.extend(run_loopvar_checks(path, &lowered));
                 }
@@ -705,8 +879,8 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
                 let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Java, &cache)?;
                 let (content, tree) = cached.as_ref();
                 let lowered = lower_all_java_functions(content.as_bytes(), tree);
-                let mut findings = run_npe_risk(repo_root, path, content, &lowered, &[], &cache);
-                findings.extend(run_loaded_taint_rules(repo_root, path, content, "Java", &lowered, registered_packs, &cache));
+                let mut findings = run_npe_risk(repo_root, path, content, &lowered, &[], &caches);
+                findings.extend(run_loaded_taint_rules(repo_root, path, content, "Java", &lowered, registered_packs, &caches));
                 Some(findings)
             } else if path.ends_with(".kt") || path.ends_with(".kts") {
                 let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Kotlin, &cache)?;
@@ -716,8 +890,8 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
                 // extension (see java_kotlin_npe_risk's own docs) — the
                 // only call this rule's dereference-walk must not treat as
                 // risky on a nullable receiver in Kotlin specifically.
-                let mut findings = run_npe_risk(repo_root, path, content, &lowered, &["toString"], &cache);
-                findings.extend(run_loaded_taint_rules(repo_root, path, content, "Kotlin", &lowered, registered_packs, &cache));
+                let mut findings = run_npe_risk(repo_root, path, content, &lowered, &["toString"], &caches);
+                findings.extend(run_loaded_taint_rules(repo_root, path, content, "Kotlin", &lowered, registered_packs, &caches));
                 Some(findings)
             } else if path.ends_with(".tsx") {
                 let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Tsx, &cache)?;
@@ -728,23 +902,25 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
                 // of TypeScript's, so the same taint rules apply verbatim; a
                 // duplicate set of Tsx-only YAML files would just be the
                 // same rules twice.
-                Some(run_loaded_taint_rules(repo_root, path, content, "TypeScript", &lowered, registered_packs, &cache))
+                Some(run_loaded_taint_rules(repo_root, path, content, "TypeScript", &lowered, registered_packs, &caches))
             } else if path.ends_with(".ts") || path.ends_with(".mts") || path.ends_with(".cts") {
                 let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::TypeScript, &cache)?;
                 let (content, tree) = cached.as_ref();
                 let lowered = lower_all_javascript_functions(content.as_bytes(), tree);
-                Some(run_loaded_taint_rules(repo_root, path, content, "TypeScript", &lowered, registered_packs, &cache))
+                Some(run_loaded_taint_rules(repo_root, path, content, "TypeScript", &lowered, registered_packs, &caches))
             } else if path.ends_with(".js") || path.ends_with(".jsx") || path.ends_with(".mjs") || path.ends_with(".cjs") {
                 let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::JavaScript, &cache)?;
                 let (content, tree) = cached.as_ref();
                 let lowered = lower_all_javascript_functions(content.as_bytes(), tree);
-                Some(run_loaded_taint_rules(repo_root, path, content, "JavaScript", &lowered, registered_packs, &cache))
+                Some(run_loaded_taint_rules(repo_root, path, content, "JavaScript", &lowered, registered_packs, &caches))
             } else {
                 None
             }
         })
         .flatten()
-        .collect()
+        .collect();
+    persistent.save();
+    findings
 }
 
 #[cfg(test)]
@@ -775,6 +951,71 @@ mod tests {
         // would be relevant, which it isn't here; the contract under test
         // is just "repeated misses stay misses, no panic").
         assert!(cache.get(&dir.path().join("nonexistent.go"), autoreview_langsupport::Language::Go).is_none());
+    }
+
+    #[test]
+    fn persistent_summary_cache_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = summary_cache_path(dir.path());
+        let _ = std::fs::remove_file(&cache_path);
+
+        {
+            let cache = PersistentSummaryCache::load(dir.path());
+            assert!(cache.get("rule-a", Path::new("/tmp/f.go"), "hash1").is_none());
+            cache.put("rule-a", Path::new("/tmp/f.go"), "hash1".to_string(), HashMap::from([("f".to_string(), true)]));
+            cache.save();
+        }
+
+        let reloaded = PersistentSummaryCache::load(dir.path());
+        assert_eq!(reloaded.get("rule-a", Path::new("/tmp/f.go"), "hash1"), Some(HashMap::from([("f".to_string(), true)])), "a matching content hash must return the persisted summary");
+        assert!(reloaded.get("rule-a", Path::new("/tmp/f.go"), "hash2").is_none(), "a different content hash must miss rather than return a stale summary — this is the correctness guarantee the whole cache rests on");
+        assert!(reloaded.get("rule-b", Path::new("/tmp/f.go"), "hash1").is_none(), "a different rule_id must not see another rule's cached summary for the same file/hash");
+
+        let _ = std::fs::remove_file(&cache_path);
+    }
+
+    #[test]
+    fn persistent_summary_cache_survives_a_missing_or_corrupt_cache_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = summary_cache_path(dir.path());
+        let _ = std::fs::create_dir_all(cache_path.parent().unwrap());
+        std::fs::write(&cache_path, "not valid json").unwrap();
+
+        let cache = PersistentSummaryCache::load(dir.path());
+        assert!(cache.get("rule-a", Path::new("/tmp/f.go"), "hash1").is_none(), "a corrupt cache file must degrade to an empty cache, not panic or propagate an error");
+
+        let _ = std::fs::remove_file(&cache_path);
+    }
+
+    #[test]
+    fn run_dataflow_check_persists_cross_package_summaries_for_reuse_on_a_later_invocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = summary_cache_path(dir.path());
+        let _ = std::fs::remove_file(&cache_path);
+
+        std::fs::write(dir.path().join("helper.go"), "package main\n\nfunc mightFail() *Thing {\n\tvar t *Thing\n\treturn t\n}\n\ntype Thing struct{}\n").unwrap();
+        std::fs::write(dir.path().join("main.go"), "package main\n\nfunc f() error {\n\tt := mightFail()\n\treturn t\n}\n").unwrap();
+
+        let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("typed-nil-interface-return")), "got: {findings:#?}");
+
+        // A second, entirely separate invocation (fresh ParseCache, as a
+        // real second CLI run would have) must reuse the persisted
+        // summary rather than recomputing it from scratch — verified
+        // directly against the persisted cache file rather than via
+        // instrumentation, since content-hash correctness means the
+        // *findings* are identical either way.
+        let helper_content = std::fs::read_to_string(dir.path().join("helper.go")).unwrap();
+        let persisted = PersistentSummaryCache::load(dir.path());
+        let cached = persisted.get("typed-nil-interface-return", &dir.path().join("helper.go"), &content_hash(&helper_content));
+        assert_eq!(cached.as_ref().and_then(|s| s.get("mightFail")), Some(&true), "got: {cached:#?}");
+
+        // A second invocation must still find the same finding, sourced
+        // from the persisted cache this time.
+        let findings2 = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
+        assert!(findings2.iter().any(|f| f.source.rule_id.as_deref() == Some("typed-nil-interface-return")), "got: {findings2:#?}");
+
+        let _ = std::fs::remove_file(&cache_path);
     }
 
     #[test]
@@ -942,7 +1183,9 @@ mod tests {
         std::fs::write(dir.path().join("JavaHelper.java"), "package com.example;\n\nclass JavaHelper {\n    Object risky() {\n        Object e = null;\n        return e;\n    }\n}\n").unwrap();
         std::fs::write(dir.path().join("KotlinHelper.kt"), "package com.example\n\nfun riskyKt(): String? {\n    val e: String? = null\n    return e\n}\n").unwrap();
         let cache = ParseCache::new();
-        let summaries = java_kotlin_package_summaries(dir.path(), "Caller.java", "com.example", &autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary, &cache);
+        let persistent = PersistentSummaryCache::load(dir.path());
+        let caches = SummaryCaches { parse: &cache, persistent: &persistent };
+        let summaries = java_kotlin_package_summaries(dir.path(), "Caller.java", "com.example", &autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary, "npe-risk-from-helper-return", &caches);
         assert_eq!(summaries.get("risky"), Some(&true), "got: {summaries:#?}");
         assert_eq!(summaries.get("riskyKt"), Some(&true), "got: {summaries:#?}");
     }
