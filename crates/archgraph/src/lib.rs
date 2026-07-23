@@ -29,9 +29,26 @@ use std::path::Path;
 /// import resolving to another package in this same module — external/
 /// stdlib imports aren't part of the graph at all, since there's nothing
 /// to detect a cycle or layering violation *within this repo* about them).
+///
+/// Rule engine roadmap item 3 (see `RULE_ENGINE_RESEARCH.md`): `edges` used
+/// to be a plain `HashMap<String, HashSet<String>>` — boolean adjacency,
+/// "does package A import package B," with no record of *which* import
+/// statement(s) actually established that edge. Promoted to
+/// `HashMap<String, HashMap<String, HashSet<String>>>` (from → to → the raw
+/// imported symbol string(s) using that edge) so a consumer can report
+/// exactly what was imported, not just that something was. For Java/Kotlin
+/// this is genuinely symbol-level (the raw `import` target before
+/// `import_package` strips it down to just the package, e.g.
+/// `"com.example.helper.Helper"`, not just `"com.example.helper"`). For Go
+/// this is honestly only package-level still — Go's `import "path"`
+/// syntax imports a whole package, not an individual symbol, so knowing
+/// which `pkg.Selector` a file actually *uses* would need a second pass
+/// scanning selector expressions against each import's local alias, which
+/// isn't done here; the symbol set recorded for a Go edge is just the
+/// import path itself, one entry, no finer than before this change.
 #[derive(Debug, Clone, Default)]
 pub struct ImportGraph {
-    pub edges: HashMap<String, HashSet<String>>,
+    pub edges: HashMap<String, HashMap<String, HashSet<String>>>,
 }
 
 impl ImportGraph {
@@ -40,11 +57,20 @@ impl ImportGraph {
     }
 
     pub fn fan_out(&self, package: &str) -> usize {
-        self.edges.get(package).map(|s| s.len()).unwrap_or(0)
+        self.edges.get(package).map(|m| m.len()).unwrap_or(0)
     }
 
     pub fn fan_in(&self, package: &str) -> usize {
-        self.edges.values().filter(|targets| targets.contains(package)).count()
+        self.edges.values().filter(|targets| targets.contains_key(package)).count()
+    }
+
+    /// The raw imported symbol(s) crossing directly from `from` to `to`,
+    /// if that edge exists at all — `None` for "no edge," distinct from
+    /// `Some(&empty set)`, which shouldn't occur in practice (every edge
+    /// is inserted alongside at least the import that created it) but
+    /// isn't the same claim.
+    pub fn symbols_crossing(&self, from: &str, to: &str) -> Option<&HashSet<String>> {
+        self.edges.get(from)?.get(to)
     }
 }
 
@@ -137,7 +163,11 @@ pub fn build_go_import_graph(repo_root: &Path, module_path: &str) -> ImportGraph
         let entry = graph.edges.entry(package.clone()).or_default();
         for import in extract_go_imports(&content) {
             if import.starts_with(module_path) && import != package {
-                entry.insert(import);
+                // Go's own symbol granularity ceiling — see ImportGraph's
+                // doc comment: the import path itself is the only "symbol"
+                // recorded, since Go imports a whole package, not an
+                // individual member.
+                entry.entry(import.clone()).or_default().insert(import);
             }
         }
     }
@@ -242,7 +272,11 @@ pub fn build_java_kotlin_import_graph(repo_root: &Path) -> ImportGraph {
         for import in extract_java_kotlin_imports(content) {
             let target = import_package(&import);
             if target != *package && declared_packages.contains(&target) {
-                entry.insert(target);
+                // `import` is the raw target as written (e.g.
+                // "com.example.helper.Helper" or a "*" wildcard), genuinely
+                // symbol-level unlike Go's own edges — see ImportGraph's
+                // doc comment.
+                entry.entry(target).or_default().insert(import);
             }
         }
     }
@@ -282,7 +316,7 @@ fn dfs(node: &str, graph: &ImportGraph, visited: &mut HashSet<String>, on_stack:
     on_stack_set.insert(node.to_string());
 
     if let Some(targets) = graph.edges.get(node) {
-        let mut sorted_targets: Vec<&String> = targets.iter().collect();
+        let mut sorted_targets: Vec<&String> = targets.keys().collect();
         sorted_targets.sort();
         for target in sorted_targets {
             if on_stack_set.contains(target) {
@@ -332,8 +366,8 @@ mod tests {
         let graph = build_go_import_graph(dir.path(), "github.com/example/myapp");
         let a = "github.com/example/myapp/internal/a";
         let b = "github.com/example/myapp/internal/b";
-        assert!(graph.edges.get(a).unwrap().contains(b));
-        assert!(!graph.edges.get(a).unwrap().contains("fmt"), "stdlib imports must not become graph edges");
+        assert!(graph.edges.get(a).unwrap().contains_key(b));
+        assert!(!graph.edges.get(a).unwrap().contains_key("fmt"), "stdlib imports must not become graph edges");
     }
 
     #[test]
@@ -374,6 +408,36 @@ mod tests {
     }
 
     #[test]
+    fn symbols_crossing_returns_the_go_import_path_for_a_go_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        write_go_file(dir.path(), "internal/a/a.go", "package a\n\nimport \"github.com/example/myapp/internal/b\"\n\nfunc F() { b.G() }\n");
+        write_go_file(dir.path(), "internal/b/b.go", "package b\n\nfunc G() {}\n");
+        let graph = build_go_import_graph(dir.path(), "github.com/example/myapp");
+        let symbols = graph.symbols_crossing("github.com/example/myapp/internal/a", "github.com/example/myapp/internal/b").unwrap();
+        assert_eq!(symbols.len(), 1, "got: {symbols:#?}");
+        assert!(symbols.contains("github.com/example/myapp/internal/b"));
+    }
+
+    #[test]
+    fn symbols_crossing_returns_the_java_classs_full_import_path() {
+        let dir = tempfile::tempdir().unwrap();
+        write_source_file(dir.path(), "src/com/example/a/A.java", "package com.example.a;\n\nimport com.example.b.B;\n\nclass A {\n    B b;\n}\n");
+        write_source_file(dir.path(), "src/com/example/b/B.java", "package com.example.b;\n\nclass B {}\n");
+        let graph = build_java_kotlin_import_graph(dir.path());
+        let symbols = graph.symbols_crossing("com.example.a", "com.example.b").unwrap();
+        assert_eq!(symbols.len(), 1, "got: {symbols:#?}");
+        assert!(symbols.contains("com.example.b.B"), "must record the full symbol, not just the package — got: {symbols:#?}");
+    }
+
+    #[test]
+    fn symbols_crossing_returns_none_for_a_nonexistent_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        write_go_file(dir.path(), "internal/a/a.go", "package a\n\nfunc F() {}\n");
+        let graph = build_go_import_graph(dir.path(), "github.com/example/myapp");
+        assert!(graph.symbols_crossing("github.com/example/myapp/internal/a", "github.com/example/myapp/internal/nonexistent").is_none());
+    }
+
+    #[test]
     fn walk_go_files_skips_vendor_and_git_directories() {
         let dir = tempfile::tempdir().unwrap();
         write_go_file(dir.path(), "internal/a/a.go", "package a\n");
@@ -404,8 +468,8 @@ mod tests {
         write_source_file(dir.path(), "src/com/example/b/B.java", "package com.example.b;\n\nclass B {}\n");
 
         let graph = build_java_kotlin_import_graph(dir.path());
-        assert!(graph.edges.get("com.example.a").unwrap().contains("com.example.b"));
-        assert!(!graph.edges.get("com.example.a").unwrap().contains("java.util"), "stdlib imports must not become graph edges");
+        assert!(graph.edges.get("com.example.a").unwrap().contains_key("com.example.b"));
+        assert!(!graph.edges.get("com.example.a").unwrap().contains_key("java.util"), "stdlib imports must not become graph edges");
     }
 
     #[test]
@@ -415,7 +479,7 @@ mod tests {
         write_source_file(dir.path(), "src/com/example/b/B.java", "package com.example.b;\n\nclass B {}\n");
 
         let graph = build_java_kotlin_import_graph(dir.path());
-        assert!(graph.edges.get("com.example.a").unwrap().contains("com.example.b"));
+        assert!(graph.edges.get("com.example.a").unwrap().contains_key("com.example.b"));
     }
 
     #[test]
@@ -425,7 +489,7 @@ mod tests {
         write_source_file(dir.path(), "src/com/example/b/B.java", "package com.example.b;\n\nclass B {}\n");
 
         let graph = build_java_kotlin_import_graph(dir.path());
-        assert!(graph.edges.get("com.example.a").unwrap().contains("com.example.b"));
+        assert!(graph.edges.get("com.example.a").unwrap().contains_key("com.example.b"));
     }
 
     #[test]

@@ -32,6 +32,35 @@ fn java_kotlin_package_for_file(repo_root: &Path, file: &str) -> Option<String> 
     declared_package(&content)
 }
 
+/// Renders a cycle with the specific import(s) crossing each edge —
+/// rule engine roadmap item 3 (`RULE_ENGINE_RESEARCH.md`): `ImportGraph`
+/// used to only know a boolean "A imports B," so this message could only
+/// ever say "A -> B," never *what* about A actually depends on B. Now
+/// backed by `ImportGraph::symbols_crossing`, so a reviewer sees exactly
+/// which class (Java/Kotlin) or import path (Go — package-level only,
+/// see that type's own doc comment on why Go can't go further without a
+/// second selector-usage scan) to look at on each hop, not just which
+/// packages are involved.
+fn describe_cycle_with_symbols(cycle: &[String], graph: &ImportGraph) -> String {
+    let mut out = String::new();
+    for (i, pkg) in cycle.iter().enumerate() {
+        if i > 0 {
+            let from = &cycle[i - 1];
+            match graph.symbols_crossing(from, pkg) {
+                Some(symbols) if !symbols.is_empty() => {
+                    let mut symbols: Vec<&String> = symbols.iter().collect();
+                    symbols.sort();
+                    let symbols_text = symbols.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+                    out.push_str(&format!(" --[{symbols_text}]--> "));
+                }
+                _ => out.push_str(" -> "),
+            }
+        }
+        out.push_str(pkg);
+    }
+    out
+}
+
 /// Runs cycle detection over `graph` and reports any cycle that includes
 /// a package one of `changed_files` belongs to (via `package_for_file`),
 /// anchoring each finding at one of those changed files. Shared between
@@ -70,7 +99,7 @@ fn report_cycles_touching_changed_files(graph: &ImportGraph, changed_files: &[&S
         let anchor_file = changed_files.iter().find(|f| package_for_file(f).map(|p| cycle_packages.contains(&p)).unwrap_or(false));
         let Some(anchor_file) = anchor_file else { continue };
 
-        let cycle_description = cycle.join(" -> ");
+        let cycle_description = describe_cycle_with_symbols(cycle, graph);
         findings.push(AgentFinding {
             source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-archgraph".to_string(), rule_id: Some("import-cycle".to_string()), aspect: None, backend: None },
             category: "architecture".to_string(),
@@ -154,6 +183,34 @@ mod tests {
         assert_eq!(findings[0].category, "architecture");
         assert!(findings[0].message.contains("internal/a"));
         assert!(findings[0].message.contains("internal/b"));
+    }
+
+    #[test]
+    fn reports_the_specific_import_path_crossing_each_edge_in_the_cycle() {
+        // Rule engine roadmap item 3: the cycle description must name the
+        // actual import that established each edge, not just the two
+        // package names.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module github.com/example/myapp\n").unwrap();
+        write_go_file(dir.path(), "internal/a/a.go", "package a\n\nimport \"github.com/example/myapp/internal/b\"\n\nfunc F() { b.G() }\n");
+        write_go_file(dir.path(), "internal/b/b.go", "package b\n\nimport \"github.com/example/myapp/internal/a\"\n\nfunc G() { a.F() }\n");
+
+        let findings = run_archgraph_check(dir.path(), &["internal/a/a.go".to_string()]);
+        assert_eq!(findings.len(), 1, "got: {findings:#?}");
+        assert!(findings[0].message.contains("github.com/example/myapp/internal/b"), "got: {}", findings[0].message);
+        assert!(findings[0].message.contains("github.com/example/myapp/internal/a"), "got: {}", findings[0].message);
+    }
+
+    #[test]
+    fn reports_the_specific_java_class_crossing_each_edge_in_the_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        write_source_file(dir.path(), "src/com/example/a/A.java", "package com.example.a;\n\nimport com.example.b.B;\n\nclass A {\n    B b;\n}\n");
+        write_source_file(dir.path(), "src/com/example/b/B.java", "package com.example.b;\n\nimport com.example.a.A;\n\nclass B {\n    A a;\n}\n");
+
+        let findings = run_archgraph_check(dir.path(), &["src/com/example/a/A.java".to_string()]);
+        assert_eq!(findings.len(), 1, "got: {findings:#?}");
+        assert!(findings[0].message.contains("com.example.b.B"), "must name the specific class, not just the package — got: {}", findings[0].message);
+        assert!(findings[0].message.contains("com.example.a.A"), "got: {}", findings[0].message);
     }
 
     #[test]
