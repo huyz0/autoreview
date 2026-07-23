@@ -31,13 +31,23 @@ fn print_finding_summary(finding: &Finding) {
 /// file — their check logic is plain Rust, so a missing `find_rule_
 /// definition`/shadow-file match for one of these is expected, not a gap.
 /// Deliberately NOT a blanket `tool.starts_with("autoreview-")` check:
-/// `autoreview-dataflow` (taint rules), `autoreview-complexity` (threshold
-/// rules), and `autoreview-shadow-rule` (shadow/promoted rules) all share
-/// that prefix but ARE genuinely YAML-backed — for those, a failed lookup
-/// really does mean the rule was renamed/removed, and saying otherwise
-/// would be a false explanation from the one command whose whole job is
-/// truthful ones.
+/// `autoreview-complexity` (threshold rules) and `autoreview-shadow-rule`
+/// (shadow/promoted rules) share that prefix but ARE genuinely YAML-backed
+/// — for those, a failed lookup really does mean the rule was renamed/
+/// removed, and saying otherwise would be a false explanation from the one
+/// command whose whole job is truthful ones.
 const CODE_ONLY_ANALYZER_TOOLS: &[&str] = &["autoreview-duplication", "autoreview-practices", "autoreview-architecture", "autoreview-archgraph", "autoreview-symindex", "autoreview-churn"];
+
+/// `autoreview-dataflow`'s own rule ids are a MIX: `run_loaded_taint_rules`
+/// produces findings for genuinely YAML-backed (`kind: taint`) rule ids,
+/// but `dataflow_check.rs`'s CFG-based rules (`typed-nil-interface-return`,
+/// `append-shared-backing-array`, both `loopvar-*` ids) are hardcoded in
+/// Rust via `make_finding` and were NEVER YAML rules — so this tool can't
+/// be classified by name alone the way `CODE_ONLY_ANALYZER_TOOLS` classifies
+/// the single-purpose analyzers. These specific ids get the code-only
+/// message; every other `autoreview-dataflow` rule id (an actual taint
+/// rule id that stopped resolving) falls through to "renamed or removed."
+const CODE_ONLY_DATAFLOW_RULE_IDS: &[&str] = &["typed-nil-interface-return", "append-shared-backing-array", "loopvar-capture-pre-1.22", "loopvar-address-pre-1.22"];
 
 fn print_definition_text(header_detail: &str, text: &str) {
     println!("\nRule definition ({header_detail}):");
@@ -97,7 +107,7 @@ fn print_rule_definition(repo_root: &Path, tool: &str, rule_id: &str) {
 fn no_definition_found_message(tool: &str, rule_id: &str) -> String {
     if tool == "golangci-lint" || tool == "clippy" {
         format!("'{rule_id}' is {tool}'s own check, not one of autoreview's declarative rules — there's no YAML rule to show. See {tool}'s own documentation for what '{rule_id}' means.")
-    } else if CODE_ONLY_ANALYZER_TOOLS.contains(&tool) {
+    } else if CODE_ONLY_ANALYZER_TOOLS.contains(&tool) || (tool == "autoreview-dataflow" && CODE_ONLY_DATAFLOW_RULE_IDS.contains(&rule_id)) {
         format!("This check's logic lives directly in autoreview's {tool} analyzer code (crates/core/src/analyzers/), not a declarative YAML rule file — there's no rule text to show beyond the message above.")
     } else {
         format!("No rule definition for '{rule_id}' was found among builtin rules, registered rule packs, or this repo's .autoreview/rules/{{shadow,promoted}}/ — it may have been renamed or removed since this finding was reported.")
@@ -161,6 +171,24 @@ mod tests {
             assert!(message.contains("may have been renamed or removed"), "tool '{tool}' got the wrong message: {message}");
             assert!(!message.contains("lives directly in"), "tool '{tool}' is YAML-backed and must not get the code-only message: {message}");
         }
+    }
+
+    #[test]
+    fn a_pure_rust_dataflow_rule_id_gets_the_code_only_message_even_though_its_tool_is_mixed() {
+        // autoreview-dataflow is a mixed tool: run_loaded_taint_rules
+        // produces genuinely YAML-backed findings, but these four CFG-rule
+        // ids are hardcoded in Rust via make_finding and were never YAML —
+        // the tool name alone can't distinguish them, only the rule id can.
+        for rule_id in CODE_ONLY_DATAFLOW_RULE_IDS {
+            let message = no_definition_found_message("autoreview-dataflow", rule_id);
+            assert!(message.contains("lives directly in"), "rule '{rule_id}' got the wrong message: {message}");
+        }
+    }
+
+    #[test]
+    fn an_unresolved_taint_rule_id_on_the_same_mixed_tool_still_gets_renamed_or_removed() {
+        let message = no_definition_found_message("autoreview-dataflow", "go-command-injection-taint");
+        assert!(message.contains("may have been renamed or removed"), "got: {message}");
     }
 
     #[test]
