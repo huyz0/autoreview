@@ -158,8 +158,11 @@ pub fn declared_package(content: &str) -> Option<String> {
 /// Extracts every `import foo.bar.Baz;`/`import foo.bar.*;` (Java) or
 /// `import foo.bar.Baz`/`import foo.bar.*` (Kotlin) target — `import
 /// static foo.Bar.baz;`'s `static` keyword is stripped so the member's
-/// owning package still resolves correctly.
-fn extract_java_kotlin_imports(content: &str) -> Vec<String> {
+/// owning package still resolves correctly. Public since `autoreview-
+/// core`'s dataflow layer needs the same extraction to resolve a changed
+/// file's own cross-package call summaries (mirroring how it already uses
+/// `discover_go_module_path`/`extract_go_imports` for Go).
+pub fn extract_java_kotlin_imports(content: &str) -> Vec<String> {
     content
         .lines()
         .map(str::trim)
@@ -169,8 +172,8 @@ fn extract_java_kotlin_imports(content: &str) -> Vec<String> {
 
 /// An import target's own package: `foo.bar.Baz` -> `foo.bar`, and a
 /// wildcard `foo.bar.*` -> `foo.bar` directly (no trailing member to
-/// strip).
-fn import_package(import_path: &str) -> String {
+/// strip). Public for the same reason as `extract_java_kotlin_imports`.
+pub fn import_package(import_path: &str) -> String {
     match import_path.strip_suffix(".*") {
         Some(prefix) => prefix.to_string(),
         None => match import_path.rfind('.') {
@@ -194,6 +197,22 @@ fn walk_java_kotlin_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// Every `.java`/`.kt` file in the repo whose own `package` declaration
+/// equals `package` exactly — the Java/Kotlin analog of Go's "scan the
+/// directory a module-relative import path resolves to" cross-package
+/// resolution, except there's no directory to resolve to (package !=
+/// directory here, see this module's doc comment), so this scans the
+/// whole tree and filters by the real declaration instead. Same
+/// per-call, uncached cost `build_java_kotlin_import_graph` already pays
+/// on every review run today; not a new performance profile this crate
+/// hasn't already accepted.
+pub fn find_java_kotlin_files_declaring_package(repo_root: &Path, package: &str) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    walk_java_kotlin_files(repo_root, &mut files);
+    files.retain(|path| std::fs::read_to_string(path).ok().and_then(|content| declared_package(&content)).is_some_and(|p| p == package));
+    files
 }
 
 /// Builds the whole-repo Java/Kotlin package import graph. Unlike Go's
@@ -407,6 +426,25 @@ mod tests {
 
         let graph = build_java_kotlin_import_graph(dir.path());
         assert!(graph.edges.get("com.example.a").unwrap().contains("com.example.b"));
+    }
+
+    #[test]
+    fn find_java_kotlin_files_declaring_package_finds_files_across_the_whole_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        write_source_file(dir.path(), "src/com/example/b/B.java", "package com.example.b;\n\nclass B {}\n");
+        write_source_file(dir.path(), "src/com/example/b/impl/BImpl.kt", "package com.example.b\n\nclass BImpl : B()\n");
+        write_source_file(dir.path(), "src/com/example/a/A.java", "package com.example.a;\n\nclass A {}\n");
+
+        let files = find_java_kotlin_files_declaring_package(dir.path(), "com.example.b");
+        assert_eq!(files.len(), 2, "got: {files:#?}");
+        assert!(files.iter().all(|p| p.file_name().unwrap() == "B.java" || p.file_name().unwrap() == "BImpl.kt"));
+    }
+
+    #[test]
+    fn find_java_kotlin_files_declaring_package_returns_empty_for_an_unknown_package() {
+        let dir = tempfile::tempdir().unwrap();
+        write_source_file(dir.path(), "src/com/example/a/A.java", "package com.example.a;\n\nclass A {}\n");
+        assert!(find_java_kotlin_files_declaring_package(dir.path(), "com.example.nonexistent").is_empty());
     }
 
     #[test]

@@ -11,3 +11,4 @@
 pub mod go_append_shared_backing_array;
 pub mod go_loopvar;
 pub mod go_typed_nil_interface_return;
+pub mod java_kotlin_npe_risk;

@@ -301,6 +301,121 @@ fn run_typed_nil_interface_return(repo_root: &Path, path: &str, source: &[u8], l
     findings
 }
 
+/// Adds every function/method summary from one `.java`/`.kt`/`.kts` file
+/// into `summaries` (keyed by bare function name — see
+/// `autoreview_dataflow::lower::java::function_name`'s docs on the
+/// accepted same-name-conflates-across-classes imprecision this shares
+/// with Go's own summary keying). Best-effort: a file that fails to read
+/// or parse is silently skipped, same "current file's findings still
+/// matter" rationale as Go's `scan_dir_for_pointer_summaries`.
+fn add_npe_summaries_from_file(path: &Path, summaries: &mut HashMap<String, bool>) {
+    let Ok(content) = std::fs::read_to_string(path) else { return };
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("java") => {
+            let Some(mut parser) = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Java) else { return };
+            let Some(tree) = parser.parse(&content, None) else { return };
+            let source = content.as_bytes();
+            for fn_node in java_functions(&tree) {
+                if let Some(name) = autoreview_dataflow::lower::java::function_name(fn_node, source) {
+                    let cfg = autoreview_dataflow::lower::java::lower_function(source, fn_node);
+                    summaries.insert(name, autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary(&cfg));
+                }
+            }
+        }
+        Some("kt") | Some("kts") => {
+            let Some(mut parser) = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Kotlin) else { return };
+            let Some(tree) = parser.parse(&content, None) else { return };
+            let source = content.as_bytes();
+            for fn_node in kotlin_functions(&tree) {
+                if let Some(name) = autoreview_dataflow::lower::kotlin::function_name(fn_node, source) {
+                    let cfg = autoreview_dataflow::lower::kotlin::lower_function(source, fn_node);
+                    summaries.insert(name, autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary(&cfg));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Same-package summaries for `file_path`'s NPE-risk pass 1: every
+/// `.java`/`.kt`/`.kts` file in the same directory whose own declared
+/// package matches `own_package` — a fast common-case scan (mirroring
+/// Go's own-directory scan) with a correctness check on top, since
+/// directory == package isn't a language guarantee here the way it is for
+/// Go (see `autoreview_archgraph`'s module docs on why Java/Kotlin's
+/// package resolution reads the real declaration instead of inferring
+/// from the path).
+fn npe_package_summaries(repo_root: &Path, file_path: &str, own_package: &str) -> HashMap<String, bool> {
+    let mut summaries = HashMap::new();
+    let Some(dir) = repo_root.join(file_path).parent().map(Path::to_path_buf) else { return summaries };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return summaries };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        if autoreview_archgraph::declared_package(&content).as_deref() != Some(own_package) {
+            continue;
+        }
+        add_npe_summaries_from_file(&path, &mut summaries);
+    }
+    summaries
+}
+
+/// Cross-package summaries: every package `own_content`'s file imports,
+/// resolved to the real files declaring it anywhere in the repo —
+/// `find_java_kotlin_files_declaring_package`'s own docs cover why this
+/// is a whole-repo scan rather than a module-path-relative directory jump
+/// the way Go's cross-package resolution is.
+fn npe_imported_package_summaries(repo_root: &Path, own_content: &str) -> HashMap<String, bool> {
+    let mut summaries = HashMap::new();
+    for import in autoreview_archgraph::extract_java_kotlin_imports(own_content) {
+        let pkg = autoreview_archgraph::import_package(&import);
+        for path in autoreview_archgraph::find_java_kotlin_files_declaring_package(repo_root, &pkg) {
+            add_npe_summaries_from_file(&path, &mut summaries);
+        }
+    }
+    summaries
+}
+
+/// Interprocedural NPE-risk check for one Java/Kotlin file — see
+/// `autoreview_dataflow::rules::java_kotlin_npe_risk`'s module docs for
+/// the two-pass design this wires up. Pass 1's summaries come from
+/// `npe_package_summaries` (same directory, filtered by declared package)
+/// merged with `npe_imported_package_summaries` (every other package this
+/// file imports); a file with no `package` declaration at all (Java's
+/// default/unnamed package) falls back to summarizing just its own
+/// functions, so same-file resolution still works even without cross-file
+/// scope.
+fn run_npe_risk(repo_root: &Path, path: &str, own_content: &str, lowered: &[(Node, Cfg<Stmt>)], null_safe_methods: &[&str]) -> Vec<AgentFinding> {
+    let mut summaries = match autoreview_archgraph::declared_package(own_content) {
+        Some(package) => npe_package_summaries(repo_root, path, &package),
+        None => {
+            let mut own_only = HashMap::new();
+            add_npe_summaries_from_file(&repo_root.join(path), &mut own_only);
+            own_only
+        }
+    };
+    summaries.extend(npe_imported_package_summaries(repo_root, own_content));
+
+    let mut findings = Vec::new();
+    for (_, cfg) in lowered {
+        for hit in autoreview_dataflow::rules::java_kotlin_npe_risk::check(cfg, &summaries, null_safe_methods) {
+            findings.push(make_finding(
+                "npe-risk-from-helper-return",
+                "correctness",
+                Severity::High,
+                path,
+                hit.source_line,
+                format!("`{}` may be null after `{}`", hit.var, hit.call_name),
+                format!(
+                    "`{}` was assigned from `{}`, and that call has a path that returns null. Using it here without a null check risks a `NullPointerException`. Add `if ({} != null) {{ ... }}` before this use, or change the helper's contract so it never returns null (throw instead, or return an `Optional`).",
+                    hit.var, hit.call_name, hit.var
+                ),
+            ));
+        }
+    }
+    findings
+}
+
 fn run_loopvar_checks(path: &str, lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
     let mut findings = Vec::new();
     for (_, cfg) in lowered {
@@ -394,12 +509,13 @@ fn read_and_parse(repo_root: &Path, path: &str, language: autoreview_langsupport
 /// Runs all dataflow-powered checks against one changed file's current
 /// content. Go gets the full rule set (Phase 3/4/5: append-shared-
 /// backing-array, typed-nil-interface-return, loopvar, plus taint rules).
-/// Java/Kotlin/JavaScript/TypeScript/TSX only get taint rules so far — no
-/// hand-written rule (the append/typed-nil-return/loopvar families) exists
-/// for them yet, but the generic taint engine already works against any
-/// lowered `Cfg`, so a `kind: taint` YAML rule for any of them needs no
-/// dataflow-crate changes to run. Parses and lowers each file's functions
-/// exactly once per language, shared across that
+/// Java/Kotlin also get the interprocedural NPE-risk check
+/// (`java_kotlin_npe_risk`, the Java/Kotlin analog of Go's typed-nil-
+/// return rule — see that module's docs). JavaScript/TypeScript/TSX only
+/// get taint rules so far — the generic taint engine already works
+/// against any lowered `Cfg`, so a `kind: taint` YAML rule for any of
+/// them needs no dataflow-crate changes to run. Parses and lowers each
+/// file's functions exactly once per language, shared across that
 /// language's rule families rather than each re-parsing/re-lowering
 /// independently.
 pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
@@ -422,11 +538,19 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
             } else if path.ends_with(".java") {
                 let (content, tree) = read_and_parse(repo_root, path, autoreview_langsupport::Language::Java)?;
                 let lowered = lower_all_java_functions(content.as_bytes(), &tree);
-                Some(run_loaded_taint_rules(path, "Java", &lowered, registered_packs))
+                let mut findings = run_npe_risk(repo_root, path, &content, &lowered, &[]);
+                findings.extend(run_loaded_taint_rules(path, "Java", &lowered, registered_packs));
+                Some(findings)
             } else if path.ends_with(".kt") || path.ends_with(".kts") {
                 let (content, tree) = read_and_parse(repo_root, path, autoreview_langsupport::Language::Kotlin)?;
                 let lowered = lower_all_kotlin_functions(content.as_bytes(), &tree);
-                Some(run_loaded_taint_rules(path, "Kotlin", &lowered, registered_packs))
+                // Kotlin's stdlib defines Any?.toString() as a null-safe
+                // extension (see java_kotlin_npe_risk's own docs) — the
+                // only call this rule's dereference-walk must not treat as
+                // risky on a nullable receiver in Kotlin specifically.
+                let mut findings = run_npe_risk(repo_root, path, &content, &lowered, &["toString"]);
+                findings.extend(run_loaded_taint_rules(path, "Kotlin", &lowered, registered_packs));
+                Some(findings)
             } else if path.ends_with(".tsx") {
                 let (content, tree) = read_and_parse(repo_root, path, autoreview_langsupport::Language::Tsx)?;
                 let lowered = lower_all_javascript_functions(content.as_bytes(), &tree);
@@ -544,6 +668,121 @@ mod tests {
         .unwrap();
         let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("typed-nil-interface-return")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_a_same_file_java_npe_risk_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Foo.java"), "class Foo {\n    void f() {\n        Object e = null;\n        e.toString();\n    }\n}\n").unwrap();
+        let findings = run_dataflow_check(dir.path(), &["Foo.java".to_string()], &[]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("npe-risk-from-helper-return")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_guarded_java_dereference_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Foo.java"), "class Foo {\n    void f() {\n        Object e = null;\n        if (e != null) {\n            e.toString();\n        }\n    }\n}\n").unwrap();
+        let findings = run_dataflow_check(dir.path(), &["Foo.java".to_string()], &[]);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("npe-risk-from-helper-return")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_an_interprocedural_java_npe_risk_within_the_same_class() {
+        // Java's bare (receiver-less) call syntax only ever resolves within
+        // the same class (implicit `this.`) — a cross-class call always
+        // needs a receiver (`helper.risky()`), which this rule can't
+        // resolve without type information (see the module's own doc
+        // comment on why summaries are keyed by bare name). So the
+        // realistic Java interprocedural case this rule actually catches is
+        // two methods on the same class — the cross-file/cross-package
+        // proof below uses Kotlin instead, where a bare call to a
+        // top-level function genuinely can cross files without a receiver.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Foo.java"),
+            "class Foo {\n    Object risky() {\n        Object e = null;\n        return e;\n    }\n    void f() {\n        Object e = risky();\n        e.toString();\n    }\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["Foo.java".to_string()], &[]);
+        assert!(
+            findings.iter().any(|f| f.source.rule_id.as_deref() == Some("npe-risk-from-helper-return")),
+            "got: {findings:#?} — a same-function-only heuristic couldn't have caught this, risky() is a different method"
+        );
+    }
+
+    #[test]
+    fn flags_a_same_file_kotlin_npe_risk_end_to_end() {
+        // Deliberately not .toString() — Kotlin's stdlib defines
+        // Any?.toString() as a genuinely null-safe extension (never
+        // throws), so it's excluded from this rule for Kotlin specifically
+        // (see run_npe_risk's own Kotlin call site). Note this specific
+        // source wouldn't actually compile in real Kotlin (a bare
+        // .hashCode() on an explicitly-`?`-typed variable needs `?.`/`!!`)
+        // — this test exercises the rule's mechanism, not a realistic
+        // Kotlin snippet; see java_kotlin_npe_risk's module doc comment
+        // for the honest caveat about this rule's narrower practical
+        // surface for pure Kotlin-to-Kotlin calls.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Foo.kt"), "class Foo {\n    fun f() {\n        val e: String? = null\n        e.hashCode()\n    }\n}\n").unwrap();
+        let findings = run_dataflow_check(dir.path(), &["Foo.kt".to_string()], &[]);
+        assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("npe-risk-from-helper-return")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_kotlin_tostring_call_on_a_nullable_receiver() {
+        // Regression test for the null_safe_methods exclusion: unlike
+        // every other method, Any?.toString() never NPEs in Kotlin, so
+        // this must not fire even with no guard in between.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Foo.kt"), "class Foo {\n    fun f() {\n        val e: String? = null\n        e.toString()\n    }\n}\n").unwrap();
+        let findings = run_dataflow_check(dir.path(), &["Foo.kt".to_string()], &[]);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("npe-risk-from-helper-return")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn does_not_flag_a_guarded_kotlin_dereference_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Foo.kt"),
+            "class Foo {\n    fun f() {\n        val e: String? = null\n        if (e != null) {\n            e.toString()\n        }\n    }\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["Foo.kt".to_string()], &[]);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("npe-risk-from-helper-return")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn flags_an_interprocedural_kotlin_npe_risk_across_two_files_in_the_same_package() {
+        // Unlike Java, a Kotlin top-level function has no enclosing class,
+        // so a bare call to it genuinely can resolve across files with no
+        // receiver — this is where the same-package/cross-package summary
+        // machinery actually earns its keep for Kotlin.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Helper.kt"), "package com.example\n\nfun risky(): String? {\n    val e: String? = null\n    return e\n}\n").unwrap();
+        std::fs::write(dir.path().join("Caller.kt"), "package com.example\n\nfun f() {\n    val e = risky()\n    e.hashCode()\n}\n").unwrap();
+        let findings = run_dataflow_check(dir.path(), &["Caller.kt".to_string()], &[]);
+        assert!(
+            findings.iter().any(|f| f.source.rule_id.as_deref() == Some("npe-risk-from-helper-return")),
+            "got: {findings:#?} — same-file-only resolution couldn't have caught this, risky() is declared in a sibling file"
+        );
+    }
+
+    #[test]
+    fn flags_an_interprocedural_kotlin_npe_risk_across_two_different_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("com/example/helper")).unwrap();
+        std::fs::write(dir.path().join("com/example/helper/Helper.kt"), "package com.example.helper\n\nfun risky(): String? {\n    val e: String? = null\n    return e\n}\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("com/example/app")).unwrap();
+        std::fs::write(
+            dir.path().join("com/example/app/Caller.kt"),
+            "package com.example.app\n\nimport com.example.helper.risky\n\nfun f() {\n    val e = risky()\n    e.hashCode()\n}\n",
+        )
+        .unwrap();
+        let findings = run_dataflow_check(dir.path(), &["com/example/app/Caller.kt".to_string()], &[]);
+        assert!(
+            findings.iter().any(|f| f.source.rule_id.as_deref() == Some("npe-risk-from-helper-return")),
+            "got: {findings:#?} — same-package-only resolution couldn't have caught this, risky() is declared in a different package entirely"
+        );
     }
 
     #[test]

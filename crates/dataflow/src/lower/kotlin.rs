@@ -32,6 +32,13 @@ fn text<'a>(node: Node, source: &'a [u8]) -> &'a str {
     node.utf8_text(source).unwrap_or("").trim()
 }
 
+/// The function's own bare name — same convention and same accepted
+/// same-name-conflates-across-classes imprecision as Java's `function_name`
+/// (see that doc comment) and Go's own `function_name`.
+pub fn function_name(fn_node: Node, source: &[u8]) -> Option<String> {
+    fn_node.child_by_field_name("name").map(|n| text(n, source).to_string())
+}
+
 fn first_child_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
     let mut cursor = node.walk();
     let found = node.children(&mut cursor).find(|c| c.kind() == kind);
@@ -157,16 +164,54 @@ fn lower_statement(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: Node
     }
 }
 
+/// Recognizes `x != null` / `null != x` (and the `==` counterpart) — same
+/// scope as Go's/Java's own `recognize_*_guard`. Kotlin's condition field
+/// is directly a `binary_expression` with `left`/`right` fields (no
+/// wrapping `parenthesized_expression` the way Java's is), verified
+/// against the real `tree-sitter-kotlin-ng` crate rather than ast-grep's
+/// bundled dump — see this module's doc comment on why that distinction
+/// matters here. Kotlin's `null` is a plain `identifier` with text
+/// `"null"` (also per this module's doc comment), not a dedicated node
+/// kind, so the operand is matched by kind *and* text rather than kind
+/// alone.
+fn recognize_null_guard(cond: Node, source: &[u8]) -> Option<(String, crate::cfg::GuardOp)> {
+    if cond.kind() != "binary_expression" {
+        return None;
+    }
+    let (left, right) = (cond.child_by_field_name("left")?, cond.child_by_field_name("right")?);
+    let is_null = |n: Node| n.kind() == "identifier" && text(n, source) == "null";
+    let var_node = if is_null(right) && !is_null(left) {
+        left
+    } else if is_null(left) && !is_null(right) {
+        right
+    } else {
+        return None;
+    };
+    let op_text = text(cond, source);
+    let op = if op_text.contains("!=") {
+        crate::cfg::GuardOp::NotEqual
+    } else if op_text.contains("==") {
+        crate::cfg::GuardOp::Equal
+    } else {
+        return None;
+    };
+    Some((text(var_node, source).to_string(), op))
+}
+
 /// `if_expression`'s consequence/alternative are `block` nodes directly
 /// (no wrapper the way some grammars use) — verified against the real
 /// crate, see this module's doc comment.
 fn lower_if(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {
     cfg.nodes[current].stmts.push(Stmt::Other(format!("if {}", text(stmt, source))));
+    let null_guard = stmt.child_by_field_name("condition").and_then(|cond| recognize_null_guard(cond, source));
 
     let branches = children_of_kind(stmt, "block");
 
     let true_start = cfg.push_node(stmt.start_position().row as u32 + 1);
     cfg.edges.push((current, true_start, EdgeKind::True));
+    if let Some((var, op)) = &null_guard {
+        cfg.nodes[true_start].stmts.push(Stmt::Guard { var: var.clone(), op: *op, against: crate::cfg::GuardAgainst::Nil });
+    }
     let true_end = if let Some(consequence) = branches.first() { lower_block(cfg, *consequence, source, true_start) } else { true_start };
 
     let false_end = if let Some(alternative) = branches.get(1) {
@@ -221,6 +266,28 @@ mod tests {
         }
         let fn_node = find_fn(root).expect("no function_declaration found");
         lower_function(source.as_bytes(), fn_node)
+    }
+
+    #[test]
+    fn function_name_reads_the_functions_own_name() {
+        let mut parser = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Kotlin).unwrap();
+        let source = "class Foo {\n    fun doWork(): Int {\n        return 1\n    }\n}\n";
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+        fn find_fn(node: Node) -> Option<Node> {
+            if node.kind() == "function_declaration" {
+                return Some(node);
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(found) = find_fn(child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let fn_node = find_fn(root).unwrap();
+        assert_eq!(function_name(fn_node, source.as_bytes()), Some("doWork".to_string()));
     }
 
     #[test]
@@ -287,5 +354,41 @@ mod tests {
             "got: {:#?}",
             cfg.nodes
         );
+    }
+
+    #[test]
+    fn recognizes_a_not_equal_null_guard_on_the_true_branch() {
+        let cfg = lower("class Foo {\n    fun f(e: String?) {\n        if (e != null) {\n            val x = 1\n        }\n    }\n}\n");
+        assert!(
+            cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Guard { var, op: crate::cfg::GuardOp::NotEqual, against: crate::cfg::GuardAgainst::Nil } if var == "e"))),
+            "got: {:#?}",
+            cfg.nodes
+        );
+    }
+
+    #[test]
+    fn recognizes_an_equal_null_guard_with_operands_reversed() {
+        let cfg = lower("class Foo {\n    fun f(e: String?) {\n        if (null == e) {\n            val x = 1\n        }\n    }\n}\n");
+        assert!(
+            cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Guard { var, op: crate::cfg::GuardOp::Equal, against: crate::cfg::GuardAgainst::Nil } if var == "e"))),
+            "got: {:#?}",
+            cfg.nodes
+        );
+    }
+
+    #[test]
+    fn a_non_null_condition_produces_no_guard() {
+        let cfg = lower("class Foo {\n    fun f(x: Int) {\n        if (x > 0) {\n            val y = 1\n        }\n    }\n}\n");
+        assert!(!cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Guard { .. }))), "got: {:#?}", cfg.nodes);
+    }
+
+    #[test]
+    fn comparing_two_variables_produces_no_guard_even_though_one_side_looks_like_null_text() {
+        // Neither operand is the literal `null` identifier here — this
+        // guards against a matcher that only checks operand *kind*
+        // (identifier) without also checking the text, which would
+        // wrongly treat any two-identifier comparison as a null guard.
+        let cfg = lower("class Foo {\n    fun f(a: String, b: String) {\n        if (a != b) {\n            val y = 1\n        }\n    }\n}\n");
+        assert!(!cfg.nodes.iter().any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Guard { .. }))), "got: {:#?}", cfg.nodes);
     }
 }
