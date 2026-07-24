@@ -119,6 +119,37 @@ impl CredentialStore {
         }
     }
 
+    fn account_marker_path(&self, service: &str) -> PathBuf {
+        self.fallback_dir.join(format!("{service}.account"))
+    }
+
+    /// Remembers which `account` a login flow resolved for `service`, as
+    /// plain (non-secret) text — separate from `store`'s actual secret
+    /// value. Exists because Bitbucket's account name is the user's own
+    /// email, resolved at login time, not a fixed constant the way
+    /// GitHub's is (`auth::GITHUB_ACCOUNT`) — `auth status` and future
+    /// callers need *some* way to know which account to `load` against
+    /// without asking the user to retype their email every time. Not
+    /// worth permission-hardening the way the credential file is, since
+    /// this holds no secret.
+    pub fn remember_account(&self, service: &str, account: &str) -> anyhow::Result<()> {
+        std::fs::create_dir_all(&self.fallback_dir)?;
+        std::fs::write(self.account_marker_path(service), account)?;
+        Ok(())
+    }
+
+    pub fn recall_account(&self, service: &str) -> Option<String> {
+        std::fs::read_to_string(self.account_marker_path(service)).ok().map(|s| s.trim().to_string())
+    }
+
+    pub fn forget_account(&self, service: &str) -> std::io::Result<()> {
+        match std::fs::remove_file(self.account_marker_path(service)) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Looks up a stored secret: env var override first, then the OS
     /// keyring, then the fallback file. `Ok(None)` means genuinely not
     /// found anywhere (not an error) — the caller decides what that
@@ -212,6 +243,28 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "got: {mode:o}");
         }
+    }
+
+    #[test]
+    fn remembers_and_recalls_an_account_name() {
+        let (store, _dir) = store_with_temp_fallback();
+        assert_eq!(store.recall_account("autoreview-bitbucket"), None);
+        store.remember_account("autoreview-bitbucket", "alice@example.com").unwrap();
+        assert_eq!(store.recall_account("autoreview-bitbucket"), Some("alice@example.com".to_string()));
+    }
+
+    #[test]
+    fn forgetting_a_never_remembered_account_is_not_an_error() {
+        let (store, _dir) = store_with_temp_fallback();
+        store.forget_account("never-remembered").unwrap();
+    }
+
+    #[test]
+    fn forget_account_removes_a_previously_remembered_account() {
+        let (store, _dir) = store_with_temp_fallback();
+        store.remember_account("autoreview-bitbucket", "alice@example.com").unwrap();
+        store.forget_account("autoreview-bitbucket").unwrap();
+        assert_eq!(store.recall_account("autoreview-bitbucket"), None);
     }
 
     #[test]

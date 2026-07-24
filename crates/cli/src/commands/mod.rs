@@ -1,4 +1,5 @@
 pub mod apply;
+pub mod auth;
 pub mod backend;
 pub mod diff;
 pub mod doctor;

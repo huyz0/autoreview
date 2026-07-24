@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 
 use autoreview_schema::{AgentBackendKind, Tier};
 use commands::apply::run_apply;
+use commands::auth::run_auth_status;
 use commands::diff::{run_diff_or_watch, DiffCommandOptions};
 use commands::doctor::run_doctor;
 use commands::explain::run_explain;
@@ -108,6 +109,20 @@ enum Commands {
         #[command(subcommand)]
         action: SpecAction,
     },
+    /// Manage GitHub/Bitbucket credentials for network-backed mining
+    /// sources (rules mine --from-bitbucket-comments, and GitHub sources
+    /// beyond the existing gh-shelling-out --from-comments)
+    Auth {
+        #[command(subcommand)]
+        action: AuthAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuthAction {
+    /// Show whether a GitHub/Bitbucket credential is currently stored —
+    /// read-only, no network call
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -344,6 +359,9 @@ fn main() -> anyhow::Result<()> {
         },
         Commands::Spec { action } => match action {
             SpecAction::Draft { base, head, force } => run_spec_draft(SpecDraftOptions { repo_root, base_ref: base, head_ref: head, force })?,
+        },
+        Commands::Auth { action } => match action {
+            AuthAction::Status => run_auth_status()?,
         },
     }
 

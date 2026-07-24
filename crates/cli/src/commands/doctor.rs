@@ -55,6 +55,25 @@ fn check_local_llm() -> CheckResult {
     }
 }
 
+/// Presence-only, non-blocking — a missing GitHub/Bitbucket credential is
+/// a normal, expected state (most reviews never need one), never a
+/// doctor failure. Points at `auth status` for the fuller picture
+/// (`doctor`'s own scope is tool availability, not credential detail).
+fn check_auth_github() -> CheckResult {
+    let store = autoreview_core::CredentialStore::open_default();
+    let ok = store.load(autoreview_core::GITHUB_SERVICE, autoreview_core::GITHUB_ACCOUNT).ok().flatten().is_some();
+    let detail = if ok { "configured".to_string() } else { "not configured — only needed for GitHub-backed mining sources, see `autoreview auth status`".to_string() };
+    CheckResult { name: "auth-github", ok: true, detail }
+}
+
+fn check_auth_bitbucket() -> CheckResult {
+    let store = autoreview_core::CredentialStore::open_default();
+    let account = store.recall_account(autoreview_core::BITBUCKET_SERVICE);
+    let ok = account.as_deref().is_some_and(|email| store.load(autoreview_core::BITBUCKET_SERVICE, email).ok().flatten().is_some());
+    let detail = if ok { "configured".to_string() } else { "not configured — only needed for `rules mine --from-bitbucket-comments`, see `autoreview auth status`".to_string() };
+    CheckResult { name: "auth-bitbucket", ok: true, detail }
+}
+
 fn check_config(repo_root: &Path) -> CheckResult {
     let config_path = repo_root.join(".autoreview").join("config.yaml");
     if config_path.exists() {
@@ -80,6 +99,8 @@ pub fn run_doctor(repo_root: &Path) {
         check_local_llm(),
         check_binary("ast-grep"),
         check_binary("golangci-lint"),
+        check_auth_github(),
+        check_auth_bitbucket(),
         check_config(repo_root),
     ];
 
