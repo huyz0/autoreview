@@ -1,0 +1,16 @@
+id: go-ssrf-taint
+language: Go
+category: security
+severity: error
+kind: taint
+semantic: true
+message: "`{tainted_arg}` reaches `{sink_call}` with an unsanitized value from an HTTP form field"
+sources:
+  - call: FormValue
+  - call: PostFormValue
+sinks:
+  - call: http.Get
+  - call: http.Post
+  - call: http.Head
+  - call: http.PostForm
+sanitizers: []

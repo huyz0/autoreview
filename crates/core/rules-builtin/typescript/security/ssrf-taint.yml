@@ -1,0 +1,14 @@
+id: typescript-ssrf-taint
+language: TypeScript
+category: security
+severity: error
+kind: taint
+semantic: true
+message: "`{tainted_arg}` reaches `{sink_call}` with an unsanitized value from an HTTP request parameter"
+sources:
+  - call: param
+sinks:
+  - call: fetch
+  - call: axios.get
+  - call: axios.post
+sanitizers: []
