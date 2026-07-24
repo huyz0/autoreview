@@ -1,4 +1,5 @@
 pub mod architecture;
+pub mod auth_config;
 pub mod config;
 pub mod finding;
 pub mod mining_config;
@@ -8,6 +9,7 @@ pub mod skill_manifest;
 pub mod spec;
 
 pub use architecture::*;
+pub use auth_config::*;
 pub use config::*;
 pub use finding::*;
 pub use mining_config::*;

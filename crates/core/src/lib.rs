@@ -36,6 +36,7 @@ pub use analyzers::dataflow_check::run_dataflow_check;
 pub use analyzers::symindex_check::{run_symindex_check, run_symindex_check_with_tier4};
 pub use auth::bitbucket_token::{verify_bitbucket_token, BitbucketUser};
 pub use auth::credential_store::{CredentialStore, StoredVia};
+pub use auth::github_device_flow::{run_device_flow, DeviceCodeResponse, PollOutcome};
 pub use auth::{BITBUCKET_SERVICE, GITHUB_ACCOUNT, GITHUB_SERVICE};
 pub use config::load_config;
 pub use context::{collect_context, render_context_block, ContextItem};

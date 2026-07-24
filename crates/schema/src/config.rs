@@ -483,4 +483,6 @@ pub struct AutoreviewConfig {
     pub mine_from_comments: MineFromCommentsConfig,
     #[serde(default)]
     pub mine_from_bugfix_commits: crate::mining_config::MineFromBugfixCommitsConfig,
+    #[serde(default)]
+    pub auth: crate::auth_config::AuthConfig,
 }

@@ -371,7 +371,7 @@ fn main() -> anyhow::Result<()> {
             SpecAction::Draft { base, head, force } => run_spec_draft(SpecDraftOptions { repo_root, base_ref: base, head_ref: head, force })?,
         },
         Commands::Auth { action } => match action {
-            AuthAction::Login { provider, email, token } => run_auth_login(&provider, email, token)?,
+            AuthAction::Login { provider, email, token } => run_auth_login(&repo_root, &provider, email, token)?,
             AuthAction::Status => run_auth_status()?,
         },
     }

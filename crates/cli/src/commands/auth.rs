@@ -8,14 +8,22 @@
 //! of only ever delegating to an already-authenticated CLI.
 
 use std::io::Write;
+use std::path::Path;
 
 use autoreview_core::{CredentialStore, StoredVia, BITBUCKET_SERVICE, GITHUB_ACCOUNT, GITHUB_SERVICE};
+
+/// The OAuth scope requested for GitHub's device flow — `repo` (not the
+/// narrower `public_repo`) since reading PR review comments on a private
+/// repository, the realistic common case, needs it. See
+/// `autoreview_core::auth::github_device_flow`'s own module doc for the
+/// full tradeoff.
+const GITHUB_OAUTH_SCOPE: &str = "repo";
 
 /// Providers `auth login` currently knows how to log into — checked
 /// explicitly rather than letting an unrecognized provider silently
 /// no-op, matching this project's house style of naming exactly what
 /// went wrong. Grows as more login flows land.
-const KNOWN_LOGIN_PROVIDERS: &[&str] = &["bitbucket"];
+const KNOWN_LOGIN_PROVIDERS: &[&str] = &["bitbucket", "github"];
 
 struct StatusLine {
     provider: &'static str,
@@ -103,9 +111,34 @@ fn run_auth_login_bitbucket(email: Option<String>, token: Option<String>) -> any
     Ok(())
 }
 
-pub fn run_auth_login(provider: &str, email: Option<String>, token: Option<String>) -> anyhow::Result<()> {
+fn run_auth_login_github(repo_root: &Path) -> anyhow::Result<()> {
+    let config = autoreview_core::load_config(&repo_root.join(".autoreview").join("config.yaml"))?;
+    let Some(client_id) = config.auth.github.client_id else {
+        anyhow::bail!(
+            "no GitHub OAuth client_id configured — set auth.github.clientId in .autoreview/config.yaml to a Device-Flow-enabled OAuth App's client_id. \
+             Register one (free, one-time) at https://github.com/settings/developers — see \
+             https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow for how to enable device flow on it."
+        );
+    };
+
+    let mut stdout = std::io::stdout();
+    let token = autoreview_core::run_device_flow(&client_id, GITHUB_OAUTH_SCOPE, "curl", &mut stdout)?;
+    println!("Authorized.");
+
+    let store = CredentialStore::open_default();
+    let via = store.store(GITHUB_SERVICE, GITHUB_ACCOUNT, &token)?;
+    let via_label = match via {
+        StoredVia::Keyring => "the OS keyring",
+        StoredVia::FileFallback => "a locked-down local file (see the warning above for why)",
+    };
+    println!("Stored in {via_label}. Run `autoreview auth status` any time to check.");
+    Ok(())
+}
+
+pub fn run_auth_login(repo_root: &Path, provider: &str, email: Option<String>, token: Option<String>) -> anyhow::Result<()> {
     match provider {
         "bitbucket" => run_auth_login_bitbucket(email, token),
+        "github" => run_auth_login_github(repo_root),
         other => anyhow::bail!("unknown or not-yet-supported provider '{other}' — expected one of: {}", KNOWN_LOGIN_PROVIDERS.join(", ")),
     }
 }
