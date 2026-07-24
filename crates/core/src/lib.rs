@@ -47,6 +47,7 @@ pub use rule_factory::draft::{draft_candidate, DraftOutcome};
 pub use rule_factory::shadow::{classify_agreement, should_demote, should_promote, Agreement, AgentFindingRef, PromotionInputs};
 pub use skill_evolution::mine::{draft_negative_guidance, mine_negative_guidance, write_proposal_file as write_skill_proposal_file, NegativeGuidanceSeed};
 pub use skill_evolution::replay::{compare_replay, ReplayComparison};
+pub use rule_factory::config_gap_report::{compare_linter_configs_to_rule_catalog, ConfigGapReport, DisabledMatch, LinterCheckStatus};
 pub use rule_factory::existing_rules::{find_similar_existing_rule, load_existing_rule_summaries, ExistingRuleMatch, ExistingRuleSummary};
 pub use rule_factory::mine::{mine_candidates, write_seed_file, CandidateSeed, RepresentativeSnippet};
 pub use rule_factory::mine_from_bitbucket_comments::{mine_from_bitbucket_pr_comments, resolve_bitbucket_repo_slug};

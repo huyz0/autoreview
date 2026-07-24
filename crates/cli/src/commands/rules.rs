@@ -298,6 +298,41 @@ pub fn run_rules_mine_bitbucket_comments(repo_root: &std::path::Path) -> anyhow:
     draft_and_write_seeds(repo_root, &config, &seeds)
 }
 
+/// `autoreview rules mine --from-linter-config` — compares whatever
+/// linter config the repo already has (`.golangci.yml`/`.eslintrc.*`/
+/// checkstyle/detekt) against autoreview's own rule catalog (see
+/// `rule_factory::config_gap_report`'s own module docs). Report only,
+/// same "prototype — inspect only" posture `--from-code` already has —
+/// no seed files, no draft attempt.
+pub fn run_rules_mine_linter_config(repo_root: &std::path::Path) -> anyhow::Result<()> {
+    let existing = load_existing_rule_summaries(&resolved_packs_for_mining(repo_root));
+    let reports = autoreview_core::compare_linter_configs_to_rule_catalog(repo_root, &existing);
+    if reports.is_empty() {
+        println!("No .golangci.yml/.eslintrc.*/checkstyle/detekt config found under this repo — nothing to compare.");
+        return Ok(());
+    }
+
+    for report in &reports {
+        println!("{} ({}):", report.tool, report.config_path.display());
+        if report.disabled_matches.is_empty() {
+            println!("  No disabled checks matched an existing autoreview rule.");
+        } else {
+            println!("  Disabled in {}, but autoreview already covers it (a standing false-positive risk for this team):", report.tool);
+            for m in &report.disabled_matches {
+                println!("    {} ~ {} (similarity {:.2})", m.linter_check, m.autoreview_rule_id, m.similarity);
+            }
+        }
+        if !report.uncovered_checks.is_empty() {
+            println!("  Enabled in {}, with no obvious autoreview equivalent (a possible coverage gap):", report.tool);
+            for name in &report.uncovered_checks {
+                println!("    {name}");
+            }
+        }
+        println!();
+    }
+    Ok(())
+}
+
 const CODE_MINE_MIN_OCCURRENCES: usize = 5;
 const CODE_MINE_MIN_CONSISTENCY: f64 = 0.9;
 

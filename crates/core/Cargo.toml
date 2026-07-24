@@ -26,6 +26,7 @@ tree-sitter-kotlin-ng.workspace = true
 tree-sitter-typescript.workspace = true
 tree-sitter-javascript.workspace = true
 keyring = { version = "4.1.5", features = ["apple-native-keyring-store"] }
+roxmltree = "0.21.1"
 
 [dev-dependencies]
 autoreview-test-support = { path = "../test-support" }

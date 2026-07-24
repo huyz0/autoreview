@@ -265,11 +265,16 @@ mod tests {
     fn mines_real_pr_comments_from_a_real_public_bitbucket_repository() {
         // Real network call, no credential needed — Bitbucket Cloud
         // allows anonymous GET on public repos. Best-effort: skipped,
-        // not failed, with no network access.
+        // not failed, with no network access, or a real HTTP 429 — this
+        // anonymous, unauthenticated endpoint is rate-limited more
+        // tightly than an authenticated one, and this exact test hitting
+        // it repeatedly during development is itself a real example of
+        // that; verifying this module's real-API integration isn't the
+        // same claim as verifying it never gets rate-limited.
         match mine_from_bitbucket_pr_comments("", "", "atlassian", "atlassian-plugins", 3, "curl") {
             Ok(rows) => assert!(!rows.is_empty(), "expected at least one substantive comment from real merged PRs"),
-            Err(err) if err.to_string().contains("failed to reach Bitbucket") => {
-                eprintln!("skipping: no network access in this environment ({err})");
+            Err(err) if err.to_string().contains("failed to reach Bitbucket") || err.to_string().contains("HTTP 429") => {
+                eprintln!("skipping: network unavailable or rate-limited in this environment ({err})");
             }
             Err(err) => panic!("got an unexpected error: {err}"),
         }

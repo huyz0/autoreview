@@ -6,6 +6,7 @@
 
 pub mod bench;
 pub mod category_heuristics;
+pub mod config_gap_report;
 pub mod draft;
 pub mod existing_rules;
 pub mod mine;
