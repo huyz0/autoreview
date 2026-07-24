@@ -19,7 +19,10 @@
 //! mining source (see `run_rules_mine_code`'s own docs) — a discovery
 //! prototype, not yet integrated into the draft/bench/shadow pipeline.
 
-use autoreview_core::{draft_candidate, find_similar_existing_rule, load_existing_rule_summaries, mine_candidates, mine_from_pr_comments, run_bench, write_seed_file, BenchVerdict, CandidateSeed, DraftOutcome, HistoryStore};
+use autoreview_core::{
+    draft_candidate, find_similar_existing_rule, load_existing_rule_summaries, mine_candidates, mine_from_bitbucket_pr_comments, mine_from_pr_comments, resolve_bitbucket_repo_slug, run_bench, write_seed_file, BenchVerdict, CandidateSeed,
+    CredentialStore, DraftOutcome, HistoryStore, BITBUCKET_SERVICE,
+};
 use autoreview_schema::AgentBackendKind;
 use serde::Deserialize;
 
@@ -236,6 +239,62 @@ pub fn run_rules_mine_suppressions(repo_root: &std::path::Path) -> anyhow::Resul
     }
 
     let config = autoreview_core::load_config(&repo_root.join(".autoreview").join("config.yaml"))?;
+    draft_and_write_seeds(repo_root, &config, &seeds)
+}
+
+/// `autoreview rules mine --from-bitbucket-comments` — mines recurring
+/// human PR review comments from a Bitbucket Cloud repository (see
+/// `rule_factory::mine_from_bitbucket_comments`'s own module docs). Opt-in
+/// (`mineFromBitbucketComments.enabled: true`) since it hits the real
+/// Bitbucket API, and needs a stored credential first — errors clearly
+/// pointing at `auth login bitbucket` rather than silently doing nothing
+/// when one isn't configured.
+pub fn run_rules_mine_bitbucket_comments(repo_root: &std::path::Path) -> anyhow::Result<()> {
+    let config = autoreview_core::load_config(&repo_root.join(".autoreview").join("config.yaml"))?;
+    if !config.mine_from_bitbucket_comments.enabled {
+        println!("mineFromBitbucketComments.enabled is false in .autoreview/config.yaml — nothing to do. Set it to true to mine recurring PR review comments via Bitbucket's API.");
+        return Ok(());
+    }
+
+    let store = CredentialStore::open_default();
+    let Some(email) = store.recall_account(BITBUCKET_SERVICE) else {
+        anyhow::bail!("no Bitbucket credential stored — run `autoreview auth login bitbucket` first");
+    };
+    let Some(token) = store.load(BITBUCKET_SERVICE, &email)? else {
+        anyhow::bail!("no Bitbucket credential stored — run `autoreview auth login bitbucket` first");
+    };
+
+    let (workspace, repo_slug) = match &config.mine_from_bitbucket_comments.workspace {
+        Some(workspace) => {
+            let Some((_, repo_slug)) = resolve_bitbucket_repo_slug(repo_root) else {
+                anyhow::bail!("mineFromBitbucketComments.workspace is set, but the repo slug couldn't be inferred from origin's remote URL — this needs a real bitbucket.org remote configured");
+            };
+            (workspace.clone(), repo_slug)
+        }
+        None => match resolve_bitbucket_repo_slug(repo_root) {
+            Some(resolved) => resolved,
+            None => anyhow::bail!("couldn't determine the Bitbucket workspace/repo — set mineFromBitbucketComments.workspace in .autoreview/config.yaml, or configure a bitbucket.org origin remote"),
+        },
+    };
+
+    println!("Fetching the {} most recently merged PRs' review comments from {workspace}/{repo_slug}...", config.mine_from_bitbucket_comments.lookback_prs);
+    let findings = mine_from_bitbucket_pr_comments(&email, &token, &workspace, &repo_slug, config.mine_from_bitbucket_comments.lookback_prs, &config.mine_from_bitbucket_comments.curl_binary)?;
+    if findings.is_empty() {
+        println!("No substantive review comments found on recent merged PRs — nothing to mine.");
+        return Ok(());
+    }
+
+    let seeds = mine_candidates(findings);
+    if seeds.is_empty() {
+        println!("No recurring clusters found (need >= 3 similar comments spanning >= 2 distinct PRs).");
+        return Ok(());
+    }
+    let seeds = filter_out_existing_rule_duplicates(repo_root, seeds);
+    if seeds.is_empty() {
+        println!("Every recurring cluster matched a rule that's already shipped — nothing new to draft.");
+        return Ok(());
+    }
+
     draft_and_write_seeds(repo_root, &config, &seeds)
 }
 

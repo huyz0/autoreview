@@ -9,6 +9,7 @@ pub mod category_heuristics;
 pub mod draft;
 pub mod existing_rules;
 pub mod mine;
+pub mod mine_from_bitbucket_comments;
 pub mod mine_from_bugfix_commits;
 pub mod mine_from_code;
 pub mod mine_from_comments;
