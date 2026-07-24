@@ -180,6 +180,37 @@ pub fn run_rules_mine_comments(repo_root: &std::path::Path) -> anyhow::Result<()
     draft_and_write_seeds(repo_root, &config, &seeds)
 }
 
+/// `autoreview rules mine --from-bugfix-commits` — mines the repo's own
+/// local git history for bug-fix-shaped commits (see
+/// `rule_factory::mine_from_bugfix_commits`'s own module docs). No
+/// `.enabled` config gate, unlike `--from-comments`: this never leaves
+/// the local `git log`/`git show`, so there's no external network/auth
+/// surface to opt into.
+pub fn run_rules_mine_bugfix_commits(repo_root: &std::path::Path) -> anyhow::Result<()> {
+    let config = autoreview_core::load_config(&repo_root.join(".autoreview").join("config.yaml"))?;
+    let max_commits = config.mine_from_bugfix_commits.max_commits;
+
+    println!("Scanning the {max_commits} most recent commit(s) for bug-fix-shaped changes...");
+    let findings = autoreview_core::mine_from_bugfix_commits(repo_root, max_commits)?;
+    if findings.is_empty() {
+        println!("No bug-fix-shaped commits found in that window — nothing to mine.");
+        return Ok(());
+    }
+
+    let seeds = mine_candidates(findings);
+    if seeds.is_empty() {
+        println!("No recurring clusters found (need >= 3 similar fixes spanning >= 2 distinct commits).");
+        return Ok(());
+    }
+    let seeds = filter_out_existing_rule_duplicates(repo_root, seeds);
+    if seeds.is_empty() {
+        println!("Every recurring cluster matched a rule that's already shipped — nothing new to draft.");
+        return Ok(());
+    }
+
+    draft_and_write_seeds(repo_root, &config, &seeds)
+}
+
 const CODE_MINE_MIN_OCCURRENCES: usize = 5;
 const CODE_MINE_MIN_CONSISTENCY: f64 = 0.9;
 

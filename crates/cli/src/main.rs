@@ -10,7 +10,7 @@ use commands::doctor::run_doctor;
 use commands::explain::run_explain;
 use commands::feedback::{run_feedback, run_missed_report};
 use commands::history::{run_history_costs, run_history_sync};
-use commands::rules::{run_rules_bench, run_rules_mine, run_rules_mine_code, run_rules_mine_comments, run_rules_packs, run_rules_packs_add, run_rules_packs_refresh, run_rules_packs_validate, run_rules_review, run_rules_rollback, run_rules_shadow_log};
+use commands::rules::{run_rules_bench, run_rules_mine, run_rules_mine_bugfix_commits, run_rules_mine_code, run_rules_mine_comments, run_rules_packs, run_rules_packs_add, run_rules_packs_refresh, run_rules_packs_validate, run_rules_review, run_rules_rollback, run_rules_shadow_log};
 use commands::skills::{run_skills_list, run_skills_mine, run_skills_review, run_skills_rollback};
 use commands::skills_bench::run_skills_bench;
 use commands::spec::{run_spec_draft, SpecDraftOptions};
@@ -145,12 +145,16 @@ enum RulesAction {
     /// instead (opt-in — see mineFromComments in .autoreview/config.yaml).
     /// With --from-code, mines call-pair usage conventions directly from
     /// the repo's own Go source (discovery prototype, prints findings —
-    /// see commands::rules::run_rules_mine_code).
+    /// see commands::rules::run_rules_mine_code). With
+    /// --from-bugfix-commits, mines the repo's own local git history for
+    /// bug-fix-shaped commits — no auth/network needed at all.
     Mine {
         #[arg(long)]
         from_comments: bool,
         #[arg(long)]
         from_code: bool,
+        #[arg(long)]
+        from_bugfix_commits: bool,
     },
     /// Bench a candidate rule against its self-test + historical precision
     Bench { cluster_id: String },
@@ -297,14 +301,16 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Rules { action } => match action {
-            RulesAction::Mine { from_comments, from_code } => {
-                if from_comments && from_code {
-                    eprintln!("error: --from-comments and --from-code are mutually exclusive");
+            RulesAction::Mine { from_comments, from_code, from_bugfix_commits } => {
+                if [from_comments, from_code, from_bugfix_commits].iter().filter(|f| **f).count() > 1 {
+                    eprintln!("error: --from-comments, --from-code, and --from-bugfix-commits are mutually exclusive");
                     std::process::exit(1);
                 } else if from_comments {
                     run_rules_mine_comments(&repo_root)?
                 } else if from_code {
                     run_rules_mine_code(&repo_root)?
+                } else if from_bugfix_commits {
+                    run_rules_mine_bugfix_commits(&repo_root)?
                 } else {
                     run_rules_mine(&repo_root)?
                 }

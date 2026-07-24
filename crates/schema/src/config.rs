@@ -481,4 +481,6 @@ pub struct AutoreviewConfig {
     pub symindex: SymindexConfig,
     #[serde(default)]
     pub mine_from_comments: MineFromCommentsConfig,
+    #[serde(default)]
+    pub mine_from_bugfix_commits: crate::mining_config::MineFromBugfixCommitsConfig,
 }
