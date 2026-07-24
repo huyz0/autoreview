@@ -1,0 +1,14 @@
+id: go-open-redirect-taint
+language: Go
+category: security
+severity: warning
+kind: taint
+semantic: true
+message: "`{tainted_arg}` reaches `{sink_call}` with an unsanitized value from an HTTP form field — an attacker can point this redirect at an arbitrary external URL (open redirect), useful for phishing since the link starts on your own trusted domain"
+sources:
+  - call: FormValue
+  - call: PostFormValue
+sinks:
+  - call: http.Redirect
+    argPositions: [2]
+sanitizers: []

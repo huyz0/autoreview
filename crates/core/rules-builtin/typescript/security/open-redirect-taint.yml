@@ -1,0 +1,12 @@
+id: typescript-open-redirect-taint
+language: TypeScript
+category: security
+severity: warning
+kind: taint
+semantic: true
+message: "`{tainted_arg}` reaches `{sink_call}` with an unsanitized value from an HTTP request parameter — an attacker can point this redirect at an arbitrary external URL (open redirect), useful for phishing since the link starts on your own trusted domain"
+sources:
+  - call: param
+sinks:
+  - call: redirect
+sanitizers: []

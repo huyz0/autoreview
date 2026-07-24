@@ -1,0 +1,14 @@
+id: javascript-log-injection-taint
+language: JavaScript
+category: security
+severity: warning
+kind: taint
+semantic: true
+message: "`{tainted_arg}` reaches `{sink_call}` with an unsanitized value from an HTTP request parameter — an attacker can inject newlines/control characters to forge fake log entries or split a single log line into several, undermining anything (SIEM rules, audits) that trusts the log's structure"
+sources:
+  - call: param
+sinks:
+  - call: console.log
+  - call: console.error
+  - call: console.warn
+sanitizers: []

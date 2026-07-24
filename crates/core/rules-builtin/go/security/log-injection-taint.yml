@@ -1,0 +1,15 @@
+id: go-log-injection-taint
+language: Go
+category: security
+severity: warning
+kind: taint
+semantic: true
+message: "`{tainted_arg}` reaches `{sink_call}` with an unsanitized value from an HTTP form field — an attacker can inject newlines/control characters to forge fake log entries or split a single log line into several, undermining anything (SIEM rules, audits) that trusts the log's structure"
+sources:
+  - call: FormValue
+  - call: PostFormValue
+sinks:
+  - call: log.Printf
+  - call: log.Println
+  - call: log.Print
+sanitizers: []
