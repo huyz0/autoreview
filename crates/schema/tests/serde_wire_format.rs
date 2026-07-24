@@ -137,6 +137,28 @@ agents:
 }
 
 #[test]
+fn agents_config_parses_camel_case_yaml_for_the_openai_compatible_backend() {
+    let yaml = r#"
+agents:
+  backend: openai-compatible
+  openAiCompatible:
+    baseUrl: https://api.together.xyz/v1
+    model: meta-llama/Llama-3-70b
+"#;
+    let config: AutoreviewConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(config.agents.backend, autoreview_schema::AgentBackendKind::OpenAiCompatible);
+    assert_eq!(config.agents.open_ai_compatible.base_url, "https://api.together.xyz/v1");
+    assert_eq!(config.agents.open_ai_compatible.model, "meta-llama/Llama-3-70b");
+}
+
+#[test]
+fn openai_compatible_config_defaults_to_openrouter_when_the_section_is_absent() {
+    let config: AutoreviewConfig = serde_yaml::from_str("{}").unwrap();
+    assert_eq!(config.agents.open_ai_compatible.base_url, "https://openrouter.ai/api/v1");
+    assert_eq!(config.agents.open_ai_compatible.model, "openrouter/auto");
+}
+
+#[test]
 fn config_yaml_uses_camel_case_keys_matching_the_plan() {
     // The plan's own config.yaml examples use camelCase (e.g. `costClass`,
     // `maxTurns`, `totalTokenCap`). A config file authored against that

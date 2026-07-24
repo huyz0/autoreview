@@ -74,6 +74,13 @@ fn check_auth_bitbucket() -> CheckResult {
     CheckResult { name: "auth-bitbucket", ok: true, detail }
 }
 
+fn check_auth_openai_compatible() -> CheckResult {
+    let store = autoreview_core::CredentialStore::open_default();
+    let ok = store.load(autoreview_core::OPENAI_COMPAT_SERVICE, autoreview_core::OPENAI_COMPAT_ACCOUNT).ok().flatten().is_some();
+    let detail = if ok { "configured".to_string() } else { "not configured — only needed for --backend openai-compatible, see `autoreview auth status`".to_string() };
+    CheckResult { name: "auth-openai-compat", ok: true, detail }
+}
+
 fn check_config(repo_root: &Path) -> CheckResult {
     let config_path = repo_root.join(".autoreview").join("config.yaml");
     if config_path.exists() {
@@ -101,11 +108,14 @@ pub fn run_doctor(repo_root: &Path) {
         check_binary("golangci-lint"),
         check_auth_github(),
         check_auth_bitbucket(),
+        check_auth_openai_compatible(),
         check_config(repo_root),
     ];
 
     println!("autoreview doctor\n");
-    println!("  (claude, pi, and local-llm are the three Stage-3 agent backends — only the one selected via `--backend`/`agents.backend` in config needs to be available; the others are informational.)\n");
+    println!(
+        "  (claude, pi, local-llm, and openai-compatible are the four Stage-3 agent backends — only the one selected via `--backend`/`agents.backend` in config needs to be available; the others are informational. openai-compatible also needs a stored key — see auth-openai-compat below.)\n"
+    );
     let mut required_missing = false;
     for check in &checks {
         let icon = if check.ok { "✓" } else { "✗" };

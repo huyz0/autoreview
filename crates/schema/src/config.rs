@@ -200,6 +200,13 @@ pub enum AgentBackendKind {
     ClaudeCode,
     Pi,
     LocalLlm,
+    /// Explicit `rename`, overriding what `rename_all = "kebab-case"` would
+    /// otherwise derive: serde's kebab-case splitter treats `OpenAi` as two
+    /// words (`open-ai-compatible`), not the `openai-compatible` spelling
+    /// this project's config/CLI/doc comments all actually use — caught by
+    /// a real parse-failure test, not by inspection.
+    #[serde(rename = "openai-compatible")]
+    OpenAiCompatible,
 }
 
 fn default_local_llm_base_url() -> String {
@@ -225,6 +232,37 @@ pub struct LocalLlmConfig {
 impl Default for LocalLlmConfig {
     fn default() -> Self {
         Self { base_url: default_local_llm_base_url(), model: default_local_llm_model() }
+    }
+}
+
+fn default_openai_compatible_base_url() -> String {
+    "https://openrouter.ai/api/v1".to_string()
+}
+fn default_openai_compatible_model() -> String {
+    "openrouter/auto".to_string()
+}
+
+/// Settings for the generic OpenAI-compatible hosted backend (see
+/// `autoreview_core::agents::openai_compatible`'s own module doc) —
+/// OpenRouter by default (the base_url/model defaults below), but
+/// `baseUrl` works against any provider speaking the same
+/// `/v1/chat/completions` contract (Together, Groq, Fireworks, ...). The
+/// API key itself never lives here — it's a secret, stored via
+/// `CredentialStore` (`autoreview auth login openai-compatible`), the same
+/// split `MineFromBitbucketCommentsConfig`'s doc comment already draws
+/// between repo-level shared policy and person-level local state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAiCompatibleConfig {
+    #[serde(default = "default_openai_compatible_base_url")]
+    pub base_url: String,
+    #[serde(default = "default_openai_compatible_model")]
+    pub model: String,
+}
+
+impl Default for OpenAiCompatibleConfig {
+    fn default() -> Self {
+        Self { base_url: default_openai_compatible_base_url(), model: default_openai_compatible_model() }
     }
 }
 
@@ -273,6 +311,8 @@ pub struct AgentsConfig {
     pub pi_provider: Option<String>,
     #[serde(default)]
     pub local_llm: LocalLlmConfig,
+    #[serde(default)]
+    pub open_ai_compatible: OpenAiCompatibleConfig,
     #[serde(default)]
     pub embedding: EmbeddingConfig,
 }

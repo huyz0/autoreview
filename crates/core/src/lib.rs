@@ -18,6 +18,7 @@ pub use agents::claude_code::*;
 pub use agents::contract::*;
 pub use agents::embedding::{cosine_similarity, embedding_from_bytes, embedding_to_bytes, fetch_embedding, parse_embedding_response};
 pub use agents::local_llm::{local_llm_available, parse_chat_completion_response, LocalLlmBackend};
+pub use agents::openai_compatible::{openai_compatible_available, verify_api_key as verify_openai_compatible_key, OpenAiCompatibleBackend};
 pub use agents::pi::{parse_pi_json_output, PiBackend};
 pub use analyzers::apply_condition::ApplyCondition;
 pub use analyzers::archgraph_check::run_archgraph_check;
@@ -37,7 +38,7 @@ pub use analyzers::symindex_check::{run_symindex_check, run_symindex_check_with_
 pub use auth::bitbucket_token::{verify_bitbucket_token, BitbucketUser};
 pub use auth::credential_store::{CredentialStore, StoredVia};
 pub use auth::github_device_flow::{run_device_flow, DeviceCodeResponse, PollOutcome};
-pub use auth::{BITBUCKET_SERVICE, GITHUB_ACCOUNT, GITHUB_SERVICE};
+pub use auth::{BITBUCKET_SERVICE, GITHUB_ACCOUNT, GITHUB_SERVICE, OPENAI_COMPAT_ACCOUNT, OPENAI_COMPAT_SERVICE};
 pub use config::load_config;
 pub use context::{collect_context, render_context_block, ContextItem};
 pub use patch_check::parses_cleanly;

@@ -33,6 +33,7 @@ use super::history::history_dir_for;
 fn cheap_model_for(kind: AgentBackendKind, config: &autoreview_schema::AutoreviewConfig) -> &str {
     match kind {
         AgentBackendKind::LocalLlm => &config.agents.local_llm.model,
+        AgentBackendKind::OpenAiCompatible => &config.agents.open_ai_compatible.model,
         AgentBackendKind::ClaudeCode | AgentBackendKind::Pi => &config.budgets.models.cheap,
     }
 }

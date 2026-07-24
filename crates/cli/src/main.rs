@@ -298,6 +298,7 @@ fn parse_backend(s: &str) -> Option<AgentBackendKind> {
         "claude-code" => Some(AgentBackendKind::ClaudeCode),
         "pi" => Some(AgentBackendKind::Pi),
         "local-llm" => Some(AgentBackendKind::LocalLlm),
+        "openai-compatible" => Some(AgentBackendKind::OpenAiCompatible),
         _ => {
             eprintln!("warning: unrecognized --backend '{s}', ignoring override");
             None

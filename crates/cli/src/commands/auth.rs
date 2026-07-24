@@ -10,7 +10,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use autoreview_core::{CredentialStore, StoredVia, BITBUCKET_SERVICE, GITHUB_ACCOUNT, GITHUB_SERVICE};
+use autoreview_core::{CredentialStore, StoredVia, BITBUCKET_SERVICE, GITHUB_ACCOUNT, GITHUB_SERVICE, OPENAI_COMPAT_ACCOUNT, OPENAI_COMPAT_SERVICE};
 
 /// The OAuth scope requested for GitHub's device flow — `repo` (not the
 /// narrower `public_repo`) since reading PR review comments on a private
@@ -23,7 +23,7 @@ const GITHUB_OAUTH_SCOPE: &str = "repo";
 /// explicitly rather than letting an unrecognized provider silently
 /// no-op, matching this project's house style of naming exactly what
 /// went wrong. Grows as more login flows land.
-const KNOWN_LOGIN_PROVIDERS: &[&str] = &["bitbucket", "github"];
+const KNOWN_LOGIN_PROVIDERS: &[&str] = &["bitbucket", "github", "openai-compatible"];
 
 struct StatusLine {
     provider: &'static str,
@@ -55,6 +55,12 @@ fn bitbucket_status(store: &CredentialStore) -> anyhow::Result<StatusLine> {
     Ok(StatusLine { provider: "bitbucket", ok: logged_in, detail })
 }
 
+fn openai_compatible_status(store: &CredentialStore) -> anyhow::Result<StatusLine> {
+    let logged_in = store.load(OPENAI_COMPAT_SERVICE, OPENAI_COMPAT_ACCOUNT)?.is_some();
+    let detail = if logged_in { "logged in".to_string() } else { "not logged in — run `autoreview auth login openai-compatible`".to_string() };
+    Ok(StatusLine { provider: "openai-compat", ok: logged_in, detail })
+}
+
 /// Read-only by default — checks only whether a credential is present in
 /// the local `CredentialStore`, no network call. Never errors on "not
 /// logged in": that's a normal, expected state this command exists to
@@ -64,6 +70,7 @@ pub fn run_auth_status() -> anyhow::Result<()> {
     println!("autoreview auth status\n");
     print_status_line(&github_status(&store)?);
     print_status_line(&bitbucket_status(&store)?);
+    print_status_line(&openai_compatible_status(&store)?);
     Ok(())
 }
 
@@ -135,10 +142,46 @@ fn run_auth_login_github(repo_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Verifies the key with one real, minimal chat-completion request before
+/// storing it — `/models` (what `openai_compatible_available` checks) was
+/// tried first here and rejected as a verification signal: confirmed
+/// against the real OpenRouter API that it's public and returns 200 with
+/// any bearer token, including a fake one, so a `/models`-based check
+/// would never actually catch a bad key. `/chat/completions` is the one
+/// endpoint every OpenAI-compatible provider this backend targets
+/// genuinely enforces auth on — see `verify_api_key`'s own doc for the
+/// small, one-time real cost this incurs.
+fn run_auth_login_openai_compatible(repo_root: &Path, token: Option<String>) -> anyhow::Result<()> {
+    let api_key = match token {
+        Some(t) if !t.trim().is_empty() => t.trim().to_string(),
+        _ => rpassword::prompt_password("OpenAI-compatible API key (input hidden, e.g. an OpenRouter key from openrouter.ai/keys): ")?,
+    };
+    if api_key.is_empty() {
+        anyhow::bail!("no API key provided");
+    }
+
+    let config = autoreview_core::load_config(&repo_root.join(".autoreview").join("config.yaml"))?;
+    let base_url = &config.agents.open_ai_compatible.base_url;
+    let model = &config.agents.open_ai_compatible.model;
+    println!("Verifying against {base_url} with model '{model}' (one minimal real request)...");
+    autoreview_core::verify_openai_compatible_key(base_url, model, &api_key, "curl")?;
+    println!("Verified.");
+
+    let store = CredentialStore::open_default();
+    let via = store.store(OPENAI_COMPAT_SERVICE, OPENAI_COMPAT_ACCOUNT, &api_key)?;
+    let via_label = match via {
+        StoredVia::Keyring => "the OS keyring",
+        StoredVia::FileFallback => "a locked-down local file (see the warning above for why)",
+    };
+    println!("Stored in {via_label}. Run `autoreview auth status` any time to check.");
+    Ok(())
+}
+
 pub fn run_auth_login(repo_root: &Path, provider: &str, email: Option<String>, token: Option<String>) -> anyhow::Result<()> {
     match provider {
         "bitbucket" => run_auth_login_bitbucket(email, token),
         "github" => run_auth_login_github(repo_root),
+        "openai-compatible" => run_auth_login_openai_compatible(repo_root, token),
         other => anyhow::bail!("unknown or not-yet-supported provider '{other}' — expected one of: {}", KNOWN_LOGIN_PROVIDERS.join(", ")),
     }
 }
@@ -170,6 +213,11 @@ pub fn run_auth_logout(provider: &str) -> anyhow::Result<()> {
                 None => println!("No Bitbucket credential was stored locally."),
             }
             println!("Note: this does NOT revoke the API token on Bitbucket's side — visit id.atlassian.com to revoke it there if you want to.");
+        }
+        "openai-compatible" => {
+            store.delete(OPENAI_COMPAT_SERVICE, OPENAI_COMPAT_ACCOUNT)?;
+            println!("Removed the locally stored OpenAI-compatible API key.");
+            println!("Note: this does NOT revoke the key on the provider's side — revoke it from that provider's own dashboard (e.g. openrouter.ai/keys) if you want to.");
         }
         other => anyhow::bail!("unknown provider '{other}' — expected one of: {}", KNOWN_LOGIN_PROVIDERS.join(", ")),
     }

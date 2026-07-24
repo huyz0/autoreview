@@ -37,17 +37,20 @@ use super::backend::{backend_available, backend_label, build_backend};
 fn cheap_model_for(kind: AgentBackendKind, config: &AutoreviewConfig) -> &str {
     match kind {
         AgentBackendKind::LocalLlm => &config.agents.local_llm.model,
+        AgentBackendKind::OpenAiCompatible => &config.agents.open_ai_compatible.model,
         AgentBackendKind::ClaudeCode | AgentBackendKind::Pi => &config.budgets.models.cheap,
     }
 }
 
-/// The model to invoke a specialist with. For the local-LLM backend this is
-/// always the one served model, overriding whatever tier-based alias
-/// `plan_review` resolved (Claude Code model aliases like "haiku"/"sonnet"
-/// mean nothing to a local server).
+/// The model to invoke a specialist with. For the local-LLM and
+/// OpenAI-compatible backends this is always the one configured model,
+/// overriding whatever tier-based alias `plan_review` resolved (Claude
+/// Code model aliases like "haiku"/"sonnet" mean nothing to either of
+/// them).
 fn specialist_model_for(kind: AgentBackendKind, config: &AutoreviewConfig, planned_model: &str) -> String {
     match kind {
         AgentBackendKind::LocalLlm => config.agents.local_llm.model.clone(),
+        AgentBackendKind::OpenAiCompatible => config.agents.open_ai_compatible.model.clone(),
         AgentBackendKind::ClaudeCode | AgentBackendKind::Pi => planned_model.to_string(),
     }
 }
@@ -398,7 +401,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
                             let stage1_summary =
                                 stage1_summary_for_category(&stage1_findings, &specialist.aspect);
                             let backend_ref: &(dyn AgentBackend + Sync) = backend.as_ref();
-                            let model_override = (backend_kind == AgentBackendKind::LocalLlm).then(|| specialist_model_for(backend_kind, &config, &specialist.model));
+                            let model_override = matches!(backend_kind, AgentBackendKind::LocalLlm | AgentBackendKind::OpenAiCompatible).then(|| specialist_model_for(backend_kind, &config, &specialist.model));
                             scope.spawn(move || {
                                 run_one_specialist(
                                     backend_ref,
