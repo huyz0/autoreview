@@ -22,6 +22,7 @@
 //! *retained*, structured `Cfg` this crate needs to build and keep around
 //! for the solver to walk.
 
+pub mod call_order;
 pub mod cfg;
 pub mod lattice;
 pub mod lower;

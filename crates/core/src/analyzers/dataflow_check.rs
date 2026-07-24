@@ -52,6 +52,7 @@ use autoreview_dataflow::cfg::{Cfg, Stmt};
 use autoreview_dataflow::rules::{go_append_shared_backing_array, go_loopvar, go_typed_nil_interface_return};
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
+use super::call_order_rules;
 use super::taint_rules;
 use crate::rule_packs::ResolvedRulePack;
 
@@ -228,7 +229,11 @@ fn make_finding(rule_id: &str, category: &str, severity: Severity, path: &str, l
 /// definition came from a registered pack — `None` for builtin rules,
 /// matching `ast_grep.rs`'s own pattern-rule provenance tagging.
 fn taint_pack_meta(rule: &taint_rules::TaintRuleDef) -> Option<HashMap<String, serde_json::Value>> {
-    let pack_id = rule.pack_id.as_ref()?;
+    pack_meta(rule.pack_id.as_ref())
+}
+
+fn pack_meta(pack_id: Option<&String>) -> Option<HashMap<String, serde_json::Value>> {
+    let pack_id = pack_id?;
     let mut meta = HashMap::new();
     meta.insert("rulePackId".to_string(), serde_json::Value::String(pack_id.clone()));
     Some(meta)
@@ -829,6 +834,47 @@ fn run_loaded_taint_rules(repo_root: &Path, path: &str, own_content: &str, langu
     findings
 }
 
+/// Renders a `call-sequence` rule's `{trigger_call}` placeholder — the
+/// call (or, for a `checkBeforeReturn` hit, the literal text `"return"`)
+/// that actually tripped the rule while its obligation was still open.
+fn render_call_order_message(template: &str, hit: &autoreview_dataflow::call_order::CallOrderHit) -> String {
+    template.replace("{trigger_call}", &hit.trigger_call)
+}
+
+/// Runs every `kind: call-sequence` rule (see
+/// `autoreview_dataflow::call_order`'s own module docs for what this
+/// engine models and why it's a separate primitive from taint) whose
+/// `language` matches, against one file's already-lowered functions.
+/// Purely intraprocedural — no summaries/caches involved, unlike
+/// `run_loaded_taint_rules`, since the obligation this models is meant to
+/// resolve within one function.
+fn run_call_order_rules(path: &str, language: &str, lowered: &[(Node, Cfg<Stmt>)], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
+    let rules: Vec<_> = call_order_rules::load_call_order_rules(registered_packs).into_iter().filter(|r| r.language == language).collect();
+    if rules.is_empty() {
+        return Vec::new();
+    }
+
+    let mut findings = Vec::new();
+    for rule in &rules {
+        for (_, cfg) in lowered {
+            for hit in autoreview_dataflow::call_order::check(&rule.spec, cfg) {
+                let mut finding = make_finding(
+                    &rule.id,
+                    &rule.category,
+                    rule.severity,
+                    path,
+                    hit.source_line,
+                    format!("`{}` reached with an unresolved `{}` obligation still open", hit.trigger_call, rule.id),
+                    render_call_order_message(&rule.message, &hit),
+                );
+                finding.meta = pack_meta(rule.pack_id.as_ref());
+                findings.push(finding);
+            }
+        }
+    }
+    findings
+}
+
 /// Reads and parses one file, for the checks below to lower — a shared
 /// early-return-on-any-failure helper since all three language branches in
 /// `run_dataflow_check` do exactly this before lowering. Routed through
@@ -881,6 +927,7 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
                 let lowered = lower_all_java_functions(content.as_bytes(), tree);
                 let mut findings = run_npe_risk(repo_root, path, content, &lowered, &[], &caches);
                 findings.extend(run_loaded_taint_rules(repo_root, path, content, "Java", &lowered, registered_packs, &caches));
+                findings.extend(run_call_order_rules(path, "Java", &lowered, registered_packs));
                 Some(findings)
             } else if path.ends_with(".kt") || path.ends_with(".kts") {
                 let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Kotlin, &cache)?;
@@ -892,6 +939,7 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
                 // risky on a nullable receiver in Kotlin specifically.
                 let mut findings = run_npe_risk(repo_root, path, content, &lowered, &["toString"], &caches);
                 findings.extend(run_loaded_taint_rules(repo_root, path, content, "Kotlin", &lowered, registered_packs, &caches));
+                findings.extend(run_call_order_rules(path, "Kotlin", &lowered, registered_packs));
                 Some(findings)
             } else if path.ends_with(".tsx") {
                 let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Tsx, &cache)?;

@@ -1,0 +1,14 @@
+id: java-unreleased-lock
+language: Java
+category: correctness
+severity: error
+kind: call-sequence
+message: "A `Lock` was acquired but this path returns without releasing it — every other thread that later calls `lock()` on the same lock will block forever (a permanent deadlock), and there's no `finally` block here to guarantee release even when this return is due to an exception. Wrap the critical section in `try { ... } finally { lock.unlock(); }` so the lock is released on every exit path, including an exceptional one."
+metadata:
+  cwe: ["CWE-667"]
+  confidence: MEDIUM
+after:
+  - call: lock
+unless:
+  - call: unlock
+checkBeforeReturn: true

@@ -1,0 +1,20 @@
+id: kotlin-xxe-unconfigured-parser
+language: Kotlin
+category: security
+severity: warning
+kind: call-sequence
+message: "An XML parser factory was created and used to parse without first disabling external entity resolution — by default, `DocumentBuilderFactory`/`SAXParserFactory`/`XMLInputFactory` will fetch and expand external entities/DTDs referenced inside the XML it parses (XXE), letting an attacker read local files, trigger SSRF against internal services, or exhaust memory (a billion-laughs entity bomb) just by controlling the XML being parsed. Call `setFeature(\"http://apache.org/xml/features/disallow-doctype-decl\", true)` (or the equivalent `setExpandEntityReferences(false)`/`XMLConstants.FEATURE_SECURE_PROCESSING`) on the factory before parsing."
+metadata:
+  cwe: ["CWE-611"]
+  owasp: ["A05:2021"]
+  confidence: MEDIUM
+  references:
+    - "https://cwe.mitre.org/data/definitions/611.html"
+after:
+  - call: newInstance
+unless:
+  - call: setFeature
+  - call: setExpandEntityReferences
+  - call: setXIncludeAware
+before:
+  - call: parse

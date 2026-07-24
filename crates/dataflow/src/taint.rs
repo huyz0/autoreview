@@ -63,7 +63,7 @@ impl NamePattern {
         Ok(NamePattern::Regex(Arc::new(Regex::new(pattern)?)))
     }
 
-    fn matches(&self, call_name: &str) -> bool {
+    pub(crate) fn matches(&self, call_name: &str) -> bool {
         match self {
             NamePattern::Suffix(name) => call_name == name || call_name.strip_suffix(name.as_str()).is_some_and(|prefix| prefix.ends_with('.')),
             NamePattern::Regex(re) => re.is_match(call_name),
