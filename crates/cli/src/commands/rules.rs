@@ -722,6 +722,13 @@ struct MinimalThresholdRule {
     threshold: serde_yaml::Value,
 }
 
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct MinimalCallSequenceRule {
+    after: Vec<serde_yaml::Value>,
+    unless: Vec<serde_yaml::Value>,
+}
+
 /// Structurally checks one rule file matches the shape its own declared
 /// `kind:` needs to actually load at runtime — deliberately checking the
 /// *minimum* required keys (the same ones each real loader in
@@ -750,7 +757,16 @@ fn validate_rule_file(contents: &str) -> anyhow::Result<(String, String)> {
                 anyhow::bail!("kind: pattern rule is missing a `rule:` block — ast-grep will reject it at scan time");
             }
         }
-        other => anyhow::bail!("unknown `kind: {other}` — expected pattern, taint, or threshold"),
+        "call-sequence" => {
+            let rule: MinimalCallSequenceRule = serde_yaml::from_str(contents).map_err(|err| anyhow::anyhow!("kind: call-sequence rule is missing a valid `after:`/`unless:` list: {err}"))?;
+            if rule.after.is_empty() {
+                anyhow::bail!("kind: call-sequence rule's `after:` list is empty — nothing would ever start the check");
+            }
+            if rule.unless.is_empty() {
+                anyhow::bail!("kind: call-sequence rule's `unless:` list is empty — nothing would ever clear the check, so every `after` site would always fire");
+            }
+        }
+        other => anyhow::bail!("unknown `kind: {other}` — expected pattern, taint, threshold, or call-sequence"),
     }
     Ok((id_only.id, meta.kind))
 }
@@ -1003,6 +1019,40 @@ mod tests {
 
         let err = run_rules_packs_validate(dir.path()).unwrap_err();
         assert!(err.to_string().contains("1 validation problem"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_succeeds_for_a_call_sequence_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+        std::fs::write(
+            dir.path().join("unreleased-lock.yml"),
+            "id: acme-unreleased-lock\nkind: call-sequence\nlanguage: Java\ncategory: correctness\nseverity: error\nmessage: m\nafter:\n  - call: lock\nunless:\n  - call: unlock\ncheckBeforeReturn: true\n",
+        )
+        .unwrap();
+
+        run_rules_packs_validate(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn validate_reports_a_call_sequence_rule_missing_unless() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+        std::fs::write(dir.path().join("broken.yml"), "id: acme-broken\nkind: call-sequence\nlanguage: Java\ncategory: correctness\nseverity: error\nmessage: m\nafter:\n  - call: lock\nunless: []\ncheckBeforeReturn: true\n").unwrap();
+
+        let err = run_rules_packs_validate(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("1 validation problem"), "got: {err}");
+        assert!(err.to_string().contains("unless"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_reports_an_unknown_kind_clearly() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+        std::fs::write(dir.path().join("broken.yml"), "id: acme-broken\nkind: made-up-kind\nlanguage: Java\ncategory: correctness\nseverity: error\nmessage: m\n").unwrap();
+
+        let err = run_rules_packs_validate(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("unknown `kind: made-up-kind`"), "got: {err}");
     }
 
     #[test]
