@@ -593,6 +593,7 @@ struct RuleKindCounts {
     pattern: usize,
     taint: usize,
     threshold: usize,
+    call_sequence: usize,
 }
 
 #[derive(Deserialize)]
@@ -632,6 +633,7 @@ fn count_rule_kinds_inner(dir: &std::path::Path, counts: &mut RuleKindCounts) {
         match meta.kind.as_str() {
             "taint" => counts.taint += 1,
             "threshold" => counts.threshold += 1,
+            "call-sequence" => counts.call_sequence += 1,
             _ => counts.pattern += 1,
         }
     }
@@ -660,7 +662,14 @@ pub fn run_rules_packs(repo_root: &std::path::Path) -> anyhow::Result<()> {
                     autoreview_schema::RulePackTrust::Full => "full",
                     autoreview_schema::RulePackTrust::Shadow => "shadow",
                 };
-                println!("  {id} [{trust}] — {} pattern, {} taint, {} threshold rule(s) ({})", counts.pattern, counts.taint, counts.threshold, resolved.local_path.display());
+                println!(
+                    "  {id} [{trust}] — {} pattern, {} taint, {} threshold, {} call-sequence rule(s) ({})",
+                    counts.pattern,
+                    counts.taint,
+                    counts.threshold,
+                    counts.call_sequence,
+                    resolved.local_path.display()
+                );
             }
             Err(err) => println!("  {id} — failed to resolve: {err}"),
         }
@@ -795,6 +804,7 @@ fn validate_pack_dir(dir: &std::path::Path, errors: &mut Vec<String>, seen_ids: 
                 match kind.as_str() {
                     "taint" => counts.taint += 1,
                     "threshold" => counts.threshold += 1,
+                    "call-sequence" => counts.call_sequence += 1,
                     _ => counts.pattern += 1,
                 }
                 if let Some(existing) = seen_ids.insert(id.clone(), path.clone()) {
@@ -830,7 +840,7 @@ pub fn run_rules_packs_validate(pack_path: &std::path::Path) -> anyhow::Result<(
 
     let description = if manifest.description.is_empty() { String::new() } else { format!(" — {}", manifest.description) };
     println!("Pack '{}' (version {}){description}", manifest.id, manifest.version);
-    println!("  {} pattern, {} taint, {} threshold rule(s)", counts.pattern, counts.taint, counts.threshold);
+    println!("  {} pattern, {} taint, {} threshold, {} call-sequence rule(s)", counts.pattern, counts.taint, counts.threshold, counts.call_sequence);
 
     if errors.is_empty() {
         println!("  no problems found.");
@@ -1032,6 +1042,22 @@ mod tests {
         .unwrap();
 
         run_rules_packs_validate(dir.path()).unwrap();
+    }
+
+    /// Regression test for the exact seam `count_rule_kinds_inner`/
+    /// `validate_pack_dir` both switch on: a `kind: call-sequence` rule
+    /// used to fall through their `_ => counts.pattern += 1` wildcard arm
+    /// and get silently counted as a pattern rule in `rules packs`/
+    /// `rules packs validate`'s printed breakdown. `validate_rule_file`'s
+    /// own returned `kind` is the single source of truth for that
+    /// counting, so pinning it here catches a regression at either call
+    /// site without needing to capture stdout.
+    #[test]
+    fn validate_rule_file_returns_call_sequence_as_its_own_kind_not_pattern() {
+        let contents = "id: acme-unreleased-lock\nkind: call-sequence\nlanguage: Java\ncategory: correctness\nseverity: error\nmessage: m\nafter:\n  - call: lock\nunless:\n  - call: unlock\n";
+        let (id, kind) = validate_rule_file(contents).unwrap();
+        assert_eq!(id, "acme-unreleased-lock");
+        assert_eq!(kind, "call-sequence");
     }
 
     #[test]
