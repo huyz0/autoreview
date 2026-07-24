@@ -12,8 +12,8 @@ use commands::explain::run_explain;
 use commands::feedback::{run_feedback, run_missed_report};
 use commands::history::{run_history_costs, run_history_sync};
 use commands::rules::{
-    run_rules_bench, run_rules_mine, run_rules_mine_bitbucket_comments, run_rules_mine_bugfix_commits, run_rules_mine_code, run_rules_mine_comments, run_rules_mine_linter_config, run_rules_mine_suppressions, run_rules_packs,
-    run_rules_packs_add, run_rules_packs_refresh, run_rules_packs_validate, run_rules_review, run_rules_rollback, run_rules_shadow_log,
+    run_rules_bench, run_rules_mine, run_rules_mine_bitbucket_comments, run_rules_mine_bugfix_commits, run_rules_mine_code, run_rules_mine_comments, run_rules_mine_linter_config, run_rules_mine_llm_patterns,
+    run_rules_mine_suppressions, run_rules_packs, run_rules_packs_add, run_rules_packs_refresh, run_rules_packs_validate, run_rules_review, run_rules_rollback, run_rules_shadow_log,
 };
 use commands::skills::{run_skills_list, run_skills_mine, run_skills_review, run_skills_rollback};
 use commands::skills_bench::run_skills_bench;
@@ -188,7 +188,12 @@ enum RulesAction {
     /// .autoreview/config.yaml). With --from-linter-config, prints a
     /// report comparing .golangci.yml/.eslintrc/checkstyle/detekt config
     /// against autoreview's own rule catalog (report only, not fed into
-    /// the draft pipeline).
+    /// the draft pipeline). With --from-llm-patterns, samples representative
+    /// source files and asks the configured agent backend to propose
+    /// call-pair conventions, mechanically re-verifying every proposal
+    /// against the whole repo before it's drafted — opt-in (see
+    /// mineFromLlmPatterns in .autoreview/config.yaml) since it sends whole
+    /// file contents to the backend, unlike every other source.
     Mine {
         #[arg(long)]
         from_comments: bool,
@@ -202,6 +207,8 @@ enum RulesAction {
         from_bitbucket_comments: bool,
         #[arg(long)]
         from_linter_config: bool,
+        #[arg(long)]
+        from_llm_patterns: bool,
     },
     /// Bench a candidate rule against its self-test + historical precision
     Bench { cluster_id: String },
@@ -348,9 +355,11 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Rules { action } => match action {
-            RulesAction::Mine { from_comments, from_code, from_bugfix_commits, from_suppressions, from_bitbucket_comments, from_linter_config } => {
-                if [from_comments, from_code, from_bugfix_commits, from_suppressions, from_bitbucket_comments, from_linter_config].iter().filter(|f| **f).count() > 1 {
-                    eprintln!("error: --from-comments, --from-code, --from-bugfix-commits, --from-suppressions, --from-bitbucket-comments, and --from-linter-config are mutually exclusive");
+            RulesAction::Mine { from_comments, from_code, from_bugfix_commits, from_suppressions, from_bitbucket_comments, from_linter_config, from_llm_patterns } => {
+                if [from_comments, from_code, from_bugfix_commits, from_suppressions, from_bitbucket_comments, from_linter_config, from_llm_patterns].iter().filter(|f| **f).count() > 1 {
+                    eprintln!(
+                        "error: --from-comments, --from-code, --from-bugfix-commits, --from-suppressions, --from-bitbucket-comments, --from-linter-config, and --from-llm-patterns are mutually exclusive"
+                    );
                     std::process::exit(1);
                 } else if from_comments {
                     run_rules_mine_comments(&repo_root)?
@@ -364,6 +373,8 @@ fn main() -> anyhow::Result<()> {
                     run_rules_mine_bitbucket_comments(&repo_root)?
                 } else if from_linter_config {
                     run_rules_mine_linter_config(&repo_root)?
+                } else if from_llm_patterns {
+                    run_rules_mine_llm_patterns(&repo_root)?
                 } else {
                     run_rules_mine(&repo_root)?
                 }

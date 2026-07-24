@@ -14,5 +14,6 @@ pub mod mine_from_bitbucket_comments;
 pub mod mine_from_bugfix_commits;
 pub mod mine_from_code;
 pub mod mine_from_comments;
+pub mod mine_from_llm_patterns;
 pub mod mine_from_suppressions;
 pub mod shadow;

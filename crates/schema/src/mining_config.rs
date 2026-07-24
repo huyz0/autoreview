@@ -68,6 +68,46 @@ impl Default for MineFromBitbucketCommentsConfig {
     }
 }
 
+fn default_max_sample_files() -> usize {
+    8
+}
+
+fn default_min_occurrences() -> usize {
+    5
+}
+
+fn default_min_consistency() -> f64 {
+    0.9
+}
+
+/// `mineFromLlmPatterns` — opt-in (`enabled: false` by default), and
+/// unlike every other source here, the *reason* is not "touches a real
+/// external API" but privacy: this is the only mining source that sends
+/// whole sampled file contents (not just short titles/messages) to the
+/// configured `AgentBackend`. See
+/// `autoreview_core::rule_factory::mine_from_llm_patterns`'s module doc
+/// for the mandatory mechanical re-verification gate every LLM proposal
+/// must clear before it can become a candidate — `min_occurrences`/
+/// `min_consistency` here configure that gate, not the LLM step itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MineFromLlmPatternsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_max_sample_files")]
+    pub max_sample_files: usize,
+    #[serde(default = "default_min_occurrences")]
+    pub min_occurrences: usize,
+    #[serde(default = "default_min_consistency")]
+    pub min_consistency: f64,
+}
+
+impl Default for MineFromLlmPatternsConfig {
+    fn default() -> Self {
+        MineFromLlmPatternsConfig { enabled: false, max_sample_files: default_max_sample_files(), min_occurrences: default_min_occurrences(), min_consistency: default_min_consistency() }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +139,23 @@ mod tests {
         assert!(parsed.enabled);
         assert_eq!(parsed.workspace, Some("my-team".to_string()));
         assert_eq!(parsed.lookback_prs, 10);
+    }
+
+    #[test]
+    fn llm_patterns_defaults_to_disabled_with_the_documented_thresholds() {
+        let parsed: MineFromLlmPatternsConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(!parsed.enabled);
+        assert_eq!(parsed.max_sample_files, 8);
+        assert_eq!(parsed.min_occurrences, 5);
+        assert_eq!(parsed.min_consistency, 0.9);
+    }
+
+    #[test]
+    fn llm_patterns_round_trips_explicit_values() {
+        let parsed: MineFromLlmPatternsConfig = serde_yaml::from_str("enabled: true\nmaxSampleFiles: 4\nminOccurrences: 3\nminConsistency: 0.8\n").unwrap();
+        assert!(parsed.enabled);
+        assert_eq!(parsed.max_sample_files, 4);
+        assert_eq!(parsed.min_occurrences, 3);
+        assert_eq!(parsed.min_consistency, 0.8);
     }
 }

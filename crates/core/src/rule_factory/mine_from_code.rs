@@ -221,7 +221,10 @@ pub fn consistency_for_pair(repo_root: &Path, call_a: &str, call_b: &str, min_oc
     })
 }
 
-fn source_files(repo_root: &Path, extensions: &[&str]) -> Vec<PathBuf> {
+/// `pub(crate)` — reused by `mine_from_llm_patterns`'s representative-file
+/// sampling, which needs the same vendor/`.git`-excluding walk this
+/// module already has rather than a second copy of it.
+pub(crate) fn source_files(repo_root: &Path, extensions: &[&str]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     collect_source_files(repo_root, extensions, &mut out);
     out

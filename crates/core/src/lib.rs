@@ -54,6 +54,7 @@ pub use rule_factory::mine_from_bitbucket_comments::{mine_from_bitbucket_pr_comm
 pub use rule_factory::mine_from_bugfix_commits::{mine_from_bugfix_commits, DEFAULT_MAX_COMMITS_SCANNED};
 pub use rule_factory::mine_from_code::{consistency_for_pair, mine_call_pair_conventions, CallPairConvention, SOURCE_EXTENSIONS};
 pub use rule_factory::mine_from_comments::mine_from_pr_comments;
+pub use rule_factory::mine_from_llm_patterns::{mine_from_llm_patterns, propose_conventions_via_llm, verify_proposed_conventions, LlmProposedConvention};
 pub use rule_factory::mine_from_suppressions::mine_from_suppressions;
 pub use rule_packs::{default_rule_packs_cache_root, discover_pack_source, load_rule_packs_config, refresh_git_rule_packs, resolve_rule_packs, rule_packs_config_path, save_rule_packs_config, RefreshResult, ResolvedRulePack};
 pub use skills::{compile_skill, discover_manifests, materialize_builtin_skill_to_disk, CompiledSkill};

@@ -20,8 +20,8 @@
 //! prototype, not yet integrated into the draft/bench/shadow pipeline.
 
 use autoreview_core::{
-    draft_candidate, find_similar_existing_rule, load_existing_rule_summaries, mine_candidates, mine_from_bitbucket_pr_comments, mine_from_pr_comments, resolve_bitbucket_repo_slug, run_bench, write_seed_file, BenchVerdict, CandidateSeed,
-    CredentialStore, DraftOutcome, HistoryStore, BITBUCKET_SERVICE,
+    draft_candidate, find_similar_existing_rule, load_existing_rule_summaries, mine_candidates, mine_from_bitbucket_pr_comments, mine_from_llm_patterns, mine_from_pr_comments, resolve_bitbucket_repo_slug, run_bench, write_seed_file,
+    BenchVerdict, CandidateSeed, CredentialStore, DraftOutcome, HistoryStore, BITBUCKET_SERVICE,
 };
 use autoreview_schema::AgentBackendKind;
 use serde::Deserialize;
@@ -369,6 +369,61 @@ pub fn run_rules_mine_code(repo_root: &std::path::Path) -> anyhow::Result<()> {
     }
     println!("\n(a call to the first method with no accompanying call to the second nearby is a plausible candidate for a future rule — inspect before drafting one)");
     Ok(())
+}
+
+/// `autoreview rules mine --from-llm-patterns` — the ninth mining source
+/// (see `rule_factory::mine_from_llm_patterns`'s own module docs): unlike
+/// every other source, its very first step (proposing conventions) itself
+/// needs a real agent backend, not just its optional drafting step — so
+/// this checks `backend_available` up front and errors clearly rather than
+/// silently doing nothing. Opt-in (`mineFromLlmPatterns.enabled: true`)
+/// for a different reason than the network-backed sources: this is the
+/// only mining source that sends whole sampled file *contents* to the
+/// configured backend, a materially larger privacy surface than the short
+/// titles/messages every other source works with — the warning below says
+/// so at the point it actually happens, not just in a doc comment.
+pub fn run_rules_mine_llm_patterns(repo_root: &std::path::Path) -> anyhow::Result<()> {
+    let config = autoreview_core::load_config(&repo_root.join(".autoreview").join("config.yaml"))?;
+    if !config.mine_from_llm_patterns.enabled {
+        println!(
+            "mineFromLlmPatterns.enabled is false in .autoreview/config.yaml — nothing to do. Set it to true to let an agent propose call-pair conventions from sampled source files (this sends whole file contents to the configured agent backend — see the config's doc comment before enabling)."
+        );
+        return Ok(());
+    }
+
+    let backend_kind = config.agents.backend;
+    if !backend_available(backend_kind, &config) {
+        anyhow::bail!("no agent backend available — mineFromLlmPatterns needs one for its very first step (proposing conventions), unlike the other mining sources whose only backend use is the optional drafting step");
+    }
+    let backend = build_backend(backend_kind, &config);
+    let model = cheap_model_for(backend_kind, &config).to_string();
+
+    println!(
+        "Sampling up to {} representative file(s) and asking the agent backend to propose call-pair conventions (sends whole file contents to the backend)...",
+        config.mine_from_llm_patterns.max_sample_files
+    );
+    let (seeds, proposed_count) = mine_from_llm_patterns(
+        backend.as_ref(),
+        repo_root,
+        &model,
+        2,
+        config.mine_from_llm_patterns.max_sample_files,
+        config.mine_from_llm_patterns.min_occurrences,
+        config.mine_from_llm_patterns.min_consistency,
+    );
+    println!("The agent proposed {proposed_count} convention(s); {} survived mechanical re-verification against the whole repo.", seeds.len());
+    if seeds.is_empty() {
+        println!("Nothing survived verification — nothing to mine.");
+        return Ok(());
+    }
+
+    let seeds = filter_out_existing_rule_duplicates(repo_root, seeds);
+    if seeds.is_empty() {
+        println!("Every verified convention matched a rule that's already shipped — nothing new to draft.");
+        return Ok(());
+    }
+
+    draft_and_write_seeds(repo_root, &config, &seeds)
 }
 
 pub fn run_rules_bench(repo_root: &std::path::Path, cluster_id: &str) -> anyhow::Result<()> {

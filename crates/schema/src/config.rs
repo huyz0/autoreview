@@ -486,5 +486,7 @@ pub struct AutoreviewConfig {
     #[serde(default)]
     pub mine_from_bitbucket_comments: crate::mining_config::MineFromBitbucketCommentsConfig,
     #[serde(default)]
+    pub mine_from_llm_patterns: crate::mining_config::MineFromLlmPatternsConfig,
+    #[serde(default)]
     pub auth: crate::auth_config::AuthConfig,
 }
