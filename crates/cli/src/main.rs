@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 
 use autoreview_schema::{AgentBackendKind, Tier};
 use commands::apply::run_apply;
-use commands::auth::{run_auth_login, run_auth_status};
+use commands::auth::{run_auth_login, run_auth_logout, run_auth_status};
 use commands::diff::{run_diff_or_watch, DiffCommandOptions};
 use commands::doctor::run_doctor;
 use commands::explain::run_explain;
@@ -133,6 +133,9 @@ enum AuthAction {
     /// Show whether a GitHub/Bitbucket credential is currently stored —
     /// read-only, no network call
     Status,
+    /// Remove a locally stored credential — does NOT revoke it
+    /// server-side, see run_auth_logout's own docs for why
+    Logout { provider: String },
 }
 
 #[derive(Subcommand)]
@@ -373,6 +376,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Auth { action } => match action {
             AuthAction::Login { provider, email, token } => run_auth_login(&repo_root, &provider, email, token)?,
             AuthAction::Status => run_auth_status()?,
+            AuthAction::Logout { provider } => run_auth_logout(&provider)?,
         },
     }
 

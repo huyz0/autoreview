@@ -142,3 +142,36 @@ pub fn run_auth_login(repo_root: &Path, provider: &str, email: Option<String>, t
         other => anyhow::bail!("unknown or not-yet-supported provider '{other}' — expected one of: {}", KNOWN_LOGIN_PROVIDERS.join(", ")),
     }
 }
+
+/// Removes the *local* credential only — neither provider's token gets
+/// server-side-revoked by this command. For GitHub specifically, that's
+/// not a corner cut but a real constraint of the device-flow model this
+/// project deliberately chose: a public client (no `client_secret`) has
+/// no credential to authenticate a call to GitHub's revoke endpoint
+/// with. The message says so explicitly rather than implying the token
+/// is dead.
+pub fn run_auth_logout(provider: &str) -> anyhow::Result<()> {
+    let store = CredentialStore::open_default();
+    match provider {
+        "github" => {
+            store.delete(GITHUB_SERVICE, GITHUB_ACCOUNT)?;
+            println!("Removed the locally stored GitHub credential.");
+            println!(
+                "Note: this does NOT revoke the token on GitHub's side — a device-flow app like this one has no client_secret to call GitHub's revoke API with. To fully revoke it, visit https://github.com/settings/applications and remove autoreview's authorization there."
+            );
+        }
+        "bitbucket" => {
+            match store.recall_account(BITBUCKET_SERVICE) {
+                Some(email) => {
+                    store.delete(BITBUCKET_SERVICE, &email)?;
+                    store.forget_account(BITBUCKET_SERVICE)?;
+                    println!("Removed the locally stored Bitbucket credential for {email}.");
+                }
+                None => println!("No Bitbucket credential was stored locally."),
+            }
+            println!("Note: this does NOT revoke the API token on Bitbucket's side — visit id.atlassian.com to revoke it there if you want to.");
+        }
+        other => anyhow::bail!("unknown provider '{other}' — expected one of: {}", KNOWN_LOGIN_PROVIDERS.join(", ")),
+    }
+    Ok(())
+}
