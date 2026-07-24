@@ -47,6 +47,7 @@ pub use rule_factory::mine::{mine_candidates, write_seed_file, CandidateSeed, Re
 pub use rule_factory::mine_from_bugfix_commits::{mine_from_bugfix_commits, DEFAULT_MAX_COMMITS_SCANNED};
 pub use rule_factory::mine_from_code::{mine_call_pair_conventions, CallPairConvention};
 pub use rule_factory::mine_from_comments::mine_from_pr_comments;
+pub use rule_factory::mine_from_suppressions::mine_from_suppressions;
 pub use rule_packs::{default_rule_packs_cache_root, discover_pack_source, load_rule_packs_config, refresh_git_rule_packs, resolve_rule_packs, rule_packs_config_path, save_rule_packs_config, RefreshResult, ResolvedRulePack};
 pub use skills::{compile_skill, discover_manifests, materialize_builtin_skill_to_disk, CompiledSkill};
 pub use spec_verify::{draft_spec, parse_spec, run_spec_verify, DraftedSpec, SpecVerifyResult};

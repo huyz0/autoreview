@@ -211,6 +211,34 @@ pub fn run_rules_mine_bugfix_commits(repo_root: &std::path::Path) -> anyhow::Res
     draft_and_write_seeds(repo_root, &config, &seeds)
 }
 
+/// `autoreview rules mine --from-suppressions` — mines linter-suppression
+/// comments already present in the repo's own source (see
+/// `rule_factory::mine_from_suppressions`'s own module docs). No
+/// `.enabled` config gate — a pure filesystem walk over the repo's own
+/// already-checked-out source, no external tool, no network.
+pub fn run_rules_mine_suppressions(repo_root: &std::path::Path) -> anyhow::Result<()> {
+    println!("Scanning the repo's own source for linter-suppression comments...");
+    let findings = autoreview_core::mine_from_suppressions(repo_root);
+    if findings.is_empty() {
+        println!("No linter-suppression comments found — nothing to mine.");
+        return Ok(());
+    }
+
+    let seeds = mine_candidates(findings);
+    if seeds.is_empty() {
+        println!("No recurring clusters found (need >= 3 similar suppressions spanning >= 2 distinct files).");
+        return Ok(());
+    }
+    let seeds = filter_out_existing_rule_duplicates(repo_root, seeds);
+    if seeds.is_empty() {
+        println!("Every recurring cluster matched a rule that's already shipped — nothing new to draft.");
+        return Ok(());
+    }
+
+    let config = autoreview_core::load_config(&repo_root.join(".autoreview").join("config.yaml"))?;
+    draft_and_write_seeds(repo_root, &config, &seeds)
+}
+
 const CODE_MINE_MIN_OCCURRENCES: usize = 5;
 const CODE_MINE_MIN_CONSISTENCY: f64 = 0.9;
 
