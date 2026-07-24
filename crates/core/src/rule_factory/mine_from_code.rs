@@ -1,5 +1,5 @@
 //! Mines candidate "usage convention" rules directly from the repo's own
-//! Go source — a third input source alongside `mine::mine_candidates`
+//! source — a third input source alongside `mine::mine_candidates`
 //! (agent-finding recurrence) and `mine_from_comments` (PR-comment
 //! recurrence), but a genuinely different kind of signal: those two
 //! cluster *existing labeled findings/comments* (something already flagged
@@ -30,23 +30,43 @@
 //! same "cheap to be wrong, a human catches it" posture `mine_from_comments`
 //! already takes for its own category-guessing heuristic.
 //!
-//! Scope, stated honestly: this is a discovery/inspection prototype, not
-//! yet wired into the full mine -> draft -> bench -> shadow pipeline the
-//! other two sources feed (`CandidateSeed`'s shape — `distinct_run_count`,
-//! `member_fingerprints` — doesn't map cleanly onto "one repo-wide
-//! consistency ratio," so forcing it through that type would be more
-//! misleading than useful). `mine_call_pair_conventions` returns its
-//! findings directly; turning a strong candidate into an actual
-//! `kind: pattern`/`kind: taint` rule (e.g. "flag a call to `A` with no
-//! `B` in the same function") is a real follow-on, not done here.
+//! Originally Go-only; generalized to any of `SOURCE_EXTENSIONS` (still
+//! validated in practice mainly against Go — the call-site scanner's
+//! permissive `.identifier(` matching happens to also work reasonably for
+//! Java/Kotlin/JS/TS method-call syntax, but hasn't been checked against
+//! each language's own edge cases the way a dedicated lowering pass has).
+//!
+//! Scope, stated honestly: `mine_call_pair_conventions` is a discovery/
+//! inspection prototype, not wired into the full mine -> draft -> bench ->
+//! shadow pipeline the other sources feed (`CandidateSeed`'s shape —
+//! `distinct_run_count`, `member_fingerprints` — doesn't map cleanly onto
+//! "one repo-wide consistency ratio," so forcing it through that type
+//! would be more misleading than useful) — it returns its findings
+//! directly for a human to read. `consistency_for_pair`, added alongside
+//! it, *is* meant to feed a pipeline: `mine_from_llm_patterns`'s
+//! mechanical re-verification step for one specific LLM-proposed pair at
+//! a time. Deliberately **not** implemented as `mine_call_pair_conventions`
+//! calling into it per discovered pair (the shape a smaller refactor might
+//! suggest) — `mine_call_pair_conventions` already computes every pair's
+//! consistency in one single pass over the repo; recomputing that one
+//! pair at a time via `consistency_for_pair` would mean re-walking the
+//! whole repo once per distinct pair, a real performance regression on
+//! any repo with more than a handful of pairs. The two functions share
+//! the same file-walking/call-site-extraction primitives instead, each
+//! doing its own aggregation shaped for its own caller.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// How many lines after a call to `A` count as "nearby" when checking for
 /// an accompanying call to `B` — see the module doc for why this is a
 /// line-window, not a real function-boundary scan.
 const WINDOW_LINES: usize = 15;
+
+/// File extensions `mine_call_pair_conventions`/`consistency_for_pair`
+/// scan by default — see the module doc's note on this being validated
+/// mainly against Go so far.
+pub const SOURCE_EXTENSIONS: &[&str] = &["go", "java", "kt", "kts", "js", "jsx", "ts", "tsx"];
 
 /// A discovered `A` -> `B` call-pairing convention.
 #[derive(Debug, Clone, PartialEq)]
@@ -103,17 +123,18 @@ fn call_sites_in_file(content: &str) -> Vec<CallSite> {
     sites
 }
 
-/// Walks every `.go` file under `repo_root` (not just changed files — this
-/// is a whole-repo convention-mining pass, closer in spirit to
+/// Walks every source file under `repo_root` (not just changed files —
+/// this is a whole-repo convention-mining pass, closer in spirit to
 /// `mine_from_comments`'s whole-history PR scan than to a diff-scoped
 /// analyzer) and returns every call-pair convention meeting
-/// `min_occurrences`/`min_consistency`, most-consistent first.
+/// `min_occurrences`/`min_consistency`, most-consistent first. Scans
+/// `SOURCE_EXTENSIONS`.
 pub fn mine_call_pair_conventions(repo_root: &Path, min_occurrences: usize, min_consistency: f64) -> Vec<CallPairConvention> {
     let mut occurrences_of: HashMap<String, usize> = HashMap::new();
     let mut co_occurrences: HashMap<(String, String), usize> = HashMap::new();
     let mut example_location: HashMap<(String, String), String> = HashMap::new();
 
-    for path in go_files(repo_root) {
+    for path in source_files(repo_root, SOURCE_EXTENSIONS) {
         let Ok(content) = std::fs::read_to_string(&path) else { continue };
         let sites = call_sites_in_file(&content);
         let rel_path = path.strip_prefix(repo_root).unwrap_or(&path).display().to_string();
@@ -156,13 +177,57 @@ pub fn mine_call_pair_conventions(repo_root: &Path, min_occurrences: usize, min_
     conventions
 }
 
-fn go_files(repo_root: &Path) -> Vec<std::path::PathBuf> {
+/// Computes real repo-wide occurrence/consistency data for one *specific*
+/// `(call_a, call_b)` pair — the mechanical anti-hallucination check
+/// `mine_from_llm_patterns` runs against each pair an LLM proposes,
+/// before any of them are trusted enough to become a `CandidateSeed`.
+/// `None` when `call_a` doesn't appear at all, or appears fewer than
+/// `min_occurrences` times — a pair with too little real evidence either
+/// way, not something to report a (possibly wildly noisy) ratio for.
+pub fn consistency_for_pair(repo_root: &Path, call_a: &str, call_b: &str, min_occurrences: usize) -> Option<CallPairConvention> {
+    let mut total_a = 0usize;
+    let mut co_count = 0usize;
+    let mut example: Option<String> = None;
+
+    for path in source_files(repo_root, SOURCE_EXTENSIONS) {
+        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        let sites = call_sites_in_file(&content);
+        let rel_path = path.strip_prefix(repo_root).unwrap_or(&path).display().to_string();
+
+        for (i, site) in sites.iter().enumerate() {
+            if site.name != call_a {
+                continue;
+            }
+            total_a += 1;
+
+            let paired = sites[i + 1..].iter().take_while(|other| other.line <= site.line + WINDOW_LINES).any(|other| other.name == call_b);
+            if paired {
+                co_count += 1;
+                example.get_or_insert_with(|| format!("{rel_path}:{}", site.line));
+            }
+        }
+    }
+
+    if total_a < min_occurrences {
+        return None;
+    }
+    Some(CallPairConvention {
+        call_a: call_a.to_string(),
+        call_b: call_b.to_string(),
+        occurrences_of_a: total_a,
+        co_occurrences: co_count,
+        consistency: co_count as f64 / total_a as f64,
+        example_location: example.unwrap_or_default(),
+    })
+}
+
+fn source_files(repo_root: &Path, extensions: &[&str]) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    collect_go_files(repo_root, &mut out);
+    collect_source_files(repo_root, extensions, &mut out);
     out
 }
 
-fn collect_go_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+fn collect_source_files(dir: &Path, extensions: &[&str], out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
@@ -170,8 +235,8 @@ fn collect_go_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
             if path.file_name().and_then(|n| n.to_str()).map(|n| n == ".git" || n == "vendor" || n == "node_modules").unwrap_or(false) {
                 continue;
             }
-            collect_go_files(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("go") {
+            collect_source_files(&path, extensions, out);
+        } else if path.extension().and_then(|e| e.to_str()).is_some_and(|ext| extensions.contains(&ext)) {
             out.push(path);
         }
     }
@@ -255,7 +320,49 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(&dir.path().join("vendor/pkg/f.go"), "package pkg\n\nfunc f() {\n\tmu.Lock()\n\tmu.Unlock()\n}\n");
         write(&dir.path().join(".git/f.go"), "package pkg\n\nfunc f() {\n\tmu.Lock()\n\tmu.Unlock()\n}\n");
-        let files = go_files(dir.path());
+        let files = source_files(dir.path(), SOURCE_EXTENSIONS);
         assert!(files.is_empty(), "got: {files:#?}");
+    }
+
+    #[test]
+    fn scans_java_and_kotlin_files_too_not_just_go() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("A.java"), "class A { void f() { mu.lock(); doWork(); mu.unlock(); } }");
+        let files = source_files(dir.path(), SOURCE_EXTENSIONS);
+        assert_eq!(files.len(), 1, "got: {files:#?}");
+    }
+
+    #[test]
+    fn consistency_for_pair_matches_mine_call_pair_conventions_for_a_real_convention() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            write(
+                &dir.path().join(format!("f{i}.go")),
+                &format!("package main\n\nfunc f{i}() {{\n\tmu.Lock()\n\tdoWork()\n\tmu.Unlock()\n}}\n"),
+            );
+        }
+        let result = consistency_for_pair(dir.path(), "Lock", "Unlock", 3).unwrap();
+        assert_eq!(result.occurrences_of_a, 5);
+        assert_eq!(result.co_occurrences, 5);
+        assert_eq!(result.consistency, 1.0);
+        assert!(!result.example_location.is_empty());
+    }
+
+    #[test]
+    fn consistency_for_pair_returns_none_below_min_occurrences() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("f0.go"), "package main\n\nfunc f0() {\n\tmu.Lock()\n\tmu.Unlock()\n}\n");
+        assert!(consistency_for_pair(dir.path(), "Lock", "Unlock", 3).is_none());
+    }
+
+    #[test]
+    fn consistency_for_pair_reports_a_real_fabricated_pairs_low_consistency() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            write(&dir.path().join(format!("f{i}.go")), &format!("package main\n\nfunc f{i}() {{\n\tmu.Lock()\n\tdoWork()\n}}\n"));
+        }
+        let result = consistency_for_pair(dir.path(), "Lock", "SomethingThatNeverHappens", 3).unwrap();
+        assert_eq!(result.co_occurrences, 0);
+        assert_eq!(result.consistency, 0.0);
     }
 }
