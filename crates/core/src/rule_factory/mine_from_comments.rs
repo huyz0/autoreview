@@ -25,6 +25,7 @@ use std::process::Command;
 
 use serde::Deserialize;
 
+use crate::rule_factory::category_heuristics::guess_category;
 use crate::storage::history_store::MinedFindingRow;
 
 /// Comments shorter than this are almost always "lgtm"/"nit"/"+1"-shaped
@@ -42,29 +43,6 @@ struct GhReviewComment {
     id: u64,
     body: String,
     path: Option<String>,
-}
-
-/// Lightweight keyword bucketing, not a claim of accuracy — a human always
-/// reviews a candidate at the `rules review --approve` gate before it ever
-/// reaches shadow mode, so an imperfect initial category guess costs
-/// nothing but a slightly-off grouping label, not a wrongly-shipped rule.
-/// Checked in a fixed, deliberately narrow order (security first, since a
-/// comment mentioning both "sql injection" and "slow" should land under
-/// the security bucket, not performance) — first match wins.
-fn guess_category(body: &str) -> String {
-    let lower = body.to_lowercase();
-    const SECURITY_KEYWORDS: &[&str] = &["inject", "vulnerab", "secret", "credential", "xss", "csrf", "sanitiz", "escape", "auth", "password", "token"];
-    const PERFORMANCE_KEYWORDS: &[&str] = &["slow", "performance", "n+1", "allocat", "loop", "o(n", "cache", "latency"];
-    const DESIGN_KEYWORDS: &[&str] = &["naming", "extract", "duplicat", "readab", "abstraction", "coupling", "responsibility"];
-    if SECURITY_KEYWORDS.iter().any(|k| lower.contains(k)) {
-        "security".to_string()
-    } else if PERFORMANCE_KEYWORDS.iter().any(|k| lower.contains(k)) {
-        "performance".to_string()
-    } else if DESIGN_KEYWORDS.iter().any(|k| lower.contains(k)) {
-        "design".to_string()
-    } else {
-        "correctness".to_string()
-    }
 }
 
 fn comment_to_mined_row(comment: &GhReviewComment, pr_number: u64) -> Option<MinedFindingRow> {
@@ -175,26 +153,6 @@ mod tests {
     fn keeps_a_substantive_comment_with_no_path() {
         let c = comment(2, "This function doesn't handle the case where the input list is empty, which will panic downstream.", None);
         assert!(comment_to_mined_row(&c, 1).is_some());
-    }
-
-    #[test]
-    fn guesses_security_category_for_injection_language() {
-        assert_eq!(guess_category("This looks vulnerable to SQL injection if the input isn't sanitized."), "security");
-    }
-
-    #[test]
-    fn guesses_performance_category_for_n_plus_one_language() {
-        assert_eq!(guess_category("This issues a query inside the loop, which is an N+1 pattern."), "performance");
-    }
-
-    #[test]
-    fn security_keywords_win_over_performance_keywords_when_both_present() {
-        assert_eq!(guess_category("This SQL injection risk also makes the loop slow."), "security");
-    }
-
-    #[test]
-    fn defaults_to_correctness_when_no_keyword_matches() {
-        assert_eq!(guess_category("This should check for nil before dereferencing."), "correctness");
     }
 
     #[test]

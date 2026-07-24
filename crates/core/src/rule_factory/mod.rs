@@ -5,6 +5,7 @@
 //! and `CandidateSeed`'s docs for exactly what "recurring" means here.
 
 pub mod bench;
+pub mod category_heuristics;
 pub mod draft;
 pub mod existing_rules;
 pub mod mine;
