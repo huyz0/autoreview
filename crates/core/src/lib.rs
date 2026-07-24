@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod analyzers;
+pub mod auth;
 pub mod config;
 pub mod context;
 pub mod patch_check;
@@ -33,6 +34,8 @@ pub use analyzers::golangci_lint::run_golangci_lint;
 pub use analyzers::sarif::{ingest_sarif_file, parse_sarif_document};
 pub use analyzers::dataflow_check::run_dataflow_check;
 pub use analyzers::symindex_check::{run_symindex_check, run_symindex_check_with_tier4};
+pub use auth::credential_store::{CredentialStore, StoredVia};
+pub use auth::{BITBUCKET_SERVICE, GITHUB_ACCOUNT, GITHUB_SERVICE};
 pub use config::load_config;
 pub use context::{collect_context, render_context_block, ContextItem};
 pub use patch_check::parses_cleanly;
