@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 
 use autoreview_schema::{AgentBackendKind, Tier};
 use commands::apply::run_apply;
-use commands::auth::run_auth_status;
+use commands::auth::{run_auth_login, run_auth_status};
 use commands::diff::{run_diff_or_watch, DiffCommandOptions};
 use commands::doctor::run_doctor;
 use commands::explain::run_explain;
@@ -120,6 +120,16 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum AuthAction {
+    /// Log into a provider (currently: bitbucket) and store the
+    /// credential. --email/--token make this non-interactive (for CI);
+    /// omitted, they're prompted for (the token's input is hidden)
+    Login {
+        provider: String,
+        #[arg(long)]
+        email: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+    },
     /// Show whether a GitHub/Bitbucket credential is currently stored —
     /// read-only, no network call
     Status,
@@ -361,6 +371,7 @@ fn main() -> anyhow::Result<()> {
             SpecAction::Draft { base, head, force } => run_spec_draft(SpecDraftOptions { repo_root, base_ref: base, head_ref: head, force })?,
         },
         Commands::Auth { action } => match action {
+            AuthAction::Login { provider, email, token } => run_auth_login(&provider, email, token)?,
             AuthAction::Status => run_auth_status()?,
         },
     }

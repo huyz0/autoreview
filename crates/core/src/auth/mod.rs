@@ -11,6 +11,7 @@
 //! (`crates/cli/src/commands/auth.rs`) is a thin wrapper handling
 //! terminal I/O (prompts, `--email`/`--token` flags) around these.
 
+pub mod bitbucket_token;
 pub mod credential_store;
 
 /// The `keyring`/fallback-file "service" name for each provider this
