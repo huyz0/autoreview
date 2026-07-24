@@ -19,7 +19,7 @@
 //! mining source (see `run_rules_mine_code`'s own docs) — a discovery
 //! prototype, not yet integrated into the draft/bench/shadow pipeline.
 
-use autoreview_core::{draft_candidate, mine_candidates, mine_from_pr_comments, run_bench, write_seed_file, BenchVerdict, CandidateSeed, DraftOutcome, HistoryStore};
+use autoreview_core::{draft_candidate, find_similar_existing_rule, load_existing_rule_summaries, mine_candidates, mine_from_pr_comments, run_bench, write_seed_file, BenchVerdict, CandidateSeed, DraftOutcome, HistoryStore};
 use autoreview_schema::AgentBackendKind;
 use serde::Deserialize;
 
@@ -32,6 +32,48 @@ fn cheap_model_for(kind: AgentBackendKind, config: &autoreview_schema::Autorevie
         AgentBackendKind::LocalLlm => &config.agents.local_llm.model,
         AgentBackendKind::ClaudeCode | AgentBackendKind::Pi => &config.budgets.models.cheap,
     }
+}
+
+/// Resolves every registered rule pack (`.autoreview/rulepacks.yaml`),
+/// same warn-and-skip-on-failure convention `diff.rs` uses for a full
+/// review run — a pack that fails to resolve shouldn't block a mining
+/// run any more than it blocks a review. Shared by every mine source that
+/// needs the existing-rule set (the dedup gate) or, later, the taint/
+/// call-sequence rule loaders themselves.
+fn resolved_packs_for_mining(repo_root: &std::path::Path) -> Vec<autoreview_core::ResolvedRulePack> {
+    let configured = autoreview_core::load_rule_packs_config(&autoreview_core::rule_packs_config_path(repo_root)).unwrap_or_default();
+    let cache_root = autoreview_core::default_rule_packs_cache_root();
+    autoreview_core::resolve_rule_packs(repo_root, &cache_root, &configured)
+        .into_iter()
+        .filter_map(|(id, result)| match result {
+            Ok(resolved) => Some(resolved),
+            Err(err) => {
+                println!("  [warn] failed to resolve rule pack '{id}': {err}");
+                None
+            }
+        })
+        .collect()
+}
+
+/// Drops any mined candidate that closely matches a rule already shipped
+/// (builtin or a registered pack) — closes the gap where nothing
+/// previously stopped a mining source from proposing a rule that
+/// duplicates one that already exists, leaving a human at `rules review`
+/// as the only backstop. Prints what got skipped and why rather than
+/// silently shrinking the seed list, matching this pipeline's existing
+/// "always say what happened" tone.
+fn filter_out_existing_rule_duplicates(repo_root: &std::path::Path, seeds: Vec<CandidateSeed>) -> Vec<CandidateSeed> {
+    let existing = load_existing_rule_summaries(&resolved_packs_for_mining(repo_root));
+    seeds
+        .into_iter()
+        .filter(|seed| match find_similar_existing_rule(seed, &existing) {
+            Some(m) => {
+                println!("  {} skipped — matches existing rule '{}' (similarity {:.2})", seed.cluster_id, m.rule_id, m.similarity);
+                false
+            }
+            None => true,
+        })
+        .collect()
 }
 
 /// Shared by both mining sources: writes each seed's file, attempts a
@@ -94,6 +136,11 @@ pub fn run_rules_mine(repo_root: &std::path::Path) -> anyhow::Result<()> {
         println!("No recurring clusters found (need >= 3 similar findings spanning >= 2 distinct runs).");
         return Ok(());
     }
+    let seeds = filter_out_existing_rule_duplicates(repo_root, seeds);
+    if seeds.is_empty() {
+        println!("Every recurring cluster matched a rule that's already shipped — nothing new to draft.");
+        return Ok(());
+    }
 
     let config = autoreview_core::load_config(&repo_root.join(".autoreview").join("config.yaml"))?;
     draft_and_write_seeds(repo_root, &config, &seeds)
@@ -122,6 +169,11 @@ pub fn run_rules_mine_comments(repo_root: &std::path::Path) -> anyhow::Result<()
     let seeds = mine_candidates(findings);
     if seeds.is_empty() {
         println!("No recurring clusters found (need >= 3 similar comments spanning >= 2 distinct PRs).");
+        return Ok(());
+    }
+    let seeds = filter_out_existing_rule_duplicates(repo_root, seeds);
+    if seeds.is_empty() {
+        println!("Every recurring cluster matched a rule that's already shipped — nothing new to draft.");
         return Ok(());
     }
 

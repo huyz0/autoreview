@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use crate::report::dedupe::title_similarity;
 use crate::storage::history_store::MinedFindingRow;
 
-const SIMILARITY_THRESHOLD: f64 = 0.55;
+pub(crate) const SIMILARITY_THRESHOLD: f64 = 0.55;
 const MIN_CLUSTER_MEMBERS: usize = 3;
 const MIN_DISTINCT_RUNS: usize = 2;
 /// How many representative snippets a seed carries for the (future) draft
