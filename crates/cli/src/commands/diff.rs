@@ -382,10 +382,31 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
             } as usize;
 
             let mut launched_aspects: std::collections::HashSet<&str> = std::collections::HashSet::new();
-            let mut budget_stopped = false;
+            // Carries *why* dispatch stopped, not just that it did — the
+            // summary below names the limit that was hit, and reporting a
+            // dollar figure for a run that actually ran out of time would
+            // point the user at the wrong knob.
+            let mut budget_stopped: Option<String> = None;
+            // `wallClockSec` is printed to the user as part of the budget
+            // line, so it has to mean something. It previously did not:
+            // the planner computed it, `diff` displayed it, and the report
+            // serialized it, but nothing ever compared elapsed time
+            // against it — only the *cost* budget was enforced.
+            //
+            // Checked between chunks, which is an honest bound rather than
+            // a hard one: a specialist already in flight is allowed to
+            // finish, because `std::process` offers no way to time out a
+            // running child and killing one mid-call would waste tokens
+            // already spent. So this caps how long a review keeps
+            // *starting* new work, not the absolute wall time.
+            let specialist_deadline = std::time::Instant::now() + std::time::Duration::from_secs(u64::from(plan.budgets.wall_clock_sec));
             for chunk in plan.specialists.chunks(max_concurrency.max(1)) {
                 if autoreview_core::should_stop_for_budget(total_usd, any_usd_reported, options.max_usd) {
-                    budget_stopped = true;
+                    budget_stopped = Some(format!("spent ${total_usd:.4} of the --max-usd {:.2} cap", options.max_usd.unwrap_or(0.0)));
+                    break;
+                }
+                if std::time::Instant::now() >= specialist_deadline {
+                    budget_stopped = Some(format!("hit the {}s wallClockSec budget for this tier", plan.budgets.wall_clock_sec));
                     break;
                 }
                 for specialist in chunk {
@@ -461,15 +482,10 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
                 }
             }
 
-            if budget_stopped {
+            if let Some(reason) = &budget_stopped {
                 let skipped: Vec<&str> = plan.specialists.iter().map(|s| s.aspect.as_str()).filter(|a| !launched_aspects.contains(a)).collect();
                 if !skipped.is_empty() {
-                    println!(
-                        "\n  [budget] stopped after ${total_usd:.4} spent (--max-usd {:.2}) — skipped {} remaining specialist(s): {}",
-                        options.max_usd.unwrap_or(0.0),
-                        skipped.len(),
-                        skipped.join(", ")
-                    );
+                    println!("\n  [budget] stopped — {reason}; skipped {} remaining specialist(s): {}", skipped.len(), skipped.join(", "));
                 }
             }
         }

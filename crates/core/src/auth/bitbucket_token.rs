@@ -54,9 +54,10 @@ pub(crate) fn parse_bitbucket_user(body: &str) -> anyhow::Result<BitbucketUser> 
 /// `0600` curl config file (`auth::curl_config`) rather than a `-u` argv
 /// entry: an argument is visible to every other user on the machine via
 /// `ps`/`/proc/<pid>/cmdline` for the life of the request. `--max-time 15`
-/// since this is a real internet call, unlike the existing
-/// `localhost`-only curl call sites in `agents::local_llm`/
-/// `agents::embedding`, which don't need one.
+/// is tighter than the local-inference call sites in `agents::local_llm`/
+/// `agents::embedding` (which have their own, looser bounds): this is one
+/// small API round-trip, not model inference, so it has no business
+/// taking longer.
 pub fn verify_bitbucket_token(email: &str, api_token: &str, curl_binary: &str) -> anyhow::Result<BitbucketUser> {
     let auth_config = super::curl_config::CurlAuthConfig::basic(email, api_token).map_err(|err| anyhow::anyhow!("failed to stage curl credentials: {err}"))?;
     let config_path = auth_config.path().display().to_string();

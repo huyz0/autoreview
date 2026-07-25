@@ -19,6 +19,14 @@ use serde::Deserialize;
 
 use super::claude_code::{AgentBackend, InvokeRequest, InvokeResult, Usage};
 
+/// Ceiling on a single completion request. Generous — a large model doing
+/// CPU inference legitimately takes minutes — but bounded, which is the
+/// point: `base_url` is user-configurable, so "it only talks to
+/// localhost" stopped being true the moment someone pointed this at a
+/// shared inference server. Even on localhost, a server wedged loading a
+/// model previously hung the whole review with no way out but Ctrl-C.
+const REQUEST_TIMEOUT_SECONDS: &str = "300";
+
 #[derive(Debug, Deserialize)]
 struct ChatCompletionResponse {
     choices: Vec<ChatChoice>,
@@ -82,7 +90,7 @@ impl AgentBackend for LocalLlmBackend {
 
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let output = Command::new(&self.curl_binary)
-            .args(["-sS", "-X", "POST", &url, "-H", "Content-Type: application/json", "-d", "@-"])
+            .args(["-sS", "-X", "POST", &url, "--max-time", REQUEST_TIMEOUT_SECONDS, "-H", "Content-Type: application/json", "-d", "@-"])
             .current_dir(&req.cwd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())

@@ -37,6 +37,14 @@ pub fn parse_embedding_response(body: &str) -> anyhow::Result<Vec<f32>> {
     parsed.data.into_iter().next().map(|d| d.embedding).ok_or_else(|| anyhow::anyhow!("embeddings response had no data entries"))
 }
 
+/// Ceiling on a single embedding request. Much tighter than
+/// `local_llm`'s completion timeout: an embedding is one forward pass and
+/// returns in well under a second even on CPU, so anything approaching
+/// this bound means the server is wedged, not busy. Bounded for the same
+/// reason as there — `base_url` is configurable, so this is not
+/// necessarily localhost.
+const REQUEST_TIMEOUT_SECONDS: &str = "60";
+
 /// Fetches an embedding vector for `text` from a local OpenAI-compatible
 /// server. Same shell-out-via-curl shape as `LocalLlmBackend::invoke` —
 /// see that module's docs for why curl over an HTTP client crate.
@@ -45,7 +53,7 @@ pub fn fetch_embedding(base_url: &str, model: &str, text: &str, curl_binary: &st
     let url = format!("{}/embeddings", base_url.trim_end_matches('/'));
 
     let output = Command::new(curl_binary)
-        .args(["-sS", "-X", "POST", &url, "-H", "Content-Type: application/json", "-d", "@-"])
+        .args(["-sS", "-X", "POST", &url, "--max-time", REQUEST_TIMEOUT_SECONDS, "-H", "Content-Type: application/json", "-d", "@-"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

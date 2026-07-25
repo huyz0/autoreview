@@ -31,8 +31,10 @@ use super::local_llm::parse_chat_completion_response;
 use crate::auth::curl_config::CurlAuthConfig;
 
 /// Bounds how long a single hosted-API call is allowed to hang before
-/// `curl` gives up — real internet call, unlike `local_llm`'s
-/// localhost-only requests, which have never needed one.
+/// `curl` gives up. Tighter than `local_llm`'s equivalent: a hosted
+/// provider serving a batched GPU is expected to answer far faster than a
+/// local model doing CPU inference, so a longer wait here means something
+/// is wrong rather than merely slow.
 const REQUEST_TIMEOUT_SECONDS: &str = "120";
 
 pub struct OpenAiCompatibleBackend {
