@@ -15,14 +15,41 @@
 //!   rate" to a file-level match rate (counting matched *lines* would need
 //!   per-line dedup logic beyond what's needed to catch an obviously
 //!   over-broad pattern) — documented here, not silently substituted.
-//! - **Historical precision**: NOT implemented. The plan's design requires
-//!   replaying the candidate against every stored historical snippet in
-//!   that language, but the history store (`findings` table) does not
-//!   retain the original source snippet or file content a finding was
-//!   found in — only its fingerprint/category/title/message (see
-//!   `MinedFindingRow`). Computing this needs the history schema to grow a
-//!   snippet column first; `BenchReport` reports this check as `Skipped`
-//!   rather than fabricating a number.
+//! - **Historical precision**: NOT implemented. `BenchReport` reports this
+//!   check as `Skipped` rather than fabricating a number.
+//!
+//!   This used to be documented as blocked on the history schema: the
+//!   `findings` table keeps only fingerprint/category/title/message, so
+//!   the claim was that computing precision "needs the history schema to
+//!   grow a snippet column first". **That is wrong, and acting on it would
+//!   have meant an unnecessary migration.** Every run also writes a full
+//!   `report.json` under `<cache>/<repoFingerprint>/runs/<runId>/`, and a
+//!   serialized `Finding` carries `location.path`, `location.range` and
+//!   `location.snippet`. Measured against this machine's own retained
+//!   history: 3120 reports, 3211 findings, 100% with a path and 54% with a
+//!   non-empty snippet. The evidence is already on disk, in the reports
+//!   rather than the database.
+//!
+//!   What remains genuinely hard is not storage but *method*, and it is
+//!   worth stating before someone builds the wrong thing:
+//!
+//!   1. A retained snippet is a line or two (`"\tif x == x {"`), not a
+//!      compilable file. Running a candidate ast-grep pattern against a
+//!      bare fragment parses a different AST than the one the finding came
+//!      from, so matches and misses are both unreliable. Re-reading the
+//!      original file at the recorded path is only sound when that commit
+//!      is still checked out.
+//!   2. Precision needs ground truth, and only findings a human actually
+//!      gave a `--fp`/`--tp` verdict to have any. Unlabelled findings are
+//!      not negatives.
+//!
+//!   The cheaper measurement that needs neither: `findings` and `feedback`
+//!   share `finding_id` and both carry a rule id, so a per-rule
+//!   fired-vs-reported-false-positive rate is a plain join over data that
+//!   already exists — exact rather than approximate, and a more direct
+//!   answer to "is this rule any good" than replaying patterns against
+//!   fragments. `count_fp_feedback_for_rule` already does this for one
+//!   rule; nothing yet does it across the catalog.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -213,7 +240,7 @@ pub fn run_bench(repo_root: &Path, cluster_id: &str) -> anyhow::Result<BenchRepo
         cluster_id: cluster_id.to_string(),
         self_test,
         fp_smoke,
-        historical_precision_skipped_reason: "history store does not retain original source snippets — needs a schema change to compute this check".to_string(),
+        historical_precision_skipped_reason: "not implemented yet — the evidence exists in retained run reports, but replaying a pattern against a one-line snippet parses a different AST than the finding came from, and only human-labelled findings carry ground truth (see this module's docs)".to_string(),
         verdict,
     })
 }
@@ -299,6 +326,6 @@ mod tests {
         let candidate_dir = dir.path().join(".autoreview/rules/candidates/c1");
         write_rule(&candidate_dir);
         let report = run_bench(dir.path(), "c1").unwrap();
-        assert!(report.historical_precision_skipped_reason.contains("does not retain"));
+        assert!(report.historical_precision_skipped_reason.contains("not implemented yet"), "got: {}", report.historical_precision_skipped_reason);
     }
 }
