@@ -3,7 +3,7 @@
 //! line per seed via the configured agent backend — single-shot, not the
 //! rule factory's 5x ensemble, since a prose instruction edit is lower risk
 //! than a deterministic pattern and always goes through the human
-//! `skills review` gate (still a stub) before it can touch a live skill.
+//! `skills review` gate before it can touch a live skill.
 
 use std::path::Path;
 
@@ -122,8 +122,9 @@ pub fn draft_negative_guidance(backend: &dyn AgentBackend, seed: &NegativeGuidan
 /// `.autoreview/skills/<category>/proposals/<clusterId>.md` — a simplified
 /// stand-in for the plan's `proposals/<proposalId>/diff.patch` shape (no
 /// diff-patch tooling exists for skill instructions yet): a human-readable
-/// document with the drafted line plus its supporting evidence, for
-/// `skills review` (still a stub) to eventually surface properly.
+/// document with the drafted line plus its supporting evidence, which
+/// `skills review` lists and `--approve` appends to the skill's own
+/// `instructions.md`.
 pub fn write_proposal_file(repo_root: &Path, seed: &NegativeGuidanceSeed, drafted_line: Option<&str>) -> anyhow::Result<std::path::PathBuf> {
     let dir = repo_root.join(".autoreview").join("skills").join(&seed.category).join("proposals");
     std::fs::create_dir_all(&dir)?;

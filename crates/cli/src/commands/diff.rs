@@ -631,13 +631,12 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     let run_id = uuid::Uuid::new_v4().to_string();
     let run_timestamp = chrono::Utc::now().to_rfc3339();
 
-    // Shadow-mode rules: `.autoreview/rules/{shadow,promoted}/*.yaml`, a
-    // human-curated interim path onto a bench-passed candidate (`rules
-    // review`'s human-approval gate is still a stub). Shadow firings are
-    // suppressed (reason: ShadowRule); promoted ones surface as normal
-    // findings. Every firing is checked for agreement against this run's
-    // own agent findings and recorded, then promotion/demotion gates are
-    // evaluated per rule that fired.
+    // Shadow-mode rules: `.autoreview/rules/{shadow,promoted}/*.yaml`,
+    // populated by `rules review --approve` on a bench-passed candidate.
+    // Shadow firings are suppressed (reason: ShadowRule); promoted ones
+    // surface as normal findings. Every firing is checked for agreement
+    // against this run's own agent findings and recorded, then
+    // promotion/demotion gates are evaluated per rule that fired.
     match autoreview_core::run_shadow_rules(&options.repo_root, &changed_file_paths) {
         Ok(shadow_findings) if !shadow_findings.is_empty() => match HistoryStore::open(&history_dir) {
             Ok(store) => {

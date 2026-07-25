@@ -161,7 +161,7 @@ pub fn run_skills_bench(repo_root: &Path, aspect: &str, proposal_id: &str) -> an
         if total.tp_lost.is_empty() { String::new() } else { format!(" ({})", total.tp_lost.join(", ")) }
     );
     if total.passes_gate() {
-        println!("verdict: passes — ready for `autoreview skills review` (still a stub)");
+        println!("verdict: passes — ready for `autoreview skills review --approve <aspect>:<proposalId>`");
     } else {
         println!("verdict: does not pass — needs >=70% FP resolution and zero lost TPs");
     }

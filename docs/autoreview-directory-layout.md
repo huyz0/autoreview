@@ -46,11 +46,27 @@ sections:
   override thresholds.
 - `verify` — Stage 3.5's cheap-model confirmation pass: which analyzer
   categories get a second look by default (`noisyCategories`).
-- `agents` — which backend drives specialists (`claude-code`/`pi`/`local-llm`)
-  and its settings.
+- `agents` — which backend drives specialists
+  (`claude-code`/`pi`/`local-llm`/`openai-compatible`) and its settings.
+  The hosted `openai-compatible` backend reads its API key from the
+  credential store, never from this file — see `auth` below.
 - `symindex` — cross-file symbol-index tuning (e.g. `tier4_go`).
-- `mineFromComments` — opt-in PR-review-comment mining (see `rules mine
-  --from-comments`).
+- `auth` — non-secret auth settings only, e.g. `github.clientId` for the
+  OAuth device flow. Tokens themselves never live here; they go to the OS
+  keyring (or a locked-down local file) via `autoreview auth login`.
+- `mineFromComments` — opt-in GitHub PR-review-comment mining (see `rules
+  mine --from-comments`).
+- `mineFromBugfixCommits` — how many commits `rules mine
+  --from-bugfix-commits` scans. No `enabled` flag: it only reads local git
+  history, so there's no network or auth to opt into.
+- `mineFromBitbucketComments` — opt-in Bitbucket Cloud PR-comment mining
+  (`rules mine --from-bitbucket-comments`). The `workspace` slug is
+  repo-level shared config and belongs here; the Bitbucket credential does
+  not.
+- `mineFromLlmPatterns` — opt-in LLM-assisted call-pair convention mining
+  (`rules mine --from-llm-patterns`). Off by default for privacy: unlike
+  every other source, it sends whole sampled file contents to the
+  configured agent backend.
 
 ## `architecture.yaml`
 

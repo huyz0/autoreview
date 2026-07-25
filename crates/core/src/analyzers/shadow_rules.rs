@@ -4,12 +4,13 @@
 //! `analyzers::ast_grep`'s builtin pack, just pointed at a repo-local rule
 //! directory instead of the embedded one.
 //!
-//! A rule file lands in `shadow/` or `promoted/` by a human copying a
-//! drafted-and-benched candidate's `rule.yaml` there (`rules review`, the
-//! human-approval gate, is still a stub — this is the interim path). Every
-//! firing gets recorded into the history store regardless of status; the
-//! caller (`diff.rs`) decides whether to suppress (shadow) or surface
-//! (promoted) the resulting finding.
+//! A rule file lands in `shadow/` when a human approves a
+//! drafted-and-benched candidate (`autoreview rules review --approve`,
+//! which copies its `rule.yaml` here and registers it in the history
+//! store), and moves on to `promoted/` once the firing-history gate in
+//! `diff.rs` promotes it. Every firing gets recorded into the history store
+//! regardless of status; the caller (`diff.rs`) decides whether to suppress
+//! (shadow) or surface (promoted) the resulting finding.
 
 use std::collections::HashMap;
 use std::path::Path;

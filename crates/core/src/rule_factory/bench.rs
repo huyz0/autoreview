@@ -1,8 +1,8 @@
 //! Rule-factory bench: the gate a drafted candidate rule must clear before
-//! a human ever sees it in `rules review` (itself still a stub). Per the
-//! plan, three checks — self-test, historical precision, FP smoke test —
-//! all must pass. Two are implemented honestly here; one is not, and this
-//! module says so rather than faking it:
+//! a human ever sees it in `rules review`. Per the plan, three checks —
+//! self-test, historical precision, FP smoke test — all must pass. Two are
+//! implemented honestly here; one is not, and this module says so rather
+//! than faking it:
 //!
 //! - **Self-test**: real, against `tests/positive/*`/`tests/negative/*` a
 //!   human supplies under the candidate's directory (per `draft.rs`'s own
@@ -66,8 +66,8 @@ impl FpSmokeResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BenchVerdict {
-    /// Every implemented check passed — ready for the (still-stubbed)
-    /// human `rules review` gate.
+    /// Every implemented check passed — ready for the human `rules review`
+    /// gate.
     Candidate,
     /// No `tests/positive`/`tests/negative` fixtures exist yet under the
     /// candidate directory for bench to run self-test against.

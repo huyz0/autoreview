@@ -121,7 +121,7 @@ fn draft_and_write_seeds(repo_root: &std::path::Path, config: &autoreview_schema
             }
         }
     }
-    println!("\n(Review/shadow/promote are not yet implemented. Run `autoreview rules bench <clusterId>` on a drafted candidate once you've added tests/positive and tests/negative fixtures under its candidate directory.)");
+    println!("\n(Next: add tests/positive and tests/negative fixtures under a drafted candidate's directory, run `autoreview rules bench <clusterId>`, then `autoreview rules review --approve <clusterId>` to move it into shadow mode.)");
     Ok(())
 }
 
@@ -457,7 +457,7 @@ pub fn run_rules_bench(repo_root: &std::path::Path, cluster_id: &str) -> anyhow:
     println!("  historical-precision: skipped — {}", report.historical_precision_skipped_reason);
 
     match report.verdict {
-        BenchVerdict::Candidate => println!("\nverdict: candidate — ready for `autoreview rules review` (still a stub)"),
+        BenchVerdict::Candidate => println!("\nverdict: candidate — ready for `autoreview rules review --approve <clusterId>`"),
         BenchVerdict::NeedsFixtures => println!("\nverdict: needs-fixtures — add tests/positive/*, tests/negative/* under this candidate's directory, then re-run bench"),
         BenchVerdict::SelfTestFailed => println!("\nverdict: self-test-failed — the drafted rule doesn't cleanly match its own fixtures yet"),
         BenchVerdict::FailedFpSmoke => println!("\nverdict: failed-fp-smoke — the rule matches too many unrelated files in this repo"),

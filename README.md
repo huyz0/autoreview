@@ -98,25 +98,42 @@ which context files get fed to specialists is opt-in and documented in
 ## Extending the rule set
 
 Rules are declarative YAML (`kind: pattern` for ast-grep, `kind: taint` for
-dataflow tracking, `kind: threshold` for metrics), not Rust code, so adding
-one doesn't mean recompiling. Point autoreview at a shared or third-party
-rule pack without forking anything:
+dataflow tracking, `kind: threshold` for metrics, `kind: call-sequence` for
+must-follow call ordering like lock/unlock), not Rust code, so adding one
+doesn't mean recompiling. Point autoreview at a shared or third-party rule
+pack without forking anything:
 
 ```
 autoreview rules packs add https://github.com/your-org/rule-pack
 autoreview rules packs validate ../rule-pack-in-progress
 ```
 
-autoreview can also learn rules from your own review history: recurring
-patterns in what specialists flag, or recurring human PR comments (opt-in,
-via `gh`), get mined into candidate rules that start in shadow mode (they
-run and get tracked, but don't surface findings) until they've proven
-themselves against real feedback.
+autoreview can also learn rules from your own history. `rules mine` reads
+recurring patterns in what specialists have flagged; several opt-in flags
+mine other evidence instead:
+
+| Flag | Evidence |
+|---|---|
+| `--from-comments` | recurring human PR review comments (GitHub, via `gh`) |
+| `--from-bitbucket-comments` | the same, from Bitbucket Cloud |
+| `--from-bugfix-commits` | bug-fix-shaped commits in local git history |
+| `--from-suppressions` | `// nolint` / `@SuppressWarnings` / `// eslint-disable` comments already in your source |
+| `--from-code` | call-pair conventions the codebase already follows |
+| `--from-llm-patterns` | conventions an agent proposes from reading sampled files, each mechanically re-verified against the whole repo before it counts |
+| `--from-linter-config` | a report comparing your `.golangci.yml`/`.eslintrc`/checkstyle/detekt config against autoreview's own catalog |
+
+Whatever the source, candidates go through the same gate: drafted, benched
+against fixtures, approved by a human, then run in shadow mode (tracked but
+not surfaced) until they've proven themselves against real feedback.
 
 ```
 autoreview rules mine
 autoreview rules review
 ```
+
+If you'd rather have a coding agent author a rule directly from something it
+found, this repo ships a skill for that at
+[`.claude/skills/authoring-rules/`](.claude/skills/authoring-rules/SKILL.md).
 
 ## Commands
 
@@ -129,6 +146,7 @@ autoreview rules review
 | `rules` | Mine, review, bench, and manage the learned rule factory and external rule packs. |
 | `skills` | Manage the per-aspect instructions LLM specialists follow, including learned edits to them. |
 | `history` | Manage local run and event history, including team sync. |
+| `auth` | Log in to GitHub / Bitbucket / an OpenAI-compatible provider; tokens go to the OS keyring. |
 
 Run `autoreview <command> --help` for the full options on any of them.
 

@@ -12,10 +12,9 @@
 //! original source code the specialist was looking at — the history store
 //! doesn't retain that. So this stage drafts a rule against a *description*
 //! of the recurring issue, not real code, and a human reviewing a resulting
-//! candidate (via the still-stubbed `rules review`) needs to supply real
-//! positive/negative fixtures before it can be benched. Attaching the
-//! original snippet to the mined finding row is a natural follow-up once
-//! bench needs it.
+//! candidate (via `rules review`) needs to supply real positive/negative
+//! fixtures before it can be benched. Attaching the original snippet to the
+//! mined finding row is a natural follow-up once bench needs it.
 
 use std::path::Path;
 
