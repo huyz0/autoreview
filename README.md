@@ -40,16 +40,50 @@ tuning instead of silently eroding trust in the tool.
 
 ## Install
 
-Not published anywhere yet. Build from source:
+Released binaries cover macOS (Apple Silicon and Intel) and x86_64 Linux.
+The Linux build is statically linked against musl, so it has no glibc
+version requirement and runs on Alpine as happily as on Ubuntu.
 
+**Script** — downloads the right build for your platform and verifies its
+published SHA-256 before installing:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/huyz0/autoreview/main/packaging/install.sh | sh
 ```
-git clone <this repo>
+
+Installs to `~/.local/bin` by default; set `AUTOREVIEW_BIN_DIR` to change
+that, or `AUTOREVIEW_VERSION` to pin a tag instead of taking the latest.
+If piping a script into a shell isn't to your taste, read it first — it's
+[`packaging/install.sh`](packaging/install.sh), about 100 lines of POSIX
+sh — or use the manual route below.
+
+**Homebrew** — each release attaches a formula with the artifact hashes
+baked in:
+
+```bash
+brew install --formula https://github.com/huyz0/autoreview/releases/latest/download/autoreview.rb
+```
+
+(There's no `brew tap` yet; that needs a separate `homebrew-autoreview`
+repository, and the formula above is exactly what would go in it.)
+
+**Manual** — grab a tarball from the
+[releases page](https://github.com/huyz0/autoreview/releases), check it
+against the published `checksums.txt`, and put the binary on your `PATH`.
+
+**From source** — needs a Rust toolchain:
+
+```bash
+git clone https://github.com/huyz0/autoreview
 cd autoreview
 cargo build --release
 ```
 
-The binary lands at `target/release/autoreview`. Put it on your `PATH`, or
-run it via `cargo run --release --`.
+The binary lands at `target/release/autoreview`.
+
+Whichever route you take, run `autoreview doctor` afterwards: several
+analyzers shell out to tools (`ast-grep`, `golangci-lint`) that aren't
+bundled, and a missing one silently reduces coverage rather than failing.
 
 ## Quickstart
 

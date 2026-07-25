@@ -1,0 +1,215 @@
+name: Release
+
+# Tag-triggered. `git tag v0.2.0 && git push origin v0.2.0` builds every
+# target, verifies each binary actually runs, and publishes a GitHub
+# Release with tarballs, a checksums file, and a ready-to-use Homebrew
+# formula.
+#
+# Nothing here publishes to crates.io — this project ships a binary, not a
+# library, and `autoreview-test-support` is marked `publish = false`.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build a release for, e.g. v0.2.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      # One broken target should not hide whether the others are fine —
+      # a release is all-or-nothing, so we want to see every failure.
+      fail-fast: false
+      matrix:
+        include:
+          # musl, not gnu: a glibc build inherits the runner's glibc
+          # version floor (building on this repo's own dev machine
+          # produced a binary needing GLIBC_2.39, which will not start on
+          # Ubuntu 22.04 or Debian 12). A static musl binary has no libc
+          # dependency at all, which is what the curl installer needs.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            runs_natively: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            runs_natively: true
+          # Cross-compiled from the arm64 runner. Apple's toolchain does
+          # this natively, but the resulting binary cannot be executed
+          # here, so it gets an architecture check instead of a smoke run.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            runs_natively: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # rusqlite (bundled SQLite) and the tree-sitter grammars all compile
+      # C, so the musl target needs a musl C compiler as well as the Rust
+      # std for that target.
+      - name: Install musl toolchain
+        if: endsWith(matrix.target, '-linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked --target ${{ matrix.target }} -p autoreview-cli
+
+      # The tag is what users install; the binary's own --version comes
+      # from Cargo.toml. If they disagree, `autoreview --version` lies
+      # about which release it is, so fail here rather than ship it.
+      - name: Check the crate version matches the tag
+        shell: bash
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          crate_version="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          if [ "$tag" != "v$crate_version" ]; then
+            echo "::error::tag $tag does not match workspace version $crate_version — bump [workspace.package] version in Cargo.toml, or retag"
+            exit 1
+          fi
+
+      - name: Verify the binary
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/autoreview"
+          test -f "$bin" || { echo "::error::no binary at $bin"; exit 1; }
+          file "$bin"
+
+          if [ "${{ matrix.runs_natively }}" = "true" ]; then
+            "$bin" --version
+          else
+            # Can't execute a cross-built binary; assert it is at least the
+            # architecture we claim it is.
+            file "$bin" | grep -q 'x86_64' || { echo "::error::expected an x86_64 binary"; exit 1; }
+          fi
+
+          # A musl build that silently came out dynamically linked would
+          # defeat the entire reason for choosing musl.
+          case "${{ matrix.target }}" in
+            *-linux-musl)
+              file "$bin" | grep -q 'static' || { echo "::error::musl build is not statically linked"; exit 1; }
+              ;;
+          esac
+
+      - name: Package
+        shell: bash
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          name="autoreview-${tag}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/autoreview" "dist/$name/"
+          cp README.md "dist/$name/"
+          strip "dist/$name/autoreview" 2>/dev/null || true
+          tar -czf "dist/${name}.tar.gz" -C dist "$name"
+          echo "packaged dist/${name}.tar.gz"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Download all targets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum *.tar.gz > checksums.txt
+          cat checksums.txt
+
+      # Written here rather than kept in the repo because the formula has
+      # to carry the sha256 of the artifacts this run just built. Attached
+      # to the release so `brew install --formula <url>` works without a
+      # separate homebrew-tap repository existing.
+      - name: Generate Homebrew formula
+        working-directory: dist
+        shell: bash
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          repo="${{ github.repository }}"
+          base="https://github.com/${repo}/releases/download/${tag}"
+          arm_sha="$(awk '/aarch64-apple-darwin/ {print $1}' checksums.txt)"
+          intel_sha="$(awk '/x86_64-apple-darwin/ {print $1}' checksums.txt)"
+          linux_sha="$(awk '/x86_64-unknown-linux-musl/ {print $1}' checksums.txt)"
+
+          cat > autoreview.rb <<EOF
+          # Generated by .github/workflows/release.yml for ${tag}.
+          class Autoreview < Formula
+            desc "Portable, hierarchical, deterministic-first code review CLI"
+            homepage "https://github.com/${repo}"
+            version "${version}"
+
+            on_macos do
+              on_arm do
+                url "${base}/autoreview-${tag}-aarch64-apple-darwin.tar.gz"
+                sha256 "${arm_sha}"
+              end
+              on_intel do
+                url "${base}/autoreview-${tag}-x86_64-apple-darwin.tar.gz"
+                sha256 "${intel_sha}"
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "${base}/autoreview-${tag}-x86_64-unknown-linux-musl.tar.gz"
+                sha256 "${linux_sha}"
+              end
+            end
+
+            def install
+              bin.install "autoreview"
+            end
+
+            test do
+              assert_match "autoreview", shell_output("#{bin}/autoreview --version")
+            end
+          end
+          EOF
+          cat autoreview.rb
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release create "$tag" \
+            --repo "${{ github.repository }}" \
+            --title "$tag" \
+            --generate-notes \
+            dist/*.tar.gz dist/checksums.txt dist/autoreview.rb
