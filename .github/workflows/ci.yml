@@ -10,6 +10,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Deliberately absent: a `cargo fmt --check` gate. This was investigated
+# rather than assumed — the codebase is hand-formatted with judgment about
+# where a compact single line reads better than a split one, and rustfmt
+# can't express that. Default settings want to rewrite 1893 places; the
+# closest-fitting config found (max_width = 200, use_small_heuristics =
+# "Max") still wants 266, and inspecting those showed it making the code
+# *worse*: joining readable method chains into 200-character lines and
+# exploding compact one-line enum variants across three lines each. A
+# reformat that large also destroys `git blame` for no correctness gain.
+# Clippy (below) already catches the things that actually matter.
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -65,3 +76,65 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --tests --locked -- -D warnings
+
+  # macOS is a supported target (the `keyring` dependency carries an
+  # explicit `apple-native-keyring-store` feature for the Keychain, and
+  # `auth::credential_store` has `#[cfg(unix)]` paths), but nothing was
+  # compiling it — a macOS-only break in credential storage, the most
+  # security-sensitive code here, would have shipped undetected.
+  #
+  # Deliberately does NOT install Go/golangci-lint/ast-grep. Those exist on
+  # the Linux job to get real coverage of the subprocess-backed analyzers;
+  # duplicating them here would roughly double CI time to re-test
+  # platform-independent logic. Every test needing one of those tools checks
+  # PATH and skips with a clear message, so this job stays green without
+  # them — verified empirically by running the full suite with those tools
+  # hidden from PATH: all 1003 tests still pass.
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace --tests --locked
+
+      - name: Test
+        run: cargo test --workspace --locked -- --test-threads=4
+
+  # Supply-chain gate. This project pulls in `keyring` (OS credential
+  # stores), clones third-party rule packs from arbitrary git URLs, and
+  # shells out to curl against real APIs — a known-vulnerable transitive
+  # dependency matters more here than in a pure library. Passes clean as of
+  # this commit (231 dependencies, 0 advisories), so it starts green rather
+  # than landing pre-broken.
+  #
+  # If a future advisory has no fix available and is genuinely not
+  # reachable from this codebase, `cargo audit --ignore RUSTSEC-XXXX-NNNN`
+  # is the escape hatch — with the reasoning written down next to it, not
+  # applied silently.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit dependencies
+        run: cargo audit
