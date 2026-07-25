@@ -79,6 +79,12 @@ pub struct CallOrderRuleDef {
     pub message: String,
     pub spec: CallOrderSpec,
     pub pack_id: Option<String>,
+    /// The rule's own `metadata:` block (CWE/OWASP/confidence). Carried
+    /// here so it can reach `AgentFinding.meta` — `RuleMetadataBlock`'s
+    /// docs promise it "flows verbatim" into findings, which was true for
+    /// pattern rules but silently false here: four builtin call-sequence
+    /// rules declare CWE mappings that were parsed and then dropped.
+    pub metadata: Option<super::ast_grep::RuleMetadataBlock>,
 }
 
 fn parse_call_order_rule(contents: &str) -> Option<CallOrderRuleDef> {
@@ -99,6 +105,7 @@ fn parse_call_order_rule(contents: &str) -> Option<CallOrderRuleDef> {
         message: yaml.message,
         spec: CallOrderSpec { rule_id: yaml.common.id, after, unless, before, check_before_return: yaml.check_before_return },
         pack_id: None,
+        metadata: yaml.common.metadata,
     })
 }
 

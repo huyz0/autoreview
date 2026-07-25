@@ -124,3 +124,26 @@ fn every_call_order_rule_declares_a_category() {
         assert!(!rule.category.is_empty(), "{}: kind: call-sequence rule has no category field", rule.id);
     }
 }
+
+/// Regression test for a real silent-drop bug: `RuleMetadataBlock`
+/// documents itself as flowing "verbatim into `AgentFinding.meta`", and
+/// that held for pattern rules but not for call-sequence ones — the
+/// loader parsed the block and then discarded it, so the CWE mappings
+/// these rules declare never reached a report. Asserts against a real
+/// rule's real fixture rather than a synthetic one, so it also fails if
+/// somebody strips the metadata out of the rule file itself.
+#[test]
+fn a_call_order_rules_declared_cwe_reaches_the_finding() {
+    let rule_id = "java-xxe-unconfigured-parser";
+    let rule = discover_call_order_rules().into_iter().find(|r| r.id == rule_id).expect("java-xxe-unconfigured-parser is a builtin call-sequence rule");
+    let filename = scan_filename_for_language(&rule.language);
+
+    let positive = std::fs::read_to_string(fixtures_dir().join(rule_id).join(format!("positive.{}", extension_for_language(&rule.language)))).expect("positive fixture exists");
+    let dir = write_single_file(filename, &positive);
+    let findings = run_dataflow_check(dir.path(), &[filename.to_string()], &[]);
+
+    let finding = findings.iter().find(|f| f.source.rule_id.as_deref() == Some(rule_id)).expect("the positive fixture must fire this rule");
+    let meta = finding.meta.as_ref().unwrap_or_else(|| panic!("{rule_id} declares a metadata block, so its finding must carry meta"));
+    let cwe = meta.get("cwe").unwrap_or_else(|| panic!("{rule_id} declares cwe metadata; got meta keys {:?}", meta.keys().collect::<Vec<_>>()));
+    assert_eq!(cwe, &serde_json::json!(["CWE-611"]), "the rule's declared CWE must reach the finding unchanged");
+}

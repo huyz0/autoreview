@@ -272,7 +272,10 @@ fn walk_disk_dir(path: &Path, visit: &mut impl FnMut(&str)) {
     }
 }
 
-fn metadata_to_meta_map(metadata: &RuleMetadataBlock) -> Option<HashMap<String, serde_json::Value>> {
+/// `pub(crate)` so the dataflow backend can build the same `meta` shape
+/// for taint/call-sequence findings — a rule's CWE mapping should reach
+/// the report identically regardless of which engine matched it.
+pub(crate) fn metadata_to_meta_map(metadata: &RuleMetadataBlock) -> Option<HashMap<String, serde_json::Value>> {
     match serde_json::to_value(metadata).ok()? {
         serde_json::Value::Object(map) => Some(map.into_iter().collect()),
         _ => None,

@@ -5,6 +5,12 @@ severity: warning
 kind: taint
 semantic: true
 message: "`{tainted_arg}` reaches `{sink_call}` with an unsanitized value from an HTTP request parameter — an attacker can point this redirect at an arbitrary external URL (open redirect), useful for phishing since the link starts on your own trusted domain"
+metadata:
+  cwe: ["CWE-601"]
+  owasp: ["A01:2021"]
+  confidence: MEDIUM
+  references:
+    - "https://cwe.mitre.org/data/definitions/601.html"
 sources:
   - call: param
 sinks:

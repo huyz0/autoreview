@@ -3,6 +3,13 @@ language: Java
 category: security
 severity: warning
 message: A cookie is explicitly marked as not Secure or not HttpOnly — Secure prevents transmission over plain HTTP, HttpOnly prevents JavaScript (and XSS) from reading it.
+metadata:
+  cwe: ["CWE-614", "CWE-1004"]
+  owasp: ["A05:2021"]
+  confidence: HIGH
+  references:
+    - "https://cwe.mitre.org/data/definitions/614.html"
+    - "https://cwe.mitre.org/data/definitions/1004.html"
 rule:
   any:
     - pattern: $C.setSecure(false)

@@ -84,6 +84,10 @@ pub struct TaintRuleDef {
     /// `Some(packId)` when this rule came from a registered pack rather
     /// than the embedded builtin tree — see `ast_grep::pack_rule_provenance`.
     pub pack_id: Option<String>,
+    /// The rule's own `metadata:` block (CWE/OWASP/confidence), carried so
+    /// it can reach `AgentFinding.meta` the same way a pattern rule's
+    /// does — see `RuleMetadataBlock`'s docs.
+    pub metadata: Option<super::ast_grep::RuleMetadataBlock>,
 }
 
 fn parse_taint_rule(contents: &str) -> Option<TaintRuleDef> {
@@ -111,6 +115,7 @@ fn parse_taint_rule(contents: &str) -> Option<TaintRuleDef> {
         message: yaml.message,
         spec: TaintSpec { rule_id: yaml.common.id, sources, sinks, sanitizers },
         pack_id: None,
+        metadata: yaml.common.metadata,
     })
 }
 

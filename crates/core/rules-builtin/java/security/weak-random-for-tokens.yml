@@ -3,6 +3,12 @@ language: Java
 category: security
 severity: warning
 message: java.util.Random is not cryptographically secure and its output is predictable — use java.security.SecureRandom for tokens, session IDs, CSRF values, or nonces.
+metadata:
+  cwe: ["CWE-338"]
+  owasp: ["A02:2021"]
+  confidence: HIGH
+  references:
+    - "https://cwe.mitre.org/data/definitions/338.html"
 rule:
   pattern: Random $NAME = new Random();
 constraints:

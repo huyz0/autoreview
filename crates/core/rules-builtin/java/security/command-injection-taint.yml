@@ -5,6 +5,12 @@ severity: error
 kind: taint
 semantic: true
 message: "`{tainted_arg}` reaches `{sink_call}` with an unsanitized value from an HTTP request parameter"
+metadata:
+  cwe: ["CWE-78"]
+  owasp: ["A03:2021"]
+  confidence: MEDIUM
+  references:
+    - "https://cwe.mitre.org/data/definitions/78.html"
 sources:
   - call: getParameter
   - call: getQueryString

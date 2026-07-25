@@ -229,14 +229,25 @@ fn make_finding(rule_id: &str, category: &str, severity: Severity, path: &str, l
 /// definition came from a registered pack — `None` for builtin rules,
 /// matching `ast_grep.rs`'s own pattern-rule provenance tagging.
 fn taint_pack_meta(rule: &taint_rules::TaintRuleDef) -> Option<HashMap<String, serde_json::Value>> {
-    pack_meta(rule.pack_id.as_ref())
+    rule_meta(rule.pack_id.as_ref(), rule.metadata.as_ref())
 }
 
-fn pack_meta(pack_id: Option<&String>) -> Option<HashMap<String, serde_json::Value>> {
-    let pack_id = pack_id?;
-    let mut meta = HashMap::new();
-    meta.insert("rulePackId".to_string(), serde_json::Value::String(pack_id.clone()));
-    Some(meta)
+/// The `meta` map for a dataflow-engine finding: the rule's own
+/// `metadata:` block (CWE/OWASP/...) plus `rulePackId` when it came from
+/// a registered pack.
+///
+/// The metadata half was missing entirely until now — `RuleMetadataBlock`
+/// documents itself as flowing "verbatim into `AgentFinding.meta`", which
+/// held for pattern rules but not for taint/call-sequence ones. Four
+/// builtin call-sequence rules declared CWE mappings that were parsed and
+/// then dropped on the floor, so a real XXE or unreleased-lock finding
+/// reached the report with no CWE at all.
+fn rule_meta(pack_id: Option<&String>, metadata: Option<&super::ast_grep::RuleMetadataBlock>) -> Option<HashMap<String, serde_json::Value>> {
+    let mut meta = metadata.and_then(super::ast_grep::metadata_to_meta_map).unwrap_or_default();
+    if let Some(pack_id) = pack_id {
+        meta.insert("rulePackId".to_string(), serde_json::Value::String(pack_id.clone()));
+    }
+    (!meta.is_empty()).then_some(meta)
 }
 
 /// Every top-level `func`/method declaration in a parsed Go file.
@@ -867,7 +878,7 @@ fn run_call_order_rules(path: &str, language: &str, lowered: &[(Node, Cfg<Stmt>)
                     format!("`{}` reached with an unresolved `{}` obligation still open", hit.trigger_call, rule.id),
                     render_call_order_message(&rule.message, &hit),
                 );
-                finding.meta = pack_meta(rule.pack_id.as_ref());
+                finding.meta = rule_meta(rule.pack_id.as_ref(), rule.metadata.as_ref());
                 findings.push(finding);
             }
         }
@@ -1502,8 +1513,13 @@ mod tests {
         assert_eq!(meta.get("rulePackId").and_then(|v| v.as_str()), Some("acme-taint"));
     }
 
+    /// The counterpart to the pack test above: a *builtin* rule must not
+    /// claim a `rulePackId`. This previously asserted `meta.is_none()`,
+    /// which only held while `meta` had nothing else to carry — builtin
+    /// taint rules now declare CWE metadata, so the absence of a pack id
+    /// is asserted directly rather than via an empty map.
     #[test]
-    fn a_builtin_taint_finding_has_no_meta() {
+    fn a_builtin_taint_finding_carries_its_cwe_but_no_pack_id() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("main.go"),
@@ -1512,7 +1528,9 @@ mod tests {
         .unwrap();
         let findings = run_dataflow_check(dir.path(), &["main.go".to_string()], &[]);
         let finding = findings.iter().find(|f| f.source.rule_id.as_deref() == Some("go-command-injection-taint")).unwrap_or_else(|| panic!("got: {findings:#?}"));
-        assert!(finding.meta.is_none());
+        let meta = finding.meta.as_ref().expect("go-command-injection-taint declares cwe metadata, so its finding carries meta");
+        assert!(!meta.contains_key("rulePackId"), "a builtin rule must not claim a pack id, got: {meta:?}");
+        assert_eq!(meta.get("cwe"), Some(&serde_json::json!(["CWE-78"])), "the rule's declared CWE must reach the finding, got: {meta:?}");
     }
 
     #[test]

@@ -192,3 +192,56 @@ fn find_rule_file(rule_id: &str) -> Option<PathBuf> {
     }
     walk_find(&rules_dir(), rule_id)
 }
+
+/// Every `category: security` rule must carry a CWE mapping, whatever its
+/// `kind`. CWE IDs are how a security finding gets triaged, mapped to
+/// compliance requirements, and understood by downstream SARIF consumers,
+/// so a security rule without one is materially less useful than one with
+/// it. 37 rules were missing this when the guard was added; the point of
+/// the guard is that the next one can't ship silently.
+#[test]
+fn every_security_rule_declares_a_cwe_mapping() {
+    #[derive(Debug, serde::Deserialize)]
+    struct SecurityRuleMeta {
+        id: String,
+        #[serde(default)]
+        category: String,
+        #[serde(default)]
+        metadata: Option<MetaBlock>,
+    }
+    #[derive(Debug, serde::Deserialize)]
+    struct MetaBlock {
+        #[serde(default)]
+        cwe: Vec<String>,
+    }
+
+    fn walk(dir: &Path, out: &mut Vec<(PathBuf, SecurityRuleMeta)>) {
+        for entry in std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+                continue;
+            }
+            let is_yaml = path.extension().and_then(|e| e.to_str()).map(|e| e == "yml" || e == "yaml").unwrap_or(false);
+            if !is_yaml || path.file_name().and_then(|n| n.to_str()) == Some("rulepack.yaml") {
+                continue;
+            }
+            let contents = std::fs::read_to_string(&path).unwrap();
+            if let Ok(meta) = serde_yaml::from_str::<SecurityRuleMeta>(&contents) {
+                out.push((path, meta));
+            }
+        }
+    }
+
+    let mut rules = Vec::new();
+    walk(&rules_dir(), &mut rules);
+    let security: Vec<_> = rules.iter().filter(|(_, r)| r.category == "security").collect();
+    assert!(!security.is_empty(), "expected the builtin pack to contain security rules");
+
+    let missing: Vec<String> = security
+        .iter()
+        .filter(|(_, r)| r.metadata.as_ref().map(|m| m.cwe.is_empty()).unwrap_or(true))
+        .map(|(p, r)| format!("{} ({})", r.id, p.display()))
+        .collect();
+    assert!(missing.is_empty(), "{} security rule(s) declare no cwe metadata:\n{}", missing.len(), missing.join("\n"));
+}

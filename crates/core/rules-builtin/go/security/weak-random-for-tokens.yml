@@ -3,6 +3,12 @@ language: Go
 category: security
 severity: warning
 message: math/rand is not cryptographically secure and its output is predictable — use crypto/rand for tokens, session IDs, CSRF values, or nonces.
+metadata:
+  cwe: ["CWE-338"]
+  owasp: ["A02:2021"]
+  confidence: HIGH
+  references:
+    - "https://cwe.mitre.org/data/definitions/338.html"
 rule:
   any:
     - pattern: $NAME := rand.Int63()
