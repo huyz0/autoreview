@@ -28,8 +28,11 @@ pub struct BitbucketUser {
     pub display_name: String,
 }
 
-fn run_curl(args: &[&str]) -> anyhow::Result<(u32, String)> {
-    let output = Command::new("curl").args(args).output()?;
+/// Takes the binary rather than hardcoding `"curl"`: the caller already
+/// accepts a configurable `curl_binary`, and it previously reached only
+/// this function's error messages while the invocation itself ignored it.
+fn run_curl(curl_binary: &str, args: &[&str]) -> anyhow::Result<(u32, String)> {
+    let output = Command::new(curl_binary).args(args).output()?;
     if !output.status.success() {
         anyhow::bail!("curl failed to run: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
@@ -47,15 +50,17 @@ pub(crate) fn parse_bitbucket_user(body: &str) -> anyhow::Result<BitbucketUser> 
 }
 
 /// Verifies `email`/`api_token` against Bitbucket Cloud's real API —
-/// `GET /2.0/user` via HTTP Basic auth, using curl's own `-u` flag rather
-/// than hand-building an `Authorization: Basic ...` header, which keeps
-/// the token out of any string that might get logged or echoed by
-/// mistake. `--max-time 15` since this is a real internet call, unlike
-/// the existing `localhost`-only curl call sites in `agents::local_llm`/
+/// `GET /2.0/user` via HTTP Basic auth. The credential goes through a
+/// `0600` curl config file (`auth::curl_config`) rather than a `-u` argv
+/// entry: an argument is visible to every other user on the machine via
+/// `ps`/`/proc/<pid>/cmdline` for the life of the request. `--max-time 15`
+/// since this is a real internet call, unlike the existing
+/// `localhost`-only curl call sites in `agents::local_llm`/
 /// `agents::embedding`, which don't need one.
 pub fn verify_bitbucket_token(email: &str, api_token: &str, curl_binary: &str) -> anyhow::Result<BitbucketUser> {
-    let auth = format!("{email}:{api_token}");
-    let (status, body) = run_curl(&["-sS", "-u", &auth, "-w", "\n%{http_code}", "--max-time", "15", "https://api.bitbucket.org/2.0/user"])
+    let auth_config = super::curl_config::CurlAuthConfig::basic(email, api_token).map_err(|err| anyhow::anyhow!("failed to stage curl credentials: {err}"))?;
+    let config_path = auth_config.path().display().to_string();
+    let (status, body) = run_curl(curl_binary, &["-sS", "--config", &config_path, "-w", "\n%{http_code}", "--max-time", "15", "https://api.bitbucket.org/2.0/user"])
         .map_err(|err| anyhow::anyhow!("failed to reach Bitbucket ({curl_binary} error): {err}"))?;
 
     if status == 401 || status == 403 {
@@ -89,6 +94,19 @@ mod tests {
     #[test]
     fn errors_clearly_on_malformed_json() {
         assert!(parse_bitbucket_user("not json").is_err());
+    }
+
+    /// Regression test: `curl_binary` used to reach only the error
+    /// message while the invocation hardcoded `"curl"`, so configuring it
+    /// silently did nothing. Passing a binary that cannot exist must fail
+    /// at the spawn step — if this ever passes by reaching the real
+    /// Bitbucket API again, the parameter has been disconnected a second
+    /// time.
+    #[test]
+    fn the_configured_curl_binary_is_actually_invoked() {
+        let err = verify_bitbucket_token("fake@example.com", "irrelevant", "definitely-not-a-real-binary-xyz").unwrap_err();
+        assert!(err.to_string().contains("failed to reach Bitbucket"), "got: {err}");
+        assert!(err.to_string().contains("definitely-not-a-real-binary-xyz"), "got: {err}");
     }
 
     #[test]

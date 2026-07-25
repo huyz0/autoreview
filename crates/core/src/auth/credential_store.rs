@@ -48,6 +48,10 @@ pub struct CredentialStore {
     /// every `load`/`store` call after the first keyring miss stays
     /// silent rather than repeating the same line on every retry.
     warned_fallback: OnceLock<()>,
+    /// Same once-per-process gating for the non-Unix "this file isn't
+    /// permission-hardened" warning.
+    #[cfg(not(unix))]
+    warned_unhardened: OnceLock<()>,
 }
 
 /// `AUTOREVIEW_<PROVIDER>_TOKEN` — e.g. `AUTOREVIEW_GITHUB_TOKEN` for the
@@ -73,12 +77,22 @@ impl CredentialStore {
     /// this tool, not to any one repo.
     pub fn open_default() -> Self {
         let fallback_dir = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("autoreview").join("credentials");
-        CredentialStore { fallback_dir, warned_fallback: OnceLock::new() }
+        CredentialStore {
+            fallback_dir,
+            warned_fallback: OnceLock::new(),
+            #[cfg(not(unix))]
+            warned_unhardened: OnceLock::new(),
+        }
     }
 
     #[cfg(test)]
     fn with_fallback_dir(fallback_dir: PathBuf) -> Self {
-        CredentialStore { fallback_dir, warned_fallback: OnceLock::new() }
+        CredentialStore {
+            fallback_dir,
+            warned_fallback: OnceLock::new(),
+            #[cfg(not(unix))]
+            warned_unhardened: OnceLock::new(),
+        }
     }
 
     fn warn_fallback_once(&self, reason: &str) {
@@ -99,15 +113,33 @@ impl CredentialStore {
 
     fn store_to_file(&self, service: &str, account: &str, secret: &str) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.fallback_dir)?;
+        super::curl_config::harden_dir(&self.fallback_dir);
         let path = fallback_file_path(&self.fallback_dir, service);
         let json = serde_json::to_string(&FallbackFileContents { account: account.to_string(), secret: secret.to_string() })?;
-        std::fs::write(&path, json)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        }
+        // Creates the file already owner-only rather than writing it and
+        // chmod-ing after — see `curl_config::write_private_file` for why
+        // that ordering matters, and why an existing file is replaced
+        // rather than truncated in place.
+        super::curl_config::write_private_file(&path, &json)?;
+        #[cfg(not(unix))]
+        self.warn_unhardened_file_once();
         Ok(())
+    }
+
+    /// On a non-Unix target there is no `0600` equivalent applied here, so
+    /// the fallback file inherits whatever the parent directory's ACL
+    /// gives it. Windows is outside this feature's stated support
+    /// (Linux/WSL2/macOS), and the honest thing is to say so at the moment
+    /// a real secret is written rather than let it look equally protected
+    /// everywhere.
+    #[cfg(not(unix))]
+    fn warn_unhardened_file_once(&self) {
+        if self.warned_unhardened.set(()).is_ok() {
+            eprintln!(
+                "[warn] storing a credential in a file under {} without owner-only permissions — this platform's file mode isn't hardened by autoreview. Prefer the OS keyring, or set the AUTOREVIEW_<PROVIDER>_TOKEN environment variable instead.",
+                self.fallback_dir.display()
+            );
+        }
     }
 
     fn delete_file(&self, service: &str) -> std::io::Result<()> {
@@ -134,6 +166,11 @@ impl CredentialStore {
     /// this holds no secret.
     pub fn remember_account(&self, service: &str, account: &str) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.fallback_dir)?;
+        // The marker itself holds no secret, but it shares a directory
+        // with the credential files that do — harden here too so a repo
+        // that only ever calls `remember_account` still ends up with a
+        // `0700` directory rather than the default `0755`.
+        super::curl_config::harden_dir(&self.fallback_dir);
         std::fs::write(self.account_marker_path(service), account)?;
         Ok(())
     }

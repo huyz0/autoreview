@@ -28,6 +28,7 @@ use std::time::Instant;
 
 use super::claude_code::{truncate, AgentBackend, InvokeRequest, InvokeResult};
 use super::local_llm::parse_chat_completion_response;
+use crate::auth::curl_config::CurlAuthConfig;
 
 /// Bounds how long a single hosted-API call is allowed to hang before
 /// `curl` gives up — real internet call, unlike `local_llm`'s
@@ -55,9 +56,10 @@ impl AgentBackend for OpenAiCompatibleBackend {
         });
 
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let auth_header = format!("Authorization: Bearer {}", self.api_key);
+        let auth_config = CurlAuthConfig::bearer(&self.api_key).map_err(|err| anyhow::anyhow!("failed to stage curl credentials: {err}"))?;
+        let config_path = auth_config.path().display().to_string();
         let output = Command::new(&self.curl_binary)
-            .args(["-sS", "-X", "POST", &url, "--max-time", REQUEST_TIMEOUT_SECONDS, "-H", "Content-Type: application/json", "-H", &auth_header, "-d", "@-"])
+            .args(["-sS", "-X", "POST", &url, "--max-time", REQUEST_TIMEOUT_SECONDS, "-H", "Content-Type: application/json", "--config", &config_path, "-d", "@-"])
             .current_dir(&req.cwd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -100,9 +102,10 @@ pub fn openai_compatible_available(base_url: &str, api_key: &str, curl_binary: &
     if api_key.is_empty() {
         return false;
     }
-    let auth_header = format!("Authorization: Bearer {api_key}");
+    let Ok(auth_config) = CurlAuthConfig::bearer(api_key) else { return false };
+    let config_path = auth_config.path().display().to_string();
     Command::new(curl_binary)
-        .args(["-sS", "-f", "-o", "/dev/null", "--max-time", "5", "-H", &auth_header, &format!("{}/models", base_url.trim_end_matches('/'))])
+        .args(["-sS", "-f", "-o", "/dev/null", "--max-time", "5", "--config", &config_path, &format!("{}/models", base_url.trim_end_matches('/'))])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -141,10 +144,12 @@ pub fn verify_api_key(base_url: &str, model: &str, api_key: &str, curl_binary: &
         "stream": false,
     })
     .to_string();
-    let auth_header = format!("Authorization: Bearer {api_key}");
+    let auth_config = CurlAuthConfig::bearer(api_key).map_err(|err| anyhow::anyhow!("failed to stage curl credentials: {err}"))?;
+    let config_path = auth_config.path().display().to_string();
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let (status, response_body) = run_curl_with_status(&["-sS", "-X", "POST", &url, "--max-time", "20", "-H", "Content-Type: application/json", "-H", &auth_header, "-w", "\n%{http_code}", "-d", &body])
-        .map_err(|err| anyhow::anyhow!("failed to reach {base_url} ({curl_binary} error): {err}"))?;
+    let (status, response_body) =
+        run_curl_with_status(&["-sS", "-X", "POST", &url, "--max-time", "20", "-H", "Content-Type: application/json", "--config", &config_path, "-w", "\n%{http_code}", "-d", &body])
+            .map_err(|err| anyhow::anyhow!("failed to reach {base_url} ({curl_binary} error): {err}"))?;
 
     if status == 401 || status == 403 {
         anyhow::bail!("the provider rejected this API key (HTTP {status}) — response: {}", truncate(response_body.trim(), 300));

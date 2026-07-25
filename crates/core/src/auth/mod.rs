@@ -16,6 +16,7 @@
 
 pub mod bitbucket_token;
 pub mod credential_store;
+pub mod curl_config;
 pub mod github_device_flow;
 
 /// The `keyring`/fallback-file "service" name for each provider this

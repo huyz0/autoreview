@@ -67,20 +67,34 @@ struct BbComment {
     deleted: bool,
 }
 
-/// Empty `email`/`token` deliberately omits curl's `-u` flag entirely
-/// rather than passing `-u ":"` — confirmed empirically against a real
-/// public repository that Bitbucket treats an explicit-but-empty Basic
-/// auth header as a real (failing) authentication attempt, not the same
-/// thing as sending no `Authorization` header at all, so `-u ":"` gets a
-/// real 401 even for anonymous-readable public repos.
+/// Empty `email`/`token` deliberately sends no credential at all rather
+/// than an empty one — confirmed empirically against a real public
+/// repository that Bitbucket treats an explicit-but-empty Basic auth
+/// header as a real (failing) authentication attempt, not the same thing
+/// as sending no `Authorization` header at all, so an empty credential
+/// gets a real 401 even for anonymous-readable public repos.
+///
+/// When there *is* a credential it travels in a `0600` curl config file
+/// (`auth::curl_config`), never as a `-u` argv entry that `ps` would
+/// expose to every other user on the machine.
 fn run_curl_json(url: &str, email: &str, token: &str, curl_binary: &str) -> anyhow::Result<String> {
-    let auth = format!("{email}:{token}");
+    let auth_config = if email.is_empty() && token.is_empty() {
+        None
+    } else {
+        Some(crate::auth::curl_config::CurlAuthConfig::basic(email, token).map_err(|err| anyhow::anyhow!("failed to stage curl credentials: {err}"))?)
+    };
+    let config_path = auth_config.as_ref().map(|c| c.path().display().to_string());
+
     let mut args = vec!["-sS"];
-    if !email.is_empty() || !token.is_empty() {
-        args.extend(["-u", &auth]);
+    if let Some(path) = &config_path {
+        args.extend(["--config", path]);
     }
     args.extend(["-w", "\n%{http_code}", "--max-time", "20", url]);
-    let output = Command::new("curl").args(&args).output().map_err(|err| anyhow::anyhow!("failed to reach Bitbucket ({curl_binary} error): {err}"))?;
+    // `curl_binary`, not a hardcoded "curl": `mineFromBitbucketComments.
+    // curlBinary` is a real setting, and it previously appeared only in
+    // this function's error message while the actual invocation ignored
+    // it — so configuring it did nothing.
+    let output = Command::new(curl_binary).args(&args).output().map_err(|err| anyhow::anyhow!("failed to reach Bitbucket ({curl_binary} error): {err}"))?;
     if !output.status.success() {
         anyhow::bail!("curl failed to run: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
