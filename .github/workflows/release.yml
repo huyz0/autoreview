@@ -214,3 +214,65 @@ jobs:
             --title "$tag" \
             --generate-notes \
             dist/*.tar.gz dist/checksums.txt dist/autoreview.rb
+
+  # The `secrets` context cannot be referenced from a job-level `if:` —
+  # GitHub rejects the workflow at parse time with "Unrecognized
+  # named-value: 'secrets'". Resolving presence into a step output first
+  # is the way around it, and is the same shape huyz0/lsp-cli uses.
+  check-secrets:
+    needs: release
+    runs-on: ubuntu-latest
+    outputs:
+      has_homebrew: ${{ steps.check.outputs.has_homebrew }}
+    steps:
+      - id: check
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: echo "has_homebrew=$([ -n "$HOMEBREW_TAP_TOKEN" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  # Publishes the formula into huyz0/homebrew-tap so `brew tap huyz0/tap`
+  # then `brew install huyz0/tap/autoreview` works, which is nicer than
+  # installing a formula by URL.
+  #
+  # Needs a HOMEBREW_TAP_TOKEN repo secret: the built-in GITHUB_TOKEN is
+  # scoped to this repository and cannot write to the tap. huyz0/lsp-cli
+  # already has such a secret; secrets are per-repository, so the same
+  # token has to be added here too. Prefer a fine-grained PAT limited to
+  # huyz0/homebrew-tap with Contents: read and write — a classic `repo`
+  # PAT would grant write access to every repository on the account.
+  #
+  # Skips quietly when the secret is absent rather than failing every
+  # release: the release itself is already published by that point, and
+  # the formula is attached to it regardless.
+  homebrew:
+    needs: [release, check-secrets]
+    if: needs.check-secrets.outputs.has_homebrew == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      # Reuses the formula the release job already generated and attached,
+      # so the tap and the release asset are byte-identical by
+      # construction rather than by two generators agreeing.
+      - name: Download the formula from the release
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release download "$tag" --repo "${{ github.repository }}" --pattern autoreview.rb
+          cat autoreview.rb
+
+      - name: Push to homebrew-tap
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          content="$(base64 -w 0 autoreview.rb)"
+          # Updating an existing file needs its current blob sha; creating
+          # one must omit the field entirely.
+          sha="$(gh api repos/huyz0/homebrew-tap/contents/Formula/autoreview.rb --jq '.sha' 2>/dev/null || echo "")"
+          if [ -n "$sha" ]; then
+            gh api -X PUT repos/huyz0/homebrew-tap/contents/Formula/autoreview.rb \
+              -f message="autoreview ${version}" -f content="$content" -f sha="$sha"
+          else
+            gh api -X PUT repos/huyz0/homebrew-tap/contents/Formula/autoreview.rb \
+              -f message="autoreview ${version}" -f content="$content"
+          fi

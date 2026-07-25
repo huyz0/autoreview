@@ -57,15 +57,19 @@ If piping a script into a shell isn't to your taste, read it first — it's
 [`packaging/install.sh`](packaging/install.sh), about 100 lines of POSIX
 sh — or use the manual route below.
 
-**Homebrew** — each release attaches a formula with the artifact hashes
-baked in:
+**Homebrew**:
+
+```bash
+brew tap huyz0/tap
+brew install huyz0/tap/autoreview
+```
+
+Each release also attaches the formula directly, if you'd rather not add
+a tap:
 
 ```bash
 brew install --formula https://github.com/huyz0/autoreview/releases/latest/download/autoreview.rb
 ```
-
-(There's no `brew tap` yet; that needs a separate `homebrew-autoreview`
-repository, and the formula above is exactly what would go in it.)
 
 **Manual** — grab a tarball from the
 [releases page](https://github.com/huyz0/autoreview/releases), check it
