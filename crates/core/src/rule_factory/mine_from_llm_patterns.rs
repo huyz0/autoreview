@@ -114,7 +114,10 @@ fn top_files_by_package_fan_in(repo_root: &Path, graph: &autoreview_archgraph::I
     }
 
     let mut ranked: Vec<(String, PathBuf)> = largest_file_for_package.into_iter().map(|(package, (path, _))| (package, path)).collect();
-    ranked.sort_by(|(a, _), (b, _)| graph.fan_in(b).cmp(&graph.fan_in(a)));
+    // `Reverse` rather than a flipped comparator: clippy's
+    // `unnecessary_sort_by` rejects the latter, and both sorts are stable
+    // so packages with equal fan-in keep their existing relative order.
+    ranked.sort_by_key(|(package, _)| std::cmp::Reverse(graph.fan_in(package)));
     ranked.into_iter().take(max_files).map(|(_, path)| path).collect()
 }
 
