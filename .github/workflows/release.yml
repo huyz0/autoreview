@@ -173,6 +173,7 @@ jobs:
             desc "Portable, hierarchical, deterministic-first code review CLI"
             homepage "https://github.com/${repo}"
             version "${version}"
+            license "Apache-2.0"
 
             on_macos do
               on_arm do

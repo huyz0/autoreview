@@ -2,6 +2,7 @@
 name = "autoreview-symindex"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 tree-sitter.workspace = true

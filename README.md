@@ -204,3 +204,7 @@ cargo clippy --workspace --tests
 Tests that depend on `ast-grep` or `golangci-lint` skip themselves cleanly
 when those tools aren't on `PATH`, printing what they skipped rather than
 failing.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).
