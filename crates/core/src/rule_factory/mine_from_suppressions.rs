@@ -30,14 +30,44 @@ use crate::storage::history_store::MinedFindingRow;
 /// analyzer here at all) — kept anyway, since a mined candidate from a
 /// language this project doesn't yet check is still useful signal for a
 /// human to see, and costs nothing to detect.
-const SUPPRESSION_MARKERS: &[&str] = &["// nolint", "//nolint", "@SuppressWarnings", "// eslint-disable", "/* eslint-disable", "# noqa"];
+///
+/// A suppression comment is a standing "we know, and we chose to ignore
+/// it" marker, which makes it strong evidence of a rule a team actually
+/// cares about. Covering a language's *linter* syntax but not its
+/// *compiler* one leaves that evidence on the floor.
+///
+/// `#[allow(` and the TypeScript markers were missing until this list was
+/// checked against a real repo: run over autoreview's own source, which
+/// carries 8 `#[allow(...)]` attributes, this source reported "no
+/// linter-suppression comments found" — it could not see the language it
+/// is itself written in.
+const SUPPRESSION_MARKERS: &[&str] = &[
+    "// nolint",
+    "//nolint",
+    "@SuppressWarnings",
+    "// eslint-disable",
+    "/* eslint-disable",
+    "# noqa",
+    // Rust: the compiler's own lint suppression, plus clippy's.
+    "#[allow(",
+    "#![allow(",
+    "#[expect(",
+    // TypeScript: the type-checker's suppressions. `eslint-disable` above
+    // only covers the linter, so a repo that suppresses type errors
+    // rather than lint errors was invisible despite `ts`/`tsx` being in
+    // SOURCE_EXTENSIONS all along.
+    "@ts-ignore",
+    "@ts-expect-error",
+    // Python: mypy's, alongside flake8's `# noqa` above.
+    "# type: ignore",
+];
 
 /// Directory names never worth walking into — vendored/generated/build
 /// output, which can be enormous and never contains a suppression comment
 /// a human actually wrote.
 const SKIP_DIRS: &[&str] = &[".git", "vendor", "node_modules", "dist", "build", "target", ".autoreview"];
 
-const SOURCE_EXTENSIONS: &[&str] = &["go", "java", "kt", "kts", "js", "jsx", "ts", "tsx", "py"];
+const SOURCE_EXTENSIONS: &[&str] = &["go", "java", "kt", "kts", "js", "jsx", "ts", "tsx", "py", "rs"];
 
 /// The first marker matched on `line`, if any — pure, tested directly
 /// rather than only through the whole-file walk.
@@ -129,9 +159,35 @@ mod tests {
         }
     }
 
+    /// Regression test for a real blind spot: this source reported "no
+    /// linter-suppression comments found" against autoreview's own repo,
+    /// which carries 8 `#[allow(...)]` attributes — it could not see the
+    /// language it is written in. The TypeScript entries cover the same
+    /// class of gap: `ts`/`tsx` were already scanned, but only ESLint's
+    /// markers were recognized, so a repo suppressing *type* errors
+    /// rather than lint errors was equally invisible.
+    #[test]
+    fn recognizes_compiler_level_suppressions_not_just_linter_ones() {
+        for line in [
+            "#[allow(dead_code)]",
+            "#![allow(clippy::too_many_arguments)]",
+            "#[expect(unused_variables)]",
+            "// @ts-ignore",
+            "// @ts-expect-error remove once the upstream types land",
+            "value = compute()  # type: ignore[arg-type]",
+        ] {
+            assert!(suppression_marker_in_line(line).is_some(), "expected {line:?} to be recognized");
+        }
+    }
+
     #[test]
     fn does_not_match_an_ordinary_line() {
         assert!(suppression_marker_in_line("result, err := risky()").is_none());
+        // Guards the `#[allow(` marker against matching ordinary Rust
+        // attributes — it has to be specific enough not to fire on every
+        // `#[derive(...)]` in the codebase.
+        assert!(suppression_marker_in_line("#[derive(Debug, Clone)]").is_none());
+        assert!(suppression_marker_in_line("let allowed = check(x);").is_none());
     }
 
     #[test]

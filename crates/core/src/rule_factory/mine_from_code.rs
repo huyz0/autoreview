@@ -221,9 +221,35 @@ pub fn consistency_for_pair(repo_root: &Path, call_a: &str, call_b: &str, min_oc
     })
 }
 
+/// Directories never worth mining a *convention* from: vendored and
+/// generated output, plus anything test-shaped.
+///
+/// Excluding tests is the important part, and it was learned the hard
+/// way. Run against autoreview's own repo, 416 of the 417 files this
+/// walker matched lived under `tests/`, and the single "convention" it
+/// reported was `getRuntime() -> exec()` mined out of a *deliberately
+/// vulnerable* rule fixture — precisely the anti-pattern the rule catalog
+/// exists to flag, proposed as a rule to enforce. Test code is the worst
+/// available evidence for "what does this codebase do on purpose": it is
+/// full of intentional anti-patterns, and its conventions differ from
+/// production code's even when it isn't.
+const SKIP_DIRS: &[&str] = &[".git", "vendor", "node_modules", "target", "dist", "build", "out", ".autoreview", "tests", "test", "testdata", "__tests__", "spec", "fixtures", "__fixtures__", "testFixtures"];
+
+/// Go and JS/TS put tests *beside* the code they test rather than under a
+/// test directory, so a directory-name filter alone would miss them.
+fn is_test_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return false };
+    name.ends_with("_test.go")
+        || name.ends_with("Test.java")
+        || name.ends_with("Tests.java")
+        || name.ends_with("Test.kt")
+        || name.ends_with("Tests.kt")
+        || [".test.", ".spec."].iter().any(|marker| name.contains(marker))
+}
+
 /// `pub(crate)` — reused by `mine_from_llm_patterns`'s representative-file
-/// sampling, which needs the same vendor/`.git`-excluding walk this
-/// module already has rather than a second copy of it.
+/// sampling, which needs the same test/vendor-excluding walk this module
+/// already has rather than a second copy of it.
 pub(crate) fn source_files(repo_root: &Path, extensions: &[&str]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     collect_source_files(repo_root, extensions, &mut out);
@@ -235,11 +261,11 @@ fn collect_source_files(dir: &Path, extensions: &[&str], out: &mut Vec<PathBuf>)
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
         if path.is_dir() {
-            if path.file_name().and_then(|n| n.to_str()).map(|n| n == ".git" || n == "vendor" || n == "node_modules").unwrap_or(false) {
+            if path.file_name().and_then(|n| n.to_str()).map(|n| SKIP_DIRS.contains(&n)).unwrap_or(false) {
                 continue;
             }
             collect_source_files(&path, extensions, out);
-        } else if path.extension().and_then(|e| e.to_str()).is_some_and(|ext| extensions.contains(&ext)) {
+        } else if path.extension().and_then(|e| e.to_str()).is_some_and(|ext| extensions.contains(&ext)) && !is_test_file(&path) {
             out.push(path);
         }
     }
@@ -316,6 +342,24 @@ mod tests {
         // 4 Lock() occurrences total, only 3 have Unlock() within the
         // window -> 75% consistency, below the 90% threshold.
         assert!(!conventions.iter().any(|c| c.call_a == "Lock" && c.call_b == "Unlock"), "got: {conventions:#?}");
+    }
+
+    /// Regression test for the defect this filter exists to prevent: run
+    /// against autoreview's own repo, 416 of the 417 files this walker
+    /// matched were test fixtures, and the one "convention" it reported
+    /// was mined out of a deliberately vulnerable sample.
+    #[test]
+    fn skips_test_directories_and_test_named_files() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("internal/service.go"), "package internal\n\nfunc f() {\n\tmu.Lock()\n\tmu.Unlock()\n}\n");
+        write(&dir.path().join("tests/fixtures/bad.kt"), "class Main { fun f() { Runtime.getRuntime().exec(cmd) } }");
+        write(&dir.path().join("testdata/sample.go"), "package testdata\n\nfunc f() {\n\tmu.Lock()\n}\n");
+        write(&dir.path().join("internal/service_test.go"), "package internal\n\nfunc TestF(t *testing.T) {\n\tmu.Lock()\n}\n");
+        write(&dir.path().join("web/app.spec.ts"), "describe('x', () => { runtime.exec(cmd); });");
+
+        let files = source_files(dir.path(), SOURCE_EXTENSIONS);
+        let names: Vec<String> = files.iter().map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().replace('\\', "/")).collect();
+        assert_eq!(names, vec!["internal/service.go"], "only real production source should be mined for conventions, got: {names:?}");
     }
 
     #[test]
