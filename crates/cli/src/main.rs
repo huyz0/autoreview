@@ -45,7 +45,7 @@ enum Commands {
         /// Suppress findings whose fingerprint was already reported in the most recent prior run on this repo
         #[arg(long)]
         incremental: bool,
-        /// Which agent backend drives specialists: claude-code (default), pi, or local-llm
+        /// Which agent backend drives specialists: claude-code (default), pi, local-llm, or openai-compatible
         #[arg(long)]
         backend: Option<String>,
         /// Re-run automatically whenever base...head changes (e.g. a new

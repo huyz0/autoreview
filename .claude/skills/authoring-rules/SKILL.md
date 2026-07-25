@@ -14,7 +14,11 @@ description: >
 autoreview is a static-review CLI with its own rule engine (ast-grep-based
 pattern matching, plus taint/threshold/call-sequence kinds — see
 `reference/rule-dsl.md`). This skill turns something a human noticed once
-into a rule that catches it automatically from then on, using whatever tools
+into a rule that catches it automatically from then on. To *run* a review
+and act on its findings rather than author a rule, use the
+[`running-reviews`](../running-reviews/SKILL.md) skill instead.
+
+It uses whatever tools
 you already have (repo access, `git`, `gh`/Bitbucket API, grep) instead of
 autoreview's own limited, non-interactive mining passes — you can actually
 read the PR discussion, follow the fix across files, and use judgment about

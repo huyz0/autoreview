@@ -131,9 +131,18 @@ autoreview rules mine
 autoreview rules review
 ```
 
-If you'd rather have a coding agent author a rule directly from something it
-found, this repo ships a skill for that at
-[`.claude/skills/authoring-rules/`](.claude/skills/authoring-rules/SKILL.md).
+## Driving autoreview from a coding agent
+
+This repo ships two skills under `.claude/skills/`, picked up automatically
+by any agent harness that reads them:
+
+- [`running-reviews`](.claude/skills/running-reviews/SKILL.md) — run a
+  review and act on it: interpret the report, explain why a finding fired,
+  apply a suggested patch, and record verdicts without corrupting the
+  rule-learning loop.
+- [`authoring-rules`](.claude/skills/authoring-rules/SKILL.md) — turn a
+  recurring pattern into a new deterministic rule, with the DSL reference
+  and the validate/register workflow.
 
 ## Commands
 
