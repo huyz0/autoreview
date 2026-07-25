@@ -560,6 +560,15 @@ fn rules_bench_fails_clearly_when_no_rule_has_been_drafted() {
 
 #[test]
 fn rules_bench_reports_needs_fixtures_for_a_drafted_rule_with_no_test_files() {
+    // `rules bench` runs the drafted rule through the real ast-grep
+    // binary, so without it the command exits with a bare ENOENT instead
+    // of reporting a verdict. Every other tool-dependent test here guards
+    // the same way; this one did not, and it was the single failure that
+    // took the macOS CI job red on its first ever run.
+    if !ast_grep_available() {
+        eprintln!("skipping: ast-grep not on PATH");
+        return;
+    }
     let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
     let candidate_dir = repo.path().join(".autoreview/rules/candidates/c1");
     std::fs::create_dir_all(&candidate_dir).unwrap();

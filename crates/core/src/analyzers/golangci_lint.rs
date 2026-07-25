@@ -229,8 +229,29 @@ mod tests {
         }
     }
 
+    /// Requires golangci-lint **v2**, not merely a binary called
+    /// golangci-lint. `run_golangci_lint` passes `--output.json.path`,
+    /// which only exists in v2 (v1 used `--out-format`), so a v1 install
+    /// satisfies a presence-only check and then rejects the one flag this
+    /// analyzer uses.
+    ///
+    /// That is not hypothetical: CI installed v1 for weeks — the Go module
+    /// path was missing its `/v2` suffix — and these tests failed on every
+    /// run rather than skipping, because this check only asked whether the
+    /// binary existed. Skipping on a version mismatch keeps the suite
+    /// honest for anyone with v1 on their PATH instead of handing them
+    /// four confusing panics.
     fn golangci_lint_available() -> bool {
-        Command::new("golangci-lint").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+        let Ok(output) = Command::new("golangci-lint").arg("--version").output() else { return false };
+        if !output.status.success() {
+            return false;
+        }
+        let version = String::from_utf8_lossy(&output.stdout);
+        let is_v2 = version.contains("version 2.") || version.contains("version v2.");
+        if !is_v2 {
+            eprintln!("skipping: golangci-lint v2 required (this analyzer passes --output.json.path), found: {}", version.lines().next().unwrap_or("unknown"));
+        }
+        is_v2
     }
 
     fn write_go_module(files: &[(&str, &str)]) -> tempfile::TempDir {
