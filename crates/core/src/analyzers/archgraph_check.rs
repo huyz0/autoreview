@@ -4,10 +4,7 @@
 //!
 //! Deliberately diff-relevant, not a whole-repo audit dump: archgraph
 //! builds the graph over the *entire* repo (a cycle can't be seen from one
-//! file), but this only reports a cycle when at least one of its packages
-//! contains a file the current diff actually touched — otherwise every
-//! `autoreview diff` on an unrelated change would repeat the same
-//! pre-existing cycles it can't do anything about in this review. Go and
+//! file), then locates the imports that form the cycle in touched files. Go and
 //! Java/Kotlin are checked independently (two separate graphs, two
 //! separate package-resolution strategies — see `autoreview_archgraph`'s
 //! own module doc for why) and their findings are simply concatenated.
@@ -15,7 +12,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use autoreview_archgraph::{build_go_import_graph, build_java_kotlin_import_graph, detect_cycles, discover_go_module_path, go_package_for_file, java_kotlin_package_for_file, ImportGraph};
+use autoreview_archgraph::{build_go_import_graph, build_java_kotlin_import_graph, detect_cycles, discover_go_module_path, go_imports_with_lines, go_package_for_file, java_kotlin_imports_with_lines, java_kotlin_package_for_file, ImportGraph};
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
 /// Renders a cycle with the specific import(s) crossing each edge —
@@ -52,22 +49,41 @@ fn describe_cycle_with_symbols(cycle: &[String], graph: &ImportGraph) -> String 
 /// anchoring each finding at one of those changed files. Shared between
 /// the Go and Java/Kotlin call sites below — only the graph and the
 /// package-resolution strategy differ between them.
-fn report_cycles_touching_changed_files(graph: &ImportGraph, changed_files: &[&String], package_for_file: impl Fn(&str) -> Option<String>) -> Vec<AgentFinding> {
+fn report_cycles_touching_changed_files(
+    repo_root: &Path,
+    graph: &ImportGraph,
+    changed_files: &[&String],
+    package_for_file: impl Fn(&str) -> Option<String>,
+    imports_with_lines: fn(&str) -> Vec<(String, u32)>,
+) -> Vec<AgentFinding> {
     let cycles = detect_cycles(graph);
     if cycles.is_empty() {
         return Vec::new();
     }
 
-    let changed_packages: HashSet<String> = changed_files.iter().filter_map(|f| package_for_file(f)).collect();
+    let changed_imports: Vec<_> = changed_files.iter().filter_map(|path| {
+        let package = package_for_file(path)?;
+        let source = std::fs::read_to_string(repo_root.join(path)).ok()?;
+        Some((path, package, imports_with_lines(&source)))
+    }).collect();
 
     let mut findings = Vec::new();
     let mut reported: HashSet<Vec<String>> = HashSet::new();
 
     for cycle in &cycles {
-        let cycle_packages: HashSet<&String> = cycle.iter().collect();
-        if !changed_packages.iter().any(|p| cycle_packages.contains(p)) {
-            continue;
+        let mut locations = Vec::new();
+        for (file, package, imports) in &changed_imports {
+            for edge in cycle.windows(2).filter(|edge| edge[0] == *package) {
+                let Some(symbols) = graph.symbols_crossing(&edge[0], &edge[1]) else { continue };
+                locations.extend(imports.iter().filter(|(target, _)| symbols.contains(target)).map(|(target, line)| Location {
+                    path: (**file).to_string(),
+                    range: LocationRange { start_line: *line, ..Default::default() },
+                    snippet: target.clone(),
+                    side: Side::New,
+                }));
+            }
         }
+        let Some((location, related)) = locations.split_first() else { continue };
         // Cycles are reported starting from whichever node the DFS visited
         // first, which can differ run to run if edge iteration order
         // changes — normalize by rotating to start at the lexicographically
@@ -76,16 +92,11 @@ fn report_cycles_touching_changed_files(graph: &ImportGraph, changed_files: &[&S
         let mut canonical = cycle[..cycle.len() - 1].to_vec();
         let min_idx = canonical.iter().enumerate().min_by_key(|(_, s)| s.as_str()).map(|(i, _)| i).unwrap_or(0);
         canonical.rotate_left(min_idx);
-        if !reported.insert(canonical.clone()) {
+        canonical.push(canonical[0].clone());
+        let cycle_description = describe_cycle_with_symbols(&canonical, graph);
+        if !reported.insert(canonical) {
             continue;
         }
-
-        // Anchor the finding at one of the actually-changed files that
-        // belongs to a package in this cycle.
-        let anchor_file = changed_files.iter().find(|f| package_for_file(f).map(|p| cycle_packages.contains(&p)).unwrap_or(false));
-        let Some(anchor_file) = anchor_file else { continue };
-
-        let cycle_description = describe_cycle_with_symbols(cycle, graph);
         findings.push(AgentFinding {
             source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-archgraph".to_string(), rule_id: Some("import-cycle".to_string()), aspect: None, backend: None },
             category: "architecture".to_string(),
@@ -95,8 +106,8 @@ fn report_cycles_touching_changed_files(graph: &ImportGraph, changed_files: &[&S
             message: format!(
                 "This diff touches a package involved in a circular import: {cycle_description}. Cyclic package dependencies make it impossible to reason about either package in isolation and often signal a missing shared abstraction — extract the shared pieces into a new package both can depend on."
             ),
-            location: Location { path: (*anchor_file).clone(), range: LocationRange { start_line: 1, ..Default::default() }, snippet: cycle_description, side: Side::New },
-            related_locations: None,
+            location: location.clone(),
+            related_locations: (!related.is_empty()).then(|| related.to_vec()),
             suggestion: None,
             tags: None,
             meta: None,
@@ -118,14 +129,14 @@ pub fn run_archgraph_check(repo_root: &Path, changed_files: &[String]) -> Vec<Ag
         let changed_go_files: Vec<&String> = changed_files.iter().filter(|f| f.ends_with(".go")).collect();
         if !changed_go_files.is_empty() {
             let graph = build_go_import_graph(repo_root, &module_path);
-            findings.extend(report_cycles_touching_changed_files(&graph, &changed_go_files, |f| go_package_for_file(f, &module_path)));
+            findings.extend(report_cycles_touching_changed_files(repo_root, &graph, &changed_go_files, |f| go_package_for_file(f, &module_path), go_imports_with_lines));
         }
     }
 
     let changed_java_kotlin_files: Vec<&String> = changed_files.iter().filter(|f| f.ends_with(".java") || f.ends_with(".kt")).collect();
     if !changed_java_kotlin_files.is_empty() {
         let graph = build_java_kotlin_import_graph(repo_root);
-        findings.extend(report_cycles_touching_changed_files(&graph, &changed_java_kotlin_files, |f| java_kotlin_package_for_file(repo_root, f)));
+        findings.extend(report_cycles_touching_changed_files(repo_root, &graph, &changed_java_kotlin_files, |f| java_kotlin_package_for_file(repo_root, f), java_kotlin_imports_with_lines));
     }
 
     findings
@@ -167,6 +178,7 @@ mod tests {
         let findings = run_archgraph_check(dir.path(), &["internal/a/a.go".to_string()]);
         assert_eq!(findings.len(), 1, "got: {findings:#?}");
         assert_eq!(findings[0].category, "architecture");
+        assert_eq!(findings[0].location.range.start_line, 3);
         assert!(findings[0].message.contains("internal/a"));
         assert!(findings[0].message.contains("internal/b"));
     }
@@ -263,9 +275,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_source_file(dir.path(), "src/com/example/a/A.java", "package com.example.a;\n\nimport com.example.b.B;\n\nclass A {\n    B b;\n}\n");
         write_source_file(dir.path(), "src/com/example/b/B.java", "package com.example.b;\n\nimport com.example.a.A;\n\nclass B {\n    A a;\n}\n");
-        write_source_file(dir.path(), "src/com/example/unrelated/U.java", "package com.example.unrelated;\n\nclass U {}\n");
+        write_source_file(dir.path(), "src/com/example/a/U.java", "package com.example.a;\n\nclass U {}\n");
 
-        let findings = run_archgraph_check(dir.path(), &["src/com/example/unrelated/U.java".to_string()]);
+        let findings = run_archgraph_check(dir.path(), &["src/com/example/a/U.java".to_string()]);
         assert!(findings.is_empty());
     }
 }

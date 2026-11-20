@@ -1,11 +1,5 @@
-//! Shared language dispatch/parser-setup for the languages `autoreview`
-//! analyzes (Go, Java, Kotlin, TypeScript, TSX, JavaScript). Extracted from
-//! three near-identical copies that had accumulated in `autoreview-core`
-//! (`patch_check.rs`, `analyzers/practices.rs`, `analyzers/complexity.rs`)
-//! and `autoreview-symindex` (`extract/mod.rs`) — this crate is the single
-//! source of truth going forward; existing callers keep their own
-//! extension-matching helpers where they need a project-local enum shape,
-//! but new code (starting with `autoreview-dataflow`) should use this.
+//! Shared language dispatch and parser setup for `autoreview`. Analyzers
+//! can use their own language subsets when they support fewer grammars.
 //!
 //! TypeScript/TSX/JavaScript are three distinct tree-sitter grammars (JSX
 //! syntax is handled by the JavaScript grammar itself, not a separate one —
@@ -22,6 +16,7 @@ pub enum Language {
     TypeScript,
     Tsx,
     JavaScript,
+    Rust,
 }
 
 /// Extension-based language dispatch — the same convention already used
@@ -34,6 +29,7 @@ pub fn language_for_path(path: &std::path::Path) -> Option<Language> {
         "ts" | "mts" | "cts" => Some(Language::TypeScript),
         "tsx" => Some(Language::Tsx),
         "js" | "jsx" | "mjs" | "cjs" => Some(Language::JavaScript),
+        "rs" => Some(Language::Rust),
         _ => None,
     }
 }
@@ -59,6 +55,7 @@ fn ts_language(language: Language) -> tree_sitter::Language {
         Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         Language::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
         Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+        Language::Rust => tree_sitter_rust::LANGUAGE.into(),
     }
 }
 
@@ -89,6 +86,7 @@ mod tests {
         assert_eq!(language_for_path(std::path::Path::new("foo.jsx")), Some(Language::JavaScript));
         assert_eq!(language_for_path(std::path::Path::new("foo.mjs")), Some(Language::JavaScript));
         assert_eq!(language_for_path(std::path::Path::new("foo.cjs")), Some(Language::JavaScript));
+        assert_eq!(language_for_path(std::path::Path::new("main.rs")), Some(Language::Rust));
         assert_eq!(language_for_path(std::path::Path::new("foo.py")), None);
     }
 
@@ -112,6 +110,7 @@ mod tests {
             (Language::TypeScript, "const x: number = 1;\n"),
             (Language::Tsx, "const x = <div>{1}</div>;\n"),
             (Language::JavaScript, "const x = 1;\n"),
+            (Language::Rust, "fn main() { let x = 1; }\n"),
         ] {
             let mut parser = parser_for(lang).expect("parser should load");
             let tree = parser.parse(src, None).expect("should parse");

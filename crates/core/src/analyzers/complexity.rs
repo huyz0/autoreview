@@ -1,14 +1,6 @@
-//! Track 2 (metric-based half) of the rule-pack expansion plan: long
-//! method, long parameter list, deep nesting, and god class. ast-grep's
-//! declarative YAML has no aggregate/threshold primitive ("more than 4
-//! parameters", "nesting depth > 3") — confirmed repeatedly this session
-//! fighting its pattern-parsing ambiguities for far simpler syntactic
-//! rules — so rather than a hybrid "ast-grep locates, Rust measures"
-//! design, this is a single self-contained brace-depth scanner, the same
-//! shape as `duplication.rs`. A real, if approximate, cost: it's a line
-//! scan with a heuristic for "this line opens a function/class", not a
-//! real parse, so unusual formatting (Allman brace style, e.g.) can throw
-//! it off. Verified against real representative samples per language.
+//! Threshold checks use syntax-tree ranges for Java and line-based metrics for other languages.
+
+mod java;
 
 use std::collections::HashMap;
 
@@ -165,7 +157,7 @@ fn opens_unparenthesized_arrow(before_brace: &str) -> Option<&str> {
 /// Extracts a method's name from its declaration line (the same shape
 /// `opens_function` already validated) — the last identifier before the
 /// parameter list, e.g. `"public String getName()"` -> `"getName"`. Used
-/// only for the Data Class check's naming-convention heuristic.
+/// for identifying named functions in line-based checks.
 pub(crate) fn function_name(trimmed: &str) -> Option<&str> {
     if !trimmed.ends_with('{') {
         return None;
@@ -199,12 +191,12 @@ fn is_abstract_member_signature(trimmed: &str) -> bool {
     trimmed[..open_paren].trim().chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_')
 }
 
-/// The class's own name, for the Utility Class check's constructor-name
-/// match — the token immediately after the `class` keyword.
-fn class_name(trimmed: &str) -> Option<&str> {
-    let words: Vec<&str> = trimmed.split_whitespace().collect();
-    let idx = words.iter().position(|w| *w == "class")?;
-    words.get(idx + 1).map(|s| s.trim_end_matches('{').trim())
+fn java_has_modifier(node: tree_sitter::Node<'_>, modifier: &str) -> bool {
+    let mut cursor = node.walk();
+    let Some(modifiers) = node.named_children(&mut cursor).find(|child| child.kind() == "modifiers") else { return false };
+    let mut cursor = modifiers.walk();
+    let present = modifiers.children(&mut cursor).any(|child| child.kind() == modifier);
+    present
 }
 
 fn opens_control_block(trimmed: &str) -> bool {
@@ -243,21 +235,8 @@ struct OpenSpan {
 }
 
 enum SpanKind {
-    Function { name_hint: String, param_count: usize, max_nesting: usize, branch_count: usize, return_count: usize, cognitive_score: usize },
-    /// `is_java` (not Kotlin) gates the Data Class check: Kotlin has
-    /// first-class `data class` support, an intentional, encouraged
-    /// language feature, not a smell — flagging it would be actively wrong
-    /// for idiomatic Kotlin. Data Class is fundamentally a JavaBean-era
-    /// Java pattern (manual getters/setters where a `record` would do).
-    Class {
-        member_count: usize,
-        trivial_accessor_count: usize,
-        is_java: bool,
-        name: String,
-        saw_any_method: bool,
-        all_methods_static: bool,
-        has_private_constructor: bool,
-    },
+    Function { param_count: usize, max_nesting: usize, branch_count: usize, return_count: usize, cognitive_score: usize },
+    Class { member_count: usize },
     /// Go/Java `switch` only (deliberately not Kotlin's `when`: its arms use
     /// a bare `->` with no keyword prefix, which is indistinguishable from a
     /// lambda expression by this line-scan — counting them would be a
@@ -288,6 +267,93 @@ fn build_finding(rule_id: &str, path: &str, start_line: u32, end_line: u32, titl
     }
 }
 
+struct FunctionMetrics {
+    start_line: u32,
+    end_line: u32,
+    line_count: usize,
+    param_count: usize,
+    max_nesting: usize,
+    branch_count: usize,
+    return_count: usize,
+    cognitive_score: usize,
+}
+
+type MakeFinding<'a> = dyn Fn(&str, &str, u32, u32, String, String) -> AgentFinding + 'a;
+
+fn append_function_findings(
+    findings: &mut Vec<AgentFinding>, path: &str, metrics: FunctionMetrics,
+    thresholds: &ComplexityThresholds, make_finding: &MakeFinding<'_>,
+) {
+    let FunctionMetrics { end_line, line_count, param_count, max_nesting, branch_count, return_count, cognitive_score, .. } = metrics;
+    let cyclomatic_complexity = branch_count + 1;
+    if cyclomatic_complexity > thresholds.cyclomatic_complexity {
+        findings.push(make_finding(
+            "cyclomatic-complexity",
+            path,
+            metrics.start_line,
+            end_line,
+            format!("High cyclomatic complexity ({cyclomatic_complexity})"),
+            format!(
+                "This function/method has an estimated cyclomatic complexity of {cyclomatic_complexity} (over the {}-threshold) — {branch_count} branch point(s) plus the base path. Consider extracting some of its branches into named helper functions, or replacing a long if/else-if chain with a lookup table or polymorphism.",
+                thresholds.cyclomatic_complexity
+            ),
+        ));
+    }
+    if cognitive_score > thresholds.cognitive_complexity {
+        findings.push(make_finding(
+            "cognitive-complexity",
+            path,
+            metrics.start_line,
+            end_line,
+            format!("High cognitive complexity ({cognitive_score})"),
+            format!("This function/method has an estimated cognitive complexity of {cognitive_score} (over the {}-threshold, detekt's CognitiveComplexMethod) — unlike cyclomatic complexity, nested control structures compound this score instead of adding linearly, so it tracks how hard the function is to hold in your head better than branch count alone. Consider flattening nesting with early returns/guard clauses, or extracting inner blocks into named helpers.", thresholds.cognitive_complexity),
+        ));
+    }
+    if return_count > thresholds.too_many_returns {
+        findings.push(make_finding(
+            "too-many-returns",
+            path,
+            metrics.start_line,
+            end_line,
+            format!("Too many return points ({return_count})"),
+            format!(
+                "This function/method has {return_count} separate `return` statements (over the {}-threshold) — that many exit points makes it hard to reason about every path through the function. Consider consolidating logic or extracting some branches into their own functions.",
+                thresholds.too_many_returns
+            ),
+        ));
+    }
+    if line_count > thresholds.long_method {
+        findings.push(make_finding(
+            "long-method",
+            path,
+            metrics.start_line,
+            end_line,
+            format!("Long method ({line_count} lines)"),
+            format!("This function/method body is {line_count} lines long (over the {}-line threshold) — consider extracting smaller, named helper functions for its distinct steps.", thresholds.long_method),
+        ));
+    }
+    if param_count > thresholds.long_parameter_list {
+        findings.push(make_finding(
+            "long-parameter-list",
+            path,
+            metrics.start_line,
+            metrics.start_line,
+            format!("Long parameter list ({param_count} parameters)"),
+            format!("This function/method takes {param_count} parameters (over the {}-parameter threshold) — consider grouping related parameters into a struct/options object.", thresholds.long_parameter_list),
+        ));
+    }
+    if max_nesting > thresholds.deep_nesting {
+        findings.push(make_finding(
+            "deep-nesting",
+            path,
+            metrics.start_line,
+            end_line,
+            format!("Deep nesting ({max_nesting} levels)"),
+            format!("This function/method nests control-flow blocks {max_nesting} levels deep (over the {}-level threshold) — consider early returns/guard clauses or extracting the innermost blocks into their own functions.", thresholds.deep_nesting),
+        ));
+    }
+}
+
 /// Scans one file's content for long methods, long parameter lists, deep
 /// nesting, and (Java/Kotlin only) god classes, using the default
 /// thresholds. Thin wrapper over `detect_complexity_in_file_with_thresholds`
@@ -314,6 +380,10 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
         });
         build_finding(rule_id, path, start_line, end_line, title, message, meta)
     };
+    if language == ComplexityLanguage::JavaOrKotlin && path.ends_with(".java") {
+        return java::findings(path, content, thresholds, &make_finding);
+    }
+
     let mut findings = Vec::new();
     let mut depth: i32 = 0;
     let mut stack: Vec<OpenSpan> = Vec::new();
@@ -337,24 +407,13 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
         if let Some(param_list) = opens_function(trimmed) {
             // A class member's method body sits one level inside its
             // enclosing class span — count it there before pushing our own.
-            if let Some(OpenSpan { kind: SpanKind::Class { member_count, name, saw_any_method, all_methods_static, has_private_constructor, .. }, start_depth, .. }) = stack.last_mut() {
+            if let Some(OpenSpan { kind: SpanKind::Class { member_count, .. }, start_depth, .. }) = stack.last_mut() {
                 // A class's own body content lives one level deeper than
                 // its `start_depth` (recorded *before* its opening brace
                 // incremented `depth`) — so a direct member sits at
                 // `start_depth + 1`, not `start_depth` itself.
                 if depth == *start_depth + 1 {
                     *member_count += 1;
-                    let is_constructor = function_name(trimmed).map(|n| n == name.as_str()).unwrap_or(false);
-                    if is_constructor {
-                        if trimmed.contains("private") {
-                            *has_private_constructor = true;
-                        }
-                    } else {
-    *saw_any_method = true;
-                        if !trimmed.contains("static") {
-                            *all_methods_static = false;
-                        }
-                    }
                 }
             }
             if let Some(OpenSpan { kind: SpanKind::Interface { member_count }, start_depth, .. }) = stack.last_mut() {
@@ -365,7 +424,7 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
             stack.push(OpenSpan {
                 start_line: line_no,
                 start_depth: depth,
-                kind: SpanKind::Function { name_hint: trimmed.to_string(), param_count: count_params(param_list), max_nesting: 0, branch_count: 0, return_count: 0, cognitive_score: 0 },
+                kind: SpanKind::Function { param_count: count_params(param_list), max_nesting: 0, branch_count: 0, return_count: 0, cognitive_score: 0 },
             });
             depth += 1;
             continue;
@@ -375,15 +434,7 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
             stack.push(OpenSpan {
                 start_line: line_no,
                 start_depth: depth,
-                kind: SpanKind::Class {
-                    member_count: 0,
-                    trivial_accessor_count: 0,
-                    is_java: path.ends_with(".java"),
-                    name: class_name(trimmed).unwrap_or_default().to_string(),
-                    saw_any_method: false,
-                    all_methods_static: true,
-                    has_private_constructor: false,
-                },
+                kind: SpanKind::Class { member_count: 0 },
             });
             depth += 1;
             continue;
@@ -439,93 +490,15 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
                 }
                 let span = stack.pop().unwrap();
                 match span.kind {
-                    SpanKind::Function { name_hint, param_count, max_nesting, branch_count, return_count, cognitive_score } => {
+                    SpanKind::Function { param_count, max_nesting, branch_count, return_count, cognitive_score } => {
                         let end_line = line_no as u32;
                         let line_count = end_line - span.start_line as u32;
-                        let cyclomatic_complexity = branch_count + 1;
-                        if cyclomatic_complexity > thresholds.cyclomatic_complexity {
-                            findings.push(make_finding(
-                                "cyclomatic-complexity",
-                                path,
-                                span.start_line as u32,
-                                end_line,
-                                format!("High cyclomatic complexity ({cyclomatic_complexity})"),
-                                format!(
-                                    "This function/method has an estimated cyclomatic complexity of {cyclomatic_complexity} (over the {}-threshold) — {branch_count} branch point(s) plus the base path. Consider extracting some of its branches into named helper functions, or replacing a long if/else-if chain with a lookup table or polymorphism.",
-                                    thresholds.cyclomatic_complexity
-                                ),
-                            ));
-                        }
-                        if cognitive_score > thresholds.cognitive_complexity {
-                            findings.push(make_finding(
-                                "cognitive-complexity",
-                                path,
-                                span.start_line as u32,
-                                end_line,
-                                format!("High cognitive complexity ({cognitive_score})"),
-                                format!("This function/method has an estimated cognitive complexity of {cognitive_score} (over the {}-threshold, detekt's CognitiveComplexMethod) — unlike cyclomatic complexity, nested control structures compound this score instead of adding linearly, so it tracks how hard the function is to hold in your head better than branch count alone. Consider flattening nesting with early returns/guard clauses, or extracting inner blocks into named helpers.", thresholds.cognitive_complexity),
-                            ));
-                        }
-                        if return_count > thresholds.too_many_returns {
-                            findings.push(make_finding(
-                                "too-many-returns",
-                                path,
-                                span.start_line as u32,
-                                end_line,
-                                format!("Too many return points ({return_count})"),
-                                format!(
-                                    "This function/method has {return_count} separate `return` statements (over the {}-threshold) — that many exit points makes it hard to reason about every path through the function. Consider consolidating logic or extracting some branches into their own functions.",
-                                    thresholds.too_many_returns
-                                ),
-                            ));
-                        }
-                        if line_count as usize > thresholds.long_method {
-                            findings.push(make_finding(
-                                "long-method",
-                                path,
-                                span.start_line as u32,
-                                end_line,
-                                format!("Long method ({line_count} lines)"),
-                                format!("This function/method body is {line_count} lines long (over the {}-line threshold) — consider extracting smaller, named helper functions for its distinct steps.", thresholds.long_method),
-                            ));
-                        }
-                        if param_count > thresholds.long_parameter_list {
-                            findings.push(make_finding(
-                                "long-parameter-list",
-                                path,
-                                span.start_line as u32,
-                                span.start_line as u32,
-                                format!("Long parameter list ({param_count} parameters)"),
-                                format!("This function/method takes {param_count} parameters (over the {}-parameter threshold) — consider grouping related parameters into a struct/options object.", thresholds.long_parameter_list),
-                            ));
-                        }
-                        if max_nesting > thresholds.deep_nesting {
-                            findings.push(make_finding(
-                                "deep-nesting",
-                                path,
-                                span.start_line as u32,
-                                end_line,
-                                format!("Deep nesting ({max_nesting} levels)"),
-                                format!("This function/method nests control-flow blocks {max_nesting} levels deep (over the {}-level threshold) — consider early returns/guard clauses or extracting the innermost blocks into their own functions.", thresholds.deep_nesting),
-                            ));
-                        }
-                        // Trivial-accessor detection for the enclosing
-                        // class's Data Class check: a short (<=3 line)
-                        // getX/setX/isX method. Checked here (at the
-                        // method's own close, once its line count is known)
-                        // rather than at push time.
-                        if let Some(OpenSpan { kind: SpanKind::Class { trivial_accessor_count, is_java: true, .. }, start_depth, .. }) = stack.last_mut() {
-                            if depth == *start_depth + 1 && line_count as usize <= 3 {
-                                let is_accessor_name = function_name(&name_hint)
-                                    .map(|n| n.starts_with("get") || n.starts_with("set") || n.starts_with("is"))
-                                    .unwrap_or(false);
-                                if is_accessor_name {
-                                    *trivial_accessor_count += 1;
-                                }
-                            }
-                        }
+                        append_function_findings(&mut findings, path, FunctionMetrics {
+                            start_line: span.start_line as u32, end_line, line_count: line_count as usize,
+                            param_count, max_nesting, branch_count, return_count, cognitive_score,
+                        }, thresholds, &make_finding);
                     }
-                    SpanKind::Class { member_count, trivial_accessor_count, is_java, saw_any_method, all_methods_static, has_private_constructor, .. } => {
+                    SpanKind::Class { member_count } => {
                         if member_count > thresholds.god_class {
                             findings.push(make_finding(
                                 "god-class",
@@ -534,26 +507,6 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
                                 line_no as u32,
                                 format!("Large class ({member_count} methods)"),
                                 format!("This class defines {member_count} methods (over the {}-method threshold) — a class this large is often doing more than one job; consider splitting it by responsibility.", thresholds.god_class),
-                            ));
-                        }
-                        if is_java && member_count >= thresholds.data_class_min_accessors && trivial_accessor_count == member_count {
-                            findings.push(make_finding(
-                                "data-class",
-                                path,
-                                span.start_line as u32,
-                                line_no as u32,
-                                format!("Possible Data Class ({member_count} trivial accessors, no other behavior)"),
-                                format!("Every method in this class ({member_count} of them) is a short get/set/is accessor — the class holds data but no behavior (Fowler's Data Class smell). Heuristic — a DTO/value holder is often intentional, so confirm this actually needs behavior before restructuring; if it's genuinely just data, a Java `record` may be a better fit than manual accessors."),
-                            ));
-                        }
-                        if is_java && saw_any_method && all_methods_static && !has_private_constructor && member_count >= thresholds.utility_class_min_static_methods {
-                            findings.push(make_finding(
-                                "utility-class-public-constructor",
-                                path,
-                                span.start_line as u32,
-                                line_no as u32,
-                                "Utility class with a public constructor".to_string(),
-                                "Every method in this class is static and there's no private constructor — this class can be misleadingly instantiated even though instances have no purpose (Checkstyle's HideUtilityClassConstructor / detekt's UtilityClassWithPublicConstructor). Add a private no-arg constructor, or make the class `final` with all-static access if it's meant purely as a namespace.".to_string(),
                             ));
                         }
                     }

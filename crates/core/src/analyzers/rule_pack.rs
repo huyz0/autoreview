@@ -9,13 +9,17 @@
 use std::path::Path;
 use std::process::Command;
 
-/// Writes one rule file's contents to `dest_path`, creating parent
-/// directories as needed.
+/// Writes only the ast-grep portion of an Autoreview pattern rule. Recent
+/// ast-grep versions reject unknown top-level fields.
 pub(crate) fn write_rule_file(dest_path: &Path, contents: &str) -> anyhow::Result<()> {
+    let mut rule: serde_yaml::Mapping = serde_yaml::from_str(contents)?;
+    for key in ["category", "semantic", "kind"] {
+        rule.remove(serde_yaml::Value::String(key.to_string()));
+    }
     if let Some(parent) = dest_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(dest_path, contents)?;
+    std::fs::write(dest_path, serde_yaml::to_string(&rule)?)?;
     Ok(())
 }
 
@@ -32,7 +36,32 @@ pub(crate) fn run_ast_grep_scan(temp_dir: &Path, repo_root: &Path, relevant: &[&
     let sgconfig_path = temp_dir.join("sgconfig.yml");
     std::fs::write(&sgconfig_path, "ruleDirs:\n  - rules\n")?;
 
-    let output = match Command::new("ast-grep").arg("scan").arg("--config").arg(&sgconfig_path).arg("--json").args(relevant).current_dir(repo_root).output() {
+    // Keep the combined argument size below Windows' process limit.
+    // Bound both path count and length to cover quoting and command flags.
+    const PATH_BUDGET: usize = 12_000;
+    let mut matches = Vec::new();
+    let mut batch = Vec::new();
+    let mut size = 0;
+    for path in relevant {
+        let path_size = path.len() + 3;
+        if size + path_size > PATH_BUDGET && !batch.is_empty() {
+            let Some(found) = scan_batch(&sgconfig_path, repo_root, &batch)? else { return Ok(None) };
+            matches.extend(found);
+            batch.clear();
+            size = 0;
+        }
+        batch.push(*path);
+        size += path_size;
+    }
+    if !batch.is_empty() {
+        let Some(found) = scan_batch(&sgconfig_path, repo_root, &batch)? else { return Ok(None) };
+        matches.extend(found);
+    }
+    Ok(Some(matches))
+}
+
+fn scan_batch(sgconfig_path: &Path, repo_root: &Path, relevant: &[&str]) -> anyhow::Result<Option<Vec<serde_json::Value>>> {
+    let output = match Command::new("ast-grep").arg("scan").arg("--config").arg(sgconfig_path).arg("--json").arg("--").args(relevant).current_dir(repo_root).output() {
         Ok(output) => output,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err.into()),

@@ -89,9 +89,13 @@ pub fn discover_go_module_path(repo_root: &Path) -> Option<String> {
 /// package interprocedural summaries for `typed-nil-interface-return`)
 /// can reuse the same parsing instead of re-deriving it.
 pub fn extract_go_imports(content: &str) -> Vec<String> {
+    go_imports_with_lines(content).into_iter().map(|(target, _)| target).collect()
+}
+
+pub fn go_imports_with_lines(content: &str) -> Vec<(String, u32)> {
     let mut imports = Vec::new();
     let mut in_block = false;
-    for raw_line in content.lines() {
+    for (index, raw_line) in content.lines().enumerate() {
         let line = raw_line.trim();
         if let Some(rest) = line.strip_prefix("import ") {
             let rest = rest.trim();
@@ -100,7 +104,7 @@ pub fn extract_go_imports(content: &str) -> Vec<String> {
                 continue;
             }
             if let Some(path) = extract_quoted(rest) {
-                imports.push(path);
+                imports.push((path, index as u32 + 1));
             }
             continue;
         }
@@ -110,7 +114,7 @@ pub fn extract_go_imports(content: &str) -> Vec<String> {
                 continue;
             }
             if let Some(path) = extract_quoted(line) {
-                imports.push(path);
+                imports.push((path, index as u32 + 1));
             }
         }
     }
@@ -193,10 +197,18 @@ pub fn declared_package(content: &str) -> Option<String> {
 /// file's own cross-package call summaries (mirroring how it already uses
 /// `discover_go_module_path`/`extract_go_imports` for Go).
 pub fn extract_java_kotlin_imports(content: &str) -> Vec<String> {
+    java_kotlin_imports_with_lines(content).into_iter().map(|(target, _)| target).collect()
+}
+
+pub fn java_kotlin_imports_with_lines(content: &str) -> Vec<(String, u32)> {
     content
         .lines()
-        .map(str::trim)
-        .filter_map(|line| line.strip_prefix("import ").map(|rest| rest.strip_prefix("static ").unwrap_or(rest).trim_end_matches(';').trim().to_string()))
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let rest = line.trim().strip_prefix("import ")?;
+            let target = rest.strip_prefix("static ").unwrap_or(rest).trim_end_matches(';').trim();
+            Some((target.to_string(), index as u32 + 1))
+        })
         .collect()
 }
 
@@ -216,17 +228,33 @@ pub fn import_package(import_path: &str) -> String {
 fn walk_java_kotlin_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else { continue };
         let path = entry.path();
-        if path.is_dir() {
+        if kind.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if SKIP_DIRS.contains(&name) {
                 continue;
             }
             walk_java_kotlin_files(&path, out);
-        } else if matches!(path.extension().and_then(|e| e.to_str()), Some("java") | Some("kt")) {
+        } else if kind.is_file() && matches!(path.extension().and_then(|e| e.to_str()), Some("java") | Some("kt")) {
             out.push(path);
         }
     }
+}
+
+/// Index declared packages once so callers can resolve many imports in a
+/// large repository without re-reading every source file for each import.
+pub fn index_java_kotlin_packages(repo_root: &Path) -> HashMap<String, Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
+    walk_java_kotlin_files(repo_root, &mut files);
+    let mut packages: HashMap<String, Vec<_>> = HashMap::new();
+    for file in files {
+        let Ok(content) = std::fs::read_to_string(&file) else { continue };
+        if let Some(package) = declared_package(&content) {
+            packages.entry(package).or_default().push(file);
+        }
+    }
+    packages
 }
 
 /// Every `.java`/`.kt` file in the repo whose own `package` declaration

@@ -8,29 +8,11 @@
 //! and still produce broken code (a missing brace, an unterminated string).
 //! This module answers exactly that second question, narrowly.
 //!
-//! Language coverage: Go, Java, Kotlin, TypeScript, TSX, and JavaScript.
-//! Kotlin was originally evaluated and dropped — the stale
-//! `tree-sitter-kotlin` crate pins `tree-sitter ^0.21`, incompatible with
-//! `tree-sitter-go`/`tree-sitter-java`'s `^0.25`/`^0.26` (Cargo's
-//! `links = "tree-sitter"` forbids two versions of the native library in
-//! one dependency graph) — but `tree-sitter-kotlin-ng` (the
-//! actively-maintained `tree-sitter-grammars` org fork) builds cleanly
-//! against the same `tree-sitter` version already in use, so Kotlin is
-//! supported here too now.
+//! Language coverage follows `autoreview_langsupport`.
 
 use std::path::Path;
 
-fn language_for_extension(extension: &str) -> Option<tree_sitter::Language> {
-    match extension {
-        "go" => Some(tree_sitter_go::LANGUAGE.into()),
-        "java" => Some(tree_sitter_java::LANGUAGE.into()),
-        "kt" | "kts" => Some(tree_sitter_kotlin_ng::LANGUAGE.into()),
-        "ts" | "mts" | "cts" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
-        "tsx" => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
-        "js" | "jsx" | "mjs" | "cjs" => Some(tree_sitter_javascript::LANGUAGE.into()),
-        _ => None,
-    }
-}
+use autoreview_langsupport::{language_for_path, parser_for};
 
 /// Parses `content` as the language implied by `path`'s extension and
 /// reports whether the resulting tree is error-free. Returns `None` (not a
@@ -38,10 +20,7 @@ fn language_for_extension(extension: &str) -> Option<tree_sitter::Language> {
 /// load — callers should treat `None` as "skip this check", never as
 /// "failed".
 pub fn parses_cleanly(path: &Path, content: &str) -> Option<bool> {
-    let extension = path.extension()?.to_str()?;
-    let language = language_for_extension(extension)?;
-    let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&language).ok()?;
+    let mut parser = parser_for(language_for_path(path)?)?;
     let tree = parser.parse(content, None)?;
     Some(!tree.root_node().has_error())
 }
@@ -120,6 +99,13 @@ mod tests {
     #[test]
     fn unsupported_language_returns_none_not_a_verdict() {
         assert_eq!(parses_cleanly(&PathBuf::from("README.md"), "# broken (("), None);
+    }
+
+    #[test]
+    fn parses_rust_and_rejects_an_unclosed_function() {
+        let path = Path::new("main.rs");
+        assert_eq!(parses_cleanly(path, "fn main() { println!(\"hello\"); }"), Some(true));
+        assert_eq!(parses_cleanly(path, "fn main() { println!(\"hello\");"), Some(false));
     }
 
     #[test]

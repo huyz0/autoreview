@@ -105,7 +105,7 @@ pub fn embedding_from_bytes(bytes: &[u8]) -> anyhow::Result<Vec<f32>> {
     if !bytes.len().is_multiple_of(4) {
         anyhow::bail!("embedding blob length {} is not a multiple of 4 bytes", bytes.len());
     }
-    Ok(bytes.chunks_exact(4).map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])).collect())
+    Ok(bytes.as_chunks::<4>().0.iter().copied().map(f32::from_le_bytes).collect())
 }
 
 #[cfg(test)]

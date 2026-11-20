@@ -89,18 +89,27 @@ fn build_globset_owned(patterns: &[String]) -> globset::GlobSet {
 
 fn git_diff_numstat(repo_root: &str, base_ref: &str, head_ref: &str) -> anyhow::Result<Vec<FileChange>> {
     let output = Command::new("git")
-        .args(["diff", "--numstat", &format!("{base_ref}...{head_ref}")])
+        .args(["diff", "--no-ext-diff", "--no-textconv", "--find-renames", "--numstat", "-z", &format!("{base_ref}...{head_ref}"), "--"])
         .current_dir(repo_root)
         .output()?;
     if !output.status.success() {
         anyhow::bail!("git diff --numstat failed: {}", String::from_utf8_lossy(&output.stderr));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = std::str::from_utf8(&output.stdout).map_err(|_| anyhow::anyhow!("Git diff contains a path that cannot be represented as UTF-8"))?;
+    let mut records = stdout.split_terminator('\0');
     let mut changes = Vec::new();
-    for line in stdout.lines() {
-        let mut parts = line.splitn(3, '\t');
+    while let Some(record) = records.next() {
+        let mut parts = record.splitn(3, '\t');
         let (Some(add_str), Some(del_str), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
-            continue;
+            anyhow::bail!("invalid Git diff --numstat record");
+        };
+        // Renames use a blank path in the stat record, followed by two
+        // NUL-delimited paths. Analyzers need the path on the head side.
+        let path = if path.is_empty() {
+            records.next();
+            records.next().ok_or_else(|| anyhow::anyhow!("missing destination path in Git diff --numstat"))?
+        } else {
+            path
         };
         let additions = if add_str == "-" { 0 } else { add_str.parse().unwrap_or(0) };
         let deletions = if del_str == "-" { 0 } else { del_str.parse().unwrap_or(0) };
@@ -111,7 +120,7 @@ fn git_diff_numstat(repo_root: &str, base_ref: &str, head_ref: &str) -> anyhow::
 
 fn git_added_lines(repo_root: &str, base_ref: &str, head_ref: &str) -> anyhow::Result<String> {
     let output = Command::new("git")
-        .args(["diff", "--unified=0", &format!("{base_ref}...{head_ref}")])
+        .args(["diff", "--no-ext-diff", "--no-textconv", "--unified=0", &format!("{base_ref}...{head_ref}"), "--"])
         .current_dir(repo_root)
         .output()?;
     if !output.status.success() {

@@ -128,6 +128,7 @@ impl ParseCache {
 /// cache should never be able to break a scan, only slow it down.
 struct PersistentSummaryCache {
     cache_path: PathBuf,
+    source_root: PathBuf,
     data: RefCell<PersistentSummaryCacheData>,
     dirty: RefCell<bool>,
 }
@@ -145,20 +146,22 @@ struct CachedFileSummaries {
 }
 
 impl PersistentSummaryCache {
-    fn load(repo_root: &Path) -> Self {
+    fn load(repo_root: &Path, source_root: &Path) -> Self {
         let cache_path = summary_cache_path(repo_root);
         let data = std::fs::read_to_string(&cache_path).ok().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
-        PersistentSummaryCache { cache_path, data: RefCell::new(data), dirty: RefCell::new(false) }
+        PersistentSummaryCache { cache_path, source_root: source_root.to_path_buf(), data: RefCell::new(data), dirty: RefCell::new(false) }
     }
 
     fn get(&self, rule_id: &str, path: &Path, content_hash: &str) -> Option<HashMap<String, bool>> {
         let data = self.data.borrow();
-        let entry = data.entries.get(rule_id)?.get(path.to_string_lossy().as_ref())?;
+        let relative = path.strip_prefix(&self.source_root).ok()?;
+        let entry = data.entries.get(rule_id)?.get(relative.to_string_lossy().as_ref())?;
         (entry.content_hash == content_hash).then(|| entry.summaries.clone())
     }
 
     fn put(&self, rule_id: &str, path: &Path, content_hash: String, summaries: HashMap<String, bool>) {
-        self.data.borrow_mut().entries.entry(rule_id.to_string()).or_default().insert(path.to_string_lossy().into_owned(), CachedFileSummaries { content_hash, summaries });
+        let Ok(relative) = path.strip_prefix(&self.source_root) else { return };
+        self.data.borrow_mut().entries.entry(rule_id.to_string()).or_default().insert(relative.to_string_lossy().into_owned(), CachedFileSummaries { content_hash, summaries });
         *self.dirty.borrow_mut() = true;
     }
 
@@ -175,7 +178,12 @@ impl PersistentSummaryCache {
             return;
         }
         if let Ok(json) = serde_json::to_string(&*self.data.borrow()) {
-            let _ = std::fs::write(&self.cache_path, json);
+            if let Ok(mut file) = tempfile::NamedTempFile::new_in(parent) {
+                use std::io::Write;
+                if file.write_all(json.as_bytes()).is_ok() {
+                    let _ = file.persist(&self.cache_path);
+                }
+            }
         }
     }
 }
@@ -189,7 +197,7 @@ fn summary_cache_path(repo_root: &Path) -> PathBuf {
     let canonical = std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
     let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
     let fingerprint: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
-    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("autoreview").join("dataflow-summaries").join(format!("{fingerprint}.json"))
+    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("autoreview").join("dataflow-summaries").join(format!("{fingerprint}-v2.json"))
 }
 
 fn content_hash(content: &str) -> String {
@@ -206,6 +214,7 @@ fn content_hash(content: &str) -> String {
 struct SummaryCaches<'a> {
     parse: &'a ParseCache,
     persistent: &'a PersistentSummaryCache,
+    java_kotlin_packages: std::cell::OnceCell<HashMap<String, Vec<PathBuf>>>,
 }
 
 fn make_finding(rule_id: &str, category: &str, severity: Severity, path: &str, line: u32, title: String, message: String) -> AgentFinding {
@@ -663,8 +672,9 @@ fn java_kotlin_imported_package_summaries(
     let mut summaries = HashMap::new();
     for import in autoreview_archgraph::extract_java_kotlin_imports(own_content) {
         let pkg = autoreview_archgraph::import_package(&import);
-        for path in autoreview_archgraph::find_java_kotlin_files_declaring_package(repo_root, &pkg) {
-            add_java_kotlin_summaries_from_file(&path, &mut summaries, compute_summary, rule_id, caches);
+        let packages = caches.java_kotlin_packages.get_or_init(|| autoreview_archgraph::index_java_kotlin_packages(repo_root));
+        for path in packages.get(&pkg).into_iter().flatten() {
+            add_java_kotlin_summaries_from_file(path, &mut summaries, compute_summary, rule_id, caches);
         }
     }
     summaries
@@ -912,10 +922,14 @@ fn read_and_parse(repo_root: &Path, path: &str, language: autoreview_langsupport
 /// interprocedural rule's own same-package/cross-package resolution too
 /// (rule engine roadmap item 1, see `RULE_ENGINE_RESEARCH.md`).
 pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
+    run_dataflow_check_for_snapshot(repo_root, repo_root, changed_files, registered_packs)
+}
+
+pub fn run_dataflow_check_for_snapshot(repo: &Path, repo_root: &Path, changed_files: &[String], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
     let go_pre_1_22 = crate::analyzers::practices::go_module_targets_pre_1_22(repo_root);
     let cache = ParseCache::new();
-    let persistent = PersistentSummaryCache::load(repo_root);
-    let caches = SummaryCaches { parse: &cache, persistent: &persistent };
+    let persistent = PersistentSummaryCache::load(repo, repo_root);
+    let caches = SummaryCaches { parse: &cache, persistent: &persistent, java_kotlin_packages: Default::default() };
     let findings: Vec<AgentFinding> = changed_files
         .iter()
         .filter_map(|path| {
@@ -1015,20 +1029,23 @@ mod tests {
     #[test]
     fn persistent_summary_cache_round_trips_through_disk() {
         let dir = tempfile::tempdir().unwrap();
+        let next_snapshot = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f.go");
+        let same_file = next_snapshot.path().join("f.go");
         let cache_path = summary_cache_path(dir.path());
         let _ = std::fs::remove_file(&cache_path);
 
         {
-            let cache = PersistentSummaryCache::load(dir.path());
-            assert!(cache.get("rule-a", Path::new("/tmp/f.go"), "hash1").is_none());
-            cache.put("rule-a", Path::new("/tmp/f.go"), "hash1".to_string(), HashMap::from([("f".to_string(), true)]));
+            let cache = PersistentSummaryCache::load(dir.path(), dir.path());
+            assert!(cache.get("rule-a", &file, "hash1").is_none());
+            cache.put("rule-a", &file, "hash1".to_string(), HashMap::from([("f".to_string(), true)]));
             cache.save();
         }
 
-        let reloaded = PersistentSummaryCache::load(dir.path());
-        assert_eq!(reloaded.get("rule-a", Path::new("/tmp/f.go"), "hash1"), Some(HashMap::from([("f".to_string(), true)])), "a matching content hash must return the persisted summary");
-        assert!(reloaded.get("rule-a", Path::new("/tmp/f.go"), "hash2").is_none(), "a different content hash must miss rather than return a stale summary — this is the correctness guarantee the whole cache rests on");
-        assert!(reloaded.get("rule-b", Path::new("/tmp/f.go"), "hash1").is_none(), "a different rule_id must not see another rule's cached summary for the same file/hash");
+        let reloaded = PersistentSummaryCache::load(dir.path(), next_snapshot.path());
+        assert_eq!(reloaded.get("rule-a", &same_file, "hash1"), Some(HashMap::from([("f".to_string(), true)])), "a matching content hash must return the persisted summary in a new snapshot");
+        assert!(reloaded.get("rule-a", &same_file, "hash2").is_none(), "a different content hash must miss");
+        assert!(reloaded.get("rule-b", &same_file, "hash1").is_none(), "a different rule id must miss");
 
         let _ = std::fs::remove_file(&cache_path);
     }
@@ -1040,7 +1057,7 @@ mod tests {
         let _ = std::fs::create_dir_all(cache_path.parent().unwrap());
         std::fs::write(&cache_path, "not valid json").unwrap();
 
-        let cache = PersistentSummaryCache::load(dir.path());
+        let cache = PersistentSummaryCache::load(dir.path(), dir.path());
         assert!(cache.get("rule-a", Path::new("/tmp/f.go"), "hash1").is_none(), "a corrupt cache file must degrade to an empty cache, not panic or propagate an error");
 
         let _ = std::fs::remove_file(&cache_path);
@@ -1065,7 +1082,7 @@ mod tests {
         // instrumentation, since content-hash correctness means the
         // *findings* are identical either way.
         let helper_content = std::fs::read_to_string(dir.path().join("helper.go")).unwrap();
-        let persisted = PersistentSummaryCache::load(dir.path());
+        let persisted = PersistentSummaryCache::load(dir.path(), dir.path());
         let cached = persisted.get("typed-nil-interface-return", &dir.path().join("helper.go"), &content_hash(&helper_content));
         assert_eq!(cached.as_ref().and_then(|s| s.get("mightFail")), Some(&true), "got: {cached:#?}");
 
@@ -1242,8 +1259,8 @@ mod tests {
         std::fs::write(dir.path().join("JavaHelper.java"), "package com.example;\n\nclass JavaHelper {\n    Object risky() {\n        Object e = null;\n        return e;\n    }\n}\n").unwrap();
         std::fs::write(dir.path().join("KotlinHelper.kt"), "package com.example\n\nfun riskyKt(): String? {\n    val e: String? = null\n    return e\n}\n").unwrap();
         let cache = ParseCache::new();
-        let persistent = PersistentSummaryCache::load(dir.path());
-        let caches = SummaryCaches { parse: &cache, persistent: &persistent };
+        let persistent = PersistentSummaryCache::load(dir.path(), dir.path());
+        let caches = SummaryCaches { parse: &cache, persistent: &persistent, java_kotlin_packages: Default::default() };
         let summaries = java_kotlin_package_summaries(dir.path(), "Caller.java", "com.example", &autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary, "npe-risk-from-helper-return", &caches);
         assert_eq!(summaries.get("risky"), Some(&true), "got: {summaries:#?}");
         assert_eq!(summaries.get("riskyKt"), Some(&true), "got: {summaries:#?}");

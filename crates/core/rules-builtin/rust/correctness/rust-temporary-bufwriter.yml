@@ -1,0 +1,15 @@
+id: rust-temporary-bufwriter
+language: Rust
+category: correctness
+severity: info
+semantic: true
+message: >-
+  This temporary `BufWriter` can defer writes until it is dropped, where flush
+  errors are ignored. Keep the writer and handle an explicit `flush()` if the
+  caller needs to know the write succeeded.
+metadata:
+  confidence: HIGH
+  references:
+    - https://doc.rust-lang.org/std/io/struct.BufWriter.html
+rule:
+  pattern: std::io::BufWriter::new($WRITER).write_all($BYTES)

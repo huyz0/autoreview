@@ -48,22 +48,24 @@ pub fn detect_duplication_in_file(path: &str, content: &str) -> Vec<AgentFinding
             None => {
                 first_seen.insert(key, start);
             }
-            Some(&first_start) if start >= covered_until => {
+            Some(&first_start) if start >= covered_until && first_start + MIN_DUPLICATE_LINES <= start => {
+                let length = lines[first_start..start].iter().zip(&lines[start..])
+                    .take_while(|(first, second)| first.trim() == second.trim()).count();
                 findings.push(AgentFinding {
                     source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-duplication".to_string(), rule_id: Some("duplicate-code-block".to_string()), aspect: None, backend: None },
                     category: "duplication".to_string(),
                     severity: Severity::Medium,
                     confidence: 1.0,
-                    title: format!("Duplicated code block ({MIN_DUPLICATE_LINES}+ lines)"),
+                    title: format!("Duplicated code block ({length} lines)"),
                     message: format!("This block duplicates code already at {path}:{} — consider extracting a shared function.", first_start + 1),
-                    location: Location { path: path.to_string(), range: LocationRange { start_line: (start + 1) as u32, end_line: Some((start + MIN_DUPLICATE_LINES) as u32), ..Default::default() }, snippet: window.join("\n"), side: Side::New },
-                    related_locations: None,
+                    location: Location { path: path.to_string(), range: LocationRange { start_line: (start + 1) as u32, end_line: Some((start + length) as u32), ..Default::default() }, snippet: window.join("\n"), side: Side::New },
+                    related_locations: Some(vec![Location { path: path.to_string(), range: LocationRange { start_line: (first_start + 1) as u32, end_line: Some((first_start + length) as u32), ..Default::default() }, snippet: window.join("\n"), side: Side::New }]),
                     suggestion: None,
                     tags: None,
                     meta: None,
                     suggested_patch: None,
                 });
-                covered_until = start + MIN_DUPLICATE_LINES;
+                covered_until = start + length;
             }
             Some(_) => {}
         }
@@ -102,12 +104,12 @@ pub fn run_duplication_check(repo_root: &std::path::Path, changed_files: &[Strin
 /// is exactly the scope blow-up the plan's own duplication section already
 /// ruled out for the single-file detector.
 pub fn detect_cross_file_duplication(files: &[(String, String)]) -> Vec<AgentFinding> {
-    let mut first_seen: std::collections::HashMap<String, (String, usize)> = std::collections::HashMap::new();
+    let mut first_seen: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
     let mut covered_until: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut findings = Vec::new();
 
-    for (path, content) in files {
-        let lines: Vec<&str> = content.lines().collect();
+    let file_lines: Vec<Vec<&str>> = files.iter().map(|(_, content)| content.lines().collect()).collect();
+    for (file_index, ((path, _), lines)) in files.iter().zip(&file_lines).enumerate() {
         if lines.len() < MIN_DUPLICATE_LINES {
             continue;
         }
@@ -121,26 +123,29 @@ pub fn detect_cross_file_duplication(files: &[(String, String)]) -> Vec<AgentFin
 
             match first_seen.get(&key) {
                 None => {
-                    first_seen.insert(key, (path.clone(), start));
+                    first_seen.insert(key, (file_index, start));
                 }
-                Some((first_path, first_start)) if first_path != path => {
+                Some(&(first_index, first_start)) if first_index != file_index => {
                     let already_covered = covered_until.get(path).is_some_and(|&until| start < until);
                     if !already_covered {
+                        let length = file_lines[first_index][first_start..].iter().zip(&lines[start..])
+                            .take_while(|(first, second)| first.trim() == second.trim()).count();
+                        let first_path = &files[first_index].0;
                         findings.push(AgentFinding {
                             source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-duplication".to_string(), rule_id: Some("duplicate-code-block-cross-file".to_string()), aspect: None, backend: None },
                             category: "duplication".to_string(),
                             severity: Severity::Medium,
                             confidence: 1.0,
-                            title: format!("Duplicated code block across files ({MIN_DUPLICATE_LINES}+ lines)"),
+                            title: format!("Duplicated code block across files ({length} lines)"),
                             message: format!("This block duplicates code already at {first_path}:{} — consider extracting a shared function.", first_start + 1),
-                            location: Location { path: path.to_string(), range: LocationRange { start_line: (start + 1) as u32, end_line: Some((start + MIN_DUPLICATE_LINES) as u32), ..Default::default() }, snippet: window.join("\n"), side: Side::New },
-                            related_locations: None,
+                            location: Location { path: path.to_string(), range: LocationRange { start_line: (start + 1) as u32, end_line: Some((start + length) as u32), ..Default::default() }, snippet: window.join("\n"), side: Side::New },
+                            related_locations: Some(vec![Location { path: first_path.clone(), range: LocationRange { start_line: (first_start + 1) as u32, end_line: Some((first_start + length) as u32), ..Default::default() }, snippet: window.join("\n"), side: Side::New }]),
                             suggestion: None,
                             tags: None,
                             meta: None,
                             suggested_patch: None,
                         });
-                        covered_until.insert(path.clone(), start + MIN_DUPLICATE_LINES);
+                        covered_until.insert(path.clone(), start + length);
                     }
                 }
                 Some(_) => {}
@@ -180,6 +185,17 @@ mod tests {
         assert_eq!(findings.len(), 1, "expected exactly one finding for the second occurrence, got: {findings:#?}");
         assert_eq!(findings[0].category, "duplication");
         assert!(findings[0].message.contains("a.rs:"));
+    }
+
+    #[test]
+    fn combines_adjacent_duplicate_windows_into_one_span() {
+        let block: String = (0..15).map(|index| format!("    execute_operation_{index}();\n")).collect();
+        let content = format!("fn one() {{\n{block}}}\n\nfn two() {{\n{block}}}\n");
+        let findings = detect_duplication_in_file("a.rs", &content);
+        assert_eq!(findings.len(), 1);
+        let range = &findings[0].location.range;
+        assert!(range.end_line.unwrap() - range.start_line >= 14);
+        assert_eq!(findings[0].related_locations.as_ref().unwrap()[0].range.start_line, 2);
     }
 
     #[test]

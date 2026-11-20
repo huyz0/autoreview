@@ -11,3 +11,4 @@ tree-sitter-java.workspace = true
 tree-sitter-kotlin-ng.workspace = true
 tree-sitter-typescript.workspace = true
 tree-sitter-javascript.workspace = true
+tree-sitter-rust.workspace = true

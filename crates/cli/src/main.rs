@@ -45,6 +45,12 @@ enum Commands {
         /// Suppress findings whose fingerprint was already reported in the most recent prior run on this repo
         #[arg(long)]
         incremental: bool,
+        /// Run deterministic analyzers only, without calling model backends
+        #[arg(long)]
+        static_only: bool,
+        /// Limit deterministic findings to changed lines or related locations on changed lines
+        #[arg(long)]
+        changed_lines: bool,
         /// Which agent backend drives specialists: claude-code (default), pi, local-llm, or openai-compatible
         #[arg(long)]
         backend: Option<String>,
@@ -210,8 +216,20 @@ enum RulesAction {
         #[arg(long)]
         from_llm_patterns: bool,
     },
-    /// Bench a candidate rule against its self-test + historical precision
+    /// Bench a candidate rule against its fixtures and sample repository files
     Bench { cluster_id: String },
+    /// Measure built-in rules on labelled Git snapshots
+    Replay {
+        #[arg(long, default_value = ".autoreview/replay.yaml")]
+        suite: std::path::PathBuf,
+    },
+    /// Check changed lines against precision-qualified rules from the base commit
+    Gate {
+        #[arg(long, default_value = "origin/main")]
+        base: String,
+        #[arg(long, default_value = "HEAD")]
+        head: String,
+    },
     /// Human review queue for candidate rules — lists candidates by default;
     /// --approve moves a candidate to shadow mode, --reject <clusterId> --reason <text> records why
     Review {
@@ -308,23 +326,29 @@ fn parse_backend(s: &str) -> Option<AgentBackendKind> {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let repo_root = std::env::current_dir()?;
+    let cwd = std::env::current_dir()?;
+    let repo_root = commands::revision::repository_root(&cwd).unwrap_or(cwd);
 
     match cli.command {
         Commands::Doctor => {
             run_doctor(&repo_root);
         }
-        Commands::Diff { base, head, tier, aspects, max_usd, incremental, backend, watch, watch_interval } => {
+        Commands::Diff { base, head, tier, aspects, max_usd, incremental, static_only, changed_lines, backend, watch, watch_interval } => {
+            let tier = tier.as_deref().map(|value| parse_tier(value).ok_or_else(|| anyhow::anyhow!("invalid tier '{value}'"))).transpose()?;
+            let backend = backend.as_deref().map(|value| parse_backend(value).ok_or_else(|| anyhow::anyhow!("invalid backend '{value}'"))).transpose()?;
+            anyhow::ensure!(max_usd.is_none_or(|limit| limit.is_finite() && limit >= 0.0), "--max-usd must be a finite, nonnegative amount");
             run_diff_or_watch(
                 DiffCommandOptions {
                     repo_root,
                     base_ref: base,
                     head_ref: head,
-                    tier: tier.and_then(|t| parse_tier(&t)),
-                    aspects: aspects.map(|a| a.split(',').map(|s| s.to_string()).collect()),
+                    tier,
+                    aspects: aspects.map(|a| a.split(',').map(|s| s.trim().to_string()).collect()),
                     max_usd,
                     incremental,
-                    backend: backend.and_then(|b| parse_backend(&b)),
+                    static_only,
+                    changed_lines,
+                    backend,
                 },
                 watch,
                 watch_interval,
@@ -381,6 +405,8 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             RulesAction::Bench { cluster_id } => run_rules_bench(&repo_root, &cluster_id)?,
+            RulesAction::Replay { suite } => commands::replay::run_replay(&repo_root, &suite)?,
+            RulesAction::Gate { base, head } => commands::replay::run_gate(&repo_root, &base, &head)?,
             RulesAction::Review { approve, reject, reason } => run_rules_review(&repo_root, approve, reject, reason)?,
             RulesAction::ShadowLog { rule_id } => run_rules_shadow_log(&repo_root, &rule_id)?,
             RulesAction::Rollback { rule_id } => run_rules_rollback(&repo_root, &rule_id)?,

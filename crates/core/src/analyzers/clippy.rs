@@ -1,15 +1,7 @@
-//! Wraps `cargo clippy` for Rust — the plan's "Language coverage" item,
-//! and dogfooded directly on this very workspace (16 real warnings found
-//! across the codebase while building this adapter, none fixed here since
-//! fixing them isn't this task's job — see the conformance test below for
-//! how that's verified instead of just asserted).
-//!
-//! `cargo clippy --message-format=json` runs over the whole workspace (like
-//! `golangci-lint`, clippy has no "just these files" mode that respects
-//! cross-file type information) — findings are filtered down to the diff's
-//! changed files afterward, the same "analyze broad, report narrow" shape
-//! `run_archgraph_check` already uses for Go import cycles.
+//! Runs Clippy on workspace packages that contain changed Rust files, then
+//! keeps diagnostics whose primary span points to one of those files.
 
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::process::Command;
 
@@ -45,6 +37,26 @@ struct ClippySpan {
     line_end: u32,
     column_start: u32,
     column_end: u32,
+    #[serde(default)]
+    text: Vec<ClippySourceLine>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClippySourceLine {
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct CargoMetadata {
+    workspace_members: HashSet<String>,
+    packages: Vec<CargoPackage>,
+}
+
+#[derive(Deserialize)]
+struct CargoPackage {
+    id: String,
+    name: String,
+    manifest_path: std::path::PathBuf,
 }
 
 fn map_severity(level: &str) -> Severity {
@@ -60,40 +72,40 @@ fn is_relevant_source_file(path: &str) -> bool {
     Path::new(path).extension().and_then(|e| e.to_str()) == Some("rs")
 }
 
-fn parse_clippy_output(stdout: &str, changed_files: &std::collections::HashSet<&str>) -> Vec<AgentFinding> {
+fn parse_clippy_output(stdout: &str, changed_files: &HashSet<&str>) -> Vec<AgentFinding> {
     let mut findings = Vec::new();
+    let mut seen = HashSet::new();
     for line in stdout.lines() {
         let Ok(msg) = serde_json::from_str::<CargoMessage>(line) else { continue };
         if msg.reason != "compiler-message" {
             continue;
         }
         let Some(diagnostic) = msg.message else { continue };
-        // Only "warning"/"error" carry an actionable clippy lint id; a bare
-        // "note"/"help" child diagnostic (already folded into the parent's
-        // own `rendered` text) would just double-report the same lint.
-        if diagnostic.level != "warning" && diagnostic.level != "error" {
+        let code = diagnostic.code.as_ref().map(|code| code.code.as_str());
+        let is_clippy = code.is_some_and(|code| code.starts_with("clippy::"));
+        let is_error = diagnostic.level == "error";
+        if !(is_error || diagnostic.level == "warning" && is_clippy) {
             continue;
         }
-        let Some(code) = &diagnostic.code else { continue };
-        if !code.code.starts_with("clippy::") {
-            continue;
-        }
-        let Some(span) = diagnostic.spans.iter().find(|s| s.is_primary) else { continue };
-        if !changed_files.contains(span.file_name.as_str()) {
+        let Some((span, path)) = diagnostic.spans.iter().filter(|span| span.is_primary).find_map(|span| {
+            let path = span.file_name.replace(std::path::MAIN_SEPARATOR, "/");
+            changed_files.contains(path.as_str()).then_some((span, path))
+        }) else { continue };
+        if !seen.insert((path.clone(), span.line_start, span.column_start, code.map(str::to_owned), diagnostic.message.clone())) {
             continue;
         }
 
         findings.push(AgentFinding {
-            source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "clippy".to_string(), rule_id: Some(code.code.clone()), aspect: None, backend: None },
-            category: "style".to_string(),
+            source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "clippy".to_string(), rule_id: code.map(str::to_owned), aspect: None, backend: None },
+            category: if is_clippy { "style" } else { "correctness" }.to_string(),
             severity: map_severity(&diagnostic.level),
             confidence: 1.0,
-            title: code.code.clone(),
+            title: code.unwrap_or("Rust compiler error").to_string(),
             message: diagnostic.message.clone(),
             location: Location {
-                path: span.file_name.clone(),
+                path,
                 range: LocationRange { start_line: span.line_start, start_col: Some(span.column_start), end_line: Some(span.line_end), end_col: Some(span.column_end) },
-                snippet: String::new(),
+                snippet: span.text.iter().map(|line| line.text.as_str()).collect::<Vec<_>>().join("\n"),
                 side: Side::New,
             },
             related_locations: None,
@@ -106,30 +118,61 @@ fn parse_clippy_output(stdout: &str, changed_files: &std::collections::HashSet<&
     findings
 }
 
-/// Runs `cargo clippy --message-format=json` over the whole workspace at
-/// `repo_root` and returns findings for whichever changed files clippy
-/// flagged. Returns an empty list (not an error) if no changed file is
-/// Rust, `cargo`/clippy isn't on PATH, or `repo_root` isn't a Cargo
-/// project — Stage 1 degrades gracefully, same contract as every other
-/// analyzer adapter here.
+fn changed_packages(repo_root: &Path, changed_files: &HashSet<&str>) -> Option<BTreeSet<String>> {
+    let output = Command::new("cargo").args(["metadata", "--no-deps", "--format-version=1"]).current_dir(repo_root).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let metadata: CargoMetadata = serde_json::from_slice(&output.stdout).ok()?;
+    let members: Vec<_> = metadata.packages.iter()
+        .filter(|package| metadata.workspace_members.contains(&package.id))
+        .filter_map(|package| package.manifest_path.parent().map(|directory| (directory, &package.name)))
+        .collect();
+    let mut packages = BTreeSet::new();
+    for file in changed_files {
+        let absolute = repo_root.join(file);
+        let (_, package) = members.iter().filter(|(directory, _)| absolute.starts_with(directory))
+            .max_by_key(|(directory, _)| directory.components().count())?;
+        packages.insert((*package).clone());
+    }
+    Some(packages)
+}
+
 pub fn run_clippy(repo_root: &Path, changed_files: &[String]) -> anyhow::Result<Vec<AgentFinding>> {
-    let relevant: std::collections::HashSet<&str> = changed_files.iter().map(String::as_str).filter(|p| is_relevant_source_file(p)).collect();
+    let relevant: HashSet<&str> = changed_files.iter().map(String::as_str)
+        .filter(|p| is_relevant_source_file(p) && repo_root.join(p).is_file())
+        .collect();
     if relevant.is_empty() || !repo_root.join("Cargo.toml").exists() {
         return Ok(vec![]);
     }
 
-    let output = match Command::new("cargo").args(["clippy", "--workspace", "--message-format=json", "--quiet"]).current_dir(repo_root).output() {
-        Ok(output) => output,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(err) => return Err(err.into()),
-    };
+    let mut command = Command::new("cargo");
+    command.args(["clippy", "--message-format=json", "--quiet"]).current_dir(repo_root);
+    // Standalone test, example and benchmark files need their Cargo
+    // targets. Ordinary source changes can use Cargo's default targets.
+    if relevant.iter().any(|path| path.split('/').any(|part| matches!(part, "tests" | "examples" | "benches"))) {
+        command.arg("--all-targets");
+    }
+    match changed_packages(repo_root, &relevant) {
+        Some(packages) => {
+            for package in packages {
+                command.arg("--package").arg(package);
+            }
+        }
+        None => { command.arg("--workspace"); }
+    }
+    let output = command.output()?;
 
-    // clippy exits non-zero when it finds warnings/errors under `-D
-    // warnings`-style configs — that's signal, not a broken invocation, so
-    // only a genuinely unparsable stdout (checked inside parse_clippy_output
-    // per-line, tolerantly) would indicate the tool itself failed.
+    // A nonzero exit can carry a valid diagnostic, including errors in
+    // the changed code. Surface failed invocations that yielded none.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_clippy_output(&stdout, &relevant))
+    let findings = parse_clippy_output(&stdout, &relevant);
+    if !output.status.success() && findings.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let excerpt = stderr.lines().take(20).collect::<Vec<_>>().join("\n");
+        anyhow::bail!("cargo clippy failed ({}): {}", output.status, excerpt.trim());
+    }
+    Ok(findings)
 }
 
 #[cfg(test)]

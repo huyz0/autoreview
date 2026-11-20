@@ -20,7 +20,7 @@ rules are vendored there) — copy the shape, not just the idea.
 
 ```yaml
 id: go-example-rule-id       # unique within the pack; kebab-case, usually <lang>-<what>
-language: Go                 # Go | Java | Kotlin | JavaScript | TypeScript
+language: Go                 # Go | Java | Kotlin | JavaScript | TypeScript | Rust
 category: correctness        # see taxonomy below
 severity: warning            # error | warning | info
 kind: pattern                 # pattern (default, omit if pattern) | taint | threshold | call-sequence
@@ -59,6 +59,11 @@ Native ast-grep syntax under `rule:`, handed to the `ast-grep` subprocess
 unchanged — this is the only kind where `rule:`/`constraints:` mean exactly
 what they'd mean in a raw ast-grep config. Use for a syntactic match with no
 dataflow or call-ordering question attached.
+
+For Rust, qualify standard-library and crate API paths in patterns where
+an unqualified name could refer to a different type. Add negative fixtures
+for nearby valid uses, such as retaining an owner or checking a child
+process's exit status.
 
 ```yaml
 id: javascript-command-injection-concat

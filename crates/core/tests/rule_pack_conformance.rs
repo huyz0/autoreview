@@ -87,6 +87,7 @@ fn extension_for_language(language: &str) -> &'static str {
         "TypeScript" => "ts",
         "Tsx" => "tsx",
         "JavaScript" => "js",
+        "Rust" => "rs",
         other => panic!("rule_pack_conformance doesn't know the fixture extension for language {other:?} — add it to extension_for_language"),
     }
 }
@@ -99,6 +100,7 @@ fn scan_filename_for_language(language: &str) -> &'static str {
         "TypeScript" => "sample.ts",
         "Tsx" => "Sample.tsx",
         "JavaScript" => "sample.js",
+        "Rust" => "sample.rs",
         other => panic!("rule_pack_conformance doesn't know the scan filename for language {other:?} — add it to scan_filename_for_language"),
     }
 }
@@ -132,6 +134,15 @@ fn every_builtin_rule_fires_on_its_positive_fixture_and_stays_silent_on_its_nega
             failures.push(format!("{}: missing fixture files (expected {} and {})", rule.id, positive_path.display(), negative_path.display()));
             continue;
         };
+
+        if rule.language == "Rust" {
+            for (path, source) in [(&positive_path, &positive), (&negative_path, &negative)] {
+                let mut parser = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Rust).unwrap();
+                if parser.parse(source, None).unwrap().root_node().has_error() {
+                    failures.push(format!("{}: invalid Rust fixture {}", rule.id, path.display()));
+                }
+            }
+        }
 
         let positive_dir = write_single_file(filename, &positive);
         let positive_findings = run_ast_grep(positive_dir.path(), &[filename.to_string()], &[]).unwrap();

@@ -1,0 +1,20 @@
+id: rust-write-to-read-only-file
+language: Rust
+category: correctness
+severity: warning
+message: >-
+  `File::open` opens the file read-only. A write that reaches the file will fail.
+  Open it with `OpenOptions` and the intended write or append mode.
+metadata:
+  confidence: HIGH
+  references:
+    - https://doc.rust-lang.org/std/fs/struct.File.html#method.open
+rule:
+  any:
+    - pattern: std::fs::File::open($PATH)?.$METHOD($$$ARGS)
+    - pattern: std::fs::File::open($PATH).unwrap().$METHOD($$$ARGS)
+    - pattern: std::fs::File::open($PATH).expect($REASON).$METHOD($$$ARGS)
+constraints:
+  METHOD:
+    kind: field_identifier
+    regex: '^(write|write_all|write_fmt|write_vectored|write_all_vectored)$'

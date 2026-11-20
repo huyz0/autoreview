@@ -124,6 +124,9 @@ fn chain_to_finding(chain: autoreview_symindex::ChainFinding) -> AgentFinding {
 /// contradicts the heuristic — real type information is strong enough
 /// evidence to drop the finding rather than merely flag it as unconfirmed.
 fn envy_to_finding_with_tier4(index: &SymbolIndex, envy: autoreview_symindex::FeatureEnvyFinding, tier4_records: Option<&[autoreview_symindex::Tier4Access]>) -> Option<AgentFinding> {
+    // The suggested refactor moves code to the collaborator. Require a
+    // declaration we can point to in the repository.
+    index.find_type(&envy.envied_type)?;
     let verdict = tier4_records.map(|records| autoreview_symindex::confirm_feature_envy(records, &envy));
     if verdict == Some(autoreview_symindex::Tier4Verdict::Contradicted) {
         return None;
@@ -141,13 +144,13 @@ fn envy_to_finding(index: &SymbolIndex, envy: autoreview_symindex::FeatureEnvyFi
             side: Side::New,
         }]
     });
-    let heuristic_caveat = "Heuristic, name-based match — parameter types aren't resolved against imports, and only direct parameter accesses are counted (not locals reassigned from a parameter/field), so this may under- or over-count.";
+    let heuristic_caveat = "This heuristic counts direct parameter accesses and matches the collaborator by name. Confirm the related declaration before moving the method.";
     let (message_suffix, confidence) = match tier4_verdict {
         Some(autoreview_symindex::Tier4Verdict::Confirmed) => (
             " Confirmed by real type-checking (Tier 4: golang.org/x/tools/go/packages) — this isn't just a name-based guess.".to_string(),
             1.0,
         ),
-        _ => (format!(" {heuristic_caveat}"), 1.0),
+        _ => (format!(" {heuristic_caveat}"), 0.6),
     };
     AgentFinding {
         source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-symindex".to_string(), rule_id: Some("feature-envy".to_string()), aspect: None, backend: None },
@@ -387,14 +390,22 @@ mod tests {
     }
 
     fn sample_index() -> SymbolIndex {
-        SymbolIndex { types: Vec::new() }
+        SymbolIndex { types: vec![autoreview_symindex::TypeDecl {
+            name: "Other".to_string(), file: "other.go".into(), start_line: 1,
+            fields: vec![], methods: vec![], superclass: None,
+        }] }
     }
 
     #[test]
     fn envy_finding_carries_no_tier4_caveat_language_when_no_records_available() {
         let finding = envy_to_finding_with_tier4(&sample_index(), sample_envy(), None).unwrap();
-        assert_eq!(finding.confidence, 1.0);
-        assert!(finding.message.contains("Heuristic, name-based match"));
+        assert!(finding.confidence < 1.0);
+        assert!(finding.message.contains("matches the collaborator by name"));
+    }
+
+    #[test]
+    fn drops_feature_envy_when_the_collaborator_has_no_local_declaration() {
+        assert!(envy_to_finding_with_tier4(&SymbolIndex::default(), sample_envy(), None).is_none());
     }
 
     #[test]
@@ -462,6 +473,7 @@ mod tests {
     #[test]
     fn reports_kotlin_feature_envy_that_touches_a_changed_file() {
         let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "Customer.kt", "class Customer {}\n");
         write_file(
             dir.path(),
             "Widget.kt",
@@ -478,6 +490,7 @@ mod tests {
         // returned Vec::new() unconditionally for a TS-only diff even
         // though the underlying extractor/query layer worked fine.
         let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "Customer.ts", "class Customer {}\n");
         write_file(
             dir.path(),
             "Widget.ts",
