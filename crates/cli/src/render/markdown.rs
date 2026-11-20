@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use autoreview_schema::{CriterionResult, CriterionVerdict, Finding, ReviewReport, Severity};
 
+use super::render_analyzer_warnings;
+
 fn severity_rank(s: Severity) -> u8 {
     match s {
         Severity::Blocker => 0,
@@ -94,13 +96,7 @@ pub fn render_markdown(report: &ReviewReport) -> String {
     }
     out.push('\n');
 
-    if !report.analyzer_warnings.is_empty() {
-        out.push_str("## Analyzer warnings\n\n");
-        for warning in &report.analyzer_warnings {
-            out.push_str(&format!("- {}\n", warning.lines().collect::<Vec<_>>().join(" ")));
-        }
-        out.push('\n');
-    }
+    render_analyzer_warnings(&mut out, &report.analyzer_warnings);
     if !report.spec_verdicts.is_empty() {
         out.push_str(&render_spec_verdicts(&report.spec_verdicts));
     }

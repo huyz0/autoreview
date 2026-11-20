@@ -15,9 +15,9 @@ deep tier.
 ## What it checks
 
 - **ast-grep pattern rules** for Go, Java, Kotlin, TypeScript, JavaScript,
-  and Rust cover security, correctness, design, and performance. Rust checks
-  include file access modes, temporary resource lifetimes, buffered writes,
-  eager indexing in `then_some`, and child exit status.
+  and Rust. Coverage varies by language. The built-in Rust rules focus on
+  correctness, including file access modes, temporary resource lifetimes,
+  buffered writes, eager indexing in `then_some`, and child exit status.
 - **Dataflow and taint tracking** for Go, Java, and Kotlin: a real CFG-based
   engine, not just syntax matching, catches things like a tainted HTTP
   parameter reaching `exec.Command`, or a typed nil pointer silently

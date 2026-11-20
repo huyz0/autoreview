@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use autoreview_schema::{Finding, ReviewReport, Severity};
 
+use super::render_analyzer_warnings;
+
 fn severity_label(s: Severity) -> &'static str {
     match s {
         Severity::Blocker => "BLOCKER",
@@ -34,6 +36,7 @@ pub fn render_index(report: &ReviewReport) -> String {
     let mut out = String::new();
     out.push_str("# Review Index\n\n");
     out.push_str(&format!("run: `{}` | tier: {} | findings: {} | suppressed: {}\n\n", report.run_id, report.plan.tier, report.findings.len(), report.suppressed.len()));
+    render_analyzer_warnings(&mut out, &report.analyzer_warnings);
 
     if report.findings.is_empty() {
         out.push_str("No findings.\n");

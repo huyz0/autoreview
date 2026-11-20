@@ -6,6 +6,17 @@ pub use index::render_index;
 pub use markdown::render_markdown;
 pub use sarif::render_sarif;
 
+fn render_analyzer_warnings(out: &mut String, warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
+    out.push_str("## Analyzer warnings\n\n");
+    for warning in warnings {
+        out.push_str(&format!("- {}\n", warning.lines().collect::<Vec<_>>().join(" ")));
+    }
+    out.push('\n');
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,6 +80,15 @@ mod tests {
         let md = render_markdown(&report);
         assert!(md.contains("No findings"));
         assert!(!md.contains("## Findings"));
+    }
+
+    #[test]
+    fn both_markdown_views_show_incomplete_coverage_even_without_findings() {
+        let mut report = make_report(vec![], vec![]);
+        report.analyzer_warnings.push("clippy run failed\nSee compiler diagnostics.".into());
+        for view in [render_markdown(&report), render_index(&report)] {
+            assert!(view.contains("## Analyzer warnings\n\n- clippy run failed See compiler diagnostics.\n\nNo findings."));
+        }
     }
 
     #[test]
