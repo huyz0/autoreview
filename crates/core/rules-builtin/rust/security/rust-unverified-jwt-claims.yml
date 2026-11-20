@@ -1,0 +1,18 @@
+id: rust-unverified-jwt-claims
+language: Rust
+category: security
+severity: info
+semantic: true
+message: >-
+  This API decodes JWT claims without verifying their signature. Treat the
+  claims as untrusted until a signed decode validates them against your policy.
+metadata:
+  cwe: [CWE-347]
+  confidence: HIGH
+  references:
+    - https://docs.rs/jsonwebtoken/latest/jsonwebtoken/dangerous/index.html
+rule:
+  pattern: $DECODE($TOKEN)
+constraints:
+  DECODE:
+    regex: '^(::\s*)?jsonwebtoken\s*::\s*dangerous\s*::\s*insecure_decode(_claims)?(\s*::\s*<[^;]+>)?$'

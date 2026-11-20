@@ -1,0 +1,36 @@
+id: rust-blocking-call-in-async
+language: Rust
+category: performance
+severity: info
+semantic: true
+message: >-
+  This synchronous sleep or file operation can block the thread polling the future.
+  Use the runtime's async API or run the work on a dedicated blocking worker.
+metadata:
+  confidence: HIGH
+  references:
+    - https://doc.rust-lang.org/std/thread/fn.sleep.html
+    - https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html
+rule:
+  pattern: $CALL($$$ARGS)
+  inside:
+    any:
+      - kind: async_block
+      - kind: closure_expression
+        regex: '^async\b'
+      - kind: function_item
+        has:
+          kind: function_modifiers
+          regex: '^async\b'
+    stopBy:
+      any:
+        - kind: function_item
+        - kind: closure_expression
+        - kind: async_block
+        - kind: const_block
+        - kind: const_item
+        - kind: static_item
+        - kind: gen_block
+constraints:
+  CALL:
+    regex: '^(::\s*)?std\s*::\s*(thread\s*::\s*sleep|fs\s*::\s*(read|read_to_string|write))$'

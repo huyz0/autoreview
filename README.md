@@ -15,20 +15,24 @@ deep tier.
 ## What it checks
 
 - **ast-grep pattern rules** for Go, Java, Kotlin, TypeScript, JavaScript,
-  and Rust. Coverage varies by language. The built-in Rust rules focus on
-  correctness, including file access modes, temporary resource lifetimes,
-  buffered writes, eager indexing in `then_some`, and child exit status.
+  and Rust. Rust rules cover I/O and temporary resource lifetimes, panic and
+  unsafe preconditions, blocking calls in async code, and TLS or JWT
+  verification settings.
 - **Dataflow and taint tracking** for Go, Java, and Kotlin: a real CFG-based
   engine, not just syntax matching, catches things like a tainted HTTP
   parameter reaching `exec.Command`, or a typed nil pointer silently
   satisfying an `error` interface.
-- **Complexity metrics**: cyclomatic/cognitive complexity, long methods, deep
-  nesting, god classes, all with YAML-configurable thresholds.
+- **Complexity metrics** with YAML-configurable thresholds. Java and Rust use
+  syntax trees to measure function length, parameters, nesting, branches, and
+  explicit returns. Java also checks class and interface structure.
 - **Cross-file structure**: import-cycle detection (Go, Java, Kotlin),
   ArchUnit-style layer rules from `.autoreview/architecture.yaml`, symbol-index-backed
   smells like feature envy and data clumps.
-- **golangci-lint and clippy** wrapped and normalized into the same finding
-  format as everything else.
+- **golangci-lint and clippy** report into the same finding format. Autoreview
+  classifies selected Clippy lints as correctness, performance, or design for
+  `--aspects` filtering. Other Clippy lints appear under style.
+- **Rust dependency advisories** via optional offline `cargo audit` for
+  changed lockfiles.
 - **LLM specialists** for the things only a model can judge: does this
   actually do what the PR claims, is this abstraction the right shape, is
   this test meaningful or just padding coverage.
@@ -125,6 +129,13 @@ For a review without model calls, pass `--static-only`. Add `--changed-lines`
 to keep deterministic findings whose primary or related location overlaps
 added or modified lines. By default, deterministic checks report across touched
 files, including findings whose locations are outside the changed hunks.
+
+To check Rust dependencies in changed `Cargo.lock` files, pass
+`--audit-rust-deps`. Install [cargo-audit](https://github.com/rustsec/rustsec/tree/main/cargo-audit)
+and populate its local RustSec database before running the review. Autoreview
+uses that database offline and reports scanner failures as analyzer warnings.
+The audit covers Cargo's default registry. With `--changed-lines`, the
+affected package's name or version range must overlap the diff.
 
 Record feedback on a finding to teach the rule factory what's
 actually a false positive:

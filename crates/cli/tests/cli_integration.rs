@@ -181,6 +181,35 @@ fn diff_against_a_seeded_bug_produces_a_valid_report_with_the_expected_finding()
 }
 
 #[test]
+fn rust_design_and_performance_findings_follow_aspect_filters() {
+    if !ast_grep_available() {
+        return;
+    }
+    let decisions = "    if flag { total += 1; }\n".repeat(11);
+    let source = format!(
+        "pub async fn work(flag: bool) -> i32 {{\n    std::thread::sleep(std::time::Duration::from_millis(1));\n    let mut total = 0;\n{decisions}    total\n}}\n"
+    );
+    let repo = init_repo_with_diff(
+        &[("app.rs", "pub async fn work(_: bool) -> i32 { 0 }\n")],
+        &[("app.rs", &source)],
+        "seed Rust performance and design findings",
+    );
+    for (category, expected) in [
+        ("performance", "rust-blocking-call-in-async"),
+        ("design", "cyclomatic-complexity"),
+    ] {
+        let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+            .args(["diff", "--base", "main~1", "--head", "main", "--static-only", "--changed-lines", "--aspects", category])
+            .assert().success();
+        let stdout = String::from_utf8_lossy(&result.get_output().stdout);
+        let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report_path_from_stdout(&stdout)).unwrap()).unwrap();
+        let findings = report["findings"].as_array().unwrap();
+        assert!(findings.iter().any(|f| f["source"]["ruleId"] == expected && f["location"]["path"] == "app.rs"));
+        assert!(findings.iter().all(|f| f["category"] == category));
+    }
+}
+
+#[test]
 fn a_shadow_trust_rule_packs_finding_is_suppressed_not_surfaced() {
     if !ast_grep_available() {
         eprintln!("skipping: ast-grep not on PATH");

@@ -27,6 +27,7 @@ pub struct DiffCommandOptions {
     pub incremental: bool,
     pub static_only: bool,
     pub changed_lines: bool,
+    pub audit_rust_deps: bool,
     pub backend: Option<AgentBackendKind>,
 }
 
@@ -248,6 +249,16 @@ fn run_diff_at_revisions(options: &DiffCommandOptions, base: &str, head: &str) -
         Ok(findings) => stage1_agent_findings.extend(findings),
         Err(err) => warn(format!("clippy run failed: {err}")),
     }
+    if options.audit_rust_deps && categories_present.as_ref().is_none_or(|categories| categories.contains("security")) {
+        for path in &changed_file_paths {
+            if Path::new(path).file_name().is_some_and(|name| name == "Cargo.lock") {
+                match autoreview_core::run_cargo_audit(source_root, path) {
+                    Ok(findings) => stage1_agent_findings.extend(findings),
+                    Err(err) => warn(format!("cargo audit failed for {path}: {err:#}")),
+                }
+            }
+        }
+    }
     // Duplication detection is deliberately NOT gated by language here: its
     // sliding-window line-hash algorithm is language-agnostic and already
     // fires on non-source text files (.sql/.proto/.md/etc) — gating it to
@@ -255,10 +266,13 @@ fn run_diff_at_revisions(options: &DiffCommandOptions, base: &str, head: &str) -
     // a behavior change, not a speed win.
     stage1_agent_findings.extend(autoreview_core::run_duplication_check(source_root, &changed_file_paths));
     stage1_agent_findings.extend(autoreview_core::run_cross_file_duplication_check(source_root, &changed_file_paths));
-    if STRUCTURAL_RULE_LANGUAGES.applies(&languages_present, None) {
-        if DESIGN_ONLY.applies(&languages_present, categories_present.as_ref()) {
-            stage1_agent_findings.extend(autoreview_core::run_complexity_check(source_root, &changed_file_paths, &registered_packs));
-        }
+    let has_structural_language = STRUCTURAL_RULE_LANGUAGES.applies(&languages_present, None);
+    if (has_structural_language || languages_present.contains(&Language::Rust))
+        && DESIGN_ONLY.applies(&languages_present, categories_present.as_ref())
+    {
+        stage1_agent_findings.extend(autoreview_core::run_complexity_check(source_root, &changed_file_paths, &registered_packs));
+    }
+    if has_structural_language {
         stage1_agent_findings.extend(autoreview_core::run_practices_check(source_root, &changed_file_paths));
     }
     // Architecture layer check is opt-in: only runs when the repo has a
@@ -1093,7 +1107,7 @@ mod watch_tests {
     #[test]
     fn run_diff_watch_stops_after_max_iterations_when_nothing_changes() {
         let repo = init_repo(&[("main.go", "package main\n")]);
-        let options = DiffCommandOptions { repo_root: repo.path().to_path_buf(), base_ref: "HEAD".to_string(), head_ref: "HEAD".to_string(), tier: None, aspects: None, max_usd: None, incremental: false, static_only: true, changed_lines: false, backend: None };
+        let options = DiffCommandOptions { repo_root: repo.path().to_path_buf(), base_ref: "HEAD".to_string(), head_ref: "HEAD".to_string(), tier: None, aspects: None, max_usd: None, incremental: false, static_only: true, changed_lines: false, audit_rust_deps: false, backend: None };
         run_diff_watch(options, std::time::Duration::from_millis(1), Some(3)).unwrap();
     }
 }
