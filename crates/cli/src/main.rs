@@ -51,6 +51,9 @@ enum Commands {
         /// Limit deterministic findings to changed lines or related locations on changed lines
         #[arg(long)]
         changed_lines: bool,
+        /// Use the local RustSec database to audit changed Cargo.lock files
+        #[arg(long)]
+        audit_rust_deps: bool,
         /// Which agent backend drives specialists: claude-code (default), pi, local-llm, or openai-compatible
         #[arg(long)]
         backend: Option<String>,
@@ -333,7 +336,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Doctor => {
             run_doctor(&repo_root);
         }
-        Commands::Diff { base, head, tier, aspects, max_usd, incremental, static_only, changed_lines, backend, watch, watch_interval } => {
+        Commands::Diff { base, head, tier, aspects, max_usd, incremental, static_only, changed_lines, audit_rust_deps, backend, watch, watch_interval } => {
             let tier = tier.as_deref().map(|value| parse_tier(value).ok_or_else(|| anyhow::anyhow!("invalid tier '{value}'"))).transpose()?;
             let backend = backend.as_deref().map(|value| parse_backend(value).ok_or_else(|| anyhow::anyhow!("invalid backend '{value}'"))).transpose()?;
             anyhow::ensure!(max_usd.is_none_or(|limit| limit.is_finite() && limit >= 0.0), "--max-usd must be a finite, nonnegative amount");
@@ -348,6 +351,7 @@ fn main() -> anyhow::Result<()> {
                     incremental,
                     static_only,
                     changed_lines,
+                    audit_rust_deps,
                     backend,
                 },
                 watch,

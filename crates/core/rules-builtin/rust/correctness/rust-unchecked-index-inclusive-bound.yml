@@ -1,0 +1,26 @@
+id: rust-unchecked-index-inclusive-bound
+language: Rust
+category: correctness
+severity: warning
+semantic: true
+message: >-
+  This guard permits the index to equal the length, which is out of bounds for a
+  slice or vector element. Use a strict `<` bound before unchecked access, or use
+  checked access with `get` or `get_mut`.
+metadata:
+  confidence: HIGH
+  references:
+    - https://doc.rust-lang.org/std/primitive.slice.html#method.get_unchecked
+    - https://doc.rust-lang.org/std/primitive.slice.html#method.get_unchecked_mut
+rule:
+  any:
+    - pattern: 'if $INDEX <= $ITEMS.len() { unsafe { $ITEMS.$ACCESS($INDEX) } } else { $$$FALLBACK }'
+    - pattern: 'if $INDEX <= $ITEMS.len() { return unsafe { $ITEMS.$ACCESS($INDEX) }; }'
+constraints:
+  INDEX:
+    kind: identifier
+  ITEMS:
+    kind: identifier
+  ACCESS:
+    kind: field_identifier
+    regex: '^get_unchecked(_mut)?$'

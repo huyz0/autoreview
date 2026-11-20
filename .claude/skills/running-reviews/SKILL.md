@@ -51,6 +51,7 @@ diff` reviews the current branch. Flags that matter:
 | `--aspects security,correctness` | Restrict deterministic findings and specialist selection to the named categories. |
 | `--static-only` | Run the deterministic review without calling model backends. |
 | `--changed-lines` | Keep deterministic findings with a primary or related location on added or modified lines. |
+| `--audit-rust-deps` | Audit changed `Cargo.lock` files using installed `cargo-audit` and its local RustSec database. |
 | `--incremental` | Suppress findings already reported in the previous run on this repo — good for re-reviewing after a fixup commit. |
 | `--backend` | `claude-code` (default), `pi`, `local-llm`, `openai-compatible`. |
 | `--watch` | Re-run whenever `base...head` changes. Interactive use only, never in CI. |

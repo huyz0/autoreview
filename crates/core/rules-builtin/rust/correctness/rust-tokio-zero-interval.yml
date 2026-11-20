@@ -1,0 +1,19 @@
+id: rust-tokio-zero-interval
+language: Rust
+category: correctness
+severity: warning
+message: >-
+  A Tokio interval panics when its period is zero. Use a positive period or an
+  async sleep or yield when the operation should run only once.
+metadata:
+  confidence: HIGH
+  references:
+    - https://docs.rs/tokio/latest/tokio/time/fn.interval.html
+    - https://docs.rs/tokio/latest/tokio/time/fn.interval_at.html
+rule:
+  any:
+    - pattern: tokio::time::interval($PERIOD)
+    - pattern: tokio::time::interval_at($START, $PERIOD)
+constraints:
+  PERIOD:
+    regex: '^(::\s*)?(std\s*::\s*time|core\s*::\s*time|tokio\s*::\s*time)\s*::\s*Duration\s*::\s*(ZERO|(from_(secs|millis|micros|nanos)\s*\(\s*0\s*,?\s*\)|new\s*\(\s*0\s*,\s*0\s*,?\s*\)))$'

@@ -1,0 +1,21 @@
+id: rust-nonzero-unwrap-zero
+language: Rust
+category: correctness
+severity: warning
+message: >-
+  `NonZero::new(0)` returns `None`, so unwrapping it panics when this code runs.
+  Use a nonzero value or handle `None`.
+metadata:
+  confidence: HIGH
+  references:
+    - https://doc.rust-lang.org/std/num/struct.NonZero.html#method.new
+rule:
+  any:
+    - pattern: $CONSTRUCTOR($ZERO).unwrap()
+    - pattern: $CONSTRUCTOR($ZERO).expect($WHY)
+constraints:
+  CONSTRUCTOR:
+    regex: '^(::\s*)?(std|core)\s*::\s*num\s*::\s*NonZero([UI](8|16|32|64|128|size)|\s*::\s*<\s*[iu](8|16|32|64|128|size)\s*>)?\s*::\s*new$'
+  ZERO:
+    kind: integer_literal
+    regex: '^(0[0_]*|0[xob][0_]*0[0_]*)([iu](8|16|32|64|128|size))?$'

@@ -68,6 +68,19 @@ fn map_severity(level: &str) -> Severity {
     }
 }
 
+fn diagnostic_category(code: Option<&str>) -> &'static str {
+    match code.and_then(|code| code.strip_prefix("clippy::")) {
+        Some("await_holding_lock" | "await_holding_refcell_ref" | "infinite_iter" | "invalid_regex"
+            | "out_of_bounds_indexing" | "suspicious_open_options" | "unused_io_amount" | "zombie_processes") => "correctness",
+        Some("box_collection" | "iter_overeager_cloned" | "large_enum_variant" | "manual_memcpy"
+            | "readonly_write_lock" | "redundant_allocation" | "regex_creation_in_loops"
+            | "result_large_err" | "slow_vector_initialization") => "performance",
+        Some("cognitive_complexity" | "too_many_arguments" | "type_complexity") => "design",
+        Some(_) => "style",
+        None => "correctness",
+    }
+}
+
 fn is_relevant_source_file(path: &str) -> bool {
     Path::new(path).extension().and_then(|e| e.to_str()) == Some("rs")
 }
@@ -97,7 +110,7 @@ fn parse_clippy_output(stdout: &str, changed_files: &HashSet<&str>) -> Vec<Agent
 
         findings.push(AgentFinding {
             source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "clippy".to_string(), rule_id: code.map(str::to_owned), aspect: None, backend: None },
-            category: if is_clippy { "style" } else { "correctness" }.to_string(),
+            category: diagnostic_category(code).to_string(),
             severity: map_severity(&diagnostic.level),
             confidence: 1.0,
             title: code.unwrap_or("Rust compiler error").to_string(),
@@ -181,6 +194,16 @@ mod tests {
 
     fn clippy_available() -> bool {
         Command::new("cargo").args(["clippy", "--version"]).output().map(|o| o.status.success()).unwrap_or(false)
+    }
+
+    #[test]
+    fn maps_known_clippy_categories_without_guessing_unknown_ids() {
+        assert_eq!(diagnostic_category(Some("clippy::regex_creation_in_loops")), "performance");
+        assert_eq!(diagnostic_category(Some("clippy::await_holding_lock")), "correctness");
+        assert_eq!(diagnostic_category(Some("clippy::type_complexity")), "design");
+        assert_eq!(diagnostic_category(Some("clippy::needless_return")), "style");
+        assert_eq!(diagnostic_category(Some("E0308")), "correctness");
+        assert_eq!(diagnostic_category(None), "correctness");
     }
 
     #[test]

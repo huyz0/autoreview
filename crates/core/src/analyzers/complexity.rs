@@ -1,6 +1,7 @@
-//! Threshold checks use syntax-tree ranges for Java and line-based metrics for other languages.
+//! Threshold checks use syntax-tree ranges for Java and Rust and line-based metrics elsewhere.
 
 mod java;
+mod rust;
 
 use std::collections::HashMap;
 
@@ -98,6 +99,7 @@ pub enum ComplexityLanguage {
     Go,
     JavaOrKotlin,
     JavaScriptOrTypeScript,
+    Rust,
 }
 
 pub fn language_for_file(path: &str) -> Option<ComplexityLanguage> {
@@ -105,6 +107,7 @@ pub fn language_for_file(path: &str) -> Option<ComplexityLanguage> {
         Some("go") => Some(ComplexityLanguage::Go),
         Some("java") | Some("kt") | Some("kts") => Some(ComplexityLanguage::JavaOrKotlin),
         Some("ts") | Some("tsx") | Some("mts") | Some("cts") | Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => Some(ComplexityLanguage::JavaScriptOrTypeScript),
+        Some("rs") => Some(ComplexityLanguage::Rust),
         _ => None,
     }
 }
@@ -306,7 +309,7 @@ fn append_function_findings(
             metrics.start_line,
             end_line,
             format!("High cognitive complexity ({cognitive_score})"),
-            format!("This function/method has an estimated cognitive complexity of {cognitive_score} (over the {}-threshold, detekt's CognitiveComplexMethod) — unlike cyclomatic complexity, nested control structures compound this score instead of adding linearly, so it tracks how hard the function is to hold in your head better than branch count alone. Consider flattening nesting with early returns/guard clauses, or extracting inner blocks into named helpers.", thresholds.cognitive_complexity),
+            format!("This function/method has an estimated cognitive complexity of {cognitive_score}, above the configured limit of {}. The score increases with the depth of nested control flow. Consider flattening deeply nested branches with guard clauses or extracting named helpers.", thresholds.cognitive_complexity),
         ));
     }
     if return_count > thresholds.too_many_returns {
@@ -382,6 +385,9 @@ pub fn detect_complexity_in_file_with_thresholds(path: &str, content: &str, lang
     };
     if language == ComplexityLanguage::JavaOrKotlin && path.ends_with(".java") {
         return java::findings(path, content, thresholds, &make_finding);
+    }
+    if language == ComplexityLanguage::Rust {
+        return rust::findings(path, content, thresholds, &make_finding);
     }
 
     let mut findings = Vec::new();

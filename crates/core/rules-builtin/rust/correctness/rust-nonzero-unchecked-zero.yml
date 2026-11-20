@@ -1,0 +1,19 @@
+id: rust-nonzero-unchecked-zero
+language: Rust
+category: correctness
+severity: error
+message: >-
+  Passing zero to `NonZero::new_unchecked` violates its safety contract.
+  Use `NonZero::new` and handle `None` for input that can be zero.
+metadata:
+  confidence: HIGH
+  references:
+    - https://doc.rust-lang.org/std/num/struct.NonZero.html#method.new_unchecked
+rule:
+  pattern: $CONSTRUCTOR($ZERO)
+constraints:
+  CONSTRUCTOR:
+    regex: '^(::\s*)?(std|core)\s*::\s*num\s*::\s*NonZero([UI](8|16|32|64|128|size)|\s*::\s*<\s*[iu](8|16|32|64|128|size)\s*>)?\s*::\s*new_unchecked$'
+  ZERO:
+    kind: integer_literal
+    regex: '^(0[0_]*|0[xob][0_]*0[0_]*)([iu](8|16|32|64|128|size))?$'
