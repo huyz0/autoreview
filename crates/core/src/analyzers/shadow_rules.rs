@@ -56,6 +56,7 @@ fn languages_from_str(value: &str) -> Option<&'static [Language]> {
         "TypeScript" => Some(&[Language::TypeScript, Language::Tsx]),
         "Tsx" => Some(&[Language::Tsx]),
         "JavaScript" => Some(&[Language::JavaScript]),
+        "Rust" => Some(&[Language::Rust]),
         _ => None,
     }
 }
@@ -102,12 +103,16 @@ pub struct ShadowFinding {
 /// isn't on PATH — matches `run_ast_grep`'s own graceful-degradation
 /// contract, since shadow mode should never be able to break Stage 1.
 pub fn run_shadow_rules(repo_root: &Path, changed_files: &[String]) -> anyhow::Result<Vec<ShadowFinding>> {
+    run_shadow_rules_for_snapshot(repo_root, repo_root, changed_files)
+}
+
+pub fn run_shadow_rules_for_snapshot(repo_root: &Path, source_root: &Path, changed_files: &[String]) -> anyhow::Result<Vec<ShadowFinding>> {
     let rule_files = discover_shadow_rule_files(repo_root);
     if rule_files.is_empty() {
         return Ok(vec![]);
     }
 
-    let relevant: Vec<&str> = changed_files.iter().map(String::as_str).filter(|p| is_relevant_source_file(p) && repo_root.join(p).exists()).collect();
+    let relevant: Vec<&str> = changed_files.iter().map(String::as_str).filter(|p| is_relevant_source_file(p) && source_root.join(p).is_file()).collect();
     if relevant.is_empty() {
         return Ok(vec![]);
     }
@@ -137,7 +142,7 @@ pub fn run_shadow_rules(repo_root: &Path, changed_files: &[String]) -> anyhow::R
         return Ok(vec![]);
     }
 
-    let matches = match run_ast_grep_scan(temp_dir.path(), repo_root, &relevant)? {
+    let matches = match run_ast_grep_scan(temp_dir.path(), source_root, &relevant)? {
         Some(matches) => matches,
         None => return Ok(vec![]),
     };

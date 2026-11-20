@@ -14,8 +14,9 @@ use autoreview_schema::{
 };
 
 use super::history::{history_dir_for, hostname};
+use super::diff_lines::ChangedLines;
+use super::revision::{checkout_snapshot, resolve_commit};
 
-#[derive(Clone)]
 pub struct DiffCommandOptions {
     pub repo_root: PathBuf,
     pub base_ref: String,
@@ -24,6 +25,8 @@ pub struct DiffCommandOptions {
     pub aspects: Option<Vec<String>>,
     pub max_usd: Option<f64>,
     pub incremental: bool,
+    pub static_only: bool,
+    pub changed_lines: bool,
     pub backend: Option<AgentBackendKind>,
 }
 
@@ -68,7 +71,7 @@ fn diff_context(
     files: &[autoreview_core::FileChange],
 ) -> String {
     let output = Command::new("git")
-        .args(["diff", &format!("{base_ref}...{head_ref}")])
+        .args(["diff", "--no-ext-diff", "--no-textconv", &format!("{base_ref}...{head_ref}"), "--"])
         .current_dir(repo_root)
         .output();
     if let Ok(output) = output {
@@ -104,7 +107,8 @@ pub(crate) fn move_shadow_rule_file(repo_root: &Path, rule_id: &str, from: &str,
             continue;
         }
         let Ok(contents) = std::fs::read_to_string(&rule_file.path) else { continue };
-        if !contents.contains(&format!("id: {rule_id}")) {
+        let Ok(rule) = serde_yaml::from_str::<serde_yaml::Value>(&contents) else { continue };
+        if rule.get("id").and_then(serde_yaml::Value::as_str) != Some(rule_id) {
             continue;
         }
         let dest_dir = repo_root.join(".autoreview").join("rules").join(to);
@@ -144,16 +148,26 @@ fn stage1_summary_for_category(stage1_findings: &[Finding], category: &str) -> S
 }
 
 pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
+    let (base, head) = diff_revisions(&options.repo_root, &options.base_ref, &options.head_ref)?;
+    run_diff_at_revisions(&options, &base, &head)
+}
+
+fn run_diff_at_revisions(options: &DiffCommandOptions, base: &str, head: &str) -> anyhow::Result<()> {
     let repo_root_str = options.repo_root.to_string_lossy().to_string();
     let config = load_config(&options.repo_root.join(".autoreview").join("config.yaml"))?;
-    let facts = collect_diff_facts(&repo_root_str, &options.base_ref, &options.head_ref, None)?;
+    let facts = collect_diff_facts(&repo_root_str, base, head, Some(&config.triage.sensitive_paths))?;
+    let changed_lines = options.changed_lines.then(|| ChangedLines::load(&options.repo_root, base, head)).transpose()?;
+    let snapshot = checkout_snapshot(&options.repo_root, head)?;
+    let source_root = snapshot.path();
     let skills = discover_manifests(&options.repo_root)?;
     let backend_kind = options.backend.unwrap_or(config.agents.backend);
+    let use_model = !options.static_only;
 
     println!(
         "autoreview diff  ({}...{})\n",
         options.base_ref, options.head_ref
     );
+    println!("  head commit:    {head}");
     println!("  files changed:  {}", facts.files.len());
     let langs = if facts.languages.is_empty() {
         "none detected".to_string()
@@ -210,48 +224,65 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     }
 
     let mut stage1_agent_findings = Vec::new();
-    match run_ast_grep(&options.repo_root, &changed_file_paths, &registered_packs) {
-        Ok(findings) => stage1_agent_findings.extend(findings),
-        Err(err) => println!("  [warn] ast-grep run failed: {err}"),
+    let mut analyzer_warnings = Vec::new();
+    let mut warn = |message: String| {
+        println!("  [warn] {message}");
+        analyzer_warnings.push(message);
+    };
+    let available = |binary: &str| Command::new(binary).arg("--version").output().is_ok_and(|output| output.status.success());
+    if !languages_present.is_empty() && !available("ast-grep") {
+        warn("ast-grep is unavailable. Pattern rules were skipped.".to_string());
     }
-    match run_golangci_lint(&options.repo_root, &changed_file_paths) {
-        Ok(findings) => stage1_agent_findings.extend(findings),
-        Err(err) => println!("  [warn] golangci-lint run failed: {err}"),
+    if languages_present.contains(&Language::Go) && !available("golangci-lint") {
+        warn("golangci-lint is unavailable. Go linter checks were skipped.".to_string());
     }
-    match autoreview_core::run_clippy(&options.repo_root, &changed_file_paths) {
+    match run_ast_grep(source_root, &changed_file_paths, &registered_packs) {
         Ok(findings) => stage1_agent_findings.extend(findings),
-        Err(err) => println!("  [warn] clippy run failed: {err}"),
+        Err(err) => warn(format!("ast-grep run failed: {err}")),
+    }
+    match run_golangci_lint(source_root, &changed_file_paths) {
+        Ok(findings) => stage1_agent_findings.extend(findings),
+        Err(err) => warn(format!("golangci-lint run failed: {err}")),
+    }
+    match autoreview_core::run_clippy(source_root, &changed_file_paths) {
+        Ok(findings) => stage1_agent_findings.extend(findings),
+        Err(err) => warn(format!("clippy run failed: {err}")),
     }
     // Duplication detection is deliberately NOT gated by language here: its
     // sliding-window line-hash algorithm is language-agnostic and already
     // fires on non-source text files (.sql/.proto/.md/etc) — gating it to
     // the tracked source-language set would silently drop that coverage,
     // a behavior change, not a speed win.
-    stage1_agent_findings.extend(autoreview_core::run_duplication_check(&options.repo_root, &changed_file_paths));
-    stage1_agent_findings.extend(autoreview_core::run_cross_file_duplication_check(&options.repo_root, &changed_file_paths));
+    stage1_agent_findings.extend(autoreview_core::run_duplication_check(source_root, &changed_file_paths));
+    stage1_agent_findings.extend(autoreview_core::run_cross_file_duplication_check(source_root, &changed_file_paths));
     if STRUCTURAL_RULE_LANGUAGES.applies(&languages_present, None) {
         if DESIGN_ONLY.applies(&languages_present, categories_present.as_ref()) {
-            stage1_agent_findings.extend(autoreview_core::run_complexity_check(&options.repo_root, &changed_file_paths, &registered_packs));
+            stage1_agent_findings.extend(autoreview_core::run_complexity_check(source_root, &changed_file_paths, &registered_packs));
         }
-        stage1_agent_findings.extend(autoreview_core::run_practices_check(&options.repo_root, &changed_file_paths));
+        stage1_agent_findings.extend(autoreview_core::run_practices_check(source_root, &changed_file_paths));
     }
     // Architecture layer check is opt-in: only runs when the repo has a
     // .autoreview/architecture.yaml declaring layers, per the plan ("no sane
     // generic default for what a repo's layers are").
     match autoreview_core::load_architecture_config(&options.repo_root.join(".autoreview").join("architecture.yaml")) {
-        Ok(Some(arch_config)) => stage1_agent_findings.extend(autoreview_core::run_architecture_check(&options.repo_root, &changed_file_paths, &arch_config)),
+        Ok(Some(arch_config)) => stage1_agent_findings.extend(autoreview_core::run_architecture_check(source_root, &changed_file_paths, &arch_config)),
         Ok(None) => {}
-        Err(err) => println!("  [warn] failed to parse .autoreview/architecture.yaml: {err}"),
+        Err(err) => warn(format!("failed to parse .autoreview/architecture.yaml: {err}")),
     }
     // archgraph (Tier 2): whole-repo import-cycle detection (Go and
     // Java/Kotlin, each its own graph), a no-op for a repo/diff with
     // neither a go.mod nor any .go/.java/.kt files touched.
-    stage1_agent_findings.extend(autoreview_core::run_archgraph_check(&options.repo_root, &changed_file_paths));
-    stage1_agent_findings.extend(autoreview_core::run_symindex_check_with_tier4(&options.repo_root, &changed_file_paths, config.symindex.tier4_go));
-    stage1_agent_findings.extend(autoreview_core::run_dataflow_check(&options.repo_root, &changed_file_paths, &registered_packs));
+    stage1_agent_findings.extend(autoreview_core::run_archgraph_check(source_root, &changed_file_paths));
+    stage1_agent_findings.extend(autoreview_core::run_symindex_check_with_tier4(source_root, &changed_file_paths, config.symindex.tier4_go));
+    stage1_agent_findings.extend(autoreview_core::run_dataflow_check_for_snapshot(&options.repo_root, source_root, &changed_file_paths, &registered_packs));
     stage1_agent_findings.extend(autoreview_core::detect_shotgun_surgery(&facts.files));
-    stage1_agent_findings.extend(autoreview_core::run_divergent_change_check(&options.repo_root, &changed_file_paths));
-    stage1_agent_findings.extend(autoreview_core::run_bidi_control_character_check(&options.repo_root, &changed_file_paths));
+    stage1_agent_findings.extend(autoreview_core::run_divergent_change_check(source_root, &changed_file_paths));
+    stage1_agent_findings.extend(autoreview_core::run_bidi_control_character_check(source_root, &changed_file_paths));
+    let in_review_scope = |finding: &autoreview_schema::AgentFinding| {
+        categories_present.as_ref().is_none_or(|categories| categories.contains(&finding.category))
+            && changed_lines.as_ref().is_none_or(|lines| lines.contains_finding(finding))
+    };
+    stage1_agent_findings.retain(in_review_scope);
     // Rule-pack shadow trust: a pack's rule still ran (its finding was
     // computed and provenance-tagged like any `trust: full` pack's), but a
     // `trust: shadow` pack's findings never surface, don't count toward
@@ -272,17 +303,17 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         .into_iter()
         .map(to_finding)
         .collect();
-    println!("  stage 1:        {stage1_finding_count} deterministic finding(s) (ast-grep + golangci-lint + clippy + duplication + cross-file-duplication + complexity + practices + architecture + archgraph + symindex)");
+    println!("  stage 1:        {stage1_finding_count} deterministic finding(s)");
 
     // LLM triage classifier (M2): only consulted when no explicit --tier was
     // given and the heuristic score itself landed within the ambiguity band
     // of a tier boundary — the common case never pays for this call.
     let mut classified_tier = None;
-    if options.tier.is_none() && backend_available(backend_kind, &config) {
+    if use_model && options.tier.is_none() && backend_available(backend_kind, &config) {
         let (heuristic_score, _) = autoreview_core::score_diff_facts(&facts, &config, stage1_finding_count);
         if let Some((lower, upper)) = autoreview_core::ambiguous_tier_boundary(heuristic_score, &config) {
             let backend = build_backend(backend_kind, &config);
-            classified_tier = autoreview_core::classify_ambiguous_tier(backend.as_ref(), &facts, heuristic_score, lower, upper, cheap_model_for(backend_kind, &config), &options.repo_root);
+            classified_tier = autoreview_core::classify_ambiguous_tier(backend.as_ref(), &facts, heuristic_score, lower, upper, cheap_model_for(backend_kind, &config), source_root);
             if let Some(tier) = classified_tier {
                 println!("  [triage] score {heuristic_score:.1} is ambiguous between {lower} and {upper} — classifier picked '{tier}'");
             }
@@ -295,7 +326,14 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         aspects: options.aspects.clone(),
         max_usd: options.max_usd,
     };
-    let plan = plan_review(&facts, &config, &skills, stage1_finding_count, overrides);
+    let mut plan = plan_review(&facts, &config, &skills, stage1_finding_count, overrides);
+    if options.static_only {
+        plan.specialists.clear();
+        plan.overrides.push("--static-only".to_string());
+    }
+    if options.changed_lines {
+        plan.overrides.push("--changed-lines".to_string());
+    }
 
     println!(
         "  triage score:   {:.1}  -> tier: {}",
@@ -325,7 +363,9 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     let mut total_usd = 0.0f64;
     let mut any_usd_reported = false;
 
-    if plan.specialists.is_empty() {
+    if options.static_only {
+        println!("  [info] Static-only review. Model stages are disabled.");
+    } else if plan.specialists.is_empty() {
         println!(
             "  [info] No specialists triggered for this diff at tier '{}'.",
             plan.tier
@@ -335,7 +375,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         // selected backend ends up being available, so `autoreview diff` is
         // still useful as a diagnostic of what context *would* be sent even
         // when specialists can't run.
-        let context_items = collect_context(&options.repo_root, &facts, &config.context.providers);
+        let context_items = collect_context(source_root, &facts, &config.context.providers);
         println!(
             "  context:        {} item(s){}",
             context_items.len(),
@@ -370,8 +410,8 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
             );
             let diff_text = diff_context(
                 &options.repo_root,
-                &options.base_ref,
-                &options.head_ref,
+                base,
+                head,
                 &facts.files,
             );
             let backend = build_backend(backend_kind, &config);
@@ -427,6 +467,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
                                 run_one_specialist(
                                     backend_ref,
                                     &repo_root,
+                                    source_root,
                                     plan.tier,
                                     specialist,
                                     &diff_text,
@@ -503,7 +544,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     let mut verify_suppressed = Vec::new();
     if over_budget {
         println!("\n  [budget] skipping verify pass — already at/over --max-usd {:.2}", options.max_usd.unwrap_or(0.0));
-    } else if plan.tier != Tier::Quick && config.verify.enabled && backend_available(backend_kind, &config) {
+    } else if use_model && plan.tier != Tier::Quick && config.verify.enabled && backend_available(backend_kind, &config) {
         // "Semantic rules": syntactically precise but semantically
         // approximate (no type resolution) rules — ast-grep rules declaring
         // `semantic: true`, plus the symindex heuristic rules (message-chain/
@@ -548,7 +589,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         let to_check = autoreview_core::select_for_verification(&findings, &config.verify.noisy_categories, &semantic_ids).len();
         if to_check > 0 {
             println!("\n  verify:         checking {to_check} finding(s) against the diff...");
-            let diff_text = diff_context(&options.repo_root, &options.base_ref, &options.head_ref, &facts.files);
+            let diff_text = diff_context(&options.repo_root, base, head, &facts.files);
             let backend = build_backend(backend_kind, &config);
             let verify_result = autoreview_core::run_verify_pass(
                 backend.as_ref(),
@@ -556,7 +597,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
                 &diff_text,
                 cheap_model_for(backend_kind, &config),
                 4,
-                &options.repo_root,
+                source_root,
                 &config.verify.noisy_categories,
                 &semantic_ids,
             );
@@ -590,15 +631,15 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     // tier for the same reason: it's a real LLM cost on top of the
     // finding-based review, not a replacement for it.
     let mut spec_verdicts = Vec::new();
-    if !over_budget && plan.tier != Tier::Quick && backend_available(backend_kind, &config) {
+    if use_model && !autoreview_core::should_stop_for_budget(total_usd, any_usd_reported, options.max_usd) && plan.tier != Tier::Quick && backend_available(backend_kind, &config) {
         let spec_path = options.repo_root.join(".autoreview").join("spec.md");
         match std::fs::read_to_string(&spec_path) {
             Ok(contents) => match autoreview_core::parse_spec(&contents) {
                 Some(spec) => {
                     println!("\n  spec:           checking {} acceptance criterion/criteria against the diff...", spec.criteria.len());
-                    let diff_text = diff_context(&options.repo_root, &options.base_ref, &options.head_ref, &facts.files);
+                    let diff_text = diff_context(&options.repo_root, base, head, &facts.files);
                     let backend = build_backend(backend_kind, &config);
-                    let spec_result = autoreview_core::run_spec_verify(backend.as_ref(), &spec, &diff_text, cheap_model_for(backend_kind, &config), 4, &options.repo_root);
+                    let spec_result = autoreview_core::run_spec_verify(backend.as_ref(), &spec, &diff_text, cheap_model_for(backend_kind, &config), 4, source_root);
                     for r in &spec_result.results {
                         let marker = match r.verdict {
                             autoreview_schema::CriterionVerdict::Satisfied => "✓",
@@ -653,7 +694,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     // surface as normal findings. Every firing is checked for agreement
     // against this run's own agent findings and recorded, then
     // promotion/demotion gates are evaluated per rule that fired.
-    match autoreview_core::run_shadow_rules(&options.repo_root, &changed_file_paths) {
+    match autoreview_core::run_shadow_rules_for_snapshot(&options.repo_root, source_root, &changed_file_paths) {
         Ok(shadow_findings) if !shadow_findings.is_empty() => match HistoryStore::open(&history_dir) {
             Ok(store) => {
                 let agent_locations: Vec<(String, String, u32)> = dedupe_result
@@ -665,15 +706,24 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
                 let agent_refs: Vec<autoreview_core::AgentFindingRef> = agent_locations.iter().map(|(category, path, line)| autoreview_core::AgentFindingRef { category, path, line: *line }).collect();
 
                 let mut fired_rule_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-                let (raw_findings, statuses): (Vec<_>, Vec<_>) = shadow_findings.into_iter().map(|sf| (sf.finding, (sf.rule_id, sf.status))).unzip();
+                let mut statuses = HashMap::new();
+                let raw_findings = shadow_findings.into_iter()
+                    .filter(|sf| in_review_scope(&sf.finding))
+                    .map(|sf| {
+                        statuses.insert(sf.rule_id, sf.status);
+                        sf.finding
+                    })
+                    .collect();
                 let fingerprinted = assign_fingerprints(raw_findings);
 
-                for (ff, (rule_id, status)) in fingerprinted.into_iter().zip(statuses) {
+                for ff in fingerprinted {
                     let finding = to_finding(ff);
-                    fired_rule_ids.insert(rule_id.clone());
-                    store.ensure_rule_tracked(&rule_id, status, &run_timestamp).ok();
+                    let Some(rule_id) = finding.source.rule_id.as_deref() else { continue };
+                    let Some(&status) = statuses.get(rule_id) else { continue };
+                    fired_rule_ids.insert(rule_id.to_owned());
+                    store.ensure_rule_tracked(rule_id, status, &run_timestamp).ok();
                     let agreement = autoreview_core::classify_agreement(&finding.category, &finding.location.path, finding.location.range.start_line, &agent_refs);
-                    store.record_shadow_firing(&rule_id, &finding.fingerprints.primary, &run_id, &finding.location.path, finding.location.range.start_line, agreement.as_str(), &run_timestamp).ok();
+                    store.record_shadow_firing(rule_id, &finding.fingerprints.primary, &run_id, &finding.location.path, finding.location.range.start_line, agreement.as_str(), &run_timestamp).ok();
 
                     if status == "shadow" {
                         dedupe_result.suppressed.push(autoreview_schema::SuppressedFinding { finding, reason: autoreview_schema::SuppressedReason::ShadowRule });
@@ -705,7 +755,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
             Err(err) => println!("  [warn] shadow rules: failed to open history store: {err}"),
         },
         Ok(_) => {}
-        Err(err) => println!("  [warn] shadow rules run failed: {err}"),
+        Err(err) => warn(format!("shadow rules run failed: {err}")),
     }
 
     // Incremental mode: suppress findings already reported in the most
@@ -743,7 +793,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     // resembles some noise) — `AcceptedRisk`/`FixInFollowup` count on the
     // tp side too, same as `TruePositive`, since all three confirm the
     // finding was correct; only `DoesntApply` counts toward neither side.
-    if config.agents.embedding.enabled {
+    if use_model && config.agents.embedding.enabled {
         match HistoryStore::open(&history_dir) {
             Ok(store) => {
                 let (mut kept, mut suppressed_by_embedding) = (Vec::new(), Vec::new());
@@ -778,8 +828,8 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
 
     for finding in &dedupe_result.findings {
         println!(
-            "\n  [{:?}] {} ({}) — {}",
-            finding.severity, finding.title, finding.id, finding.location.path
+            "\n  [{:?}] {} ({}) — {}:{}",
+            finding.severity, finding.title, finding.id, finding.location.path, finding.location.range.start_line
         );
         println!("    {}", finding.message);
     }
@@ -810,6 +860,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
             repo_root: repo_root_str,
             base_ref: options.base_ref.clone(),
             head_ref: options.head_ref.clone(),
+            commits: Some(autoreview_schema::ComparedCommits { base: base.to_owned(), head: head.to_owned() }),
             diff_stats: DiffStats {
                 files: facts.files.len() as u32,
                 additions,
@@ -820,6 +871,7 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
         plan,
         findings: dedupe_result.findings,
         suppressed: dedupe_result.suppressed,
+        analyzer_warnings,
         costs: RunCosts {
             total: CostEntry {
                 input_tokens: total_input_tokens,
@@ -877,23 +929,16 @@ pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A cheap, content-sensitive fingerprint of `base_ref...head_ref` — `git
-/// diff --stat` rather than a full patch fetch, since watch mode calls this
-/// on every poll tick and only needs to know *whether* to re-run the full
-/// (expensive) review, not what changed. Two different edits that happen to
-/// produce identical per-file added/removed line counts would collide here
-/// and be missed — an accepted false-negative for a lightweight polling
-/// signal, not a correctness guarantee.
-fn diff_signature(repo_root: &Path, base_ref: &str, head_ref: &str) -> anyhow::Result<String> {
-    let output = Command::new("git").args(["diff", "--stat", &format!("{base_ref}...{head_ref}")]).current_dir(repo_root).output()?;
-    if !output.status.success() {
-        anyhow::bail!("git diff --stat {base_ref}...{head_ref} failed: {}", String::from_utf8_lossy(&output.stderr));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+/// Watch both resolved commits so edits with identical diff statistics
+/// still trigger a new review.
+fn diff_revisions(repo_root: &Path, base_ref: &str, head_ref: &str) -> anyhow::Result<(String, String)> {
+    let base = resolve_commit(repo_root, base_ref)?;
+    let head = resolve_commit(repo_root, head_ref)?;
+    Ok((base, head))
 }
 
 /// `autoreview diff --watch` — polls `base_ref...head_ref` on an interval
-/// and re-runs the full `run_diff` whenever `diff_signature` changes,
+/// and re-runs the review whenever either ref resolves to a different commit,
 /// instead of requiring a manual re-run after every commit/amend while
 /// iterating on a branch. `max_iterations` bounds the loop for tests and
 /// scripted verification (`None` — the CLI's real usage — loops until the
@@ -908,15 +953,15 @@ fn diff_signature(repo_root: &Path, base_ref: &str, head_ref: &str) -> anyhow::R
 fn run_diff_watch(options: DiffCommandOptions, poll_interval: std::time::Duration, max_iterations: Option<u32>) -> anyhow::Result<()> {
     println!("autoreview diff --watch  ({}...{}, polling every {}s — Ctrl+C to stop)\n", options.base_ref, options.head_ref, poll_interval.as_secs());
 
-    let mut last_signature: Option<String> = None;
+    let mut last_reviewed = None;
     let mut iterations: u32 = 0;
     loop {
-        match diff_signature(&options.repo_root, &options.base_ref, &options.head_ref) {
-            Ok(signature) if last_signature.as_deref() != Some(signature.as_str()) => {
-                last_signature = Some(signature);
+        match diff_revisions(&options.repo_root, &options.base_ref, &options.head_ref) {
+            Ok(revisions) if last_reviewed.as_ref() != Some(&revisions) => {
                 println!("[watch] change detected — running review...\n");
-                if let Err(err) = run_diff(options.clone()) {
-                    println!("[watch] review run failed: {err}");
+                match run_diff_at_revisions(&options, &revisions.0, &revisions.1) {
+                    Ok(()) => last_reviewed = Some(revisions),
+                    Err(err) => println!("[watch] review run failed: {err}"),
                 }
                 println!("\n[watch] watching for further changes...");
             }
@@ -948,6 +993,7 @@ pub fn run_diff_or_watch(options: DiffCommandOptions, watch: bool, poll_interval
 fn run_one_specialist(
     backend: &dyn AgentBackend,
     repo_root: &Path,
+    source_root: &Path,
     tier: Tier,
     specialist: &autoreview_schema::SpecialistPlanEntry,
     diff_text: &str,
@@ -981,7 +1027,7 @@ fn run_one_specialist(
             allowed_tools,
             max_turns: specialist.max_turns,
             model: model_override.map(str::to_string).unwrap_or_else(|| specialist.model.clone()),
-            cwd: repo_root.to_path_buf(),
+            cwd: source_root.to_path_buf(),
         };
 
         Ok(run_specialist(
@@ -1010,12 +1056,12 @@ mod watch_tests {
         let base_sha = head_sha(repo.path());
 
         repo.commit(&[("main.go", "package main\n\nfunc f() {}\n")], "add f");
-        let sig1 = diff_signature(repo.path(), &base_sha, "HEAD").unwrap();
+        let sig1 = diff_revisions(repo.path(), &base_sha, "HEAD").unwrap();
 
-        repo.commit(&[("main.go", "package main\n\nfunc f() {}\n\nfunc g() {}\n")], "add g");
-        let sig2 = diff_signature(repo.path(), &base_sha, "HEAD").unwrap();
+        repo.commit(&[("main.go", "package main\n\nfunc g() {}\n")], "replace f with g");
+        let sig2 = diff_revisions(repo.path(), &base_sha, "HEAD").unwrap();
 
-        assert_ne!(sig1, sig2, "a new commit changing line counts must change the signature");
+        assert_ne!(sig1, sig2, "an edit with identical line counts must trigger a review");
     }
 
     #[test]
@@ -1024,16 +1070,16 @@ mod watch_tests {
         let base_sha = head_sha(repo.path());
         repo.commit(&[("main.go", "package main\n\nfunc f() {}\n")], "add f");
 
-        let sig1 = diff_signature(repo.path(), &base_sha, "HEAD").unwrap();
-        let sig2 = diff_signature(repo.path(), &base_sha, "HEAD").unwrap();
+        let sig1 = diff_revisions(repo.path(), &base_sha, "HEAD").unwrap();
+        let sig2 = diff_revisions(repo.path(), &base_sha, "HEAD").unwrap();
         assert_eq!(sig1, sig2, "polling with no repo changes between calls must produce the same signature");
     }
 
     #[test]
     fn diff_signature_errors_clearly_on_an_unresolvable_ref() {
         let repo = init_repo(&[("main.go", "package main\n")]);
-        let err = diff_signature(repo.path(), "does-not-exist", "HEAD").unwrap_err();
-        assert!(err.to_string().contains("git diff --stat"), "got: {err}");
+        let err = diff_revisions(repo.path(), "does-not-exist", "HEAD").unwrap_err();
+        assert!(err.to_string().contains("does-not-exist"), "got: {err}");
     }
 
     /// `run_diff_watch`'s polling loop only runs `run_diff` on a genuine
@@ -1047,7 +1093,7 @@ mod watch_tests {
     #[test]
     fn run_diff_watch_stops_after_max_iterations_when_nothing_changes() {
         let repo = init_repo(&[("main.go", "package main\n")]);
-        let options = DiffCommandOptions { repo_root: repo.path().to_path_buf(), base_ref: "HEAD".to_string(), head_ref: "HEAD".to_string(), tier: None, aspects: None, max_usd: None, incremental: false, backend: None };
+        let options = DiffCommandOptions { repo_root: repo.path().to_path_buf(), base_ref: "HEAD".to_string(), head_ref: "HEAD".to_string(), tier: None, aspects: None, max_usd: None, incremental: false, static_only: true, changed_lines: false, backend: None };
         run_diff_watch(options, std::time::Duration::from_millis(1), Some(3)).unwrap();
     }
 }

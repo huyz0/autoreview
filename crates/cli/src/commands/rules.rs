@@ -564,6 +564,9 @@ fn approve_candidate(repo_root: &std::path::Path, cluster_id: &str) -> anyhow::R
     let rule_path = dir.join("rule.yaml");
     let contents = std::fs::read_to_string(&rule_path).map_err(|_| anyhow::anyhow!("no drafted rule found at {} — run `autoreview rules mine` first", rule_path.display()))?;
     let meta: RuleIdOnly = serde_yaml::from_str(&contents)?;
+    let bench = run_bench(repo_root, cluster_id)?;
+    anyhow::ensure!(bench.verdict == BenchVerdict::Candidate, "candidate '{cluster_id}' failed its approval checks ({:?}). Run autoreview rules bench {cluster_id} for details", bench.verdict);
+    anyhow::ensure!(std::fs::read_to_string(&rule_path)? == contents, "candidate '{cluster_id}' changed during the benchmark. Retry approval");
 
     let shadow_dir = repo_root.join(".autoreview").join("rules").join("shadow");
     std::fs::create_dir_all(&shadow_dir)?;

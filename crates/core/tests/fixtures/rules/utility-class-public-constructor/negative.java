@@ -1,6 +1,5 @@
 public class StringUtils {
-    private StringUtils() {
-    }
+    private StringUtils() {}
     public static String reverse(String s) {
         return s;
     }

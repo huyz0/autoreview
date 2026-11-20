@@ -1,0 +1,20 @@
+id: rust-read-from-write-only-file
+language: Rust
+category: correctness
+severity: warning
+message: >-
+  `File::create` truncates the file and opens it write-only. Choose `File::open`
+  to read an existing file, or configure `OpenOptions` for read and write access.
+metadata:
+  confidence: HIGH
+  references:
+    - https://doc.rust-lang.org/std/fs/struct.File.html#method.create
+rule:
+  any:
+    - pattern: std::fs::File::create($PATH)?.$METHOD($$$ARGS)
+    - pattern: std::fs::File::create($PATH).unwrap().$METHOD($$$ARGS)
+    - pattern: std::fs::File::create($PATH).expect($REASON).$METHOD($$$ARGS)
+constraints:
+  METHOD:
+    kind: field_identifier
+    regex: '^(read|read_exact|read_to_end|read_to_string|read_vectored|read_buf|read_buf_exact)$'

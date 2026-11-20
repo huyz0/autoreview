@@ -18,6 +18,81 @@ fn ast_grep_available() -> bool {
         .unwrap_or(false)
 }
 
+fn current_commit(repo: &std::path::Path) -> String {
+    let output = StdCommand::new("git").args(["rev-parse", "HEAD"]).current_dir(repo).output().unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+#[test]
+fn commit_replay_measures_rule_precision_and_gates_only_qualified_changed_lines() {
+    if !ast_grep_available() {
+        return;
+    }
+    let policy_path = ".autoreview/replay.yaml";
+    let repo = init_repo(&[("old.go", "package fixture\nfunc Old(x int) bool { return x == x }\n")]);
+    let rule = serde_json::json!({"tool": "ast-grep", "id": "go-no-self-comparison"});
+    let mut cases = Vec::new();
+    let mut insufficient_base = String::new();
+    for index in 1..=3 {
+        let path = format!("case{index}.go");
+        let before = format!("package fixture\nfunc Compare{index}(x, y int) bool {{ return x == x }}\n");
+        let after = before.replace("x == x", "x == y");
+        repo.commit(&[(&path, &before)], "add known-bad comparison");
+        let bad = current_commit(repo.path());
+        repo.commit(&[(&path, &after)], "fix comparison");
+        let fixed = current_commit(repo.path());
+        cases.push(serde_json::json!({
+            "name": format!("comparison-{index}"), "rule": rule,
+            "before": {"commit": bad, "path": path, "lines": [2]},
+            "after": {"commit": fixed, "path": path, "lines": []}
+        }));
+        if index == 1 {
+            let policy = serde_json::json!({"gate": [rule], "cases": cases}).to_string();
+            repo.commit(&[(policy_path, &policy)], "policy with one example");
+            insufficient_base = current_commit(repo.path());
+        }
+    }
+    let policy = serde_json::json!({"gate": [rule], "cases": cases}).to_string();
+    repo.commit(&[(policy_path, &policy)], "policy with three independent cases");
+    let qualified_base = current_commit(repo.path());
+
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["rules", "replay"]).assert().success();
+    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(report["rules"][0]["truePositives"], 3);
+    assert_eq!(report["rules"][0]["precision"], 1.0);
+    assert_eq!(report["rules"][0]["recall"], 1.0);
+
+    Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["rules", "gate", "--base", &insufficient_base])
+        .assert().failure().stderr(predicate::str::contains("needs 3 distinct"));
+
+    repo.commit(&[("old.go", "package fixture\nfunc Old(x int) bool { return x == x }\n\n// Unrelated documentation.\n")], "touch a file that already has a finding");
+    Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["rules", "gate", "--base", &qualified_base])
+        .assert().success().stdout(predicate::str::contains("\"passed\": true"));
+
+    repo.commit(&[
+        (policy_path, "gate: []\ncases: []\n"),
+        ("new.go", "package fixture\nfunc New(x int) bool { return x == x }\n"),
+    ], "introduce a newly added defect and change the head policy");
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["rules", "gate", "--base", &qualified_base])
+        .assert().failure().stderr(predicate::str::contains("merge gate found 1 issue"));
+    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(report["findings"][0]["location"]["path"], "new.go");
+    assert_eq!(report["passed"], false);
+
+    cases[0]["before"]["lines"] = serde_json::json!([]);
+    cases[0]["after"]["lines"] = serde_json::json!([2]);
+    std::fs::write(repo.path().join(policy_path), serde_json::json!({"cases": cases}).to_string()).unwrap();
+    Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["rules", "replay"])
+        .assert().failure().stdout(predicate::str::contains("\"falseNegatives\": 1").and(predicate::str::contains("\"falsePositives\": 1")));
+
+    let advisory = "gate:\n  - tool: autoreview-complexity\n    id: long-method\ncases: []\n";
+    repo.commit(&[(policy_path, advisory)], "try to make a design threshold block merges");
+    Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["rules", "gate", "--base", "HEAD"])
+        .assert().failure().stderr(predicate::str::contains("must be a non-heuristic built-in correctness or security rule"));
+}
+
 /// Extracts the report path from the CLI's own "report written: <path>"
 /// line, then reads and parses it — exercising the real on-disk artifact
 /// the binary produced, not a value handed back in-process.
@@ -205,6 +280,37 @@ fn rules_packs_validate_fails_clearly_on_a_broken_pattern_rule() {
 fn run_git(cwd: &std::path::Path, args: &[&str]) {
     let status = StdCommand::new("git").args(args).current_dir(cwd).status().unwrap();
     assert!(status.success(), "git {args:?} failed in {}", cwd.display());
+}
+
+#[test]
+fn static_review_uses_the_requested_commit_and_handles_renames_from_a_subdirectory() {
+    if !ast_grep_available() {
+        return;
+    }
+    let baseline = "package sample\n\n// Compare two values supplied by the caller.\nfunc compare(a, b int) bool {\n    return a == b\n}\n";
+    let bug = baseline.replace("a == b", "a == a");
+    let legacy = "package sample\n\nfunc legacy(a int) bool { return a == a }\nfunc current(a int) int { return a + 1 }\n";
+    let repo = autoreview_test_support::init_repo(&[("src/before.go", baseline), ("src/legacy.go", legacy)]);
+    run_git(repo.path(), &["mv", "src/before.go", "src/café renamed.go"]);
+    let changed_legacy = legacy.replace("a + 1", "a + 2");
+    repo.commit(&[("src/café renamed.go", &bug), ("src/legacy.go", &changed_legacy)], "introduce wrong operand");
+    repo.commit(&[("src/café renamed.go", baseline)], "fix wrong operand at the current head");
+    std::fs::write(repo.path().join("src/legacy.go"), changed_legacy.replace("a + 2", "a + 3")).unwrap();
+
+    let output = assert_cmd::Command::cargo_bin("autoreview").unwrap()
+        .current_dir(repo.path().join("src"))
+        .args(["diff", "--base", "HEAD~2", "--head", "HEAD~1", "--tier", "deep", "--static-only", "--changed-lines"])
+        .assert().success().get_output().stdout.clone();
+    let report_path = report_path_from_stdout(&String::from_utf8(output).unwrap());
+    let report: autoreview_schema::ReviewReport = serde_json::from_slice(&std::fs::read(report_path).unwrap()).unwrap();
+    assert!(report.plan.specialists.is_empty());
+    assert!(report.costs.per_stage.is_empty());
+    let findings: Vec<_> = report.findings.iter()
+        .filter(|finding| finding.source.rule_id.as_deref() == Some("go-no-self-comparison"))
+        .map(|finding| finding.location.path.as_str())
+        .collect();
+    assert_eq!(findings, ["src/café renamed.go"]);
+    assert_eq!(std::fs::read_to_string(repo.path().join("src/café renamed.go")).unwrap(), baseline);
 }
 
 #[test]
@@ -468,6 +574,21 @@ fn rules_review_approve_fails_clearly_for_an_unknown_cluster() {
         .args(["rules", "review", "--approve", "no-such-cluster"])
         .assert()
         .failure();
+}
+
+#[test]
+fn rules_review_refuses_unbenched_candidates() {
+    let repo = autoreview_test_support::init_repo(&[("README.md", "fixture\n")]);
+    let candidate = repo.path().join(".autoreview/rules/candidates/candidate");
+    std::fs::create_dir_all(&candidate).unwrap();
+    std::fs::write(
+        candidate.join("rule.yaml"),
+        "id: example\nlanguage: Go\ncategory: correctness\nseverity: warning\nmessage: Example\nrule:\n  pattern: $A == $A\n",
+    ).unwrap();
+    Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["rules", "review", "--approve", "candidate"])
+        .assert().failure().stderr(predicates::str::contains("NeedsFixtures"));
+    assert!(!repo.path().join(".autoreview/rules/shadow/example.yaml").exists());
 }
 
 #[test]

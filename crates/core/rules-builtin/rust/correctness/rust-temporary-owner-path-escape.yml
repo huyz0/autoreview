@@ -1,0 +1,58 @@
+id: rust-temporary-owner-path-escape
+language: Rust
+category: correctness
+severity: warning
+message: >-
+  Cloning this path leaves the temporary file or directory owner to be dropped.
+  Its cleanup can remove the path before the caller uses it. Keep the owner alive
+  while using the path, or use the owner's persistence API.
+metadata:
+  confidence: HIGH
+  references:
+    - https://docs.rs/tempfile/latest/tempfile/#early-drop-pitfall
+utils:
+  escaping-value:
+    any:
+      - inside:
+          kind: let_declaration
+          field: value
+          not:
+            has:
+              field: pattern
+              regex: '^_$'
+      - inside:
+          kind: return_expression
+      - inside:
+          kind: block
+          inside:
+            kind: function_item
+            field: body
+rule:
+  all:
+    - pattern: $OWNER.path().$COPY()
+    - any:
+        - matches: escaping-value
+        - inside:
+            kind: arguments
+            inside:
+              kind: call_expression
+              all:
+                - has:
+                    field: function
+                    regex: '^(Ok|Result::Ok|std::result::Result::Ok)$'
+                - matches: escaping-value
+constraints:
+  OWNER:
+    any:
+      - pattern: tempfile::tempdir()?
+      - pattern: tempfile::tempdir().unwrap()
+      - pattern: tempfile::tempdir().expect($REASON)
+      - pattern: tempfile::TempDir::new()?
+      - pattern: tempfile::TempDir::new().unwrap()
+      - pattern: tempfile::TempDir::new().expect($REASON)
+      - pattern: tempfile::NamedTempFile::new()?
+      - pattern: tempfile::NamedTempFile::new().unwrap()
+      - pattern: tempfile::NamedTempFile::new().expect($REASON)
+  COPY:
+    kind: field_identifier
+    regex: '^(to_path_buf|to_owned)$'

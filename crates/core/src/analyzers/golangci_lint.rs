@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::process::Command;
 
@@ -27,6 +28,8 @@ struct GolangciIssue {
     text: String,
     #[serde(rename = "Pos")]
     pos: GolangciPos,
+    #[serde(rename = "SourceLines", default)]
+    source_lines: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,24 +69,29 @@ fn map_category(linter: &str) -> &'static str {
 ///   ": # example.com/pkg\n./main.go:6:2: declared and not used: x"
 /// This recovers the real location when that pattern is present; falls back
 /// to the issue's own `Pos` otherwise.
-fn recover_typecheck_location(issue: &GolangciIssue) -> (String, u32, u32, String) {
-    if issue.from_linter == "typecheck" {
-        if let Some(second_line) = issue.text.lines().nth(1) {
-            if let Some(rest) = second_line.strip_prefix("./") {
-                let mut parts = rest.splitn(4, ':');
-                if let (Some(file), Some(line_str), Some(col_str), Some(msg)) = (parts.next(), parts.next(), parts.next(), parts.next()) {
-                    if let (Ok(line), Ok(col)) = (line_str.parse::<u32>(), col_str.parse::<u32>()) {
-                        return (file.to_string(), line, col, msg.trim().to_string());
-                    }
-                }
+fn typecheck_location(diagnostic: &str) -> Option<(GolangciPos, &str)> {
+    let diagnostic = diagnostic.trim();
+    for (offset, _) in diagnostic.match_indices(':') {
+        let filename = &diagnostic[..offset];
+        if !filename.ends_with(".go") {
+            continue;
+        }
+        let mut parts = diagnostic[offset + 1..].splitn(3, ':');
+        if let (Some(line), Some(column), Some(message)) = (parts.next(), parts.next(), parts.next()) {
+            if let (Ok(line), Ok(column)) = (line.parse(), column.parse()) {
+                return Some((GolangciPos { filename: filename.to_string(), line, column }, message.trim()));
             }
         }
     }
-    (issue.pos.filename.clone(), issue.pos.line, issue.pos.column, issue.text.clone())
+    None
 }
 
-fn issue_to_finding(issue: &GolangciIssue) -> AgentFinding {
-    let (file, line, col, message) = recover_typecheck_location(issue);
+fn issue_to_finding(repo_root: &Path, issue: &GolangciIssue) -> AgentFinding {
+    let recovered = (issue.from_linter == "typecheck").then(|| issue.text.lines().find_map(typecheck_location)).flatten();
+    let (pos, message) = recovered.as_ref().map_or((&issue.pos, issue.text.as_str()), |(position, message)| (position, *message));
+    let filename = Path::new(&pos.filename);
+    let file = filename.strip_prefix(repo_root).unwrap_or(filename).to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+    let path = file.strip_prefix("./").unwrap_or(&file).to_string();
     let severity = map_severity(&issue.from_linter);
     let category = map_category(&issue.from_linter).to_string();
 
@@ -92,9 +100,9 @@ fn issue_to_finding(issue: &GolangciIssue) -> AgentFinding {
         category,
         severity,
         confidence: 1.0,
-        title: message.lines().next().unwrap_or(&message).to_string(),
-        message,
-        location: Location { path: file, range: LocationRange { start_line: line.max(1), start_col: Some(col), end_line: None, end_col: None }, snippet: String::new(), side: Side::New },
+        title: message.lines().next().unwrap_or(message).to_string(),
+        message: message.to_string(),
+        location: Location { path, range: LocationRange { start_line: pos.line.max(1), start_col: Some(pos.column), end_line: None, end_col: None }, snippet: issue.source_lines.as_deref().unwrap_or_default().join("\n"), side: Side::New },
         related_locations: None,
         suggestion: None,
         tags: None,
@@ -120,11 +128,11 @@ enum GolangciRunError {
 const GOLANGCI_LINT_MAX_ATTEMPTS: u32 = 3;
 const GOLANGCI_LINT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 
-fn run_golangci_lint_once(repo_root: &Path, go_files: &[&str]) -> Result<Option<Vec<AgentFinding>>, GolangciRunError> {
+fn run_golangci_lint_once(repo_root: &Path, go_files: &[&str], targets: &[&str]) -> Result<Option<Vec<AgentFinding>>, GolangciRunError> {
     let temp_dir = tempfile::tempdir().map_err(|err| GolangciRunError::Other(err.into()))?;
     let json_path = temp_dir.path().join("golangci-out.json");
 
-    let output = match Command::new("golangci-lint").arg("run").arg("--output.json.path").arg(&json_path).args(go_files).current_dir(repo_root).output() {
+    let output = match Command::new("golangci-lint").arg("run").arg("--output.json.path").arg(&json_path).arg("--").args(targets).current_dir(repo_root).output() {
         Ok(output) => output,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(GolangciRunError::Other(err.into())),
@@ -139,23 +147,25 @@ fn run_golangci_lint_once(repo_root: &Path, go_files: &[&str]) -> Result<Option<
         Err(_) => return Err(GolangciRunError::Retryable(String::from_utf8_lossy(&output.stderr).to_string())),
     };
 
-    let parsed: GolangciOutput = serde_json::from_str(&json_text).map_err(|err| GolangciRunError::Other(err.into()))?;
-    if let Some(report_error) = parsed.report.as_ref().and_then(|r| r.error.as_ref()) {
-        return Err(GolangciRunError::Other(anyhow::anyhow!("golangci-lint reported a package-level error (results may be incomplete or empty): {report_error}")));
+    let mut parsed: GolangciOutput = serde_json::from_str(&json_text).map_err(|err| GolangciRunError::Other(err.into()))?;
+    let report_error = parsed.report.as_ref().and_then(|r| r.error.as_ref());
+    if let Some(report_error) = report_error {
+        // Newer versions put compiler diagnostics under Report.Error.
+        let compiler_issues = report_error.lines().filter_map(typecheck_location).map(|(pos, message)| GolangciIssue {
+            from_linter: "typecheck".to_string(), text: message.to_string(), pos, source_lines: None,
+        });
+        parsed.issues.extend(compiler_issues);
     }
-    let changed_set: std::collections::HashSet<&str> = go_files.iter().copied().collect();
+    let changed_set: HashSet<&str> = go_files.iter().copied().collect();
 
-    Ok(Some(
-        parsed
-            .issues
-            .iter()
-            .map(issue_to_finding)
-            // Scanning by explicit file args can still surface package-level
-            // issues attributed to a file outside our diff; keep only issues
-            // whose (possibly recovered) location is one of the files we asked about.
-            .filter(|f| changed_set.contains(f.location.path.as_str()))
-            .collect(),
-    ))
+    let findings: Vec<_> = parsed.issues.iter()
+        .map(|issue| issue_to_finding(repo_root, issue))
+        .filter(|f| changed_set.contains(f.location.path.as_str()))
+        .collect();
+    if let Some(report_error) = report_error.filter(|_| findings.is_empty()) {
+        return Err(GolangciRunError::Other(anyhow::anyhow!("golangci-lint reported a package-level error: {report_error}")));
+    }
+    Ok(Some(findings))
 }
 
 /// Runs golangci-lint against the given changed Go files and normalizes its
@@ -177,10 +187,32 @@ pub fn run_golangci_lint(repo_root: &Path, changed_files: &[String]) -> anyhow::
         return Ok(vec![]);
     }
 
+    if repo_root.join("go.mod").is_file() || repo_root.join("go.work").is_file() {
+        // Named-file mode omits unchanged siblings and fails across packages.
+        let packages: BTreeSet<String> = go_files.iter().map(|file| {
+            file.rsplit_once('/').map_or_else(|| ".".to_string(), |(directory, _)| format!("./{directory}"))
+        }).collect();
+        let targets: Vec<_> = packages.iter().map(String::as_str).collect();
+        return run_with_retries(repo_root, &go_files, &targets);
+    }
+
+    // Keep named-file mode for repositories that have no Go module.
+    let mut groups: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for file in go_files {
+        groups.entry(file.rsplit_once('/').map_or("", |(directory, _)| directory)).or_default().push(file);
+    }
+    let mut findings = Vec::new();
+    for files in groups.values() {
+        findings.extend(run_with_retries(repo_root, files, files)?);
+    }
+    Ok(findings)
+}
+
+fn run_with_retries(repo_root: &Path, go_files: &[&str], targets: &[&str]) -> anyhow::Result<Vec<AgentFinding>> {
     let mut attempt = 0;
     loop {
         attempt += 1;
-        match run_golangci_lint_once(repo_root, &go_files) {
+        match run_golangci_lint_once(repo_root, go_files, targets) {
             Ok(None) => return Ok(vec![]),
             Ok(Some(findings)) => return Ok(findings),
             Err(GolangciRunError::Other(err)) => return Err(err),
@@ -258,7 +290,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("go.mod"), "module example.com/test\n\ngo 1.21\n").unwrap();
         for (name, contents) in files {
-            std::fs::write(dir.path().join(name), contents).unwrap();
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
         }
         dir
     }
@@ -327,6 +361,24 @@ mod tests {
         assert_eq!(findings[0].location.path, "main.go");
         assert_eq!(findings[0].location.range.start_line, 10);
         assert_eq!(findings[0].confidence, 1.0);
+    }
+
+    #[test]
+    fn reviews_multiple_go_packages_with_unchanged_siblings() {
+        if !golangci_lint_available() {
+            return;
+        }
+        let dir = write_go_module(&[
+            ("example.go", "package example\nfunc Check() { helper() }\n"),
+            ("helper.go", "package example\nfunc helper() error { return nil }\n"),
+            ("child/child.go", "package child\nfunc Check() { helper() }\n"),
+            ("child/helper.go", "package child\nfunc helper() error { return nil }\n"),
+        ]);
+        let findings = run_golangci_lint(dir.path(), &["example.go".to_string(), "child/child.go".to_string()]).unwrap();
+        assert_eq!(findings.len(), 2, "got: {findings:#?}");
+        for file in ["example.go", "child/child.go"] {
+            assert!(findings.iter().any(|finding| finding.location.path == file && finding.source.rule_id.as_deref() == Some("errcheck")));
+        }
     }
 
     #[test]

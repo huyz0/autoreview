@@ -27,14 +27,9 @@ To author a *new rule* rather than run a review, use the
 autoreview doctor
 ```
 
-**A missing analyzer degrades the review silently.** Verified: the same
-Go diff containing a self-comparison and a shell-injection concat
-reported `stage 1: 2 deterministic finding(s)` with `ast-grep` on PATH,
-and `stage 1: 0 deterministic finding(s)` without it — no warning either
-time, and the triage tier quietly dropped from `standard` to `quick` as a
-result. **Never report "autoreview found nothing" as "the code is clean"
-without having checked `doctor` first.** Say which analyzers were
-unavailable and what that leaves unchecked.
+Check `analyzerWarnings` in the review report for missing tools or failed
+analysis. State any coverage gaps alongside the findings. A review with
+zero findings only describes the checks that ran.
 
 `doctor` also reports which agent backend is available. Only the one
 selected by `agents.backend` (or `--backend`) needs to be there; the rest
@@ -53,7 +48,9 @@ diff` reviews the current branch. Flags that matter:
 |---|---|
 | `--max-usd <n>` | **Always set this for an unattended run.** Specialists cost real money; without a cap the only limits are the tier's token/agent budgets. |
 | `--tier quick\|standard\|deep` | Override the computed triage tier. `quick` skips the verify pass entirely. |
-| `--aspects security,correctness` | Restrict which specialists run. Cheaper and faster when the question is narrow. |
+| `--aspects security,correctness` | Restrict deterministic findings and specialist selection to the named categories. |
+| `--static-only` | Run the deterministic review without calling model backends. |
+| `--changed-lines` | Keep deterministic findings with a primary or related location on added or modified lines. |
 | `--incremental` | Suppress findings already reported in the previous run on this repo — good for re-reviewing after a fixup commit. |
 | `--backend` | `claude-code` (default), `pi`, `local-llm`, `openai-compatible`. |
 | `--watch` | Re-run whenever `base...head` changes. Interactive use only, never in CI. |
@@ -101,10 +98,9 @@ lead to opposite actions.
 autoreview apply f-4ef61ae0720e6748
 ```
 
-Only some findings carry a patch; the command says so plainly when one
-doesn't. It is gated — `git apply --check` runs first, and a patch that
-leaves a Go/Java file syntactically broken is reverted automatically. It
-writes to the working tree and does not commit. Review the resulting
+Only some findings carry a patch. `git apply --check` runs first, then the
+patch is tried in a scratch directory. Supported source files must pass a
+syntax check before the working tree is written. Review the resulting
 diff yourself before committing it; a patch that applies cleanly is not
 automatically a patch that is correct.
 

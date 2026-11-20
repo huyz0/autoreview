@@ -5,8 +5,8 @@ way a careful senior engineer would: run the cheap, reliable checks first
 (ast-grep patterns, dataflow/taint analysis, complexity metrics, import-cycle
 detection), and only spend LLM budget on the parts those checks can't cover.
 
-Everything a deterministic analyzer finds is real and cheap to compute.
-LLM specialists get called in proportion to how risky the diff actually looks,
+Deterministic analyzers provide reproducible evidence. Heuristic checks can
+still produce false positives. LLM specialists get called in proportion to how risky the diff actually looks,
 scored by a triage step that weighs file count, churn, test coverage, and how
 sensitive the touched paths are. A small change to a well-tested utility
 function gets a quick pass; a large change to authentication code gets the
@@ -14,10 +14,10 @@ deep tier.
 
 ## What it checks
 
-- **ast-grep pattern rules** across Go, Java, Kotlin, TypeScript, and
-  JavaScript: security (injection, deserialization, weak crypto), correctness
-  (self-comparison, empty catch blocks, equals/hashCode contracts), design
-  (god classes, generic exception handling), performance.
+- **ast-grep pattern rules** for Go, Java, Kotlin, TypeScript, JavaScript,
+  and Rust cover security, correctness, design, and performance. Rust checks
+  include file access modes, temporary resource lifetimes, buffered writes,
+  eager indexing in `then_some`, and child exit status.
 - **Dataflow and taint tracking** for Go, Java, and Kotlin: a real CFG-based
   engine, not just syntax matching, catches things like a tainted HTTP
   parameter reaching `exec.Command`, or a typed nil pointer silently
@@ -87,7 +87,8 @@ The binary lands at `target/release/autoreview`.
 
 Whichever route you take, run `autoreview doctor` afterwards: several
 analyzers shell out to tools (`ast-grep`, `golangci-lint`) that aren't
-bundled, and a missing one silently reduces coverage rather than failing.
+bundled. The review reports missing or failed tools so you can see when
+coverage was reduced.
 
 ## Quickstart
 
@@ -118,7 +119,14 @@ autoreview diff --base main~5 --head HEAD
 
 Findings print to the terminal and get written as JSON, Markdown, and SARIF
 under a machine-local cache directory (the exact path is printed at the end
-of the run). Record feedback on a finding to teach the rule factory what's
+of the run). Source files are read from the selected head commit in a temporary
+checkout. Repository-local settings and rule registrations come from your checkout.
+For a review without model calls, pass `--static-only`. Add `--changed-lines`
+to keep deterministic findings whose primary or related location overlaps
+added or modified lines. By default, deterministic checks report across touched
+files, including findings whose locations are outside the changed hunks.
+
+Record feedback on a finding to teach the rule factory what's
 actually a false positive:
 
 ```
@@ -168,6 +176,19 @@ not surfaced) until they've proven themselves against real feedback.
 autoreview rules mine
 autoreview rules review
 ```
+
+### Replay rules and opt into a merge gate
+
+Use `autoreview rules replay` to compare a built-in rule's findings with
+hand-labelled lines in complete files at known-bad and fixed Git commits.
+The JSON report shows precision, recall, and the lines each case missed or
+reported unexpectedly. Set `--suite` to use a different YAML file.
+
+`autoreview rules gate --base origin/main --head HEAD` is an optional CI
+check. It uses the base commit's rule allowlist and replay evidence, then
+fails on findings from qualified rules that overlap changed lines. Design
+and style findings remain advisory. The repository needs enough Git history
+for the comparison and replay commits. [Suite format and gate criteria](docs/autoreview-directory-layout.md#replayyaml)
 
 ## Driving autoreview from a coding agent
 

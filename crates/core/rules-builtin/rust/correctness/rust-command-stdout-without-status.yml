@@ -1,0 +1,50 @@
+id: rust-command-stdout-without-status
+language: Rust
+category: correctness
+severity: info
+semantic: true
+message: >-
+  This expression takes stdout and discards the child process's exit status.
+  If the command must succeed, keep the `Output` and check `status` before using
+  its stdout.
+metadata:
+  confidence: HIGH
+  references:
+    - https://doc.rust-lang.org/std/process/struct.Command.html#method.output
+    - https://doc.rust-lang.org/std/process/struct.Output.html
+utils:
+  constructor:
+    pattern: std::process::Command::new($PROGRAM)
+  builder-method:
+    kind: field_identifier
+    regex: '^(arg|args|env|envs|env_remove|env_clear|current_dir|stdin|stdout|stderr)$'
+  builder:
+    kind: call_expression
+    has:
+      field: function
+      kind: field_expression
+      all:
+        - has:
+            field: field
+            matches: builder-method
+        - has:
+            field: value
+            matches: constructor
+rule:
+  all:
+    - any:
+        - pattern: $COMMAND.output()?.stdout
+        - pattern: $COMMAND.output().unwrap().stdout
+        - pattern: $COMMAND.output().expect($REASON).stdout
+    - not:
+        inside:
+          kind: let_declaration
+          field: value
+          has:
+            field: pattern
+            regex: '^_$'
+constraints:
+  COMMAND:
+    any:
+      - matches: constructor
+      - matches: builder

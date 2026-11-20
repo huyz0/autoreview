@@ -3,30 +3,31 @@
 //! "Patch-suggestion sanity check" section: `git apply --check` must accept
 //! the patch against the current tree before it's ever actually applied,
 //! and — the tree-sitter re-parse validation previously deferred at M2 time
-//! — every Go/Java file the patch touches must still parse cleanly
-//! afterward. `--check` catches a patch that's gone stale (the far more
-//! common failure); the reparse catches the narrower case of a patch that
-//! applies but leaves the file syntactically broken (a missing brace, an
-//! unterminated string). A reparse failure auto-reverts the apply (`git
-//! apply -R`) rather than leaving broken code in the working tree.
+//! — supported source files must still parse after applying the patch in
+//! a scratch directory. The actual checkout is written only after both
+//! checks pass.
 
-use std::path::Path;
+use std::path::{Component, Path};
 use std::process::Command;
 
 use autoreview_core::parses_cleanly;
 
 use super::history::{find_finding_in_run_reports, history_dir_for};
 
-/// Extracts the repo-relative paths a unified diff touches, from its
-/// `+++ b/<path>` header lines — good enough for the reparse check, which
-/// only needs to know which files to re-read after applying.
-fn patched_file_paths(patch: &str) -> Vec<String> {
-    patch
-        .lines()
-        .filter_map(|line| line.strip_prefix("+++ b/"))
-        .filter(|p| *p != "/dev/null")
-        .map(str::to_string)
-        .collect()
+fn patched_file_paths(repo_root: &Path, patch_path: &Path, reverse: bool) -> anyhow::Result<Vec<String>> {
+    let mut command = Command::new("git");
+    command.current_dir(repo_root).args(["apply", "--numstat", "-z"]);
+    if reverse {
+        command.arg("--reverse");
+    }
+    let output = command.arg(patch_path).output()?;
+    anyhow::ensure!(output.status.success(), "cannot read patch paths: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = std::str::from_utf8(&output.stdout)?;
+    stdout.split_terminator('\0').map(|record| {
+        let path = record.splitn(3, '\t').nth(2).ok_or_else(|| anyhow::anyhow!("invalid patch path record"))?;
+        anyhow::ensure!(!path.is_empty() && Path::new(path).components().all(|part| matches!(part, Component::Normal(_))), "invalid patch path: {path}");
+        Ok(path.to_owned())
+    }).collect()
 }
 
 /// Outcome of trying to apply one patch to a repo — a plain enum (rather than
@@ -38,58 +39,57 @@ pub enum ApplyOutcome {
     Applied,
     FailedCheck { stderr: String },
     ApplyFailedAfterCheckPassed { stderr: String },
-    /// The patch applied cleanly, but left a Go/Java file syntactically
-    /// broken — reverted automatically, so the working tree is exactly as
-    /// it was before `apply` ran.
-    RevertedAfterParseFailure { path: String },
+    RejectedAfterParseFailure { path: String },
 }
 
-/// Writes `patch` to a scratch file and runs the two-step sanity-checked
-/// apply: `git apply --check` must pass before anything touches the working
-/// tree, then `git apply --3way` performs the real, mergeable apply.
 pub fn apply_patch_to_repo(repo_root: &Path, patch: &str) -> anyhow::Result<ApplyOutcome> {
-    let patch_path = std::env::temp_dir().join(format!("autoreview-apply-{}.patch", uuid::Uuid::new_v4()));
+    let scratch = tempfile::tempdir()?;
+    let patch_path = scratch.path().join("suggestion.patch");
     std::fs::write(&patch_path, patch)?;
-    let cleanup = || {
-        let _ = std::fs::remove_file(&patch_path);
-    };
 
     let check = Command::new("git").args(["apply", "--check"]).arg(&patch_path).current_dir(repo_root).output()?;
     if !check.status.success() {
-        cleanup();
         return Ok(ApplyOutcome::FailedCheck { stderr: String::from_utf8_lossy(&check.stderr).trim().to_string() });
     }
 
-    let apply = Command::new("git").args(["apply", "--3way"]).arg(&patch_path).current_dir(repo_root).output()?;
-    if !apply.status.success() {
-        cleanup();
-        return Ok(ApplyOutcome::ApplyFailedAfterCheckPassed { stderr: String::from_utf8_lossy(&apply.stderr).trim().to_string() });
+    let paths = patched_file_paths(repo_root, &patch_path, false)?;
+    let old_paths = patched_file_paths(repo_root, &patch_path, true)?;
+    let work = scratch.path().join("work");
+    std::fs::create_dir(&work)?;
+    let init = Command::new("git").args(["init", "--quiet", "--template="]).current_dir(&work).output()?;
+    anyhow::ensure!(init.status.success(), "cannot initialize patch validation directory: {}", String::from_utf8_lossy(&init.stderr));
+    let canonical_root = repo_root.canonicalize()?;
+    for path in old_paths.iter().chain(&paths) {
+        let source = repo_root.join(path);
+        let metadata = match source.symlink_metadata() {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err.into()),
+        };
+        anyhow::ensure!(metadata.is_file() && source.canonicalize()?.starts_with(&canonical_root), "cannot validate patch path {path} as a regular repository file");
+        let destination = work.join(path);
+        std::fs::create_dir_all(destination.parent().unwrap())?;
+        std::fs::copy(source, destination)?;
     }
 
-    let Ok(canonical_repo_root) = repo_root.canonicalize() else {
-        cleanup();
-        anyhow::bail!("could not canonicalize repo root {}", repo_root.display());
-    };
-    for relative_path in patched_file_paths(patch) {
-        let full_path = repo_root.join(&relative_path);
-        // `relative_path` comes straight from the patch's `+++ b/<path>`
-        // header — a crafted/stale patch could point outside the repo, so
-        // this re-parse check must not read whatever it resolves to
-        // without confirming it's still inside `repo_root`.
-        let Ok(canonical) = full_path.canonicalize() else { continue };
-        if !canonical.starts_with(&canonical_repo_root) {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(&canonical) else { continue };
-        if parses_cleanly(&full_path, &content) == Some(false) {
-            let _ = Command::new("git").args(["apply", "-R"]).arg(&patch_path).current_dir(repo_root).status();
-            cleanup();
-            return Ok(ApplyOutcome::RevertedAfterParseFailure { path: relative_path });
+    let trial = Command::new("git").args(["apply"]).arg(&patch_path).current_dir(&work).output()?;
+    anyhow::ensure!(trial.status.success(), "patch validation failed: {}", String::from_utf8_lossy(&trial.stderr));
+    for path in paths {
+        let file = work.join(&path);
+        if file.symlink_metadata().is_ok_and(|metadata| metadata.is_file()) {
+            let Ok(content) = std::fs::read_to_string(&file) else { continue };
+            if parses_cleanly(&file, &content) == Some(false) {
+                return Ok(ApplyOutcome::RejectedAfterParseFailure { path });
+            }
         }
     }
 
-    cleanup();
-    Ok(ApplyOutcome::Applied)
+    let apply = Command::new("git").arg("apply").arg(&patch_path).current_dir(repo_root).output()?;
+    if apply.status.success() {
+        Ok(ApplyOutcome::Applied)
+    } else {
+        Ok(ApplyOutcome::ApplyFailedAfterCheckPassed { stderr: String::from_utf8_lossy(&apply.stderr).trim().to_string() })
+    }
 }
 
 pub fn run_apply(repo_root: &Path, finding_id: &str) -> anyhow::Result<()> {
@@ -124,12 +124,12 @@ pub fn run_apply(repo_root: &Path, finding_id: &str) -> anyhow::Result<()> {
             std::process::exit(1);
         }
         ApplyOutcome::ApplyFailedAfterCheckPassed { stderr } => {
-            println!("`git apply --3way` failed for finding {finding_id} even though `--check` passed (unexpected):");
+            println!("`git apply` failed for finding {finding_id} after the sanity checks passed:");
             println!("{stderr}");
             std::process::exit(1);
         }
-        ApplyOutcome::RevertedAfterParseFailure { path } => {
-            println!("Patch for finding {finding_id} applied cleanly but left {path} syntactically broken (failed a tree-sitter reparse) — reverted automatically.");
+        ApplyOutcome::RejectedAfterParseFailure { path } => {
+            println!("Patch for finding {finding_id} would leave {path} syntactically broken (failed a tree-sitter reparse).");
             println!("This suggestion should have been marked needs-review rather than safe-autofix; not applying.");
             std::process::exit(1);
         }
@@ -169,26 +169,16 @@ mod tests {
     }
 
     #[test]
-    fn a_patch_that_leaves_go_syntactically_broken_is_reverted_automatically() {
+    fn a_patch_that_breaks_go_preserves_the_worktree_and_index() {
         let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
         // This patch applies cleanly (context matches) but replaces the
         // closing brace with an unrelated line, leaving main.go unparseable.
         let patch = "diff --git a/main.go b/main.go\nindex 0000000..1111111 100644\n--- a/main.go\n+++ b/main.go\n@@ -1,3 +1,3 @@\n package main\n \n-func main() {}\n+func main() {\n";
         let outcome = apply_patch_to_repo(repo.path(), patch).unwrap();
-        assert!(matches!(outcome, ApplyOutcome::RevertedAfterParseFailure { .. }), "expected RevertedAfterParseFailure, got {outcome:?}");
+        assert!(matches!(outcome, ApplyOutcome::RejectedAfterParseFailure { .. }), "expected RejectedAfterParseFailure, got {outcome:?}");
         let content = std::fs::read_to_string(repo.path().join("main.go")).unwrap();
-        assert_eq!(content, "package main\n\nfunc main() {}\n", "file must be back to its original content after the auto-revert");
-    }
-
-    #[test]
-    fn patched_file_paths_extracts_repo_relative_paths_from_a_unified_diff() {
-        let patch = "diff --git a/a/main.go b/a/main.go\n--- a/a/main.go\n+++ b/a/main.go\n@@ -1 +1 @@\n-x\n+y\n";
-        assert_eq!(patched_file_paths(patch), vec!["a/main.go".to_string()]);
-    }
-
-    #[test]
-    fn patched_file_paths_skips_dev_null_for_deleted_files() {
-        let patch = "diff --git a/gone.go b/gone.go\n--- a/gone.go\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
-        assert!(patched_file_paths(patch).is_empty());
+        assert_eq!(content, "package main\n\nfunc main() {}\n");
+        let index = Command::new("git").args(["diff", "--cached", "--exit-code"]).current_dir(repo.path()).output().unwrap();
+        assert!(index.status.success(), "failed apply changed the index");
     }
 }

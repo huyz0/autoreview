@@ -8,7 +8,11 @@ struct CheckResult {
 }
 
 fn check_binary(name: &'static str) -> CheckResult {
-    match Command::new(name).arg("--version").output() {
+    check_command(name, name, &["--version"])
+}
+
+fn check_command(name: &'static str, binary: &str, args: &[&str]) -> CheckResult {
+    match Command::new(binary).args(args).output() {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let detail = stdout.lines().next().unwrap_or("found").to_string();
@@ -106,6 +110,7 @@ pub fn run_doctor(repo_root: &Path) {
         check_local_llm(),
         check_binary("ast-grep"),
         check_binary("golangci-lint"),
+        check_command("clippy", "cargo", &["clippy", "--version"]),
         check_auth_github(),
         check_auth_bitbucket(),
         check_auth_openai_compatible(),

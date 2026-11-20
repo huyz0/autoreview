@@ -71,6 +71,9 @@ pub fn render_markdown(report: &ReviewReport) -> String {
     out.push_str("# Code Review Report\n\n");
     out.push_str(&format!("- **Repo:** `{}`\n", report.target.repo_root));
     out.push_str(&format!("- **Diff:** `{}...{}`\n", report.target.base_ref, report.target.head_ref));
+    if let Some(commits) = &report.target.commits {
+        out.push_str(&format!("- **Commits:** `{}...{}`\n", commits.base, commits.head));
+    }
     out.push_str(&format!("- **Run:** `{}` at {}\n", report.run_id, report.created_at));
     out.push_str(&format!(
         "- **Tier:** {} (score {:.1}){}\n",
@@ -91,12 +94,19 @@ pub fn render_markdown(report: &ReviewReport) -> String {
     }
     out.push('\n');
 
+    if !report.analyzer_warnings.is_empty() {
+        out.push_str("## Analyzer warnings\n\n");
+        for warning in &report.analyzer_warnings {
+            out.push_str(&format!("- {}\n", warning.lines().collect::<Vec<_>>().join(" ")));
+        }
+        out.push('\n');
+    }
     if !report.spec_verdicts.is_empty() {
         out.push_str(&render_spec_verdicts(&report.spec_verdicts));
     }
 
     if report.findings.is_empty() {
-        out.push_str("No findings. ✅\n");
+        out.push_str("No findings.\n");
         return out;
     }
 

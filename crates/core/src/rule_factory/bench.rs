@@ -52,9 +52,10 @@
 //!   rule; nothing yet does it across the catalog.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Deserialize;
+
+use crate::analyzers::rule_pack::{run_ast_grep_scan, write_rule_file};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfTestResult {
@@ -66,7 +67,7 @@ pub struct SelfTestResult {
 
 impl SelfTestResult {
     pub fn passed(&self) -> bool {
-        self.positive_total > 0 && self.positive_matched == self.positive_total && self.negative_matched == 0
+        self.positive_total > 0 && self.negative_total > 0 && self.positive_matched == self.positive_total && self.negative_matched == 0
     }
 }
 
@@ -125,6 +126,7 @@ fn extension_for_language(language: &str) -> Option<&'static str> {
         "TypeScript" => Some("ts"),
         "Tsx" => Some("tsx"),
         "JavaScript" => Some("js"),
+        "Rust" => Some("rs"),
         _ => None,
     }
 }
@@ -139,20 +141,11 @@ fn count_matching_files(rule_path: &Path, target_files: &[PathBuf], cwd: &Path) 
     }
 
     let temp_dir = tempfile::tempdir()?;
-    let rules_dir = temp_dir.path().join("rules");
-    std::fs::create_dir_all(&rules_dir)?;
-    std::fs::copy(rule_path, rules_dir.join("candidate.yml"))?;
-    let sgconfig_path = temp_dir.path().join("sgconfig.yml");
-    std::fs::write(&sgconfig_path, "ruleDirs:\n  - rules\n")?;
-
+    write_rule_file(&temp_dir.path().join("rules/candidate.yml"), &std::fs::read_to_string(rule_path)?)?;
     let relative: Vec<String> = existing.iter().filter_map(|p| p.strip_prefix(cwd).ok().map(|rel| rel.to_string_lossy().to_string())).collect();
-
-    let output = Command::new("ast-grep").arg("scan").arg("--config").arg(&sgconfig_path).arg("--json").args(&relative).current_dir(cwd).output()?;
-    if !output.status.success() {
-        anyhow::bail!("ast-grep scan failed ({}): {}", output.status, String::from_utf8_lossy(&output.stderr).trim());
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let matches: Vec<serde_json::Value> = serde_json::from_str(&stdout).map_err(|err| anyhow::anyhow!("ast-grep produced unparsable output: {err}. stderr: {}", String::from_utf8_lossy(&output.stderr)))?;
+    let paths: Vec<&str> = relative.iter().map(String::as_str).collect();
+    let matches = run_ast_grep_scan(temp_dir.path(), cwd, &paths)?
+        .ok_or_else(|| anyhow::anyhow!("ast-grep is required to benchmark a pattern rule"))?;
 
     let matched_files: std::collections::HashSet<String> = matches.iter().filter_map(|m| m.get("file").and_then(|v| v.as_str()).map(str::to_string)).collect();
     Ok(matched_files.len())
@@ -211,7 +204,7 @@ pub fn run_bench(repo_root: &Path, cluster_id: &str) -> anyhow::Result<BenchRepo
     let positive_files = list_fixture_files(&candidate_dir.join("tests").join("positive"));
     let negative_files = list_fixture_files(&candidate_dir.join("tests").join("negative"));
 
-    let self_test = if positive_files.is_empty() && negative_files.is_empty() {
+    let self_test = if positive_files.is_empty() || negative_files.is_empty() {
         None
     } else {
         let positive_matched = count_matching_files(&rule_path, &positive_files, repo_root)?;
@@ -248,6 +241,7 @@ pub fn run_bench(repo_root: &Path, cluster_id: &str) -> anyhow::Result<BenchRepo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn ast_grep_available() -> bool {
         Command::new("ast-grep").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
@@ -312,6 +306,7 @@ mod tests {
         let candidate_dir = dir.path().join(".autoreview/rules/candidates/c1");
         write_rule(&candidate_dir);
         write(&candidate_dir.join("tests/positive/positive.go"), "package main\n\nfunc f(x, y int) bool {\n\treturn x == y\n}\n");
+        write(&candidate_dir.join("tests/negative/negative.go"), "package main\n\nfunc f(x, y int) bool {\n\treturn x != y\n}\n");
 
         let report = run_bench(dir.path(), "c1").unwrap();
         assert_eq!(report.verdict, BenchVerdict::SelfTestFailed);

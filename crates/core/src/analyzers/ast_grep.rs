@@ -40,6 +40,7 @@ const RULE_DIR_LANGUAGES: &[(&str, &[Language])] = &[
     ("java", &[Language::Java]),
     ("kotlin", &[Language::Kotlin]),
     ("javascript", &[Language::JavaScript]),
+    ("rust", &[Language::Rust]),
     ("typescript", &[Language::TypeScript, Language::Tsx]),
 ];
 
@@ -82,10 +83,7 @@ pub struct RuleMetadataBlock {
 
 /// Just enough of the rule YAML shape to recover the fields common to every
 /// rule *kind* (`category`, `semantic`, `kind`, `metadata`) — fields
-/// `ast-grep` itself doesn't understand (verified empirically: it neither
-/// errors on unrecognized top-level keys nor echoes them back in `--json`
-/// scan output, so none of this can flow through ast-grep's own pipeline).
-/// Parsed directly from the embedded rule files ourselves, independent of
+/// Autoreview reads from the original YAML, independent of
 /// the ast-grep invocation — and, since `kind` now discriminates which
 /// *backend* actually executes a rule (`pattern` → this file's `ast-grep`
 /// subprocess, `taint` → `crates/dataflow`'s taint engine, `threshold` →
@@ -282,10 +280,8 @@ pub(crate) fn metadata_to_meta_map(metadata: &RuleMetadataBlock) -> Option<HashM
     }
 }
 
-pub(crate) const SOURCE_EXTENSIONS: &[&str] = &["go", "java", "kt", "kts", "ts", "mts", "cts", "tsx", "js", "jsx", "mjs", "cjs"];
-
 pub(crate) fn is_relevant_source_file(path: &str) -> bool {
-    Path::new(path).extension().and_then(|e| e.to_str()).map(|ext| SOURCE_EXTENSIONS.contains(&ext)).unwrap_or(false)
+    autoreview_langsupport::language_for_path(Path::new(path)).is_some()
 }
 
 pub(crate) fn map_severity(sg_severity: &str) -> Severity {
@@ -327,12 +323,8 @@ pub fn run_ast_grep(repo_root: &Path, changed_files: &[String], registered_packs
         return Ok(vec![]);
     }
 
-    // Rule-group apply condition: only extract pattern rules for languages
-    // actually present in this diff — a Go-only diff never needs to see
-    // the Java/Kotlin/TypeScript/JavaScript rule subtrees at all. This gate
-    // only applies to the embedded builtin tree's own language-directory
-    // convention — a registered pack isn't required to organize by
-    // language, so its rules are never skipped by this check.
+    // Extract builtin rules for the languages present in the diff.
+    // Registered packs can use their own directory layout.
     let languages_present = autoreview_langsupport::languages_present(relevant.iter().copied());
 
     let temp_dir = tempfile::tempdir()?;
@@ -340,10 +332,6 @@ pub fn run_ast_grep(repo_root: &Path, changed_files: &[String], registered_packs
     std::fs::create_dir_all(&rules_dir)?;
     let roots = rule_roots(registered_packs);
     let written = extract_pattern_rules(&roots, &rules_dir, &languages_present)?;
-    // Defensive, not expected to trigger today (SOURCE_EXTENSIONS and
-    // RULE_DIR_LANGUAGES are in lockstep) — future-proofs against the two
-    // lists drifting apart, e.g. a new source extension added to one and
-    // not the other.
     if written == 0 {
         return Ok(vec![]);
     }

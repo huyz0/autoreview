@@ -37,7 +37,15 @@ pub struct ReviewTarget {
     pub repo_root: String,
     pub base_ref: String,
     pub head_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commits: Option<ComparedCommits>,
     pub diff_stats: DiffStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComparedCommits {
+    pub base: String,
+    pub head: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +157,8 @@ pub struct ReviewReport {
     pub plan: ReviewPlan,
     pub findings: Vec<Finding>,
     pub suppressed: Vec<SuppressedFinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub analyzer_warnings: Vec<String>,
     pub costs: RunCosts,
     pub summary: ReviewSummary,
     /// Empty when no `.autoreview/spec.md` was present (the common case

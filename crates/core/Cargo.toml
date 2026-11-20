@@ -21,11 +21,6 @@ include_dir = "0.7"
 tempfile = "3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tree-sitter.workspace = true
-tree-sitter-go.workspace = true
-tree-sitter-java.workspace = true
-tree-sitter-kotlin-ng.workspace = true
-tree-sitter-typescript.workspace = true
-tree-sitter-javascript.workspace = true
 keyring = { version = "4.1.5", features = ["apple-native-keyring-store"] }
 roxmltree = "0.21.1"
 

@@ -16,6 +16,7 @@ live](#where-history-and-reports-actually-live) at the bottom.
 ├── config.yaml                          # main config
 ├── architecture.yaml                    # layer/import rules
 ├── rulepacks.yaml                       # registered external rule packs
+├── replay.yaml                          # labelled Git cases and optional merge policy
 ├── spec.md                              # optional acceptance-criteria spec
 ├── context/                             # free-form docs fed to specialists
 ├── rules/
@@ -115,6 +116,59 @@ packs:
       ref: v1.2.0
     trust: shadow
 ```
+
+## `replay.yaml`
+
+`autoreview rules replay` reads this YAML file from the working checkout.
+Each case labels one rule in one complete file before and after a fix.
+List the start line of every expected finding in that file. `lines: []`
+marks a snapshot where the rule should stay silent. Use the head path on
+each side if the fix renamed the file. The fixed commit must descend from
+the before commit. Reported precision and recall describe the labelled
+files in this suite. A metric with no observations is reported as `null`.
+
+```yaml
+cases:
+  - name: comparison uses the wrong operand
+    rule: {tool: ast-grep, id: go-no-self-comparison}
+    before:
+      commit: '<full object ID of the commit containing the bug>'
+      path: internal/search/filter.go
+      lines: [42]
+    after:
+      commit: '<full object ID of the commit containing the fix>'
+      path: internal/search/filter.go
+      lines: []
+```
+
+Replay supports built-in pattern, dataflow, and complexity rules, as well
+as the within-file `duplicate-code-block` check. Use `ast-grep`,
+`autoreview-dataflow`, `autoreview-complexity`, or `autoreview-duplication`
+as the tool name. Install ast-grep for pattern cases. A mismatch makes the
+command exit nonzero after printing the results.
+
+To enable the CI gate, add a `gate` list to the same file and commit it to
+the target branch. For example:
+
+```yaml
+gate:
+  - {tool: ast-grep, id: go-no-self-comparison}
+```
+
+The gate accepts built-in correctness and security rules from ast-grep or
+dataflow whose definitions omit `semantic: true`. Every listed rule must
+detect a labelled finding in at least three distinct before-and-fix
+commit pairs, finish each of those fixed examples with zero findings,
+reach at least 95% precision, and miss zero expected findings. Gate commits
+must use full Git object IDs. Include representative counterexamples in
+the suite to measure how the rule behaves on valid code.
+
+Run `autoreview rules gate --base origin/main --head HEAD` in CI with a
+checkout that includes the base, head, and all labelled commits and their
+history. Use a trusted installation of Autoreview and a trusted target
+branch as the base. The gate reads its policy from that base commit. It
+exits nonzero for missing evidence, failed analysis, or findings on
+changed lines. The regular `diff` report still includes advisory findings.
 
 ## `spec.md`
 

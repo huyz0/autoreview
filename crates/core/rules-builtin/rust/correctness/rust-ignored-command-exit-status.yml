@@ -1,0 +1,45 @@
+id: rust-ignored-command-exit-status
+language: Rust
+category: correctness
+severity: info
+semantic: true
+message: >-
+  This statement discards the child process's exit status. Handling the I/O error
+  still allows a nonzero child exit to pass. Check the status if the caller depends
+  on the command succeeding.
+metadata:
+  confidence: HIGH
+  references:
+    - https://doc.rust-lang.org/std/process/struct.Command.html#method.status
+    - https://doc.rust-lang.org/std/process/struct.ExitStatus.html#method.success
+utils:
+  constructor:
+    pattern: std::process::Command::new($PROGRAM)
+  builder-method:
+    kind: field_identifier
+    regex: '^(arg|args|env|envs|env_remove|env_clear|current_dir|stdin|stdout|stderr)$'
+  builder:
+    kind: call_expression
+    has:
+      field: function
+      kind: field_expression
+      all:
+        - has:
+            field: field
+            matches: builder-method
+        - has:
+            field: value
+            matches: constructor
+rule:
+  any:
+    - pattern: $COMMAND.$RUN()?;
+    - pattern: $COMMAND.$RUN().unwrap();
+    - pattern: $COMMAND.$RUN().expect($REASON);
+constraints:
+  COMMAND:
+    any:
+      - matches: constructor
+      - matches: builder
+  RUN:
+    kind: field_identifier
+    regex: '^(status|output)$'

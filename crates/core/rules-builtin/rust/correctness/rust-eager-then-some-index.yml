@@ -1,0 +1,19 @@
+id: rust-eager-then-some-index
+language: Rust
+category: correctness
+severity: warning
+message: >-
+  `then_some` evaluates the index even when the bounds check is false, so indexing
+  a slice or vector can panic. Use `then(|| …)` to evaluate the index only when
+  the condition holds, or use `get` if a reference is suitable.
+metadata:
+  confidence: HIGH
+  references:
+    - https://doc.rust-lang.org/std/primitive.bool.html#method.then_some
+rule:
+  pattern: ($INDEX < $ITEMS.len()).then_some($ITEMS[$INDEX])
+constraints:
+  INDEX:
+    kind: identifier
+  ITEMS:
+    kind: identifier
