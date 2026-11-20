@@ -250,12 +250,10 @@ fn run_diff_at_revisions(options: &DiffCommandOptions, base: &str, head: &str) -
         Err(err) => warn(format!("clippy run failed: {err}")),
     }
     if options.audit_rust_deps && categories_present.as_ref().is_none_or(|categories| categories.contains("security")) {
-        for path in &changed_file_paths {
-            if Path::new(path).file_name().is_some_and(|name| name == "Cargo.lock") {
-                match autoreview_core::run_cargo_audit(source_root, path) {
-                    Ok(findings) => stage1_agent_findings.extend(findings),
-                    Err(err) => warn(format!("cargo audit failed for {path}: {err:#}")),
-                }
+        for path in changed_file_paths.iter().filter(|path| Path::new(path).file_name().is_some_and(|name| name == "Cargo.lock")) {
+            match autoreview_core::run_cargo_audit(source_root, path) {
+                Ok(findings) => stage1_agent_findings.extend(findings),
+                Err(err) => warn(format!("cargo audit failed for {path}: {err:#}")),
             }
         }
     }

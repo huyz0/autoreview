@@ -60,6 +60,14 @@ struct PackageLocation<'a> {
     snippet: &'a str,
 }
 
+fn quoted_field(line: &str) -> Option<(&str, &str)> {
+    let (key, value) = line.split_once('=')?;
+    let value = value.trim_start();
+    let quote = value.chars().next().filter(|ch| matches!(ch, '"' | '\''))?;
+    let (value, _) = value[1..].split_once(quote)?;
+    Some((key.trim(), value))
+}
+
 // Locate the fields written by Cargo. Audit validates the lockfile itself.
 fn package_locations(lockfile: &str) -> Vec<PackageLocation<'_>> {
     let mut locations = Vec::new();
@@ -74,17 +82,10 @@ fn package_locations(lockfile: &str) -> Vec<PackageLocation<'_>> {
         while let Some((index, line)) =
             lines.next_if(|(_, line)| !line.trim_start().starts_with('['))
         {
-            let Some((key, value)) = line.split_once('=') else {
+            let Some((key, value)) = quoted_field(line) else {
                 continue;
             };
-            let value = value.trim_start();
-            let Some(quote @ ('"' | '\'')) = value.chars().next() else {
-                continue;
-            };
-            let Some((value, _)) = value[1..].split_once(quote) else {
-                continue;
-            };
-            match key.trim() {
+            match key {
                 "name" => name = Some((value, index as u32 + 1)),
                 "version" => version = Some((value, index as u32 + 1, line.trim())),
                 "source" => source = Some(value),

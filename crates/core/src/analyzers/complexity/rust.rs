@@ -37,8 +37,8 @@ pub(super) fn findings(
     findings
 }
 
-fn measure_function(function: Node<'_>, body: Node<'_>) -> FunctionMetrics {
-    let param_count = function
+fn parameter_count(function: Node<'_>) -> usize {
+    function
         .child_by_field_name("parameters")
         .map_or(0, |parameters| {
             let mut cursor = parameters.walk();
@@ -51,12 +51,38 @@ fn measure_function(function: Node<'_>, body: Node<'_>) -> FunctionMetrics {
                             .is_none_or(|pattern| pattern.kind() != "self")
                 })
                 .count()
-        });
+        })
+}
+
+fn branch_points(node: Node<'_>, let_else: bool) -> usize {
+    let mut cursor = node.walk();
+    match node.kind() {
+        "if_expression" | "for_expression" | "while_expression" => 1,
+        "let_declaration" => usize::from(let_else),
+        "match_block" => node
+            .named_children(&mut cursor)
+            .filter(|arm| arm.kind() == "match_arm")
+            .count()
+            .saturating_sub(1),
+        "match_pattern" => usize::from(node.child_by_field_name("condition").is_some()),
+        "binary_expression" => usize::from(
+            node.child_by_field_name("operator")
+                .is_some_and(|op| matches!(op.kind(), "&&" | "||")),
+        ),
+        "let_chain" => node
+            .children(&mut cursor)
+            .filter(|token| token.kind() == "&&")
+            .count(),
+        _ => 0,
+    }
+}
+
+fn measure_function(function: Node<'_>, body: Node<'_>) -> FunctionMetrics {
     let mut metrics = FunctionMetrics {
         start_line: (function.start_position().row + 1) as u32,
         end_line: (function.end_position().row + 1) as u32,
         line_count: body.end_position().row - body.start_position().row + 1,
-        param_count,
+        param_count: parameter_count(function),
         max_nesting: 0,
         branch_count: 0,
         return_count: 0,
@@ -93,37 +119,10 @@ fn measure_function(function: Node<'_>, body: Node<'_>) -> FunctionMetrics {
             metrics.max_nesting = metrics.max_nesting.max(depth + 1);
         }
 
-        let mut cursor = node.walk();
-        match kind {
-            "if_expression" | "for_expression" | "while_expression" => metrics.branch_count += 1,
-            "let_declaration" if let_else => metrics.branch_count += 1,
-            "match_block" => {
-                let arms = node
-                    .named_children(&mut cursor)
-                    .filter(|arm| arm.kind() == "match_arm")
-                    .count();
-                metrics.branch_count += arms.saturating_sub(1);
-            }
-            "match_pattern" if node.child_by_field_name("condition").is_some() => {
-                metrics.branch_count += 1
-            }
-            "binary_expression"
-                if node
-                    .child_by_field_name("operator")
-                    .is_some_and(|op| matches!(op.kind(), "&&" | "||")) =>
-            {
-                metrics.branch_count += 1;
-            }
-            "let_chain" => {
-                metrics.branch_count += node
-                    .children(&mut cursor)
-                    .filter(|token| token.kind() == "&&")
-                    .count()
-            }
-            "return_expression" => metrics.return_count += 1,
-            _ => {}
-        }
+        metrics.branch_count += branch_points(node, let_else);
+        metrics.return_count += usize::from(kind == "return_expression");
 
+        let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             // An else-if belongs to the same decision level as its if.
             let else_if = kind == "if_expression"
