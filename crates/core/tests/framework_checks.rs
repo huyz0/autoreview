@@ -52,6 +52,13 @@ class Child extends Parent {
     Child() { resolve("key"); }
     void resolve(Object key) {}
 }
+interface Provider {
+    default void resolve(String key) {}
+}
+class Adapter implements Provider {
+    Adapter() { resolve("key"); }
+    void resolve(Object key) {}
+}
 "#;
     let found = scan(&[("Base.java", source)], &["Base.java"]);
     assert_eq!(found.len(), 1, "{found:#?}");

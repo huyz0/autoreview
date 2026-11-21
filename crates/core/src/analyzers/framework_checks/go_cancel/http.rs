@@ -85,21 +85,19 @@ fn loses_context(call: Node<'_>, source: &str, http: &str, context: Option<&str>
     let Some(callee) = call.child_by_field_name("function") else {
         return false;
     };
-    if qualified(callee, source, http, "NewRequest") {
-        return true;
+    match text(callee, source).split_once('.') {
+        Some((package, "NewRequest")) if package == http => true,
+        Some((package, "NewRequestWithContext")) if package == http => {
+            context.is_some_and(|context| fresh_context(call, source, context))
+        }
+        _ => false,
     }
-    if !qualified(callee, source, http, "NewRequestWithContext") {
-        return false;
-    }
-    let Some(context) = context else { return false };
-    let Some(first) = call
-        .child_by_field_name("arguments")
+}
+
+fn fresh_context(call: Node<'_>, source: &str, context: &str) -> bool {
+    call.child_by_field_name("arguments")
         .and_then(|args| children(args).find(|node| node.kind() != "comment"))
-    else {
-        return false;
-    };
-    first
-        .child_by_field_name("function")
+        .and_then(|first| first.child_by_field_name("function"))
         .is_some_and(|function| {
             qualified(function, source, context, "Background")
                 || qualified(function, source, context, "TODO")

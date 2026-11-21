@@ -14,34 +14,37 @@ pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
 
 pub(super) fn findings(java: &Java<'_>) -> Vec<AgentFinding> {
     const REST: &str = "org.springframework.web.bind.annotation.RestController";
+    descendants(java.root)
+        .filter(|node| node.kind() == "class_declaration" && java.annotation(*node, REST).is_some())
+        .flat_map(|class| endpoint_findings(java, class))
+        .collect()
+}
+
+fn endpoint_findings<'a>(
+    java: &'a Java<'a>,
+    class: Node<'a>,
+) -> impl Iterator<Item = AgentFinding> + 'a {
     const GET: &str = "org.springframework.web.bind.annotation.GetMapping";
-    let mut findings = Vec::new();
-    for class in descendants(java.root).filter(|node| node.kind() == "class_declaration") {
-        if java.annotation(class, REST).is_none() {
-            continue;
-        }
-        for method in class_members(class).filter(|node| node.kind() == "method_declaration") {
-            let Some(mapping) = java.annotation(method, GET) else {
-                continue;
-            };
-            let Some(body) = method.child_by_field_name("body") else {
-                continue;
-            };
-            for statement in children(body).filter(|node| node.kind() == "return_statement") {
-                if let Some(call) =
-                    children(statement).find(|node| node.kind() == "method_invocation")
-                {
-                    if is_unpaged_find_all(java, call)
-                        && known_repository(java, class, method, call)
-                    {
-                        findings
-                            .push(RULE.finding(java.location(call), vec![java.location(mapping)]));
-                    }
-                }
-            }
-        }
-    }
-    findings
+    class_members(class)
+        .filter(|node| node.kind() == "method_declaration")
+        .filter_map(|method| Some((method, java.annotation(method, GET)?)))
+        .flat_map(move |(method, mapping)| {
+            returned_calls(method)
+                .filter(move |call| {
+                    is_unpaged_find_all(java, *call) && known_repository(java, class, method, *call)
+                })
+                .map(move |call| RULE.finding(java.location(call), vec![java.location(mapping)]))
+        })
+}
+
+fn returned_calls(method: Node<'_>) -> impl Iterator<Item = Node<'_>> {
+    method
+        .child_by_field_name("body")
+        .into_iter()
+        .flat_map(children)
+        .filter(|node| node.kind() == "return_statement")
+        .flat_map(children)
+        .filter(|node| node.kind() == "method_invocation")
 }
 
 fn known_repository<'a>(
@@ -53,7 +56,6 @@ fn known_repository<'a>(
     let Some(receiver) = call.child_by_field_name("object") else {
         return false;
     };
-    let fields = class_members(class).filter(|member| member.kind() == "field_declaration");
     let name = match receiver.kind() {
         "identifier" => java.text(receiver),
         "field_access"
@@ -61,24 +63,31 @@ fn known_repository<'a>(
                 .child_by_field_name("object")
                 .is_some_and(|node| node.kind() == "this") =>
         {
-            let Some(name) = java.field(receiver, "field") else {
-                return false;
-            };
-            return fields
-                .into_iter()
-                .any(|field| repository_field(java, field, name));
+            return java
+                .field(receiver, "field")
+                .is_some_and(|name| known_field(java, class, name));
         }
         _ => return false,
     };
-    let mut parameters = method
+    let parameter = method
         .child_by_field_name("parameters")
         .into_iter()
-        .flat_map(children);
-    if let Some(parameter) = parameters.find(|param| java.field(*param, "name") == Some(name)) {
-        return repository_type(java, parameter);
-    }
-    // A local variable can shadow a field. For an implicit receiver require a
-    // parameter or a method body consisting only of the return.
+        .flat_map(children)
+        .find(|param| java.field(*param, "name") == Some(name));
+    parameter.map_or_else(
+        || no_local_declarations(method) && known_field(java, class, name),
+        |param| repository_type(java, param),
+    )
+}
+
+fn known_field(java: &Java<'_>, class: Node<'_>, name: &str) -> bool {
+    class_members(class)
+        .filter(|member| member.kind() == "field_declaration")
+        .any(|field| repository_field(java, field, name))
+}
+
+fn no_local_declarations(method: Node<'_>) -> bool {
+    // For an implicit receiver, make sure no local variable can shadow the field.
     method.child_by_field_name("body").is_some_and(|body| {
         children(body).all(|node| {
             matches!(
@@ -86,9 +95,7 @@ fn known_repository<'a>(
                 "return_statement" | "line_comment" | "block_comment"
             )
         })
-    }) && fields
-        .into_iter()
-        .any(|field| repository_field(java, field, name))
+    })
 }
 
 fn repository_field(java: &Java<'_>, field: Node<'_>, name: &str) -> bool {

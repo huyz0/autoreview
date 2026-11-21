@@ -2,7 +2,7 @@ use autoreview_schema::AgentFinding;
 use tree_sitter::Node;
 
 use super::super::Rule;
-use super::{arity, arity_of, class_members, descendants, modifiers, Java};
+use super::{arity, class_members, descendants, local_target, modifiers, Java};
 
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     id: "java-constructor-calls-overridable-method",
@@ -13,32 +13,32 @@ pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
 };
 
 pub(super) fn findings(java: &Java<'_>) -> Vec<AgentFinding> {
-    let mut findings = Vec::new();
-    for class in descendants(java.root).filter(|node| node.kind() == "class_declaration") {
-        if modifiers(class).any(|modifier| modifier.kind() == "final") {
-            continue;
-        }
-        let methods: Vec<_> = class_members(class)
-            .filter(|member| member.kind() == "method_declaration")
-            .collect();
-        let has_superclass = class.child_by_field_name("superclass").is_some();
-        for constructor in
-            class_members(class).filter(|member| member.kind() == "constructor_declaration")
-        {
-            let Some(body) = constructor.child_by_field_name("body") else {
-                continue;
-            };
-            for call in eager_calls(body) {
-                if has_superclass && arity(call, "arguments") != Some(0) {
-                    continue;
-                }
-                if let Some(target) = target(java, call, &methods) {
-                    findings.push(RULE.finding(java.location(call), vec![java.location(target)]));
-                }
-            }
-        }
-    }
-    findings
+    descendants(java.root)
+        .filter(|node| node.kind() == "class_declaration")
+        .filter(|class| modifiers(*class).all(|modifier| modifier.kind() != "final"))
+        .flat_map(|class| class_findings(java, class))
+        .collect()
+}
+
+fn class_findings<'a>(java: &Java<'a>, class: Node<'a>) -> Vec<AgentFinding> {
+    let methods: Vec<_> = class_members(class)
+        .filter(|member| member.kind() == "method_declaration")
+        .collect();
+    let has_inherited_members = ["superclass", "interfaces"]
+        .iter()
+        .any(|field| class.child_by_field_name(field).is_some());
+    class_members(class)
+        .filter(|member| member.kind() == "constructor_declaration")
+        .filter_map(|constructor| constructor.child_by_field_name("body"))
+        .flat_map(eager_calls)
+        // Without inherited signatures, only a zero-argument call is unambiguous.
+        .filter(|call| !has_inherited_members || arity(*call, "arguments") == Some(0))
+        .filter_map(|call| {
+            let target = local_target(java, call, &methods)?;
+            overridable(target)
+                .then(|| RULE.finding(java.location(call), vec![java.location(target)]))
+        })
+        .collect()
 }
 
 fn eager_calls(body: Node<'_>) -> impl Iterator<Item = Node<'_>> {
@@ -64,24 +64,6 @@ fn eager_calls(body: Node<'_>) -> impl Iterator<Item = Node<'_>> {
     })
 }
 
-fn target<'a>(java: &Java<'a>, call: Node<'a>, methods: &[Node<'a>]) -> Option<Node<'a>> {
-    if call
-        .child_by_field_name("object")
-        .is_some_and(|receiver| receiver.kind() != "this")
-    {
-        return None;
-    }
-    let name = java.field(call, "name")?;
-    let arguments = arity(call, "arguments")?;
-    let mut candidates = methods
-        .iter()
-        .copied()
-        .filter(|method| java.field(*method, "name") == Some(name));
-    let target = candidates.next()?;
-    if candidates.next().is_some() || arity_of(target) != Some(arguments) {
-        return None;
-    }
-    modifiers(target)
-        .all(|modifier| !matches!(modifier.kind(), "private" | "static" | "final"))
-        .then_some(target)
+fn overridable(method: Node<'_>) -> bool {
+    modifiers(method).all(|modifier| !matches!(modifier.kind(), "private" | "static" | "final"))
 }

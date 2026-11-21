@@ -5,11 +5,9 @@ use autoreview_archgraph::{
     go_imports_with_lines, go_package_for_file, java_kotlin_imports_with_lines,
     java_kotlin_package_for_file, ImportGraph,
 };
-use autoreview_schema::{
-    AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side,
-};
+use autoreview_schema::{AgentFinding, Severity};
 
-use super::{language_for_file, ImportLanguage};
+use super::{architecture_finding, import_location, language_for_file, ImportLanguage};
 
 pub(super) fn check(
     root: &Path,
@@ -69,7 +67,7 @@ fn finding(
         .iter()
         .filter(|(import, _)| edges.values().any(|symbols| symbols.contains(import)));
     let (first_import, start_line) = evidence.next()?;
-    let end_line = evidence.next_back().map(|(_, line)| *line);
+    let end_line = evidence.next_back().map_or(*start_line, |(_, line)| *line);
     let mut targets: Vec<_> = edges.keys().map(String::as_str).collect();
     targets.sort_unstable();
     let count = targets.len();
@@ -79,31 +77,13 @@ fn finding(
     } else {
         String::new()
     };
-    Some(AgentFinding {
-        source: FindingSource {
-            kind: FindingSourceKind::Analyzer,
-            tool: "autoreview-architecture".into(),
-            rule_id: Some("internal-dependency-budget".into()),
-            aspect: None,
-            backend: None,
-        },
-        category: "architecture".into(),
-        severity: Severity::Medium,
-        confidence: 1.0,
-        title: "Package exceeds its internal dependency budget".into(),
-        message: format!("`{package}` directly imports {count} internal packages. Its configured budget is {limit}. Dependencies include {preview}{remaining}."),
-        location: Location {
-            path: path.into(),
-            range: LocationRange { start_line: *start_line, end_line, ..Default::default() },
-            snippet: first_import.clone(),
-            side: Side::New,
-        },
-        related_locations: None,
-        suggestion: None,
-        tags: None,
-        meta: None,
-        suggested_patch: None,
-    })
+    Some(architecture_finding(
+        "internal-dependency-budget",
+        Severity::Medium,
+        "Package exceeds its internal dependency budget".into(),
+        format!("`{package}` directly imports {count} internal packages. Its configured budget is {limit}. Dependencies include {preview}{remaining}."),
+        import_location(path, *start_line..=end_line, first_import.clone()),
+    ))
 }
 
 #[cfg(test)]

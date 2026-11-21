@@ -2,7 +2,7 @@ use autoreview_schema::AgentFinding;
 use tree_sitter::Node;
 
 use super::super::Rule;
-use super::{arity, arity_of, children, class_members, containing, descendants, Java};
+use super::{children, class_members, containing, descendants, local_target, Java};
 
 const TX: &str = "org.springframework.transaction.annotation.Transactional";
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
@@ -62,27 +62,11 @@ fn target_annotation<'a>(
     call: Node<'a>,
     methods: &[Node<'a>],
 ) -> Option<Node<'a>> {
-    if call
-        .child_by_field_name("object")
-        .is_some_and(|object| object.kind() != "this")
-    {
-        return None;
-    }
     if containing(call, "class_body") != containing(caller, "class_body") {
         return None;
     }
-    let name = java.field(call, "name")?;
-    let arity = arity(call, "arguments")?;
-    let mut candidates = methods
-        .iter()
-        .copied()
-        .filter(|method| java.field(*method, "name") == Some(name));
-    let target = candidates.next()?;
-    if candidates.next().is_some()
-        || target == caller
-        || !proxyable(target)
-        || arity_of(target) != Some(arity)
-    {
+    let target = local_target(java, call, methods)?;
+    if target == caller || !proxyable(target) {
         return None;
     }
     let annotation = java.annotation(target, TX)?;

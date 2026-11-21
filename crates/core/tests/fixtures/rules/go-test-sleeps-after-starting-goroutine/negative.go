@@ -6,18 +6,18 @@ import (
 )
 
 func TestWaitsForPublication(t *testing.T) {
-	done := make(chan struct{})
-	go publish(done)
-	<-done
-	if !ready.Load() {
+	done := make(chan int, 1)
+	go func() { done <- 42 }()
+	result := <-done
+	if result != 42 {
 		t.Error("publication did not finish")
 	}
 }
 
 func TestDataExpires(t *testing.T) {
-	store()
+	expires := time.Now().Add(time.Millisecond)
 	time.Sleep(time.Second)
-	if !expired() {
+	if time.Now().Before(expires) {
 		t.Error("data did not expire")
 	}
 }

@@ -167,3 +167,14 @@ fn arity_of(method: Node<'_>) -> Option<usize> {
     }
     arity(method, "parameters")
 }
+
+fn local_target<'a>(java: &Java<'a>, call: Node<'a>, methods: &[Node<'a>]) -> Option<Node<'a>> {
+    if call.child_by_field_name("object").is_some_and(|receiver| receiver.kind() != "this") {
+        return None;
+    }
+    let name = java.field(call, "name")?;
+    let arguments = arity(call, "arguments")?;
+    let mut candidates = methods.iter().copied().filter(|method| java.field(*method, "name") == Some(name));
+    let target = candidates.next()?;
+    (candidates.next().is_none() && arity_of(target) == Some(arguments)).then_some(target)
+}
