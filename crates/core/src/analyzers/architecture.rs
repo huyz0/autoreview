@@ -30,7 +30,7 @@ mod budgets;
 
 use globset::Glob;
 
-use autoreview_schema::{AgentFinding, ArchitectureConfig, ArchitectureLayer, Location, LocationRange, Severity, Side};
+use autoreview_schema::{AgentFinding, ArchitectureConfig, ArchitectureLayer, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
 /// Reads and parses `.autoreview/architecture.yaml`. Returns `None` (not an
 /// error) when the file doesn't exist — this feature is opt-in.
@@ -309,14 +309,27 @@ fn transitive_layer_finding(file: &str, layer: &str, target: &str, path: &[Strin
     )
 }
 
-pub(super) fn architecture_finding(
+fn architecture_finding(
     id: &str,
     severity: Severity,
     title: String,
     message: String,
     location: Location,
 ) -> AgentFinding {
-    super::analyzer_finding(("autoreview-architecture", id), "architecture", severity, (title, message), location)
+    AgentFinding {
+        source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-architecture".into(), rule_id: Some(id.into()), aspect: None, backend: None },
+        category: "architecture".into(),
+        severity,
+        confidence: 1.0,
+        title,
+        message,
+        location,
+        related_locations: None,
+        suggestion: None,
+        tags: None,
+        meta: None,
+        suggested_patch: None,
+    }
 }
 
 fn import_location(file: &str, lines: std::ops::RangeInclusive<u32>, snippet: String) -> Location {

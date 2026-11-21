@@ -8,14 +8,14 @@ use std::process::Command;
 use anyhow::{ensure, Context};
 use autoreview_langsupport::{parser_for, Language};
 use autoreview_schema::{
-    AgentFinding, ArchitectureConfig, Location, LocationRange, Severity, Side,
+    AgentFinding, ArchitectureConfig, FindingSource, FindingSourceKind, Location, LocationRange,
+    Severity, Side,
 };
 use serde::Deserialize;
 use toml_edit::{Document, Item};
 use tree_sitter::Node;
 
-use super::analyzer_finding;
-use super::architecture::{architecture_finding, layer_for_path};
+use super::architecture::layer_for_path;
 use super::rust_review::syntax::{children, descendants, is_comment, Source};
 
 #[derive(Deserialize)]
@@ -217,16 +217,17 @@ fn build_script_findings(path: &str, source: &str) -> Vec<AgentFinding> {
         .filter(|node| node.kind() == "macro_invocation")
         .filter_map(|node| {
             let variable = cargo_generated_trigger(literal_println(&syntax, node)?)?;
-            let title = format!("Rebuild trigger cannot track Cargo-generated {variable}");
-            let message = format!(
-                "This directive watches the environment passed to Cargo. When Cargo supplies {variable} to the build script, changes to that generated value cannot trigger a rebuild through this directive."
-            );
-            Some(analyzer_finding(
-                ("autoreview-cargo", "rust-cargo-generated-env-trigger"),
+            Some(finding(
+                "autoreview-cargo",
+                "rust-cargo-generated-env-trigger",
                 "correctness",
                 Severity::Medium,
-                (title, message),
+                format!("Rebuild trigger cannot track Cargo-generated {variable}"),
+                format!(
+                    "This directive watches the environment passed to Cargo. When Cargo supplies {variable} to the build script, changes to that generated value cannot trigger a rebuild through this directive."
+                ),
                 source_location(path, source, node.byte_range()),
+                None,
             ))
         })
         .collect()
@@ -390,8 +391,10 @@ fn review_layer_edges(
                 .target
                 .as_ref()
                 .map_or_else(String::new, |target| format!(" for target {target}"));
-            let mut finding = architecture_finding(
+            review.findings.push(finding(
+                "autoreview-architecture",
                 "rust-cargo-layer-violation",
+                "architecture",
                 Severity::High,
                 format!("Cargo layer violation: {layer} -> {target_layer}"),
                 format!(
@@ -399,9 +402,8 @@ fn review_layer_edges(
                     package.name, target_package.name
                 ),
                 location,
-            );
-            finding.related_locations = related.map(|location| vec![location]);
-            review.findings.push(finding);
+                related,
+            ));
         }
     }
 }
@@ -487,6 +489,38 @@ fn source_location(path: &str, source: &str, span: Range<usize>) -> Location {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn finding(
+    tool: &str,
+    rule: &str,
+    category: &str,
+    severity: Severity,
+    title: String,
+    message: String,
+    location: Location,
+    related: Option<Location>,
+) -> AgentFinding {
+    AgentFinding {
+        source: FindingSource {
+            kind: FindingSourceKind::Analyzer,
+            tool: tool.to_string(),
+            rule_id: Some(rule.to_string()),
+            aspect: None,
+            backend: None,
+        },
+        category: category.to_string(),
+        severity,
+        confidence: 1.0,
+        title,
+        message,
+        location,
+        related_locations: related.map(|related| vec![related]),
+        suggestion: None,
+        tags: None,
+        meta: None,
+        suggested_patch: None,
+    }
+}
 
 #[cfg(test)]
 mod tests {
