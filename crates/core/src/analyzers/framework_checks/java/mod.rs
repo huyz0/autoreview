@@ -1,4 +1,5 @@
 mod hibernate;
+mod otel;
 mod spring;
 
 use std::{collections::HashMap, path::Path};
@@ -10,6 +11,7 @@ use tree_sitter::{Node, Tree};
 use super::{children, descendants, location, parse_source, text};
 
 pub(super) use hibernate::RULE as HIBERNATE_RULE;
+pub(super) use otel::RULE as OTEL_RULE;
 pub(super) use spring::RULE as SPRING_RULE;
 
 pub(super) fn run(root: &Path, paths: &[String]) -> Vec<AgentFinding> {
@@ -24,6 +26,9 @@ pub(super) fn run(root: &Path, paths: &[String]) -> Vec<AgentFinding> {
         };
         let java = Java::new(path, &source, &tree);
         findings.extend(spring::findings(&java));
+        if source.contains("makeCurrent") {
+            findings.extend(otel::findings(&java));
+        }
         if source.contains("getResultList") {
             let entities = entity_index.get_or_insert_with(|| hibernate::index(root));
             findings.extend(hibernate::findings(&java, entities));

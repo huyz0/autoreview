@@ -6,6 +6,7 @@ use tree_sitter::{Node, Tree};
 
 use super::super::{children, descendants, parse_source, text};
 use super::flow::{Check, Helper, Helpers};
+use super::two_result_call;
 
 pub(super) struct File {
     pub path: String,
@@ -74,9 +75,13 @@ fn file(root: &Path, absolute: &Path, source: String, tree: Tree) -> Option<File
 }
 
 impl File {
-    fn functions(&self) -> impl Iterator<Item = Node<'_>> {
+    pub(super) fn functions(&self) -> impl Iterator<Item = Node<'_>> {
         children(self.tree.root_node())
             .filter(|item| matches!(item.kind(), "function_declaration" | "method_declaration"))
+    }
+
+    pub(super) fn root(&self) -> Node<'_> {
+        self.tree.root_node()
     }
 
     fn factory(&self, call: Node<'_>, shadowed: &HashSet<&str>) -> bool {
@@ -282,17 +287,10 @@ fn acquisition<'tree, 'src>(
     summaries: &Summaries<'_>,
     shadowed: &HashSet<&str>,
 ) -> Option<(Node<'tree>, Option<&'src str>)> {
-    let left = assignment.child_by_field_name("left")?;
-    let right = assignment.child_by_field_name("right")?;
-    if left.named_child_count() != 2 || right.named_child_count() != 1 {
+    let (binding, call) = two_result_call(assignment)?;
+    if text(binding, &file.source) == "_" {
         return None;
     }
-    let binding = left
-        .named_child(1)
-        .filter(|node| node.kind() == "identifier" && text(*node, &file.source) != "_")?;
-    let call = right
-        .named_child(0)
-        .filter(|node| node.kind() == "call_expression")?;
     let callee = call.child_by_field_name("function")?;
     if file.factory(call, shadowed) {
         return Some((binding, None));
@@ -302,7 +300,7 @@ fn acquisition<'tree, 'src>(
         .then_some((binding, Some(name)))
 }
 
-fn local_names<'src>(function: Node<'_>, source: &'src str) -> HashSet<&'src str> {
+pub(super) fn local_names<'src>(function: Node<'_>, source: &'src str) -> HashSet<&'src str> {
     descendants(function)
         .flat_map(|node| {
             match node.kind() {

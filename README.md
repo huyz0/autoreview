@@ -29,6 +29,9 @@ deep tier.
   and Hibernate reads that initialize a mapped lazy collection for each
   result of a typed query. The Spring check assumes proxy mode. The Hibernate
   check reports a query pattern that should be confirmed in generated SQL.
+- **Telemetry checks** flag likely high-cardinality Prometheus and Micrometer
+  labels, Go OpenTelemetry spans that can exit without ending, and Java
+  OpenTelemetry scopes discarded without a cleanup owner.
 - **Complexity metrics** with YAML-configurable thresholds. Java and Rust use
   syntax trees to measure function length, parameters, nesting, branches, and
   explicit returns. Rust also checks required trait items and oversized

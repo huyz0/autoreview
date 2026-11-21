@@ -19,6 +19,81 @@ fn scan(sources: &[(&str, &str)], changed: &[&str]) -> Vec<autoreview_schema::Ag
 }
 
 #[test]
+fn open_telemetry_span_ownership_tracks_return_paths() {
+    let source = r#"package demo
+import "context"
+import "go.opentelemetry.io/otel"
+import oteltrace "go.opentelemetry.io/otel/trace"
+func leak(ctx context.Context, tracer oteltrace.Tracer, early bool) {
+    _, span := tracer.Start(ctx, "load")
+    span.AddEvent("started")
+    if early { return }
+    span.End()
+}
+func close(ctx context.Context) {
+    _, span := otel.Tracer("demo").Start(ctx, "load")
+    defer span.End()
+}
+func forward(ctx context.Context, tracer oteltrace.Tracer) oteltrace.Span {
+    _, span := tracer.Start(ctx, "load")
+    return span
+}
+func other(ctx context.Context, unrelated OtherTracer) {
+    _, span := unrelated.Start(ctx, "load")
+    span.AddEvent("started")
+}
+func discard(parent context.Context) context.Context {
+    ctx, _ := otel.Tracer("demo").Start(parent, "load")
+    return ctx
+}
+"#;
+    let found = scan(&[("trace.go", source)], &["trace.go"]);
+    assert_eq!(found.len(), 2, "{found:#?}");
+    assert_eq!(
+        found[0].source.rule_id.as_deref(),
+        Some("go-otel-span-not-ended")
+    );
+    assert_eq!(found[0].location.range.start_line, 6);
+    assert_eq!(
+        found[0].related_locations.as_ref().unwrap()[0]
+            .range
+            .start_line,
+        8
+    );
+}
+
+#[test]
+fn open_telemetry_scopes_must_have_an_owner() {
+    let source = r#"import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Context;
+class Example {
+    void leak(Span span) {
+        span.makeCurrent();
+    }
+    void leakCurrent() {
+        Context.current().makeCurrent();
+    }
+    void scoped(Span span) {
+        try (var scope = span.makeCurrent()) { work(); }
+    }
+    void unrelated(Other span) {
+        span.makeCurrent();
+    }
+    void local() {
+        Span span = Span.current();
+        span.makeCurrent();
+    }
+}
+"#;
+    let found = scan(&[("Example.java", source)], &["Example.java"]);
+    let lines: Vec<_> = found
+        .iter()
+        .map(|finding| finding.location.range.start_line)
+        .collect();
+    assert_eq!(lines, [5, 8, 18], "{found:#?}");
+}
+
+#[test]
 fn go_cancellation_follows_branch_exits_and_package_local_helpers() {
     let callers = r#"package demo
 import "context"

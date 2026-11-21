@@ -10,8 +10,14 @@ use tree_sitter::{Node, Parser, Tree};
 
 use super::ast_grep::RuleDefinition;
 
-fn rules() -> [&'static Rule; 3] {
-    [&go_cancel::RULE, &java::SPRING_RULE, &java::HIBERNATE_RULE]
+fn rules() -> [&'static Rule; 5] {
+    [
+        &go_cancel::RULE,
+        &go_cancel::SPAN_RULE,
+        &java::SPRING_RULE,
+        &java::HIBERNATE_RULE,
+        &java::OTEL_RULE,
+    ]
 }
 
 pub(super) fn semantic_ids() -> impl Iterator<Item = String> {

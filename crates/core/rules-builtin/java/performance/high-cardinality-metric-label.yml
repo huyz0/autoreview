@@ -1,0 +1,26 @@
+id: java-micrometer-high-cardinality-tag
+language: Java
+category: performance
+severity: warning
+semantic: true
+message: >-
+  This Micrometer tag looks like an unbounded identifier. Each distinct tag
+  combination can register a new meter. Keep metric tags bounded and put
+  per-request identifiers in traces or logs.
+metadata:
+  references:
+    - https://docs.micrometer.io/micrometer/reference/concepts/high-cardinality-tags-detector.html
+rule:
+  all:
+    - pattern: $METER.builder($$$ARGS).tag($KEY, $VALUE)
+    - inside:
+        kind: program
+        has:
+          pattern: import io.micrometer.core.instrument.$METER;
+        stopBy: end
+constraints:
+  METER:
+    regex: '^(Counter|Timer|DistributionSummary)$'
+  KEY:
+    regex: >-
+      (?i)^(?:"|')(?:user[_.-]?id|request[_.-]?id|trace[_.-]?id|span[_.-]?id|session[_.-]?id|email|uuid)(?:"|')$
