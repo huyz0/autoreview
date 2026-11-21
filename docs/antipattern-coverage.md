@@ -77,7 +77,8 @@ A syntax rule can match a specific API sequence or local expression. Data flow i
 
 ## References
 
-- [PMD Java design rules](https://docs.pmd-code.org/pmd-doc-7.29.0/pmd_rules_java_design.html) documents concrete design metrics and constructor-dispatch checks.
+- [PMD Java design rules](https://docs.pmd-code.org/pmd-doc-7.29.0/pmd_rules_java_design.html) document concrete design metrics.
+- [PMD constructor-dispatch rule](https://docs.pmd-code.org/pmd-doc-7.22.0/pmd_rules_java_errorprone.html#constructorcallsoverridablemethod) describes calls to overridable methods during initialization.
 - [Java Thread API](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Thread.html#start()) describes starting a separate thread.
 - [typescript-eslint floating-promise rule](https://typescript-eslint.io/rules/no-floating-promises/) describes the type-aware version of promise handling.
 - [Mockito verification API](https://site.mockito.org/javadoc/current/org/mockito/Mockito.html#verify-T-) describes verification of a method call.
