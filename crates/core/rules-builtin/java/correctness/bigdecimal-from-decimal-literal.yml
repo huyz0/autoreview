@@ -1,0 +1,26 @@
+id: java-bigdecimal-from-decimal-literal
+language: Java
+category: correctness
+severity: info
+message: >-
+  This converts a binary floating-point value to BigDecimal and can preserve
+  rounding artifacts. Use the string constructor when a decimal literal must
+  be represented exactly.
+metadata:
+  references:
+    - https://docs.oracle.com/en/java/javase/19/docs/api/java.base/java/math/BigDecimal.html
+rule:
+  any:
+    - pattern: new java.math.BigDecimal($VALUE)
+    - all:
+        - pattern: new BigDecimal($VALUE)
+        - inside:
+            kind: program
+            has:
+              kind: import_declaration
+              regex: '^import\s+java\.math\.BigDecimal\s*;$'
+              stopBy: end
+            stopBy: end
+constraints:
+  VALUE:
+    regex: '^[+-]?(?:[0-9][0-9_]*\.[0-9_]*|\.[0-9][0-9_]*)(?:[eE][+-]?[0-9][0-9_]*)?$'

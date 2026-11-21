@@ -1,0 +1,33 @@
+id: go-parallel-test-process-state
+language: Go
+category: correctness
+severity: warning
+message: >-
+  This Go test calls Parallel and changes process-wide state on the same
+  testing.T. The testing package forbids combining these operations.
+  Keep tests that need Setenv or Chdir sequential.
+metadata:
+  references:
+    - https://pkg.go.dev/testing#T.Setenv
+    - https://pkg.go.dev/testing#T.Chdir
+rule:
+  all:
+    - pattern: 'func $TEST($T *testing.T) { $$$BODY }'
+    - has:
+        field: body
+        has:
+          kind: statement_list
+          all:
+            - has:
+                pattern:
+                  context: 'func f() { $T.Parallel() }'
+                  selector: expression_statement
+            - has:
+                pattern:
+                  context: 'func f() { $T.$MUTATE($$$ARGS) }'
+                  selector: expression_statement
+constraints:
+  TEST:
+    regex: '^Test[A-Z0-9_]\w*$'
+  MUTATE:
+    regex: '^(Setenv|Chdir)$'

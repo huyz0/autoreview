@@ -1,0 +1,30 @@
+id: go-discarded-context-cancel
+language: Go
+category: correctness
+severity: warning
+semantic: true
+message: >-
+  This discards the cancel function that releases the derived context's resources.
+  Keep it and call it when the operation finishes, typically with defer.
+metadata:
+  references:
+    - https://go.dev/doc/database/cancel-operations
+rule:
+  all:
+    - any:
+        - pattern:
+            context: "func f() { $CTX, _ := context.$FACTORY($$$ARGS) }"
+            selector: short_var_declaration
+        - pattern:
+            context: "func f() { $CTX, _ = context.$FACTORY($$$ARGS) }"
+            selector: assignment_statement
+    - inside:
+        kind: source_file
+        has:
+          kind: import_spec
+          regex: '^"context"$'
+          stopBy: end
+        stopBy: end
+constraints:
+  FACTORY:
+    regex: '^(WithCancel|WithCancelCause|WithDeadline|WithDeadlineCause|WithTimeout|WithTimeoutCause)$'

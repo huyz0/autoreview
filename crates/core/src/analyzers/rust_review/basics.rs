@@ -105,7 +105,7 @@ fn discards_test_matches<'tree>(source: &Source<'tree, '_>, node: Node<'tree>) -
         && test_body(source, node)
 }
 
-fn test_body<'tree>(source: &Source<'tree, '_>, node: Node<'tree>) -> bool {
+pub(super) fn test_body<'tree>(source: &Source<'tree, '_>, node: Node<'tree>) -> bool {
     let Some(function) = function_owner(node) else {
         return false;
     };
