@@ -1,0 +1,21 @@
+id: java-tautological-junit-assertion
+language: Java
+category: correctness
+severity: warning
+semantic: true
+message: >-
+  This assertion compares the same variable on both sides. Assert against
+  an independent expected value so the test can detect incorrect behavior.
+rule:
+  all:
+    - pattern: Assertions.$ASSERT($VALUE, $VALUE)
+    - inside:
+        kind: program
+        has:
+          pattern: import org.junit.jupiter.api.Assertions;
+        stopBy: end
+constraints:
+  ASSERT:
+    regex: '^assert(Equals|Same|ArrayEquals)$'
+  VALUE:
+    kind: identifier

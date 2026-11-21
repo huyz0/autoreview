@@ -1,0 +1,25 @@
+id: kotlin-tautological-assertion
+language: Kotlin
+category: correctness
+severity: warning
+semantic: true
+message: >-
+  This assertion compares the same variable on both sides. Assert against
+  an independent expected value so the test can detect incorrect behavior.
+rule:
+  all:
+    - pattern:
+        context: 'fun t() { assertEquals($VALUE, $VALUE) }'
+        selector: call_expression
+    - inside:
+        kind: source_file
+        has:
+          kind: import_header
+          regex: '^import\s+kotlin\.test\.assertEquals\s*;?$'
+          stopBy: end
+        stopBy: end
+constraints:
+  VALUE:
+    kind: value_argument
+    has:
+      kind: simple_identifier

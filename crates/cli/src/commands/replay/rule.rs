@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "kebab-case")]
 pub(super) enum Tool {
     AstGrep,
+    AutoreviewArchgraph,
     AutoreviewComplexity,
     AutoreviewDataflow,
     AutoreviewDuplication,
@@ -30,6 +31,7 @@ impl Tool {
                 autoreview_core::run_ast_grep(source, paths, &[])?
             }
             Self::AutoreviewComplexity => autoreview_core::run_complexity_check(source, paths, &[]),
+            Self::AutoreviewArchgraph => autoreview_core::run_archgraph_check(source, paths),
             Self::AutoreviewDataflow => autoreview_core::run_dataflow_check(source, paths, &[]),
             Self::AutoreviewDuplication => autoreview_core::run_duplication_check(source, paths),
             Self::AutoreviewFrameworks => autoreview_core::run_framework_checks(source, paths),
@@ -56,6 +58,9 @@ impl Rule {
         let kind = definition.as_ref().map(|rule| rule.kind.as_str());
         let supported = match self.tool {
             Tool::AstGrep => kind == Some("pattern"),
+            Tool::AutoreviewArchgraph => {
+                matches!(self.id.as_str(), "import-cycle" | "web-import-cycle")
+            }
             Tool::AutoreviewComplexity => kind == Some("threshold"),
             Tool::AutoreviewDataflow => {
                 matches!(kind, Some("taint" | "call-sequence"))
