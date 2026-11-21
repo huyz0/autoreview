@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
+use super::taint_rules::TaintRuleDef;
 use super::{
-    add_java_kotlin_summaries_from_file, call_order_rules, go_imported_package_summaries,
-    go_package_summaries, java_kotlin_imported_package_summaries, java_kotlin_package_summaries,
-    make_finding, rule_meta, taint_pack_meta, taint_rules, AgentFinding, Cfg, Node, Path,
-    ResolvedRulePack, Stmt, SummaryCaches,
+    call_order_rules, go_summaries, java_kotlin_summaries, make_finding, rule_meta, AgentFinding,
+    Cfg, Node, Path, Stmt, SummaryCaches,
 };
+use autoreview_dataflow::taint;
 
 /// Substitutes `{tainted_arg}`/`{sink_call}` in a rule's YAML `message`
 /// template with the actual hit's values — the declarative-rule
@@ -31,138 +31,61 @@ fn taint_title(hit: &autoreview_dataflow::taint::TaintHit) -> String {
     )
 }
 
-/// Runs every `kind: taint` rule declared in `rules-builtin/` or a
-/// registered pack (loaded via `taint_rules::load_taint_rules`) whose
-/// `language` matches, against one file's already-lowered functions.
-/// Adding a new taint rule means adding a new YAML file — this function
-/// doesn't change.
-/// Interprocedural taint-source summaries for one rule's own `sources`
-/// (rule engine roadmap item 6, `RULE_ENGINE_RESEARCH.md`): does a same-
-/// file/same-package/imported-package helper have a path where this
-/// specific rule's source reaches its own return? Closes a real gap the
-/// existing intraprocedural default (taint auto-propagates through an
-/// unrecognized call only from an already-tainted *argument*) structurally
-/// can't see — a niladic wrapper like `func getUserID() string { return
-/// req.FormValue("id") }` has no argument for that default to look at.
-/// Only Go, Java, and Kotlin have the same-package/cross-package
-/// resolution machinery this needs (see `go_package_summaries`/
-/// `java_kotlin_package_summaries` and friends) — JavaScript/TypeScript/
-/// TSX return an empty map, which `check_with_summaries` treats exactly
-/// like the "no interprocedural info" case it already handled before this
-/// change, so their behavior is unaffected.
-fn taint_interprocedural_summaries(
-    repo_root: &Path,
-    path: &str,
-    own_content: &str,
-    language: &str,
-    spec: &autoreview_dataflow::taint::TaintSpec,
-    rule_id: &str,
-    caches: &SummaryCaches,
-) -> HashMap<String, bool> {
-    let compute_summary =
-        |cfg: &Cfg<Stmt>| autoreview_dataflow::taint::compute_source_summary(spec, cfg);
-    match language {
-        "Go" => {
-            let mut summaries =
-                go_package_summaries(repo_root, path, None, &compute_summary, rule_id, caches);
-            summaries.extend(go_imported_package_summaries(
-                repo_root,
-                path,
-                None,
-                &compute_summary,
-                rule_id,
-                caches,
-            ));
-            summaries
+pub(super) struct TaintFile<'a> {
+    pub root: &'a Path,
+    pub path: &'a str,
+    pub content: &'a str,
+    pub language: &'a str,
+    pub caches: &'a SummaryCaches<'a>,
+}
+
+impl TaintFile<'_> {
+    /// Go and JVM helpers can carry a source back through a return value.
+    fn summaries(&self, rule: &TaintRuleDef) -> HashMap<String, bool> {
+        let compute = |cfg: &Cfg<Stmt>| taint::compute_source_summary(&rule.spec, cfg);
+        match self.language {
+            "Go" => go_summaries(self.root, self.path, None, &compute, &rule.id, self.caches),
+            "Java" | "Kotlin" => java_kotlin_summaries(
+                self.root,
+                self.path,
+                self.content,
+                &compute,
+                &rule.id,
+                self.caches,
+            ),
+            _ => HashMap::new(),
         }
-        "Java" | "Kotlin" => {
-            let mut summaries = match autoreview_archgraph::declared_package(own_content) {
-                Some(package) => java_kotlin_package_summaries(
-                    repo_root,
-                    path,
-                    &package,
-                    &compute_summary,
-                    rule_id,
-                    caches,
-                ),
-                None => {
-                    let mut own_only = HashMap::new();
-                    add_java_kotlin_summaries_from_file(
-                        &repo_root.join(path),
-                        &mut own_only,
-                        &compute_summary,
-                        rule_id,
-                        caches,
-                    );
-                    own_only
-                }
-            };
-            summaries.extend(java_kotlin_imported_package_summaries(
-                repo_root,
-                own_content,
-                &compute_summary,
-                rule_id,
-                caches,
-            ));
-            summaries
+    }
+
+    pub(super) fn findings(
+        &self,
+        functions: &[(Node, Cfg<Stmt>)],
+        rules: &[TaintRuleDef],
+    ) -> Vec<AgentFinding> {
+        let mut findings = Vec::new();
+        for rule in rules.iter().filter(|rule| rule.language == self.language) {
+            let summaries = self.summaries(rule);
+            for (_, cfg) in functions {
+                let hits = taint::check_with_summaries(&rule.spec, cfg, Some(&summaries));
+                findings.extend(hits.iter().map(|hit| taint_finding(self.path, rule, hit)));
+            }
         }
-        _ => HashMap::new(),
+        findings
     }
 }
 
-pub(super) fn run_loaded_taint_rules(
-    repo_root: &Path,
-    path: &str,
-    own_content: &str,
-    language: &str,
-    lowered: &[(Node, Cfg<Stmt>)],
-    registered_packs: &[ResolvedRulePack],
-    caches: &SummaryCaches,
-) -> Vec<AgentFinding> {
-    let rules: Vec<_> = taint_rules::load_taint_rules(registered_packs)
-        .into_iter()
-        .filter(|r| r.language == language)
-        .collect();
-    if rules.is_empty() {
-        return Vec::new();
-    }
-
-    let mut findings = Vec::new();
-    for rule in &rules {
-        // Computed once per rule (not per function) — every function in
-        // this file shares the same same-package/imported-package scope.
-        // `rule.id` doubles as the persistent cache's rule key: it's
-        // already unique per taint rule, so a niladic-source-wrapper
-        // summary computed for one rule never leaks into another's
-        // lookup.
-        let summaries = taint_interprocedural_summaries(
-            repo_root,
-            path,
-            own_content,
-            language,
-            &rule.spec,
-            &rule.id,
-            caches,
-        );
-        for (_, cfg) in lowered {
-            for hit in
-                autoreview_dataflow::taint::check_with_summaries(&rule.spec, cfg, Some(&summaries))
-            {
-                let mut finding = make_finding(
-                    &rule.id,
-                    &rule.category,
-                    rule.severity,
-                    path,
-                    hit.source_line,
-                    taint_title(&hit),
-                    render_taint_message(&rule.message, &hit),
-                );
-                finding.meta = taint_pack_meta(rule);
-                findings.push(finding);
-            }
-        }
-    }
-    findings
+fn taint_finding(path: &str, rule: &TaintRuleDef, hit: &taint::TaintHit) -> AgentFinding {
+    let mut finding = make_finding(
+        &rule.id,
+        &rule.category,
+        rule.severity,
+        path,
+        hit.source_line,
+        taint_title(hit),
+        render_taint_message(&rule.message, hit),
+    );
+    finding.meta = rule_meta(rule.pack_id.as_ref(), rule.metadata.as_ref());
+    finding
 }
 
 /// Renders a `call-sequence` rule's `{trigger_call}` placeholder — the

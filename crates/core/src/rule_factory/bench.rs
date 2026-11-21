@@ -236,7 +236,7 @@ pub fn run_bench(repo_root: &Path, cluster_id: &str) -> anyhow::Result<BenchRepo
 }
 
 #[cfg(test)]
-mod tests {
+mod bench_tests {
     use super::*;
 
     #[test]

@@ -1,12 +1,12 @@
+use autoreview_dataflow::lower;
 use autoreview_langsupport::{language_for_path, Language};
 
-use super::dsl::{run_call_order_rules, run_loaded_taint_rules};
+use super::dsl::{run_call_order_rules, TaintFile};
+use super::functions::{function_declarations, go_functions, java_functions};
 use super::{
-    call_order_rules, lower_all_functions, lower_all_java_functions,
-    lower_all_javascript_functions, lower_all_kotlin_functions, read_and_parse,
-    run_append_shared_backing_array, run_loopvar_checks, run_npe_risk,
-    run_typed_nil_interface_return, AgentFinding, Cfg, Node, ParseCache, Path,
-    PersistentSummaryCache, ResolvedRulePack, Stmt, SummaryCaches,
+    call_order_rules, read_and_parse, run_append_shared_backing_array, run_loopvar_checks,
+    run_npe_risk, run_typed_nil_interface_return, taint_rules, AgentFinding, Cfg, Node, ParseCache,
+    Path, PersistentSummaryCache, ResolvedRulePack, Stmt, SummaryCaches,
 };
 
 pub(super) fn run(
@@ -19,7 +19,7 @@ pub(super) fn run(
     let persistent = PersistentSummaryCache::load(repo, root);
     let review = DataflowReview {
         root,
-        packs,
+        taint: taint_rules::load_taint_rules(packs),
         call_sequences: call_order_rules::load_call_order_rules(packs),
         go_pre_1_22: crate::analyzers::practices::go_module_targets_pre_1_22(root),
         caches: SummaryCaches {
@@ -39,7 +39,7 @@ pub(super) fn run(
 
 struct DataflowReview<'a> {
     root: &'a Path,
-    packs: &'a [ResolvedRulePack],
+    taint: Vec<taint_rules::TaintRuleDef>,
     call_sequences: Vec<call_order_rules::CallOrderRuleDef>,
     go_pre_1_22: bool,
     caches: SummaryCaches<'a>,
@@ -48,20 +48,22 @@ struct DataflowReview<'a> {
 impl DataflowReview<'_> {
     fn check_file(&self, path: &str) -> Option<Vec<AgentFinding>> {
         let language = language_for_path(Path::new(path))?;
-        let (declared_language, lower) = profile(language)?;
+        let (declared_language, extract, lower) = profile(language)?;
         let parsed = read_and_parse(self.root, path, language, self.caches.parse)?;
         let (content, tree) = parsed.as_ref();
-        let lowered = lower(content.as_bytes(), tree);
+        let lowered: Vec<_> = extract(tree)
+            .into_iter()
+            .map(|node| (node, lower(content.as_bytes(), node)))
+            .collect();
         let mut findings = self.language_checks(path, content, language, &lowered);
-        findings.extend(run_loaded_taint_rules(
-            self.root,
+        let taint = TaintFile {
+            root: self.root,
             path,
             content,
-            declared_language,
-            &lowered,
-            self.packs,
-            &self.caches,
-        ));
+            language: declared_language,
+            caches: &self.caches,
+        };
+        findings.extend(taint.findings(&lowered, &self.taint));
         if language == Language::Go && self.go_pre_1_22 {
             findings.extend(run_loopvar_checks(path, &lowered));
         }
@@ -108,15 +110,28 @@ impl DataflowReview<'_> {
     }
 }
 
-type Lower = for<'tree> fn(&[u8], &'tree tree_sitter::Tree) -> Vec<(Node<'tree>, Cfg<Stmt>)>;
+type Extract = fn(&tree_sitter::Tree) -> Vec<Node<'_>>;
+type Lower = fn(&[u8], Node<'_>) -> Cfg<Stmt>;
 
-fn profile(language: Language) -> Option<(&'static str, Lower)> {
+fn profile(language: Language) -> Option<(&'static str, Extract, Lower)> {
     Some(match language {
-        Language::Go => ("Go", lower_all_functions),
-        Language::Java => ("Java", lower_all_java_functions),
-        Language::Kotlin => ("Kotlin", lower_all_kotlin_functions),
-        Language::TypeScript | Language::Tsx => ("TypeScript", lower_all_javascript_functions),
-        Language::JavaScript => ("JavaScript", lower_all_javascript_functions),
+        Language::Go => ("Go", go_functions, lower::go::lower_function),
+        Language::Java => ("Java", java_functions, lower::java::lower_function),
+        Language::Kotlin => (
+            "Kotlin",
+            function_declarations,
+            lower::kotlin::lower_function,
+        ),
+        Language::TypeScript | Language::Tsx => (
+            "TypeScript",
+            function_declarations,
+            lower::javascript::lower_function,
+        ),
+        Language::JavaScript => (
+            "JavaScript",
+            function_declarations,
+            lower::javascript::lower_function,
+        ),
         Language::Rust => return None,
     })
 }

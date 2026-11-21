@@ -212,7 +212,7 @@ pub fn collect_diff_facts(
 }
 
 #[cfg(test)]
-mod tests {
+mod extension_tests {
     use super::*;
 
     #[test]
