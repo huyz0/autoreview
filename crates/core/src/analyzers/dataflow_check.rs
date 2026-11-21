@@ -33,7 +33,7 @@
 //! own `run_*_taint` wrapper here. They're now declarative YAML
 //! (`kind: taint` in `crates/core/rules-builtin/`), loaded at runtime by
 //! `taint_rules::load_taint_rules` and run generically via
-//! `dsl::TaintFile` — adding a new taint rule for a language that
+//! `dsl::run_taint_rules` — adding a new taint rule for a language that
 //! already has a lowering pass doesn't touch this file at all.
 //!
 //! Java (`lower::java`), Kotlin (`lower::kotlin`), and JavaScript/
@@ -44,18 +44,22 @@ mod cache;
 mod dispatch;
 mod dsl;
 mod functions;
+mod go_practices;
+mod source;
 
+pub use dsl::DataflowRuleDef;
 use std::collections::HashMap;
 use std::path::Path;
 
 use tree_sitter::{Node, Tree};
 
 use autoreview_dataflow::cfg::{Cfg, Stmt};
-use autoreview_dataflow::rules::{go_append_shared_backing_array, go_loopvar, go_typed_nil_interface_return};
+use autoreview_dataflow::rules::go_typed_nil_interface_return;
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
 use cache::{content_hash, ParseCache, ParsedFile, PersistentSummaryCache, SummaryCaches};
 use functions::{function_declarations, go_functions, java_functions};
+use source::SummarySource;
 use super::call_order_rules;
 use super::taint_rules;
 use crate::rule_packs::ResolvedRulePack;
@@ -93,27 +97,6 @@ fn rule_meta(pack_id: Option<&String>, metadata: Option<&super::ast_grep::RuleMe
         meta.insert("rulePackId".to_string(), serde_json::Value::String(pack_id.clone()));
     }
     (!meta.is_empty()).then_some(meta)
-}
-
-fn run_append_shared_backing_array(path: &str, lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
-    let mut findings = Vec::new();
-    for (_, cfg) in lowered {
-        for hit in go_append_shared_backing_array::check(cfg) {
-            findings.push(make_finding(
-                "append-shared-backing-array",
-                "correctness",
-                Severity::Medium,
-                path,
-                hit.source_line,
-                format!("`{} = append({}, ...)` may overwrite `{}`'s backing array", hit.sub, hit.sub, hit.full),
-                format!(
-                    "`{}` was created by re-slicing `{}` (`{} := {}[...]`), and `{}` is still used later in this function. `append({}, ...)` may reuse `{}`'s shared backing array when there's spare capacity, silently overwriting memory `{}` still references. Use `{} := append([]T{{}}, {}[a:b]...)` (or `copy`) to force a fresh backing array if `{}` needs to stay untouched, or restructure so `{}` doesn't outlive its use.",
-                    hit.sub, hit.full, hit.sub, hit.full, hit.full, hit.sub, hit.sub, hit.full, hit.sub, hit.full, hit.full, hit.sub
-                ),
-            ));
-        }
-    }
-    findings
 }
 
 /// A language's adapter into the shared cross-file summary resolver below
@@ -306,19 +289,19 @@ fn go_imported_package_summaries(
     summaries
 }
 
-fn run_typed_nil_interface_return(repo_root: &Path, path: &str, source: &[u8], lowered: &[(Node, Cfg<Stmt>)], caches: &SummaryCaches) -> Vec<AgentFinding> {
+fn run_typed_nil_interface_return(file: &SummarySource, lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
     // Pass 1: same-package summaries plus every other in-module package
     // this file imports — see `go_package_summaries`/
     // `go_imported_package_summaries` above.
     let returns_pointer: Option<fn(Node) -> bool> = Some(autoreview_dataflow::lower::go::function_returns_pointer);
     let rule_id = "typed-nil-interface-return";
-    let summaries = go_summaries(repo_root, path, returns_pointer, &go_typed_nil_interface_return::compute_summary, rule_id, caches);
+    let summaries = file.go_summaries(returns_pointer, &go_typed_nil_interface_return::compute_summary, rule_id);
 
     // Pass 2: check every function declaring an `error` return against
     // those summaries.
     let mut findings = Vec::new();
     for (fn_node, cfg) in lowered {
-        if !autoreview_dataflow::lower::go::function_returns_error(*fn_node, source) {
+        if !autoreview_dataflow::lower::go::function_returns_error(*fn_node, file.content.as_bytes()) {
             continue;
         }
         for hit in go_typed_nil_interface_return::check(cfg, &summaries) {
@@ -326,7 +309,7 @@ fn run_typed_nil_interface_return(repo_root: &Path, path: &str, source: &[u8], l
                 "typed-nil-interface-return",
                 "correctness",
                 Severity::High,
-                path,
+                file.path,
                 hit.source_line,
                 format!("Returning typed pointer `{}` where an `error` is expected", hit.var),
                 format!(
@@ -337,19 +320,6 @@ fn run_typed_nil_interface_return(repo_root: &Path, path: &str, source: &[u8], l
         }
     }
     findings
-}
-
-fn go_summaries(
-    root: &Path,
-    path: &str,
-    filter: Option<fn(Node) -> bool>,
-    compute: &dyn Fn(&Cfg<Stmt>) -> bool,
-    rule_id: &str,
-    caches: &SummaryCaches,
-) -> HashMap<String, bool> {
-    let mut summaries = go_package_summaries(root, path, filter, compute, rule_id, caches);
-    summaries.extend(go_imported_package_summaries(root, path, filter, compute, rule_id, caches));
-    summaries
 }
 
 /// Adds every function/method summary from one `.java`/`.kt`/`.kts` file
@@ -421,6 +391,7 @@ fn java_kotlin_package_summaries(
 /// is a whole-repo scan rather than a module-path-relative directory jump
 /// the way Go's cross-package resolution is. Generic over
 /// `compute_summary` for the same reason as `java_kotlin_package_summaries`.
+/// Summarizes functions in packages imported by a Java or Kotlin file.
 fn java_kotlin_imported_package_summaries(
     repo_root: &Path,
     own_content: &str,
@@ -448,30 +419,10 @@ fn java_kotlin_imported_package_summaries(
 /// at all (Java's default/unnamed package) falls back to summarizing just
 /// its own functions, so same-file resolution still works even without
 /// cross-file scope.
-fn java_kotlin_summaries(
-    repo_root: &Path,
-    path: &str,
-    own_content: &str,
-    compute_summary: &dyn Fn(&Cfg<Stmt>) -> bool,
-    rule_id: &str,
-    caches: &SummaryCaches,
-) -> HashMap<String, bool> {
-    let mut summaries = match autoreview_archgraph::declared_package(own_content) {
-        Some(package) => java_kotlin_package_summaries(repo_root, path, &package, compute_summary, rule_id, caches),
-        None => {
-            let mut own_only = HashMap::new();
-            add_java_kotlin_summaries_from_file(&repo_root.join(path), &mut own_only, compute_summary, rule_id, caches);
-            own_only
-        }
-    };
-    summaries.extend(java_kotlin_imported_package_summaries(repo_root, own_content, compute_summary, rule_id, caches));
-    summaries
-}
-
-fn run_npe_risk(repo_root: &Path, path: &str, own_content: &str, lowered: &[(Node, Cfg<Stmt>)], null_safe_methods: &[&str], caches: &SummaryCaches) -> Vec<AgentFinding> {
+fn run_npe_risk(file: &SummarySource, lowered: &[(Node, Cfg<Stmt>)], null_safe_methods: &[&str]) -> Vec<AgentFinding> {
     let compute = &autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary;
     let rule_id = "npe-risk-from-helper-return";
-    let summaries = java_kotlin_summaries(repo_root, path, own_content, compute, rule_id, caches);
+    let summaries = file.java_kotlin_summaries(compute, rule_id);
     let mut findings = Vec::new();
     for (_, cfg) in lowered {
         for hit in autoreview_dataflow::rules::java_kotlin_npe_risk::check(cfg, &summaries, null_safe_methods) {
@@ -479,49 +430,12 @@ fn run_npe_risk(repo_root: &Path, path: &str, own_content: &str, lowered: &[(Nod
                 "npe-risk-from-helper-return",
                 "correctness",
                 Severity::High,
-                path,
+                file.path,
                 hit.source_line,
                 format!("`{}` may be null after `{}`", hit.var, hit.call_name),
                 format!(
                     "`{}` was assigned from `{}`, and that call has a path that returns null. Using it here without a null check risks a `NullPointerException`. Add `if ({} != null) {{ ... }}` before this use, or change the helper's contract so it never returns null (throw instead, or return an `Optional`).",
                     hit.var, hit.call_name, hit.var
-                ),
-            ));
-        }
-    }
-    findings
-}
-
-fn run_loopvar_checks(path: &str, lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
-    let mut findings = Vec::new();
-    for (_, cfg) in lowered {
-        for hit in go_loopvar::check_capture(cfg) {
-            let kind = if hit.kind == autoreview_dataflow::cfg::ClosureKind::Goroutine { "goroutine" } else { "deferred closure" };
-            findings.push(make_finding(
-                "loopvar-capture-pre-1.22",
-                "correctness",
-                Severity::Medium,
-                path,
-                hit.source_line,
-                format!("Loop variable `{}` captured by a {kind} on a pre-1.22 Go module", hit.var),
-                format!(
-                    "This {kind} references the enclosing loop's `{}` without shadowing it first, and `go.mod` targets a Go version before 1.22. Before 1.22, `for`/`range` loop variables have per-loop (not per-iteration) scope — every {kind} launched by this loop ends up seeing the same, final value of `{}` instead of its own iteration's value. Shadow it first (`{} := {}`) right inside the closure, or pass it as a parameter.",
-                    hit.var, hit.var, hit.var, hit.var
-                ),
-            ));
-        }
-
-        for hit in go_loopvar::check_address(cfg) {
-            findings.push(make_finding(
-                "loopvar-address-pre-1.22",
-                "correctness",
-                Severity::Medium,
-                path,
-                hit.source_line,
-                format!("Address of loop variable `{}` taken on a pre-1.22 Go module", hit.var),
-                format!(
-                    "This takes `&{}` inside the loop that declares `{}`, and `go.mod` targets a Go version before 1.22. Before 1.22, `for`/`range` loop variables have per-loop (not per-iteration) scope — every `&{}` taken across iterations points at the same shared variable, so a slice/map built from these pointers ends up holding N copies of the loop's final value instead of each iteration's own value. Shadow the variable first (`{} := {}`) before taking its address, or upgrade the module's Go version.",
-                    hit.var, hit.var, hit.var, hit.var, hit.var
                 ),
             ));
         }

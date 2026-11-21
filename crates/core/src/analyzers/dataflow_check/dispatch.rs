@@ -1,12 +1,13 @@
 use autoreview_dataflow::lower;
 use autoreview_langsupport::{language_for_path, Language};
 
-use super::dsl::{run_call_order_rules, TaintFile};
+use super::dsl::{run_call_order_rules, run_taint_rules};
 use super::functions::{function_declarations, go_functions, java_functions};
+use super::go_practices::{run_append_shared_backing_array, run_loopvar_checks};
 use super::{
-    call_order_rules, read_and_parse, run_append_shared_backing_array, run_loopvar_checks,
-    run_npe_risk, run_typed_nil_interface_return, taint_rules, AgentFinding, Cfg, Node, ParseCache,
-    Path, PersistentSummaryCache, ResolvedRulePack, Stmt, SummaryCaches,
+    call_order_rules, read_and_parse, run_npe_risk, run_typed_nil_interface_return, taint_rules,
+    AgentFinding, Cfg, Node, ParseCache, Path, PersistentSummaryCache, ResolvedRulePack, Stmt,
+    SummaryCaches, SummarySource,
 };
 
 pub(super) fn run(
@@ -55,15 +56,19 @@ impl DataflowReview<'_> {
             .into_iter()
             .map(|node| (node, lower(content.as_bytes(), node)))
             .collect();
-        let mut findings = self.language_checks(path, content, language, &lowered);
-        let taint = TaintFile {
+        let file = SummarySource {
             root: self.root,
             path,
             content,
-            language: declared_language,
             caches: &self.caches,
         };
-        findings.extend(taint.findings(&lowered, &self.taint));
+        let mut findings = language_checks(&file, language, &lowered);
+        findings.extend(run_taint_rules(
+            &file,
+            declared_language,
+            &lowered,
+            &self.taint,
+        ));
         if language == Language::Go && self.go_pre_1_22 {
             findings.extend(run_loopvar_checks(path, &lowered));
         }
@@ -75,38 +80,23 @@ impl DataflowReview<'_> {
         ));
         Some(findings)
     }
+}
 
-    fn language_checks(
-        &self,
-        path: &str,
-        content: &str,
-        language: Language,
-        lowered: &[(Node<'_>, Cfg<Stmt>)],
-    ) -> Vec<AgentFinding> {
-        match language {
-            Language::Go => {
-                let mut findings = run_append_shared_backing_array(path, lowered);
-                findings.extend(run_typed_nil_interface_return(
-                    self.root,
-                    path,
-                    content.as_bytes(),
-                    lowered,
-                    &self.caches,
-                ));
-                findings
-            }
-            Language::Java => run_npe_risk(self.root, path, content, lowered, &[], &self.caches),
-            // Kotlin's stdlib supplies this nullable-receiver extension.
-            Language::Kotlin => run_npe_risk(
-                self.root,
-                path,
-                content,
-                lowered,
-                &["toString"],
-                &self.caches,
-            ),
-            _ => Vec::new(),
+fn language_checks(
+    file: &SummarySource,
+    language: Language,
+    lowered: &[(Node<'_>, Cfg<Stmt>)],
+) -> Vec<AgentFinding> {
+    match language {
+        Language::Go => {
+            let mut findings = run_append_shared_backing_array(file.path, lowered);
+            findings.extend(run_typed_nil_interface_return(file, lowered));
+            findings
         }
+        Language::Java => run_npe_risk(file, lowered, &[]),
+        // Kotlin's stdlib supplies this nullable-receiver extension.
+        Language::Kotlin => run_npe_risk(file, lowered, &["toString"]),
+        _ => Vec::new(),
     }
 }
 

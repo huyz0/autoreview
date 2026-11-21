@@ -69,23 +69,7 @@ struct CallOrderRuleYaml {
     check_before_return: bool,
 }
 
-pub struct CallOrderRuleDef {
-    pub id: String,
-    pub language: String,
-    pub category: String,
-    pub severity: Severity,
-    /// May contain a `{trigger_call}` placeholder, substituted by the
-    /// caller from a `CallOrderHit`.
-    pub message: String,
-    pub spec: CallOrderSpec,
-    pub pack_id: Option<String>,
-    /// The rule's own `metadata:` block (CWE/OWASP/confidence). Carried
-    /// here so it can reach `AgentFinding.meta` — `RuleMetadataBlock`'s
-    /// docs promise it "flows verbatim" into findings, which was true for
-    /// pattern rules but silently false here: four builtin call-sequence
-    /// rules declare CWE mappings that were parsed and then dropped.
-    pub metadata: Option<super::ast_grep::RuleMetadataBlock>,
-}
+pub type CallOrderRuleDef = super::dataflow_check::DataflowRuleDef<CallOrderSpec>;
 
 fn parse_call_order_rule(contents: &str) -> Option<CallOrderRuleDef> {
     let yaml: CallOrderRuleYaml = serde_yaml::from_str(contents).ok()?;

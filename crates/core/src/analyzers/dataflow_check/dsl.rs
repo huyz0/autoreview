@@ -2,10 +2,38 @@ use std::collections::HashMap;
 
 use super::taint_rules::TaintRuleDef;
 use super::{
-    call_order_rules, go_summaries, java_kotlin_summaries, make_finding, rule_meta, AgentFinding,
-    Cfg, Node, Path, Stmt, SummaryCaches,
+    call_order_rules, make_finding, rule_meta, AgentFinding, Cfg, Node, Severity, Stmt,
+    SummarySource,
 };
 use autoreview_dataflow::taint;
+
+/// The reporting and dispatch fields shared by the CFG rule families.
+pub struct DataflowRuleDef<Spec> {
+    pub id: String,
+    pub language: String,
+    pub category: String,
+    pub severity: Severity,
+    pub message: String,
+    pub spec: Spec,
+    pub pack_id: Option<String>,
+    pub metadata: Option<super::super::ast_grep::RuleMetadataBlock>,
+}
+
+impl<Spec> DataflowRuleDef<Spec> {
+    fn finding(&self, path: &str, line: u32, title: String, message: String) -> AgentFinding {
+        let mut finding = make_finding(
+            &self.id,
+            &self.category,
+            self.severity,
+            path,
+            line,
+            title,
+            message,
+        );
+        finding.meta = rule_meta(self.pack_id.as_ref(), self.metadata.as_ref());
+        finding
+    }
+}
 
 /// Substitutes `{tainted_arg}`/`{sink_call}` in a rule's YAML `message`
 /// template with the actual hit's values — the declarative-rule
@@ -31,61 +59,43 @@ fn taint_title(hit: &autoreview_dataflow::taint::TaintHit) -> String {
     )
 }
 
-pub(super) struct TaintFile<'a> {
-    pub root: &'a Path,
-    pub path: &'a str,
-    pub content: &'a str,
-    pub language: &'a str,
-    pub caches: &'a SummaryCaches<'a>,
-}
-
-impl TaintFile<'_> {
-    /// Go and JVM helpers can carry a source back through a return value.
-    fn summaries(&self, rule: &TaintRuleDef) -> HashMap<String, bool> {
-        let compute = |cfg: &Cfg<Stmt>| taint::compute_source_summary(&rule.spec, cfg);
-        match self.language {
-            "Go" => go_summaries(self.root, self.path, None, &compute, &rule.id, self.caches),
-            "Java" | "Kotlin" => java_kotlin_summaries(
-                self.root,
-                self.path,
-                self.content,
-                &compute,
-                &rule.id,
-                self.caches,
-            ),
-            _ => HashMap::new(),
+pub(super) fn run_taint_rules(
+    file: &SummarySource,
+    language: &str,
+    functions: &[(Node, Cfg<Stmt>)],
+    rules: &[TaintRuleDef],
+) -> Vec<AgentFinding> {
+    let mut findings = Vec::new();
+    for rule in rules.iter().filter(|rule| rule.language == language) {
+        let summaries = taint_summaries(file, language, rule);
+        for (_, cfg) in functions {
+            let hits = taint::check_with_summaries(&rule.spec, cfg, Some(&summaries));
+            findings.extend(hits.iter().map(|hit| taint_finding(file.path, rule, hit)));
         }
     }
+    findings
+}
 
-    pub(super) fn findings(
-        &self,
-        functions: &[(Node, Cfg<Stmt>)],
-        rules: &[TaintRuleDef],
-    ) -> Vec<AgentFinding> {
-        let mut findings = Vec::new();
-        for rule in rules.iter().filter(|rule| rule.language == self.language) {
-            let summaries = self.summaries(rule);
-            for (_, cfg) in functions {
-                let hits = taint::check_with_summaries(&rule.spec, cfg, Some(&summaries));
-                findings.extend(hits.iter().map(|hit| taint_finding(self.path, rule, hit)));
-            }
-        }
-        findings
+fn taint_summaries(
+    file: &SummarySource,
+    language: &str,
+    rule: &TaintRuleDef,
+) -> HashMap<String, bool> {
+    let compute = |cfg: &Cfg<Stmt>| taint::compute_source_summary(&rule.spec, cfg);
+    match language {
+        "Go" => file.go_summaries(None, &compute, &rule.id),
+        "Java" | "Kotlin" => file.java_kotlin_summaries(&compute, &rule.id),
+        _ => HashMap::new(),
     }
 }
 
 fn taint_finding(path: &str, rule: &TaintRuleDef, hit: &taint::TaintHit) -> AgentFinding {
-    let mut finding = make_finding(
-        &rule.id,
-        &rule.category,
-        rule.severity,
+    rule.finding(
         path,
         hit.source_line,
         taint_title(hit),
         render_taint_message(&rule.message, hit),
-    );
-    finding.meta = rule_meta(rule.pack_id.as_ref(), rule.metadata.as_ref());
-    finding
+    )
 }
 
 /// Renders a `call-sequence` rule's `{trigger_call}` placeholder — the
@@ -103,7 +113,7 @@ fn render_call_order_message(
 /// engine models and why it's a separate primitive from taint) whose
 /// `language` matches, against one file's already-lowered functions.
 /// Purely intraprocedural — no summaries/caches involved, unlike
-/// `run_loaded_taint_rules`, since the obligation this models is meant to
+/// `run_taint_rules`, since the obligation this models is meant to
 /// resolve within one function.
 pub(super) fn run_call_order_rules(
     path: &str,
@@ -140,20 +150,16 @@ fn call_order_finding(
     rule: &call_order_rules::CallOrderRuleDef,
     hit: &autoreview_dataflow::call_order::CallOrderHit,
 ) -> AgentFinding {
-    let mut finding = make_finding(
-        &rule.id,
-        &rule.category,
-        rule.severity,
+    let title = format!(
+        "`{}` reached with an unresolved `{}` obligation still open",
+        hit.trigger_call, rule.id
+    );
+    rule.finding(
         path,
         hit.source_line,
-        format!(
-            "`{}` reached with an unresolved `{}` obligation still open",
-            hit.trigger_call, rule.id
-        ),
+        title,
         render_call_order_message(&rule.message, hit),
-    );
-    finding.meta = rule_meta(rule.pack_id.as_ref(), rule.metadata.as_ref());
-    finding
+    )
 }
 
 fn call_sequence_hits(
