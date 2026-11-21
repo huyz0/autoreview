@@ -44,9 +44,8 @@ struct RuleIdMeta {
 
 /// Maps ast-grep's own `language:` string value to the `Language`(s) it can
 /// match against — same convention as `ast_grep.rs`'s `RULE_DIR_LANGUAGES`:
-/// `"TypeScript"` covers both `.ts` and `.tsx` (ast-grep dispatches `.tsx`
-/// files under the `TypeScript` value based on extension, not a separate
-/// declared value in practice), `"Tsx"` is accepted too for a rule author
+/// `"TypeScript"` covers both `.ts` and `.tsx` through shared rule export.
+/// `"Tsx"` is accepted too for a rule author
 /// who writes it explicitly.
 fn languages_from_str(value: &str) -> Option<&'static [Language]> {
     match value {

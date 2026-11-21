@@ -20,7 +20,7 @@ rules are vendored there) — copy the shape, not just the idea.
 
 ```yaml
 id: go-example-rule-id       # unique within the pack; kebab-case, usually <lang>-<what>
-language: Go                 # Go | Java | Kotlin | JavaScript | TypeScript | Rust
+language: Go                 # Go | Java | Kotlin | JavaScript | TypeScript | Tsx | Rust
 category: correctness        # see taxonomy below
 severity: warning            # error | warning | info
 kind: pattern                 # pattern (default, omit if pattern) | taint | threshold | call-sequence
@@ -59,6 +59,9 @@ Native ast-grep syntax under `rule:`, handed to the `ast-grep` subprocess
 unchanged — this is the only kind where `rule:`/`constraints:` mean exactly
 what they'd mean in a raw ast-grep config. Use for a syntactic match with no
 dataflow or call-ordering question attached.
+
+TypeScript patterns run in both grammars. Set `typescriptOnly: true` for
+patterns that require syntax TSX cannot parse, such as angle-bracket assertions.
 
 For Rust, qualify standard-library and crate API paths in patterns where
 an unqualified name could refer to a different type. Add negative fixtures
@@ -101,8 +104,9 @@ reach a `sinks` call without passing through a `sanitizers` call first? This
 needs real interprocedural tracing (`crates/dataflow`), not something a bare
 `pattern` rule can express.
 
-Supported source languages are Go, Java, Kotlin, JavaScript, and TypeScript.
-Use `language: TypeScript` for TSX taint rules.
+Supported source languages are Go, Java, Kotlin, JavaScript, TypeScript,
+TSX, and Rust. Use `language: TypeScript` for rules shared by TypeScript and
+TSX. Use `language: Tsx` for TSX-only rules.
 
 ```yaml
 id: go-command-injection-taint
@@ -163,11 +167,18 @@ A boolean "pending" fact along a CFG path: after calling `after`, was
 `return`? Use for must-follow/must-precede conventions across statements —
 lock/unlock, open/close, a required check before use.
 
-The call-sequence engine runs on Go, Java, Kotlin, JavaScript, and TypeScript.
-Use `language: TypeScript` for TSX. Rules inspect calls and explicit return
+The call-sequence engine runs on Go, Java, Kotlin, JavaScript, TypeScript,
+TSX, and Rust. Rules inspect calls and explicit return
 statements within one function. A Go function with a `defer` still gets
 `before` checks. Its return checks are skipped because deferred effects
 are not represented in the control-flow graph.
+
+Rust models simple bindings, assignments, calls, branches, loops, and
+explicit, implicit, and `?` returns within a function. Functions using
+unsupported control flow such as `match` or `let ... else` are skipped.
+Call names are syntactic. Closure and macro bodies, type resolution, and
+destructor effects are outside the model. Use explicit cleanup calls for
+call-sequence rules.
 
 ```yaml
 id: java-unreleased-lock

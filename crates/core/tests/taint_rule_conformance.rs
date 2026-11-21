@@ -61,6 +61,7 @@ fn extension_for_language(language: &str) -> &'static str {
         "Kotlin" => "kt",
         "JavaScript" => "js",
         "TypeScript" => "ts",
+        "Rust" => "rs",
         other => panic!("taint_rule_conformance doesn't know the fixture extension for language {other:?} — add it to extension_for_language"),
     }
 }
@@ -72,6 +73,7 @@ fn scan_filename_for_language(language: &str) -> &'static str {
         "Kotlin" => "Main.kt",
         "JavaScript" => "main.js",
         "TypeScript" => "main.ts",
+        "Rust" => "main.rs",
         other => panic!("taint_rule_conformance doesn't know the scan filename for language {other:?} — add it to scan_filename_for_language"),
     }
 }

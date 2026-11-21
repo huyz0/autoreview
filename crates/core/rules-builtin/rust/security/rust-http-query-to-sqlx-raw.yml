@@ -1,0 +1,19 @@
+id: rust-http-query-to-sqlx-raw
+language: Rust
+category: security
+kind: taint
+semantic: true
+severity: warning
+message: >-
+  Request query data reaches raw SQL in `{sink_call}`. Use a parameterized
+  SQLx query and bind the data separately.
+metadata:
+  cwe: ["CWE-89"]
+  references:
+    - https://docs.rs/sqlx/latest/sqlx/fn.raw_sql.html
+    - https://docs.rs/actix-web/latest/actix_web/struct.HttpRequest.html#method.query_string
+sources:
+  - call: query_string
+sinks:
+  - call: sqlx::raw_sql
+    argPositions: [0]

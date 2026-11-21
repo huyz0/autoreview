@@ -168,6 +168,32 @@ fn every_builtin_rule_fires_on_its_positive_fixture_and_stays_silent_on_its_nega
 }
 
 #[test]
+fn typescript_pattern_catalog_has_tsx_parity() {
+    if !ast_grep_available() {
+        return;
+    }
+    let repo = tempfile::tempdir().unwrap();
+    let mut samples = Vec::new();
+    for rule in discover_rules().into_iter().filter(|rule| rule.language == "TypeScript") {
+        let dir = fixtures_dir().join(&rule.id);
+        for (fixture, expected) in [("positive", 1), ("negative", 0)] {
+            let ordinary = dir.join(format!("{fixture}.ts"));
+            let with_jsx = dir.join(format!("{fixture}.tsx"));
+            let source = if with_jsx.exists() { with_jsx } else { ordinary };
+            let path = format!("{}-{fixture}.tsx", rule.id);
+            std::fs::copy(source, repo.path().join(&path)).unwrap();
+            samples.push((path, rule.id.clone(), expected));
+        }
+    }
+    let paths: Vec<_> = samples.iter().map(|(path, _, _)| path.clone()).collect();
+    let findings = run_ast_grep(repo.path(), &paths, &[]).unwrap();
+    for (path, id, expected) in samples {
+        let count = findings.iter().filter(|finding| finding.location.path == path && finding.source.rule_id.as_deref() == Some(id.as_str())).count();
+        assert_eq!(count, expected, "{id} on {path}");
+    }
+}
+
+#[test]
 fn every_rule_declares_a_category() {
     for rule in discover_rules() {
         // Re-parse fully this time (discover_rules only pulls id/language) to

@@ -6,6 +6,7 @@ use super::{
     SummarySource,
 };
 use autoreview_dataflow::taint;
+use autoreview_langsupport::Language;
 
 /// The reporting and dispatch fields shared by the CFG rule families.
 pub struct DataflowRuleDef<Spec> {
@@ -61,16 +62,25 @@ fn taint_title(hit: &autoreview_dataflow::taint::TaintHit) -> String {
 
 pub(super) fn run_taint_rules(
     file: &SummarySource,
-    language: &str,
+    language: Language,
     functions: &[(Node, Cfg<Stmt>)],
     rules: &[TaintRuleDef],
 ) -> Vec<AgentFinding> {
     let mut findings = Vec::new();
-    for rule in rules.iter().filter(|rule| rule.language == language) {
+    for rule in rules.iter().filter(|rule| {
+        Language::from_rule_name(&rule.language)
+            .is_some_and(|declared| language.matches_rule_language(declared))
+    }) {
         let summaries = taint_summaries(file, language, rule);
         for (_, cfg) in functions {
             let hits = taint::check_with_summaries(&rule.spec, cfg, Some(&summaries));
-            findings.extend(hits.iter().map(|hit| taint_finding(file.path, rule, hit)));
+            findings.extend(hits.into_iter().map(|mut hit| {
+                if language == Language::Rust {
+                    hit.tainted_arg
+                        .truncate(hit.tainted_arg.rfind('#').unwrap_or(hit.tainted_arg.len()));
+                }
+                taint_finding(file.path, rule, &hit)
+            }));
         }
     }
     findings
@@ -78,13 +88,13 @@ pub(super) fn run_taint_rules(
 
 fn taint_summaries(
     file: &SummarySource,
-    language: &str,
+    language: Language,
     rule: &TaintRuleDef,
 ) -> HashMap<String, bool> {
     let compute = |cfg: &Cfg<Stmt>| taint::compute_source_summary(&rule.spec, cfg);
     match language {
-        "Go" => file.go_summaries(None, &compute, &rule.id),
-        "Java" | "Kotlin" => file.java_kotlin_summaries(&compute, &rule.id),
+        Language::Go => file.go_summaries(None, &compute, &rule.id),
+        Language::Java | Language::Kotlin => file.java_kotlin_summaries(&compute, &rule.id),
         _ => HashMap::new(),
     }
 }
@@ -117,13 +127,16 @@ fn render_call_order_message(
 /// resolve within one function.
 pub(super) fn run_call_order_rules(
     path: &str,
-    language: &str,
+    language: Language,
     lowered: &[(Node, Cfg<Stmt>)],
     rules: &[call_order_rules::CallOrderRuleDef],
 ) -> Vec<AgentFinding> {
     let rules: Vec<_> = rules
         .iter()
-        .filter(|rule| rule.language == language)
+        .filter(|rule| {
+            Language::from_rule_name(&rule.language)
+                .is_some_and(|declared| language.matches_rule_language(declared))
+        })
         .collect();
     if rules.is_empty() {
         return Vec::new();
@@ -131,7 +144,7 @@ pub(super) fn run_call_order_rules(
 
     let mut findings = Vec::new();
     let check_go_defers =
-        language == "Go" && rules.iter().any(|rule| rule.spec.check_before_return);
+        language == Language::Go && rules.iter().any(|rule| rule.spec.check_before_return);
     let functions: Vec<_> = lowered
         .iter()
         .map(|(node, cfg)| (cfg, check_go_defers && contains_go_defer(*node)))

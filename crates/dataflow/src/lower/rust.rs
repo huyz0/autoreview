@@ -1,0 +1,257 @@
+//! Intraprocedural lowering for Rust functions, including inherent and trait methods.
+//! Names are syntactic. Macros and independently executed closures are opaque.
+
+mod values;
+
+use std::collections::HashMap;
+use tree_sitter::Node;
+
+use crate::cfg::{Cfg, EdgeKind, NodeId, Stmt};
+use values::unwrap_value;
+
+pub fn lower_function(source: &[u8], function: Node<'_>) -> Cfg<Stmt> {
+    let mut lower = Lower {
+        cfg: Cfg::new_empty(),
+        source,
+        serial: 0,
+        loops: Vec::new(),
+    };
+    lower.cfg.entry = lower.cfg.push_node(line(function));
+    lower.cfg.exit = lower.cfg.push_node(function.end_position().row as u32 + 1);
+    let entry = lower.cfg.entry;
+    if let Some(body) = function
+        .child_by_field_name("body")
+        .filter(|body| supported(*body))
+    {
+        if let Some(end) = lower.block(body, entry, &HashMap::new()) {
+            lower.finish(end, body.end_position().row as u32 + 1);
+        }
+    }
+    lower.cfg
+}
+
+type Bindings = HashMap<String, String>;
+
+struct Lower<'src> {
+    cfg: Cfg<Stmt>,
+    source: &'src [u8],
+    serial: usize,
+    loops: Vec<(NodeId, NodeId)>,
+}
+
+impl Lower<'_> {
+    fn text(&self, node: Node<'_>) -> &str {
+        node.utf8_text(self.source).unwrap_or("")
+    }
+
+    fn emit(&mut self, at: NodeId, line: u32, stmt: Stmt) {
+        let node = &mut self.cfg.nodes[at];
+        let start = node.stmts.len();
+        node.stmts.push(stmt);
+        node.record_statement_lines(start, line);
+    }
+
+    fn edge(&mut self, from: NodeId, to: NodeId, kind: EdgeKind) {
+        self.cfg.edges.push((from, to, kind));
+    }
+
+    fn finish(&mut self, at: NodeId, source_line: u32) {
+        self.emit(at, source_line, Stmt::Return { value: None });
+        self.edge(at, self.cfg.exit, EdgeKind::Fallthrough);
+    }
+
+    fn block(&mut self, body: Node<'_>, mut at: NodeId, outer: &Bindings) -> Option<NodeId> {
+        let mut names = outer.clone();
+        for stmt in body.named_children(&mut body.walk()) {
+            at = self.statement(stmt, at, &mut names)?;
+        }
+        Some(at)
+    }
+
+    fn statement(&mut self, stmt: Node<'_>, at: NodeId, names: &mut Bindings) -> Option<NodeId> {
+        match stmt.kind() {
+            "let_declaration" => return Some(self.binding(stmt, at, names)),
+            "expression_statement" => {
+                return self.statement(stmt.named_child(0)?, at, names);
+            }
+            "return_expression" => {
+                let at = self.value(stmt.named_child(0), at, names, None);
+                self.finish(at, line(stmt));
+                return None;
+            }
+            "break_expression" | "continue_expression" => {
+                self.jump(stmt, at, names);
+                return None;
+            }
+            _ => {}
+        }
+        self.flow_expression(stmt, at, names)
+    }
+
+    fn flow_expression(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
+        match expr.kind() {
+            "if_expression" => self.branch(expr, at, names),
+            "while_expression" | "for_expression" | "loop_expression" => {
+                self.loop_body(expr, at, names)
+            }
+            "block" => self.block(expr, at, names),
+            "assignment_expression" => {
+                let target = expr
+                    .child_by_field_name("left")
+                    .and_then(|n| self.variable(n, names));
+                Some(self.value(expr.child_by_field_name("right"), at, names, target))
+            }
+            _ => Some(self.value(Some(expr), at, names, None)),
+        }
+    }
+
+    fn binding(&mut self, stmt: Node<'_>, at: NodeId, names: &mut Bindings) -> NodeId {
+        let pattern = stmt.child_by_field_name("pattern");
+        let name = pattern
+            .filter(|n| n.kind() == "identifier")
+            .map(|n| self.text(n).to_owned());
+        let target = name.as_ref().map(|name| self.fresh(name));
+        let at = self.value(stmt.child_by_field_name("value"), at, names, target.clone());
+        if let Some((name, target)) = name.zip(target) {
+            names.insert(name, target);
+        }
+        at
+    }
+
+    fn jump(&mut self, stmt: Node<'_>, at: NodeId, names: &Bindings) {
+        let at = self.value(stmt.named_child(0), at, names, None);
+        if let Some(&(head, after)) = self.loops.last() {
+            let target = if stmt.kind() == "break_expression" {
+                after
+            } else {
+                head
+            };
+            self.edge(at, target, EdgeKind::Fallthrough);
+        }
+    }
+
+    fn branch(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
+        let condition = self.value(expr.child_by_field_name("condition"), at, names, None);
+        let then = expr.child_by_field_name("consequence")?;
+        let then_end = self.arm(then, condition, names, EdgeKind::True);
+        let otherwise = expr
+            .child_by_field_name("alternative")
+            .and_then(|node| node.named_child(0));
+        let else_end = otherwise.map_or(Some(condition), |node| {
+            self.arm(node, condition, names, EdgeKind::False)
+        });
+        if then_end.is_none() && else_end.is_none() {
+            return None;
+        }
+        let join = self.cfg.push_node(line(expr));
+        if let Some(end) = then_end {
+            self.edge(end, join, EdgeKind::Fallthrough);
+        }
+        if let Some(end) = else_end {
+            let edge = if otherwise.is_none() {
+                EdgeKind::False
+            } else {
+                EdgeKind::Fallthrough
+            };
+            self.edge(end, join, edge);
+        }
+        Some(join)
+    }
+
+    fn arm(
+        &mut self,
+        expr: Node<'_>,
+        at: NodeId,
+        names: &Bindings,
+        edge: EdgeKind,
+    ) -> Option<NodeId> {
+        let start = self.cfg.push_node(line(expr));
+        self.edge(at, start, edge);
+        self.flow_expression(expr, start, names)
+    }
+
+    fn loop_body(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
+        let head = self.cfg.push_node(line(expr));
+        let after = self.cfg.push_node(expr.end_position().row as u32 + 1);
+        let iterable = self.value(expr.child_by_field_name("value"), at, names, None);
+        self.edge(iterable, head, EdgeKind::Fallthrough);
+        let condition = self.value(expr.child_by_field_name("condition"), head, names, None);
+        if expr.kind() != "loop_expression" {
+            self.edge(condition, after, EdgeKind::False);
+        }
+        self.loops.push((head, after));
+        let mut body_names = names.clone();
+        if let Some(pattern) = expr.child_by_field_name("pattern") {
+            let name = self.text(pattern).to_owned();
+            body_names.insert(name.clone(), self.fresh(&name));
+        }
+        if let Some(end) = expr
+            .child_by_field_name("body")
+            .and_then(|body| self.arm(body, condition, &body_names, EdgeKind::True))
+        {
+            self.edge(end, head, EdgeKind::Loop);
+        }
+        self.loops.pop();
+        self.cfg
+            .edges
+            .iter()
+            .any(|(_, to, _)| *to == after)
+            .then_some(after)
+    }
+
+    fn variable(&self, expr: Node<'_>, names: &Bindings) -> Option<String> {
+        let expr = unwrap_value(expr);
+        (expr.kind() == "identifier").then(|| {
+            let name = self.text(expr);
+            names.get(name).cloned().unwrap_or_else(|| name.to_owned())
+        })
+    }
+
+    fn fresh(&mut self, name: &str) -> String {
+        self.serial += 1;
+        format!("{name}#{}", self.serial)
+    }
+}
+
+fn line(node: Node<'_>) -> u32 {
+    node.start_position().row as u32 + 1
+}
+
+fn supported(node: Node<'_>) -> bool {
+    match node.kind() {
+        "function_item" | "closure_expression" | "async_block" | "macro_invocation" => return true,
+        "match_expression" | "let_chain" | "let_condition" | "label" | "unsafe_block" => {
+            return false
+        }
+        "for_expression" | "let_declaration" if !simple_binding(node) => return false,
+        "if_expression"
+        | "while_expression"
+        | "for_expression"
+        | "loop_expression"
+        | "return_expression"
+        | "break_expression"
+        | "continue_expression"
+            if !statement_position(node) =>
+        {
+            return false
+        }
+        _ => {}
+    }
+    node.named_children(&mut node.walk()).all(supported)
+}
+
+fn statement_position(node: Node<'_>) -> bool {
+    node.parent().is_some_and(|parent| {
+        matches!(
+            parent.kind(),
+            "block" | "expression_statement" | "else_clause"
+        )
+    })
+}
+
+fn simple_binding(node: Node<'_>) -> bool {
+    node.child_by_field_name("alternative").is_none()
+        && node
+            .child_by_field_name("pattern")
+            .is_none_or(|pattern| matches!(pattern.kind(), "identifier" | "_"))
+}

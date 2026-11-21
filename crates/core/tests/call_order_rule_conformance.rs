@@ -174,6 +174,51 @@ fn applies_pack_call_sequences_to_go_and_web_languages() {
 /// rule's real fixture rather than a synthetic one, so it also fails if
 /// somebody strips the metadata out of the rule file itself.
 #[test]
+fn applies_rust_call_sequences_to_branch_and_early_return_paths() {
+    use autoreview_core::ResolvedRulePack;
+    use autoreview_schema::RulePackTrust;
+
+    let repo = tempfile::tempdir().unwrap();
+    let pack = tempfile::tempdir().unwrap();
+    std::fs::write(pack.path().join("rust.yml"), r#"
+id: rust-example-finish
+kind: call-sequence
+language: Rust
+category: correctness
+severity: warning
+message: Finish before leaving
+after: [{call: begin}]
+unless: [{call: finish}]
+checkBeforeReturn: true
+"#).unwrap();
+    std::fs::write(repo.path().join("lib.rs"), r#"impl Worker {
+    async fn partial(&self, ready: bool) -> Result<(), Error> {
+        self.begin();
+        if ready {
+            self.finish();
+        } else {
+            check().await?;
+        }
+        Ok(())
+    }
+    fn closed(&self) {
+        self.begin();
+        self.finish();
+    }
+    fn unreachable(&self) {
+        return;
+        self.begin();
+    }
+}"#).unwrap();
+    let found = run_dataflow_check(repo.path(), &["lib.rs".into()], &[ResolvedRulePack {
+        id: "call-sequence-rust".into(), local_path: pack.path().to_owned(), trust: RulePackTrust::Full,
+    }]);
+    let lines: Vec<_> = found.iter().filter(|finding| finding.source.rule_id.as_deref() == Some("rust-example-finish"))
+        .map(|finding| finding.location.range.start_line).collect();
+    assert_eq!(lines, [7, 10], "{found:#?}");
+}
+
+#[test]
 fn a_call_order_rules_declared_cwe_reaches_the_finding() {
     let rule_id = "java-xxe-unconfigured-parser";
     let rule = discover_call_order_rules().into_iter().find(|r| r.id == rule_id).expect("java-xxe-unconfigured-parser is a builtin call-sequence rule");

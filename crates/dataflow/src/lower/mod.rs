@@ -15,6 +15,7 @@ pub mod go;
 pub mod java;
 pub mod javascript;
 pub mod kotlin;
+pub mod rust;
 
 use tree_sitter::Node;
 
