@@ -163,7 +163,11 @@ A boolean "pending" fact along a CFG path: after calling `after`, was
 `return`? Use for must-follow/must-precede conventions across statements —
 lock/unlock, open/close, a required check before use.
 
-The call-sequence engine runs on Java and Kotlin.
+The call-sequence engine runs on Go, Java, Kotlin, JavaScript, and TypeScript.
+Use `language: TypeScript` for TSX. Rules inspect calls and explicit return
+statements within one function. A Go function with a `defer` still gets
+`before` checks. Its return checks are skipped because deferred effects
+are not represented in the control-flow graph.
 
 ```yaml
 id: java-unreleased-lock

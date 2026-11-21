@@ -38,8 +38,10 @@
 //!
 //! Java (`lower::java`), Kotlin (`lower::kotlin`), and JavaScript/
 //! TypeScript/TSX (`lower::javascript`, one lowering module shared across
-//! all three — see its own doc comment) only get taint rules run against
-//! them for now — see `run_dataflow_check`'s own doc comment.
+//! all three) share the taint and call-sequence engines with Go.
+
+mod dispatch;
+mod dsl;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -759,143 +761,6 @@ fn run_loopvar_checks(path: &str, lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFin
     findings
 }
 
-/// Substitutes `{tainted_arg}`/`{sink_call}` in a rule's YAML `message`
-/// template with the actual hit's values — the declarative-rule
-/// equivalent of what the three old hand-written Rust closures each did
-/// inline.
-fn render_taint_message(template: &str, hit: &autoreview_dataflow::taint::TaintHit) -> String {
-    template.replace("{tainted_arg}", &hit.tainted_arg).replace("{sink_call}", &hit.sink_call)
-}
-
-/// Deliberately doesn't name the source (e.g. "an HTTP form field") the
-/// way an earlier, Go-only version of this string did — now that taint
-/// rules cover multiple languages and source families (HTTP form values,
-/// request parameters, ...), a single hardcoded source description would
-/// misdescribe whichever rules don't match it. The rule's own `message`
-/// (YAML `message:` field) is where a rule-specific, accurate source
-/// description belongs.
-fn taint_title(hit: &autoreview_dataflow::taint::TaintHit) -> String {
-    format!("`{}` reaches `{}` with an unsanitized value from an untrusted source", hit.tainted_arg, hit.sink_call)
-}
-
-/// Runs every `kind: taint` rule declared in `rules-builtin/` or a
-/// registered pack (loaded via `taint_rules::load_taint_rules`) whose
-/// `language` matches, against one file's already-lowered functions.
-/// Adding a new taint rule means adding a new YAML file — this function
-/// doesn't change.
-/// Interprocedural taint-source summaries for one rule's own `sources`
-/// (rule engine roadmap item 6, `RULE_ENGINE_RESEARCH.md`): does a same-
-/// file/same-package/imported-package helper have a path where this
-/// specific rule's source reaches its own return? Closes a real gap the
-/// existing intraprocedural default (taint auto-propagates through an
-/// unrecognized call only from an already-tainted *argument*) structurally
-/// can't see — a niladic wrapper like `func getUserID() string { return
-/// req.FormValue("id") }` has no argument for that default to look at.
-/// Only Go, Java, and Kotlin have the same-package/cross-package
-/// resolution machinery this needs (see `go_package_summaries`/
-/// `java_kotlin_package_summaries` and friends) — JavaScript/TypeScript/
-/// TSX return an empty map, which `check_with_summaries` treats exactly
-/// like the "no interprocedural info" case it already handled before this
-/// change, so their behavior is unaffected.
-fn taint_interprocedural_summaries(
-    repo_root: &Path,
-    path: &str,
-    own_content: &str,
-    language: &str,
-    spec: &autoreview_dataflow::taint::TaintSpec,
-    rule_id: &str,
-    caches: &SummaryCaches,
-) -> HashMap<String, bool> {
-    let compute_summary = |cfg: &Cfg<Stmt>| autoreview_dataflow::taint::compute_source_summary(spec, cfg);
-    match language {
-        "Go" => {
-            let mut summaries = go_package_summaries(repo_root, path, None, &compute_summary, rule_id, caches);
-            summaries.extend(go_imported_package_summaries(repo_root, path, None, &compute_summary, rule_id, caches));
-            summaries
-        }
-        "Java" | "Kotlin" => {
-            let mut summaries = match autoreview_archgraph::declared_package(own_content) {
-                Some(package) => java_kotlin_package_summaries(repo_root, path, &package, &compute_summary, rule_id, caches),
-                None => {
-                    let mut own_only = HashMap::new();
-                    add_java_kotlin_summaries_from_file(&repo_root.join(path), &mut own_only, &compute_summary, rule_id, caches);
-                    own_only
-                }
-            };
-            summaries.extend(java_kotlin_imported_package_summaries(repo_root, own_content, &compute_summary, rule_id, caches));
-            summaries
-        }
-        _ => HashMap::new(),
-    }
-}
-
-fn run_loaded_taint_rules(repo_root: &Path, path: &str, own_content: &str, language: &str, lowered: &[(Node, Cfg<Stmt>)], registered_packs: &[ResolvedRulePack], caches: &SummaryCaches) -> Vec<AgentFinding> {
-    let rules: Vec<_> = taint_rules::load_taint_rules(registered_packs).into_iter().filter(|r| r.language == language).collect();
-    if rules.is_empty() {
-        return Vec::new();
-    }
-
-    let mut findings = Vec::new();
-    for rule in &rules {
-        // Computed once per rule (not per function) — every function in
-        // this file shares the same same-package/imported-package scope.
-        // `rule.id` doubles as the persistent cache's rule key: it's
-        // already unique per taint rule, so a niladic-source-wrapper
-        // summary computed for one rule never leaks into another's
-        // lookup.
-        let summaries = taint_interprocedural_summaries(repo_root, path, own_content, language, &rule.spec, &rule.id, caches);
-        for (_, cfg) in lowered {
-            for hit in autoreview_dataflow::taint::check_with_summaries(&rule.spec, cfg, Some(&summaries)) {
-                let mut finding = make_finding(&rule.id, &rule.category, rule.severity, path, hit.source_line, taint_title(&hit), render_taint_message(&rule.message, &hit));
-                finding.meta = taint_pack_meta(rule);
-                findings.push(finding);
-            }
-        }
-    }
-    findings
-}
-
-/// Renders a `call-sequence` rule's `{trigger_call}` placeholder — the
-/// call (or, for a `checkBeforeReturn` hit, the literal text `"return"`)
-/// that actually tripped the rule while its obligation was still open.
-fn render_call_order_message(template: &str, hit: &autoreview_dataflow::call_order::CallOrderHit) -> String {
-    template.replace("{trigger_call}", &hit.trigger_call)
-}
-
-/// Runs every `kind: call-sequence` rule (see
-/// `autoreview_dataflow::call_order`'s own module docs for what this
-/// engine models and why it's a separate primitive from taint) whose
-/// `language` matches, against one file's already-lowered functions.
-/// Purely intraprocedural — no summaries/caches involved, unlike
-/// `run_loaded_taint_rules`, since the obligation this models is meant to
-/// resolve within one function.
-fn run_call_order_rules(path: &str, language: &str, lowered: &[(Node, Cfg<Stmt>)], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
-    let rules: Vec<_> = call_order_rules::load_call_order_rules(registered_packs).into_iter().filter(|r| r.language == language).collect();
-    if rules.is_empty() {
-        return Vec::new();
-    }
-
-    let mut findings = Vec::new();
-    for rule in &rules {
-        for (_, cfg) in lowered {
-            for hit in autoreview_dataflow::call_order::check(&rule.spec, cfg) {
-                let mut finding = make_finding(
-                    &rule.id,
-                    &rule.category,
-                    rule.severity,
-                    path,
-                    hit.source_line,
-                    format!("`{}` reached with an unresolved `{}` obligation still open", hit.trigger_call, rule.id),
-                    render_call_order_message(&rule.message, &hit),
-                );
-                finding.meta = rule_meta(rule.pack_id.as_ref(), rule.metadata.as_ref());
-                findings.push(finding);
-            }
-        }
-    }
-    findings
-}
-
 /// Reads and parses one file, for the checks below to lower — a shared
 /// early-return-on-any-failure helper since all three language branches in
 /// `run_dataflow_check` do exactly this before lowering. Routed through
@@ -912,10 +777,8 @@ fn read_and_parse(repo_root: &Path, path: &str, language: autoreview_langsupport
 /// backing-array, typed-nil-interface-return, loopvar, plus taint rules).
 /// Java/Kotlin also get the interprocedural NPE-risk check
 /// (`java_kotlin_npe_risk`, the Java/Kotlin analog of Go's typed-nil-
-/// return rule — see that module's docs). JavaScript/TypeScript/TSX only
-/// get taint rules so far — the generic taint engine already works
-/// against any lowered `Cfg`, so a `kind: taint` YAML rule for any of
-/// them needs no dataflow-crate changes to run. Parses and lowers each
+/// return rule — see that module's docs). All supported CFG languages
+/// run both taint and call-sequence rules. Parses and lowers each
 /// file's functions exactly once per language, shared across that
 /// language's rule families rather than each re-parsing/re-lowering
 /// independently — and, via `ParseCache`, shared across every
@@ -926,74 +789,7 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
 }
 
 pub fn run_dataflow_check_for_snapshot(repo: &Path, repo_root: &Path, changed_files: &[String], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
-    let go_pre_1_22 = crate::analyzers::practices::go_module_targets_pre_1_22(repo_root);
-    let cache = ParseCache::new();
-    let persistent = PersistentSummaryCache::load(repo, repo_root);
-    let caches = SummaryCaches { parse: &cache, persistent: &persistent, java_kotlin_packages: Default::default() };
-    let findings: Vec<AgentFinding> = changed_files
-        .iter()
-        .filter_map(|path| {
-            if path.ends_with(".go") {
-                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Go, &cache)?;
-                let (content, tree) = cached.as_ref();
-                let source = content.as_bytes();
-                let lowered = lower_all_functions(source, tree);
-
-                let mut findings = run_append_shared_backing_array(path, &lowered);
-                findings.extend(run_typed_nil_interface_return(repo_root, path, source, &lowered, &caches));
-                findings.extend(run_loaded_taint_rules(repo_root, path, content, "Go", &lowered, registered_packs, &caches));
-                if go_pre_1_22 {
-                    findings.extend(run_loopvar_checks(path, &lowered));
-                }
-                Some(findings)
-            } else if path.ends_with(".java") {
-                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Java, &cache)?;
-                let (content, tree) = cached.as_ref();
-                let lowered = lower_all_java_functions(content.as_bytes(), tree);
-                let mut findings = run_npe_risk(repo_root, path, content, &lowered, &[], &caches);
-                findings.extend(run_loaded_taint_rules(repo_root, path, content, "Java", &lowered, registered_packs, &caches));
-                findings.extend(run_call_order_rules(path, "Java", &lowered, registered_packs));
-                Some(findings)
-            } else if path.ends_with(".kt") || path.ends_with(".kts") {
-                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Kotlin, &cache)?;
-                let (content, tree) = cached.as_ref();
-                let lowered = lower_all_kotlin_functions(content.as_bytes(), tree);
-                // Kotlin's stdlib defines Any?.toString() as a null-safe
-                // extension (see java_kotlin_npe_risk's own docs) — the
-                // only call this rule's dereference-walk must not treat as
-                // risky on a nullable receiver in Kotlin specifically.
-                let mut findings = run_npe_risk(repo_root, path, content, &lowered, &["toString"], &caches);
-                findings.extend(run_loaded_taint_rules(repo_root, path, content, "Kotlin", &lowered, registered_packs, &caches));
-                findings.extend(run_call_order_rules(path, "Kotlin", &lowered, registered_packs));
-                Some(findings)
-            } else if path.ends_with(".tsx") {
-                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Tsx, &cache)?;
-                let (content, tree) = cached.as_ref();
-                let lowered = lower_all_javascript_functions(content.as_bytes(), tree);
-                // Reuses the "TypeScript" taint rules rather than a separate
-                // "Tsx" bucket — TSX's grammar only adds JSX syntax on top
-                // of TypeScript's, so the same taint rules apply verbatim; a
-                // duplicate set of Tsx-only YAML files would just be the
-                // same rules twice.
-                Some(run_loaded_taint_rules(repo_root, path, content, "TypeScript", &lowered, registered_packs, &caches))
-            } else if path.ends_with(".ts") || path.ends_with(".mts") || path.ends_with(".cts") {
-                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::TypeScript, &cache)?;
-                let (content, tree) = cached.as_ref();
-                let lowered = lower_all_javascript_functions(content.as_bytes(), tree);
-                Some(run_loaded_taint_rules(repo_root, path, content, "TypeScript", &lowered, registered_packs, &caches))
-            } else if path.ends_with(".js") || path.ends_with(".jsx") || path.ends_with(".mjs") || path.ends_with(".cjs") {
-                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::JavaScript, &cache)?;
-                let (content, tree) = cached.as_ref();
-                let lowered = lower_all_javascript_functions(content.as_bytes(), tree);
-                Some(run_loaded_taint_rules(repo_root, path, content, "JavaScript", &lowered, registered_packs, &caches))
-            } else {
-                None
-            }
-        })
-        .flatten()
-        .collect();
-    persistent.save();
-    findings
+    dispatch::run(repo, repo_root, changed_files, registered_packs)
 }
 
 #[cfg(test)]

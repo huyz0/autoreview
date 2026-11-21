@@ -125,6 +125,47 @@ fn every_call_order_rule_declares_a_category() {
     }
 }
 
+#[test]
+fn applies_pack_call_sequences_to_go_and_web_languages() {
+    use autoreview_core::ResolvedRulePack;
+    use autoreview_schema::RulePackTrust;
+
+    let dir = tempfile::tempdir().unwrap();
+    let pack = tempfile::tempdir().unwrap();
+    for language in ["Go", "JavaScript", "TypeScript"] {
+        std::fs::write(
+            pack.path().join(format!("{language}.yml")),
+            format!(
+                "id: example-{language}\nkind: call-sequence\nlanguage: {language}\ncategory: correctness\nseverity: warning\nmessage: Verify before sending\nafter: [{{call: begin}}]\nunless: [{{call: verify}}]\nbefore: [{{call: send}}]\ncheckBeforeReturn: true\n"
+            ),
+        ).unwrap();
+    }
+    let go = "package main\nfunc bad() {\nbegin()\nsend()\n}\nfunc explicit() {\nbegin()\nreturn\n}\nfunc deferred() {\nbegin()\ndefer verify()\nreturn\n}\nfunc earlySend() {\nbegin()\ndefer verify()\nsend()\nreturn\n}\n";
+    let web = "function bad() {\nbegin();\nsend();\n}\nfunction clean() {\nbegin();\nverify();\nsend();\n}\n";
+    let tsx = "function bad() {\nbegin();\nsend();\nreturn <main />;\n}\n";
+    let cases = [
+        ("worker.go", "Go", go, &[4, 8, 18][..]),
+        ("worker.mjs", "JavaScript", web, &[3][..]),
+        ("worker.cjs", "JavaScript", web, &[3][..]),
+        ("worker.mts", "TypeScript", web, &[3][..]),
+        ("worker.cts", "TypeScript", web, &[3][..]),
+        ("view.tsx", "TypeScript", tsx, &[3, 4][..]),
+    ];
+    let files: Vec<_> = cases.iter().map(|(path, _, source, _)| {
+        std::fs::write(dir.path().join(path), source).unwrap();
+        (*path).to_owned()
+    }).collect();
+    let findings = run_dataflow_check(dir.path(), &files, &[ResolvedRulePack {
+        id: "call-sequence-parity".into(), local_path: pack.path().to_owned(), trust: RulePackTrust::Full,
+    }]);
+    for (path, language, _, expected) in cases {
+        let id = format!("example-{language}");
+        let lines: Vec<_> = findings.iter().filter(|finding| finding.location.path == path && finding.source.rule_id.as_deref() == Some(&id))
+            .map(|finding| finding.location.range.start_line).collect();
+        assert_eq!(lines, expected, "{path}: {findings:#?}");
+    }
+}
+
 /// Regression test for a real silent-drop bug: `RuleMetadataBlock`
 /// documents itself as flowing "verbatim into `AgentFinding.meta`", and
 /// that held for pattern rules but not for call-sequence ones — the

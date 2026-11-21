@@ -20,10 +20,10 @@ deep tier.
 - **Scoped Rust review** resolves explicit imports and local bindings to catch
   discarded asynchronous test failures, Mockall expectation problems, and
   SQLx, Diesel, and rusqlite query issues without a build.
-- **Dataflow and taint tracking** for Go, Java, and Kotlin: a real CFG-based
-  engine, not just syntax matching, catches things like a tainted HTTP
-  parameter reaching `exec.Command`, or a typed nil pointer silently
-  satisfying an `error` interface.
+- **Control-flow analysis** runs taint and call-sequence rules for Go, Java,
+  Kotlin, JavaScript, TypeScript, and TSX. It can trace an HTTP parameter to a
+  command execution call or check whether code closes a resource before reuse.
+  Go also checks whether typed nil pointers are returned through interfaces.
 - **Complexity metrics** with YAML-configurable thresholds. Java and Rust use
   syntax trees to measure function length, parameters, nesting, branches, and
   explicit returns. Rust also checks required trait items and oversized
@@ -226,6 +226,21 @@ check. It uses the base commit's rule allowlist and replay evidence, then
 fails on findings from qualified rules that overlap changed lines. Design
 and style findings remain advisory. The repository needs enough Git history
 for the comparison and replay commits. [Suite format and gate criteria](docs/autoreview-directory-layout.md#replayyaml)
+
+## Language coverage
+
+| Check | Go | Java / Kotlin | JavaScript / TypeScript / TSX | Rust |
+|---|---|---|---|---|
+| Syntax patterns and complexity | Yes | Yes | Yes | Yes |
+| Taint and call-sequence DSL | Yes | Yes | Yes | Unavailable |
+| Feature envy | Symbol index | Symbol index | Symbol index | Typed parameters in inherent methods |
+| Layer policies | Imports | Imports | Imports | Direct Cargo workspace dependencies |
+| Import cycles | Go packages | JVM packages | Unavailable | Unavailable |
+
+JavaScript and TypeScript analysis and triage recognize JSX, TSX, and
+module extensions such as `.mjs` and `.mts`. Call-sequence rules use
+`language: TypeScript` for TSX, and Go return checks skip functions
+containing `defer`. [DSL reference](.claude/skills/authoring-rules/reference/rule-dsl.md#kind-call-sequence)
 
 ## Driving autoreview from a coding agent
 

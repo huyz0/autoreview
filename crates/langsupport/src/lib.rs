@@ -19,6 +19,27 @@ pub enum Language {
     Rust,
 }
 
+impl Language {
+    pub fn from_rule_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "Go" => Self::Go,
+            "Java" => Self::Java,
+            "Kotlin" => Self::Kotlin,
+            "JavaScript" => Self::JavaScript,
+            "TypeScript" => Self::TypeScript,
+            "Tsx" => Self::Tsx,
+            "Rust" => Self::Rust,
+            _ => return None,
+        })
+    }
+
+    /// TypeScript packs also cover TSX. An explicitly TSX rule stays scoped
+    /// to that grammar.
+    pub fn matches_rule_language(self, rule_language: Self) -> bool {
+        self == rule_language || (self == Self::Tsx && rule_language == Self::TypeScript)
+    }
+}
+
 /// Extension-based language dispatch — the same convention already used
 /// (independently, three times) across the codebase.
 pub fn language_for_path(path: &std::path::Path) -> Option<Language> {
