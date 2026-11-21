@@ -24,6 +24,11 @@ deep tier.
   Kotlin, JavaScript, TypeScript, TSX, and Rust. It can trace an HTTP parameter to a
   command execution call or check whether code closes a resource before reuse.
   Go also checks whether typed nil pointers are returned through interfaces.
+- **Framework checks** flag Go context cancellation missed on a branch or
+  through a same-package helper, Java Spring transaction self-invocation,
+  and Hibernate reads that initialize a mapped lazy collection for each
+  result of a typed query. The Spring check assumes proxy mode. The Hibernate
+  check reports a query pattern that should be confirmed in generated SQL.
 - **Complexity metrics** with YAML-configurable thresholds. Java and Rust use
   syntax trees to measure function length, parameters, nesting, branches, and
   explicit returns. Rust also checks required trait items and oversized

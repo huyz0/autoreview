@@ -1,0 +1,140 @@
+mod hibernate;
+mod spring;
+
+use std::{collections::HashMap, path::Path};
+
+use autoreview_langsupport::{parser_for, Language};
+use autoreview_schema::AgentFinding;
+use tree_sitter::{Node, Tree};
+
+use super::{children, descendants, location, text};
+
+pub(super) use hibernate::RULE as HIBERNATE_RULE;
+pub(super) use spring::RULE as SPRING_RULE;
+
+pub(super) fn run(root: &Path, paths: &[String]) -> Vec<AgentFinding> {
+    let mut findings = Vec::new();
+    let Some(mut parser) = parser_for(Language::Java) else {
+        return findings;
+    };
+    let mut entity_index = None;
+    for path in paths.iter().filter(|path| path.ends_with(".java")) {
+        let Ok(source) = std::fs::read_to_string(root.join(path)) else {
+            continue;
+        };
+        let Some(tree) = parser.parse(&source, None) else {
+            continue;
+        };
+        if tree.root_node().has_error() {
+            continue;
+        }
+        let java = Java::new(path, &source, &tree);
+        findings.extend(spring::findings(&java));
+        if source.contains("getResultList") {
+            let entities = entity_index.get_or_insert_with(|| hibernate::index(root));
+            findings.extend(hibernate::findings(&java, entities));
+        }
+    }
+    findings
+}
+
+pub(super) struct Java<'a> {
+    path: &'a str,
+    source: &'a str,
+    root: Node<'a>,
+    package: &'a str,
+    imports: HashMap<&'a str, &'a str>,
+    wildcards: Vec<&'a str>,
+}
+
+impl<'a> Java<'a> {
+    fn new(path: &'a str, source: &'a str, tree: &'a Tree) -> Self {
+        let root = tree.root_node();
+        let mut java = Self {
+            path,
+            source,
+            root,
+            package: "",
+            imports: HashMap::new(),
+            wildcards: Vec::new(),
+        };
+        for node in children(root) {
+            match node.kind() {
+                "package_declaration" => {
+                    java.package = node.named_child(0).map_or("", |name| java.text(name))
+                }
+                "import_declaration" => java.import(node),
+                _ => {}
+            }
+        }
+        java
+    }
+
+    fn import(&mut self, node: Node<'a>) {
+        let name = self
+            .text(node)
+            .trim_start_matches("import")
+            .trim_end_matches(';')
+            .trim();
+        if name.starts_with("static ") {
+            return;
+        }
+        if let Some(pkg) = name.strip_suffix(".*") {
+            self.wildcards.push(pkg);
+        } else if let Some((_, short)) = name.rsplit_once('.') {
+            self.imports.insert(short, name);
+        }
+    }
+
+    fn text(&self, node: Node<'_>) -> &'a str {
+        text(node, self.source)
+    }
+
+    fn field(&self, node: Node<'_>, name: &str) -> Option<&'a str> {
+        node.child_by_field_name(name).map(|node| self.text(node))
+    }
+
+    fn resolves(&self, actual: &str, qualified: &str) -> bool {
+        if actual == qualified {
+            return true;
+        }
+        let Some((package, name)) = qualified.rsplit_once('.') else {
+            return false;
+        };
+        name == actual
+            && self.imports.get(actual).map_or_else(
+                || self.wildcards.contains(&package),
+                |import| *import == qualified,
+            )
+    }
+
+    fn annotation(&self, node: Node<'a>, qualified: &str) -> Option<Node<'a>> {
+        annotations(node).find(|annotation| {
+            self.field(*annotation, "name")
+                .is_some_and(|name| self.resolves(name, qualified))
+        })
+    }
+
+    fn location(&self, node: Node<'_>) -> autoreview_schema::Location {
+        location(self.path, node, self.source)
+    }
+}
+
+fn annotations(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
+    children(node)
+        .find(|node| node.kind() == "modifiers")
+        .into_iter()
+        .flat_map(children)
+        .filter(|node| matches!(node.kind(), "annotation" | "marker_annotation"))
+}
+
+fn class_members(class: Node<'_>) -> impl Iterator<Item = Node<'_>> {
+    class
+        .child_by_field_name("body")
+        .into_iter()
+        .flat_map(children)
+}
+
+fn containing<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+    std::iter::successors(node.parent(), |node| node.parent()).find(|node| node.kind() == kind)
+}

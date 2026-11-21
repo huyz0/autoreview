@@ -146,6 +146,7 @@ pub fn semantic_rule_ids(registered_packs: &[ResolvedRulePack]) -> std::collecti
             set.insert(meta.id.clone());
         }
     });
+    set.extend(super::framework_checks::semantic_ids());
     set
 }
 
@@ -166,6 +167,9 @@ pub struct RuleDefinition {
 }
 
 pub fn find_rule_definition(rule_id: &str, registered_packs: &[ResolvedRulePack]) -> Option<RuleDefinition> {
+    if let Some(definition) = super::framework_checks::definition(rule_id) {
+        return Some(definition);
+    }
     for root in rule_roots(registered_packs) {
         let source_label = match &root {
             RuleRoot::Embedded(_) => "builtin".to_string(),

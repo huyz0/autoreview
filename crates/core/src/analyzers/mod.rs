@@ -11,6 +11,7 @@ pub mod clippy;
 pub mod complexity;
 pub mod dataflow_check;
 pub mod duplication;
+pub mod framework_checks;
 pub mod practices;
 pub mod rule_pack;
 pub mod rust_review;

@@ -241,6 +241,7 @@ fn cross_file(
         changed_files,
         registered_packs,
     ));
+    findings.extend(autoreview_core::run_framework_checks(source_root, changed_files));
     findings.extend(autoreview_core::detect_shotgun_surgery(files));
     findings.extend(autoreview_core::run_divergent_change_check(
         source_root,

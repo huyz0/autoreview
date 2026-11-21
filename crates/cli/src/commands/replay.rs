@@ -21,6 +21,7 @@ enum Tool {
     AutoreviewComplexity,
     AutoreviewDataflow,
     AutoreviewDuplication,
+    AutoreviewFrameworks,
     AutoreviewRust,
 }
 
@@ -40,6 +41,7 @@ impl Tool {
             Self::AutoreviewComplexity => autoreview_core::run_complexity_check(source, paths, &[]),
             Self::AutoreviewDataflow => autoreview_core::run_dataflow_check(source, paths, &[]),
             Self::AutoreviewDuplication => autoreview_core::run_duplication_check(source, paths),
+            Self::AutoreviewFrameworks => autoreview_core::run_framework_checks(source, paths),
             Self::AutoreviewRust => autoreview_core::run_rust_review(source, paths),
         };
         Ok(findings)
@@ -76,6 +78,7 @@ impl Rule {
                     )
             }
             Tool::AutoreviewDuplication => self.id == "duplicate-code-block",
+            Tool::AutoreviewFrameworks => kind == Some("framework"),
             Tool::AutoreviewRust => autoreview_core::rust_review_rule(&self.id).is_some(),
         };
         ensure!(
