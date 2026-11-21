@@ -46,7 +46,7 @@ pub fn load_architecture_config(path: &Path) -> anyhow::Result<Option<Architectu
 /// Resolves which declared layer a path belongs to (file path or,
 /// normalized, an import target) — first matching layer in declaration
 /// order wins. Returns `None` if no layer's globs match.
-fn layer_for_path<'a>(path: &str, layers: &'a [autoreview_schema::ArchitectureLayer]) -> Option<&'a str> {
+pub(super) fn layer_for_path<'a>(path: &str, layers: &'a [autoreview_schema::ArchitectureLayer]) -> Option<&'a str> {
     layers.iter().find_map(|layer| {
         layer.match_globs.iter().any(|pattern| Glob::new(pattern).map(|g| g.compile_matcher().is_match(path)).unwrap_or(false)).then_some(layer.name.as_str())
     })

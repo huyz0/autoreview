@@ -1,0 +1,35 @@
+id: rust-blocking-reqwest-in-async
+language: Rust
+category: performance
+severity: info
+semantic: true
+message: >-
+  This blocking Reqwest operation runs in an async body and can panic when it
+  tries to block an async runtime. Use the async client or a blocking worker.
+metadata:
+  confidence: HIGH
+  references:
+    - https://docs.rs/reqwest/latest/reqwest/blocking/
+rule:
+  any:
+    - pattern: reqwest::blocking::get($URL)
+    - pattern: reqwest::blocking::Client::new()
+    - pattern: reqwest::blocking::Client::builder().build()
+  inside:
+    any:
+      - kind: async_block
+      - kind: closure_expression
+        regex: '^async\b'
+      - kind: function_item
+        has:
+          kind: function_modifiers
+          regex: '^async\b'
+    stopBy:
+      any:
+        - kind: function_item
+        - kind: closure_expression
+        - kind: async_block
+        - kind: const_block
+        - kind: const_item
+        - kind: static_item
+        - kind: gen_block

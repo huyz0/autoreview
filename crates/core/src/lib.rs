@@ -26,7 +26,9 @@ pub use analyzers::architecture::{load_architecture_config, run_architecture_che
 pub use analyzers::ast_grep::{find_rule_definition, run_ast_grep, semantic_rule_ids, RuleDefinition};
 pub use analyzers::bidi_check::run_bidi_control_character_check;
 pub use analyzers::cargo_audit::run_cargo_audit;
+pub use analyzers::cargo_review::run_cargo_review;
 pub use analyzers::clippy::run_clippy;
+pub use analyzers::rust_review::{run_rust_review, rust_review_rule, rust_review_semantic_ids};
 pub use analyzers::churn::{detect_shotgun_surgery, run_divergent_change_check};
 pub use analyzers::complexity::run_complexity_check;
 pub use analyzers::practices::run_practices_check;

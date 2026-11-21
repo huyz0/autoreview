@@ -21,6 +21,7 @@ enum Tool {
     AutoreviewComplexity,
     AutoreviewDataflow,
     AutoreviewDuplication,
+    AutoreviewRust,
 }
 
 impl Tool {
@@ -39,6 +40,7 @@ impl Tool {
             Self::AutoreviewComplexity => autoreview_core::run_complexity_check(source, paths, &[]),
             Self::AutoreviewDataflow => autoreview_core::run_dataflow_check(source, paths, &[]),
             Self::AutoreviewDuplication => autoreview_core::run_duplication_check(source, paths),
+            Self::AutoreviewRust => autoreview_core::run_rust_review(source, paths),
         };
         Ok(findings)
     }
@@ -74,6 +76,7 @@ impl Rule {
                     )
             }
             Tool::AutoreviewDuplication => self.id == "duplicate-code-block",
+            Tool::AutoreviewRust => autoreview_core::rust_review_rule(&self.id).is_some(),
         };
         ensure!(
             supported,
@@ -366,6 +369,13 @@ pub(crate) fn run_replay(repo: &Path, suite: &Path) -> anyhow::Result<()> {
 }
 
 fn validate_gate_rule(rule: &Rule) -> anyhow::Result<Vec<Language>> {
+    if rule.tool == Tool::AutoreviewRust {
+        let definition = autoreview_core::rust_review_rule(&rule.id)
+            .with_context(|| format!("gate rule '{}' is not a built-in Rust review rule", rule.id))?;
+        ensure!(!definition.semantic && matches!(definition.category, "correctness" | "security"),
+            "gate rule '{}' must be a non-heuristic built-in correctness or security rule", rule.id);
+        return Ok(vec![Language::Rust]);
+    }
     let definition = autoreview_core::find_rule_definition(&rule.id, &[])
         .with_context(|| format!("gate rule '{}' is not a built-in rule", rule.id))?;
     let correct_tool = match rule.tool {

@@ -15,19 +15,22 @@ deep tier.
 ## What it checks
 
 - **ast-grep pattern rules** for Go, Java, Kotlin, TypeScript, JavaScript,
-  and Rust. Rust rules cover I/O and temporary resource lifetimes, panic and
-  unsafe preconditions, blocking calls in async code, and TLS or JWT
-  verification settings.
+  and Rust. Rust rules cover resource lifetimes, panic and unsafe preconditions,
+  blocking behavior, credentials, and TLS.
+- **Scoped Rust review** resolves explicit imports and local bindings to catch
+  discarded asynchronous test failures, Mockall expectation problems, and
+  SQLx, Diesel, and rusqlite query issues without a build.
 - **Dataflow and taint tracking** for Go, Java, and Kotlin: a real CFG-based
   engine, not just syntax matching, catches things like a tainted HTTP
   parameter reaching `exec.Command`, or a typed nil pointer silently
   satisfying an `error` interface.
 - **Complexity metrics** with YAML-configurable thresholds. Java and Rust use
   syntax trees to measure function length, parameters, nesting, branches, and
-  explicit returns. Java also checks class and interface structure.
+  explicit returns. Rust also checks the number of required items in traits.
 - **Cross-file structure**: import-cycle detection (Go, Java, Kotlin),
   ArchUnit-style layer rules from `.autoreview/architecture.yaml`, symbol-index-backed
-  smells like feature envy and data clumps.
+  smells like feature envy and data clumps. Cargo metadata resolves direct
+  Rust workspace package boundaries and the build scripts that Cargo runs.
 - **golangci-lint and clippy** report into the same finding format. Autoreview
   classifies selected Clippy lints as correctness, performance, or design for
   `--aspects` filtering. Other Clippy lints appear under style.

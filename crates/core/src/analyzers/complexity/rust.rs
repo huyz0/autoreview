@@ -22,19 +22,62 @@ pub(super) fn findings(
         let start = nodes.len();
         nodes.extend(node.named_children(&mut cursor));
         nodes[start..].reverse();
-        if node.kind() == "function_item" && !node.has_error() {
-            if let Some(body) = node.child_by_field_name("body") {
-                append_function_findings(
+        match node.kind() {
+            "function_item" if !node.has_error() => {
+                if let Some(body) = node.child_by_field_name("body") {
+                    append_function_findings(
+                        &mut findings,
+                        path,
+                        measure_function(node, body),
+                        thresholds,
+                        make_finding,
+                    );
+                }
+            }
+            "trait_item" if !node.has_error() => {
+                append_trait_finding(
                     &mut findings,
                     path,
-                    measure_function(node, body),
-                    thresholds,
+                    node,
+                    thresholds.complex_interface,
                     make_finding,
                 );
             }
+            _ => {}
         }
     }
     findings
+}
+
+fn append_trait_finding(
+    findings: &mut Vec<AgentFinding>,
+    path: &str,
+    trait_item: Node<'_>,
+    limit: usize,
+    make_finding: &MakeFinding<'_>,
+) {
+    let Some(body) = trait_item.child_by_field_name("body") else {
+        return;
+    };
+    let mut cursor = body.walk();
+    let count = body
+        .named_children(&mut cursor)
+        .filter(|member| match member.kind() {
+            "function_signature_item" | "associated_type" => true,
+            "const_item" => member.child_by_field_name("value").is_none(),
+            _ => false,
+        })
+        .count();
+    if count > limit {
+        findings.push(make_finding(
+            "complex-interface",
+            path,
+            (trait_item.start_position().row + 1) as u32,
+            (trait_item.end_position().row + 1) as u32,
+            format!("Complex trait ({count} required members)"),
+            format!("This trait declares {count} required members, above the configured limit of {limit}."),
+        ));
+    }
 }
 
 fn parameter_count(function: Node<'_>) -> usize {
@@ -191,5 +234,64 @@ impl Worker {
                 "Too many return points (1)",
             ]
         );
+    }
+
+    #[test]
+    fn flags_rust_traits_above_the_configured_limit_for_required_items() {
+        let source = r#"pub trait Worker {
+    fn run(&self);
+    type Record<'a> where Self: 'a;
+    const BATCH_SIZE: usize;
+    fn is_ready(&self) -> bool { true }
+    const DEFAULT_RETRIES: usize = 3;
+}
+"#;
+        let reports = super::super::detect_complexity_in_file_with_thresholds(
+            "worker.rs",
+            source,
+            super::super::ComplexityLanguage::Rust,
+            &ComplexityThresholds {
+                complex_interface: 2,
+                ..Default::default()
+            },
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(reports.len(), 1);
+        let report = &reports[0];
+        assert_eq!(report.source.rule_id.as_deref(), Some("complex-interface"));
+        assert_eq!(report.title, "Complex trait (3 required members)");
+        assert_eq!(report.category, "design");
+        assert_eq!(report.location.range.start_line, 1);
+        assert_eq!(report.location.range.end_line, Some(7));
+    }
+
+    #[test]
+    fn skips_default_helpers_and_traits_at_the_configured_limit() {
+        let source = r#"
+#![feature(associated_type_defaults)]
+
+trait Parent {
+    fn inherited(&self);
+}
+
+trait Worker: Parent {
+    fn run(&self);
+    fn first_helper(&self) {}
+    fn second_helper(&self) {}
+    type RetryState = ();
+    const DEFAULT_RETRIES: usize = 3;
+}
+"#;
+        let reports = super::super::detect_complexity_in_file_with_thresholds(
+            "worker.rs",
+            source,
+            super::super::ComplexityLanguage::Rust,
+            &ComplexityThresholds {
+                complex_interface: 1,
+                ..Default::default()
+            },
+            &std::collections::HashMap::new(),
+        );
+        assert!(reports.is_empty(), "got {reports:#?}");
     }
 }
