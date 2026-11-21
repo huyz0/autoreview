@@ -42,9 +42,13 @@ func other(ctx context.Context, unrelated OtherTracer) {
     _, span := unrelated.Start(ctx, "load")
     span.AddEvent("started")
 }
+func discard(parent context.Context) context.Context {
+    ctx, _ := otel.Tracer("demo").Start(parent, "load")
+    return ctx
+}
 "#;
     let found = scan(&[("trace.go", source)], &["trace.go"]);
-    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found.len(), 2, "{found:#?}");
     assert_eq!(
         found[0].source.rule_id.as_deref(),
         Some("go-otel-span-not-ended")
@@ -75,6 +79,10 @@ class Example {
     void unrelated(Other span) {
         span.makeCurrent();
     }
+    void local() {
+        Span span = Span.current();
+        span.makeCurrent();
+    }
 }
 "#;
     let found = scan(&[("Example.java", source)], &["Example.java"]);
@@ -82,7 +90,7 @@ class Example {
         .iter()
         .map(|finding| finding.location.range.start_line)
         .collect();
-    assert_eq!(lines, [5, 8], "{found:#?}");
+    assert_eq!(lines, [5, 8, 18], "{found:#?}");
 }
 
 #[test]

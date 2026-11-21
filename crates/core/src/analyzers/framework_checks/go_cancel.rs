@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use autoreview_schema::AgentFinding;
+use tree_sitter::Node;
 
 use super::{location, Rule};
 pub(super) use span::RULE as SPAN_RULE;
@@ -63,4 +64,19 @@ fn package_findings(peers: &[&package::File], paths: &[String]) -> Vec<AgentFind
         }
     }
     findings
+}
+
+fn two_result_call(assignment: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    let left = assignment.child_by_field_name("left")?;
+    let right = assignment.child_by_field_name("right")?;
+    if left.named_child_count() != 2 || right.named_child_count() != 1 {
+        return None;
+    }
+    let binding = left
+        .named_child(1)
+        .filter(|node| node.kind() == "identifier" || node.kind() == "blank_identifier")?;
+    let call = right
+        .named_child(0)
+        .filter(|node| node.kind() == "call_expression")?;
+    Some((binding, call))
 }

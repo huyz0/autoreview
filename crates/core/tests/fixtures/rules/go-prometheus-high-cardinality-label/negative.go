@@ -1,6 +1,6 @@
 package telemetry
 import "github.com/prometheus/client_golang/prometheus"
-var requests = prometheus.NewCounterVec(
+var requestsByRoute = prometheus.NewCounterVec(
     prometheus.CounterOpts{Name: "requests_total"},
     []string{"method", "result"},
 )

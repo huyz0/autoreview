@@ -6,6 +6,7 @@ use tree_sitter::Node;
 use super::super::{children, descendants, location, text, Rule};
 use super::flow::{Check, Helpers};
 use super::package::{local_names, File};
+use super::two_result_call;
 
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     id: "go-otel-span-not-ended",
@@ -56,6 +57,10 @@ impl Scope<'_, '_> {
                 continue;
             };
             let source = &self.file.source;
+            if text(binding, source) == "_" {
+                findings.push(RULE.finding(location(&self.file.path, binding, source), Vec::new()));
+                continue;
+            }
             let mut check = Check::new(
                 source,
                 text(binding, source),
@@ -78,17 +83,7 @@ impl Scope<'_, '_> {
     }
 
     fn binding<'tree>(&self, assignment: Node<'tree>) -> Option<Node<'tree>> {
-        let left = assignment.child_by_field_name("left")?;
-        let right = assignment.child_by_field_name("right")?;
-        if left.named_child_count() != 2 || right.named_child_count() != 1 {
-            return None;
-        }
-        let binding = left
-            .named_child(1)
-            .filter(|node| node.kind() == "identifier" && self.text(*node) != "_")?;
-        let call = right
-            .named_child(0)
-            .filter(|node| node.kind() == "call_expression")?;
+        let (binding, call) = two_result_call(assignment)?;
         let (object, method) = selector(call)?;
         (self.text(method) == "Start" && self.tracer(object, assignment)).then_some(binding)
     }

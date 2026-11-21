@@ -41,6 +41,9 @@ fn open_scope(java: &Java<'_>, call: Node<'_>) -> bool {
         return false;
     }
     let name = java.text(receiver);
+    if let Some(ty) = local_type(java, call, name) {
+        return scoped_type(java, ty);
+    }
     let method = containing(call, "method_declaration");
     let params = method.and_then(|method| method.child_by_field_name("parameters"));
     params.into_iter().flat_map(children).any(|param| {
@@ -49,6 +52,20 @@ fn open_scope(java: &Java<'_>, call: Node<'_>) -> bool {
                 .field(param, "type")
                 .is_some_and(|ty| scoped_type(java, ty))
     })
+}
+
+fn local_type<'a>(java: &Java<'a>, call: Node<'_>, name: &str) -> Option<&'a str> {
+    let statement = call.parent()?;
+    std::iter::successors(statement.prev_named_sibling(), |part| {
+        part.prev_named_sibling()
+    })
+    .filter(|part| part.kind() == "local_variable_declaration")
+    .find(|declaration| {
+        children(*declaration).any(|part| {
+            part.kind() == "variable_declarator" && java.field(part, "name") == Some(name)
+        })
+    })
+    .and_then(|declaration| java.field(declaration, "type"))
 }
 
 fn scoped_type(java: &Java<'_>, ty: &str) -> bool {
