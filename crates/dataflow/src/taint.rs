@@ -231,25 +231,26 @@ pub fn check_with_summaries(spec: &TaintSpec, cfg: &Cfg<Stmt>, summaries: Option
         let mut facts = preds.iter().fold(TaintFacts::bottom(), |acc, &p| acc.join(&out_facts[p]));
         for (index, stmt) in node.stmts.iter().enumerate() {
             if let Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, .. } = stmt {
-                // Every matching sink is checked, not just the first — a
-                // rule authoring two sink entries for the same call name
-                // (e.g. one general, one position-restricted) would
-                // otherwise silently only enforce the first one.
-                for sink in spec.sinks.iter().filter(|s| s.call.matches(name)) {
-                    let candidates: Vec<(usize, &String)> = args.iter().enumerate().collect();
-                    let dangerous = candidates.into_iter().filter(|(idx, _)| sink.tainted_arg_positions.as_ref().is_none_or(|positions| positions.contains(idx)));
-                    for (_, arg) in dangerous {
-                        let var = arg.trim_start_matches('&');
-                        if is_tainted(&facts, var) {
-                            hits.push(TaintHit { sink_call: name.clone(), tainted_arg: var.to_string(), node: node_id, source_line: node.statement_line(index) });
-                        }
-                    }
-                }
+                hits.extend(sink_arguments(spec, name, args, &facts).map(|var| TaintHit {
+                    sink_call: name.clone(),
+                    tainted_arg: var.to_owned(),
+                    node: node_id,
+                    source_line: node.statement_line(index),
+                }));
             }
             facts = apply(spec, &facts, stmt, summaries);
         }
     }
     hits
+}
+
+fn sink_arguments<'a>(spec: &'a TaintSpec, name: &'a str, args: &'a [String], facts: &'a TaintFacts) -> impl Iterator<Item = &'a str> {
+    spec.sinks.iter().filter(move |sink| sink.call.matches(name)).flat_map(move |sink| {
+        args.iter().enumerate()
+            .filter(move |(index, _)| sink.tainted_arg_positions.as_ref().is_none_or(|positions| positions.contains(index)))
+            .map(|(_, arg)| arg.trim_start_matches('&'))
+            .filter(move |arg| is_tainted(facts, arg))
+    })
 }
 
 #[cfg(test)]

@@ -3,6 +3,9 @@ use autoreview_schema::AgentFinding;
 use tree_sitter::Node;
 
 use super::{append_function_findings, ComplexityThresholds, FunctionMetrics, MakeFinding};
+use crate::analyzers::rust_review::syntax::is_test_item;
+
+mod god_module;
 
 pub(super) fn findings(
     path: &str,
@@ -16,37 +19,55 @@ pub(super) fn findings(
     };
 
     let mut findings = Vec::new();
-    let mut nodes = vec![tree.root_node()];
-    while let Some(node) = nodes.pop() {
+    let mut nodes = vec![(tree.root_node(), false)];
+    while let Some((node, in_tests)) = nodes.pop() {
+        let in_tests = in_tests || node.kind() == "mod_item" && is_test_item(node, content);
         let mut cursor = node.walk();
         let start = nodes.len();
-        nodes.extend(node.named_children(&mut cursor));
+        nodes.extend(
+            node.named_children(&mut cursor)
+                .map(|child| (child, in_tests)),
+        );
         nodes[start..].reverse();
-        match node.kind() {
-            "function_item" if !node.has_error() => {
-                if let Some(body) = node.child_by_field_name("body") {
-                    append_function_findings(
-                        &mut findings,
-                        path,
-                        measure_function(node, body),
-                        thresholds,
-                        make_finding,
-                    );
-                }
-            }
-            "trait_item" if !node.has_error() => {
-                append_trait_finding(
-                    &mut findings,
+        if !in_tests {
+            let limit = thresholds.rust_god_module;
+            findings.extend(god_module::finding(
+                path,
+                content,
+                node,
+                limit,
+                make_finding,
+            ));
+        }
+        append_item_findings(&mut findings, path, node, thresholds, make_finding);
+    }
+    findings
+}
+
+fn append_item_findings(
+    findings: &mut Vec<AgentFinding>,
+    path: &str,
+    node: Node<'_>,
+    limits: &ComplexityThresholds,
+    make_finding: &MakeFinding<'_>,
+) {
+    match node.kind() {
+        "function_item" if !node.has_error() => {
+            if let Some(body) = node.child_by_field_name("body") {
+                append_function_findings(
+                    findings,
                     path,
-                    node,
-                    thresholds.complex_interface,
+                    measure_function(node, body),
+                    limits,
                     make_finding,
                 );
             }
-            _ => {}
         }
+        "trait_item" if !node.has_error() => {
+            append_trait_finding(findings, path, node, limits.complex_interface, make_finding)
+        }
+        _ => {}
     }
-    findings
 }
 
 fn append_trait_finding(

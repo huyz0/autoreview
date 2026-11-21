@@ -26,7 +26,13 @@ deep tier.
   satisfying an `error` interface.
 - **Complexity metrics** with YAML-configurable thresholds. Java and Rust use
   syntax trees to measure function length, parameters, nesting, branches, and
-  explicit returns. Rust also checks the number of required items in traits.
+  explicit returns. Rust also checks required trait items and oversized
+  modules. The module rule looks for more than 20 direct declarations and
+  at least 300 lines of code in a source file or inline module. Nested
+  modules and test-only items are measured separately or excluded.
+  Rust feature envy reports an inherent method that uses at least three
+  distinct fields of one typed parameter and accesses at least two fewer
+  members on its own receiver.
 - **Cross-file structure**: import-cycle detection (Go, Java, Kotlin),
   ArchUnit-style layer rules from `.autoreview/architecture.yaml`, symbol-index-backed
   smells like feature envy and data clumps. Cargo metadata resolves direct

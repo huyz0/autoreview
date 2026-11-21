@@ -1,4 +1,5 @@
 mod basics;
+mod design;
 mod mocking;
 mod panics;
 mod sql;
@@ -40,6 +41,7 @@ fn rules() -> impl Iterator<Item = &'static RustReviewRule> {
         .chain(sql::RULES)
         .chain(mocking::RULES)
         .chain(panics::RULES)
+        .chain(design::RULES)
         .copied()
 }
 
@@ -132,6 +134,7 @@ fn analyze_file(path: &str, text: &str) -> Vec<AgentFinding> {
         sql::check(&mut review, node);
         mocking::check(&mut review, node);
         panics::check(&mut review, node);
+        design::check(&mut review, node);
     }
     review.findings
 }

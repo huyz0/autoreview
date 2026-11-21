@@ -1,0 +1,12 @@
+id: rust-god-module
+language: Rust
+category: design
+severity: warning
+kind: threshold
+metric: rust-god-module
+threshold: 20
+semantic: true
+message: An oversized Rust module with many declarations may serve several responsibilities.
+metadata:
+  references:
+    - https://doc.rust-lang.org/reference/items/modules.html

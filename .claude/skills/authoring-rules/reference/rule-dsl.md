@@ -153,7 +153,7 @@ Metrics already wired up (pick one of these — a new metric name needs a new
 implementation in `complexity.rs`, not just a YAML file, so don't invent
 one): `cyclomatic-complexity`, `cognitive-complexity`, `deep-nesting`,
 `long-method`, `long-parameter-list`, `too-many-returns`, `large-switch`,
-`god-class`, `complex-interface`, `data-class-min-accessors`,
+`god-class`, `rust-god-module`, `complex-interface`, `data-class-min-accessors`,
 `utility-class-min-static-methods`.
 
 ## `kind: call-sequence`

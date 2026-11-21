@@ -97,20 +97,7 @@ pub fn resolve_complexity_thresholds_with_provenance(registered_packs: &[Resolve
         if let Some(pack_id) = &rule.pack_id {
             pack_ids_by_metric.insert(rule.metric.clone(), pack_id.clone());
         }
-        match rule.metric.as_str() {
-            "cyclomatic-complexity" => thresholds.cyclomatic_complexity = rule.threshold,
-            "too-many-returns" => thresholds.too_many_returns = rule.threshold,
-            "cognitive-complexity" => thresholds.cognitive_complexity = rule.threshold,
-            "long-method" => thresholds.long_method = rule.threshold,
-            "long-parameter-list" => thresholds.long_parameter_list = rule.threshold,
-            "deep-nesting" => thresholds.deep_nesting = rule.threshold,
-            "god-class" => thresholds.god_class = rule.threshold,
-            "large-switch" => thresholds.large_switch = rule.threshold,
-            "complex-interface" => thresholds.complex_interface = rule.threshold,
-            "data-class-min-accessors" => thresholds.data_class_min_accessors = rule.threshold,
-            "utility-class-min-static-methods" => thresholds.utility_class_min_static_methods = rule.threshold,
-            _ => {}
-        }
+        thresholds.set_metric(&rule.metric, rule.threshold);
     }
     (thresholds, pack_ids_by_metric)
 }

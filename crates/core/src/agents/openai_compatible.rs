@@ -27,7 +27,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use super::claude_code::{truncate, AgentBackend, InvokeRequest, InvokeResult};
-use super::local_llm::parse_chat_completion_response;
+use super::local_llm::{models_endpoint_available, parse_chat_completion_response};
 use crate::auth::curl_config::CurlAuthConfig;
 
 /// Bounds how long a single hosted-API call is allowed to hang before
@@ -106,11 +106,9 @@ pub fn openai_compatible_available(base_url: &str, api_key: &str, curl_binary: &
     }
     let Ok(auth_config) = CurlAuthConfig::bearer(api_key) else { return false };
     let config_path = auth_config.path().display().to_string();
-    Command::new(curl_binary)
-        .args(["-sS", "-f", "-o", "/dev/null", "--max-time", "5", "--config", &config_path, &format!("{}/models", base_url.trim_end_matches('/'))])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let mut command = Command::new(curl_binary);
+    command.args(["--config", &config_path]);
+    models_endpoint_available(&mut command, base_url, "5")
 }
 
 fn run_curl_with_status(args: &[&str]) -> anyhow::Result<(u32, String)> {
