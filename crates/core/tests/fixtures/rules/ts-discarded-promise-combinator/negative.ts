@@ -1,11 +1,12 @@
-async function refresh(tasks) {
-  await Promise.all(tasks);
-  Promise.any(tasks).catch(reportError);
-  const pending = Promise.allSettled(tasks);
-  await pending;
-  return Promise.race(tasks);
+function handleFailures(jobs: Promise<number>[], onError: (error: unknown) => void) {
+  Promise.any(jobs).catch(onError);
 }
-function start(tasks) {
-  void Promise.all(tasks);
-  queue.all(tasks);
+
+async function collect(jobs: Promise<number>[]) {
+  const results = await Promise.allSettled(jobs);
+  return [results, await Promise.all(jobs)];
+}
+
+function first(jobs: Promise<number>[]) {
+  return Promise.race(jobs);
 }

@@ -1,3 +1,3 @@
-async function refresh(tasks) {
+async function refresh(tasks: Promise<void>[]) {
   Promise.all(tasks);
 }
