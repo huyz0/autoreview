@@ -31,40 +31,7 @@ enum Commands {
     /// Check that required tools (git, claude, ast-grep, analyzers) are available
     Doctor,
     /// Review the diff between two refs (default: origin/main...HEAD)
-    Diff {
-        #[arg(long, default_value = "origin/main")]
-        base: String,
-        #[arg(long, default_value = "HEAD")]
-        head: String,
-        #[arg(long)]
-        tier: Option<String>,
-        #[arg(long)]
-        aspects: Option<String>,
-        #[arg(long = "max-usd")]
-        max_usd: Option<f64>,
-        /// Suppress findings whose fingerprint was already reported in the most recent prior run on this repo
-        #[arg(long)]
-        incremental: bool,
-        /// Run deterministic analyzers only, without calling model backends
-        #[arg(long)]
-        static_only: bool,
-        /// Limit deterministic findings to changed lines or related locations on changed lines
-        #[arg(long)]
-        changed_lines: bool,
-        /// Use the local RustSec database to audit changed Cargo.lock files
-        #[arg(long)]
-        audit_rust_deps: bool,
-        /// Which agent backend drives specialists: claude-code (default), pi, local-llm, or openai-compatible
-        #[arg(long)]
-        backend: Option<String>,
-        /// Re-run automatically whenever base...head changes (e.g. a new
-        /// commit lands on head) instead of running once and exiting
-        #[arg(long)]
-        watch: bool,
-        /// Seconds between change checks in --watch mode
-        #[arg(long, default_value_t = 3)]
-        watch_interval: u64,
-    },
+    Diff(DiffArgs),
     /// Apply a finding's suggested patch, gated by a `git apply --check` sanity check
     Apply { finding_id: String },
     /// Show why a finding fired: its recorded source, and (for a
@@ -77,26 +44,7 @@ enum Commands {
     /// still count as a confirmed true positive for rule-precision
     /// purposes, but --doesnt-apply does NOT count as evidence the rule
     /// itself is wrong the way --fp does.
-    Feedback {
-        id: String,
-        #[arg(long)]
-        fp: bool,
-        #[arg(long)]
-        tp: bool,
-        /// The rule is valid in general but doesn't apply to this specific case
-        #[arg(long)]
-        doesnt_apply: bool,
-        /// The finding is real; the author accepts the risk and won't fix it
-        #[arg(long)]
-        accepted_risk: bool,
-        /// The finding is real and will be fixed in a separate follow-up PR
-        #[arg(long)]
-        fix_in_followup: bool,
-        #[arg(long)]
-        missed: Option<String>,
-        #[arg(long)]
-        note: Option<String>,
-    },
+    Feedback(FeedbackArgs),
     /// Manage the learned-rule factory: mine candidates from findings/PR
     /// comments/code, review/approve into shadow mode, bench against
     /// history, and the automatic shadow -> promoted lifecycle diff.rs runs
@@ -128,6 +76,64 @@ enum Commands {
         #[command(subcommand)]
         action: AuthAction,
     },
+}
+
+#[derive(clap::Args)]
+struct DiffArgs {
+    #[arg(long, default_value = "origin/main")]
+    base: String,
+    #[arg(long, default_value = "HEAD")]
+    head: String,
+    #[arg(long)]
+    tier: Option<String>,
+    #[arg(long)]
+    aspects: Option<String>,
+    #[arg(long = "max-usd")]
+    max_usd: Option<f64>,
+    /// Suppress findings whose fingerprint was already reported in the most recent prior run on this repo
+    #[arg(long)]
+    incremental: bool,
+    /// Run deterministic analyzers only, without calling model backends
+    #[arg(long)]
+    static_only: bool,
+    /// Limit deterministic findings to changed lines or related locations on changed lines
+    #[arg(long)]
+    changed_lines: bool,
+    /// Use the local RustSec database to audit changed Cargo.lock files
+    #[arg(long)]
+    audit_rust_deps: bool,
+    /// Which agent backend drives specialists: claude-code (default), pi, local-llm, or openai-compatible
+    #[arg(long)]
+    backend: Option<String>,
+    /// Re-run automatically whenever base...head changes (e.g. a new
+    /// commit lands on head) instead of running once and exiting
+    #[arg(long)]
+    watch: bool,
+    /// Seconds between change checks in --watch mode
+    #[arg(long, default_value_t = 3)]
+    watch_interval: u64,
+}
+
+#[derive(clap::Args)]
+struct FeedbackArgs {
+    id: String,
+    #[arg(long)]
+    fp: bool,
+    #[arg(long)]
+    tp: bool,
+    /// The rule is valid in general but doesn't apply to this specific case
+    #[arg(long)]
+    doesnt_apply: bool,
+    /// The finding is real; the author accepts the risk and won't fix it
+    #[arg(long)]
+    accepted_risk: bool,
+    /// The finding is real and will be fixed in a separate follow-up PR
+    #[arg(long)]
+    fix_in_followup: bool,
+    #[arg(long)]
+    missed: Option<String>,
+    #[arg(long)]
+    note: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -340,116 +346,127 @@ fn parse_backend(s: &str) -> Option<AgentBackendKind> {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let cwd = std::env::current_dir()?;
-    let repo_root = commands::revision::repository_root(&cwd).unwrap_or(cwd);
-
+    let repo = commands::revision::repository_root(&cwd).unwrap_or(cwd);
     match cli.command {
-        Commands::Doctor => {
-            run_doctor(&repo_root);
-        }
-        Commands::Diff { base, head, tier, aspects, max_usd, incremental, static_only, changed_lines, audit_rust_deps, backend, watch, watch_interval } => {
-            let tier = tier.as_deref().map(|value| parse_tier(value).ok_or_else(|| anyhow::anyhow!("invalid tier '{value}'"))).transpose()?;
-            let backend = backend.as_deref().map(|value| parse_backend(value).ok_or_else(|| anyhow::anyhow!("invalid backend '{value}'"))).transpose()?;
-            anyhow::ensure!(max_usd.is_none_or(|limit| limit.is_finite() && limit >= 0.0), "--max-usd must be a finite, nonnegative amount");
-            run_diff_or_watch(
-                DiffCommandOptions {
-                    repo_root,
-                    base_ref: base,
-                    head_ref: head,
-                    tier,
-                    aspects: aspects.map(|a| a.split(',').map(|s| s.trim().to_string()).collect()),
-                    max_usd,
-                    incremental,
-                    static_only,
-                    changed_lines,
-                    audit_rust_deps,
-                    backend,
-                },
-                watch,
-                watch_interval,
-            )?;
-        }
-        Commands::Apply { finding_id } => run_apply(&repo_root, &finding_id)?,
-        Commands::Explain { finding_id } => run_explain(&repo_root, &finding_id)?,
-        Commands::Feedback { id, fp, tp, doesnt_apply, accepted_risk, fix_in_followup, missed, note } => {
-            let flags = [fp, tp, doesnt_apply, accepted_risk, fix_in_followup, missed.is_some()];
-            if flags.iter().filter(|f| **f).count() > 1 {
-                eprintln!("error: specify only one of --fp, --tp, --doesnt-apply, --accepted-risk, --fix-in-followup, or --missed <description>");
-                std::process::exit(1);
-            }
-            if let Some(description) = missed {
-                run_missed_report(&repo_root, &id, &description)?;
-            } else if fp {
-                run_feedback(&repo_root, &id, autoreview_schema::FeedbackVerdict::FalsePositive, note.as_deref())?;
-            } else if tp {
-                run_feedback(&repo_root, &id, autoreview_schema::FeedbackVerdict::TruePositive, note.as_deref())?;
-            } else if doesnt_apply {
-                run_feedback(&repo_root, &id, autoreview_schema::FeedbackVerdict::DoesntApply, note.as_deref())?;
-            } else if accepted_risk {
-                run_feedback(&repo_root, &id, autoreview_schema::FeedbackVerdict::AcceptedRisk, note.as_deref())?;
-            } else if fix_in_followup {
-                run_feedback(&repo_root, &id, autoreview_schema::FeedbackVerdict::FixInFollowup, note.as_deref())?;
-            } else {
-                eprintln!("error: specify one of --fp, --tp, --doesnt-apply, --accepted-risk, --fix-in-followup, or --missed <description>");
-                std::process::exit(1);
-            }
-        }
-        Commands::Rules { action } => match action {
-            RulesAction::Mine { from_comments, from_code, from_bugfix_commits, from_suppressions, from_bitbucket_comments, from_linter_config, from_llm_patterns } => {
-                if [from_comments, from_code, from_bugfix_commits, from_suppressions, from_bitbucket_comments, from_linter_config, from_llm_patterns].iter().filter(|f| **f).count() > 1 {
-                    eprintln!(
-                        "error: --from-comments, --from-code, --from-bugfix-commits, --from-suppressions, --from-bitbucket-comments, --from-linter-config, and --from-llm-patterns are mutually exclusive"
-                    );
-                    std::process::exit(1);
-                } else if from_comments {
-                    run_rules_mine_comments(&repo_root)?
-                } else if from_code {
-                    run_rules_mine_code(&repo_root)?
-                } else if from_bugfix_commits {
-                    run_rules_mine_bugfix_commits(&repo_root)?
-                } else if from_suppressions {
-                    run_rules_mine_suppressions(&repo_root)?
-                } else if from_bitbucket_comments {
-                    run_rules_mine_bitbucket_comments(&repo_root)?
-                } else if from_linter_config {
-                    run_rules_mine_linter_config(&repo_root)?
-                } else if from_llm_patterns {
-                    run_rules_mine_llm_patterns(&repo_root)?
-                } else {
-                    run_rules_mine(&repo_root)?
-                }
-            }
-            RulesAction::Draft { finding_id, fixed, proposal } => commands::rule_draft::run(&repo_root, &finding_id, fixed.as_deref(), proposal.as_deref())?,
-            RulesAction::Bench { cluster_id } => run_rules_bench(&repo_root, &cluster_id)?,
-            RulesAction::Replay { suite } => commands::replay::run_replay(&repo_root, &suite)?,
-            RulesAction::Gate { base, head } => commands::replay::run_gate(&repo_root, &base, &head)?,
-            RulesAction::Review { approve, reject, reason } => run_rules_review(&repo_root, approve, reject, reason)?,
-            RulesAction::ShadowLog { rule_id } => run_rules_shadow_log(&repo_root, &rule_id)?,
-            RulesAction::Rollback { rule_id } => run_rules_rollback(&repo_root, &rule_id)?,
-            RulesAction::Packs { action: None } => run_rules_packs(&repo_root)?,
-            RulesAction::Packs { action: Some(PacksAction::Add { source }) } => run_rules_packs_add(&repo_root, &source)?,
-            RulesAction::Packs { action: Some(PacksAction::Validate { path }) } => run_rules_packs_validate(std::path::Path::new(&path))?,
-            RulesAction::Packs { action: Some(PacksAction::Refresh) } => run_rules_packs_refresh(&repo_root)?,
-        },
-        Commands::Skills { action } => match action {
-            SkillsAction::List => run_skills_list(&repo_root)?,
-            SkillsAction::Mine => run_skills_mine(&repo_root)?,
-            SkillsAction::Bench { aspect, proposal_id } => run_skills_bench(&repo_root, &aspect, &proposal_id)?,
-            SkillsAction::Review { approve, reject, reason } => run_skills_review(&repo_root, approve, reject, reason)?,
-            SkillsAction::Rollback { aspect, version } => run_skills_rollback(&repo_root, &aspect, &version)?,
-        },
-        Commands::History { action } => match action {
-            HistoryAction::Sync => run_history_sync(&repo_root)?,
-            HistoryAction::Costs { since } => run_history_costs(&repo_root, since.as_deref())?,
-        },
-        Commands::Spec { action } => match action {
-            SpecAction::Draft { base, head, force } => run_spec_draft(SpecDraftOptions { repo_root, base_ref: base, head_ref: head, force })?,
-        },
-        Commands::Auth { action } => match action {
-            AuthAction::Login { provider, email, token } => run_auth_login(&repo_root, &provider, email, token)?,
-            AuthAction::Status => run_auth_status()?,
-            AuthAction::Logout { provider } => run_auth_logout(&provider)?,
-        },
+        Commands::Doctor => run_doctor(&repo),
+        Commands::Diff(args) => run_review(repo, args)?,
+        Commands::Apply { finding_id } => run_apply(&repo, &finding_id)?,
+        Commands::Explain { finding_id } => run_explain(&repo, &finding_id)?,
+        Commands::Feedback(args) => record_feedback(&repo, args)?,
+        Commands::Rules { action } => run_rules(&repo, action)?,
+        Commands::Skills { action } => run_skills(&repo, action)?,
+        Commands::History { action } => run_history(&repo, action)?,
+        Commands::Spec { action } => run_spec(&repo, action)?,
+        Commands::Auth { action } => run_auth(&repo, action)?,
     }
+    Ok(())
+}
 
+fn run_review(repo: std::path::PathBuf, args: DiffArgs) -> anyhow::Result<()> {
+    let tier = args.tier.as_deref().map(|value| parse_tier(value).ok_or_else(|| anyhow::anyhow!("invalid tier '{value}'"))).transpose()?;
+    let backend = args.backend.as_deref().map(|value| parse_backend(value).ok_or_else(|| anyhow::anyhow!("invalid backend '{value}'"))).transpose()?;
+    anyhow::ensure!(args.max_usd.is_none_or(|limit| limit.is_finite() && limit >= 0.0), "--max-usd must be a finite, nonnegative amount");
+    run_diff_or_watch(DiffCommandOptions {
+        repo_root: repo, base_ref: args.base, head_ref: args.head, tier,
+        aspects: args.aspects.map(|value| value.split(',').map(|item| item.trim().to_string()).collect()),
+        max_usd: args.max_usd, incremental: args.incremental, static_only: args.static_only,
+        changed_lines: args.changed_lines, audit_rust_deps: args.audit_rust_deps, backend,
+    }, args.watch, args.watch_interval)
+}
+
+fn record_feedback(repo: &std::path::Path, args: FeedbackArgs) -> anyhow::Result<()> {
+    use autoreview_schema::FeedbackVerdict::*;
+    let flags = [
+        (args.fp, FalsePositive), (args.tp, TruePositive), (args.doesnt_apply, DoesntApply),
+        (args.accepted_risk, AcceptedRisk), (args.fix_in_followup, FixInFollowup),
+    ];
+    let mut selected = flags.into_iter().filter_map(|(active, verdict)| active.then_some(verdict));
+    let verdict = selected.next();
+    if selected.next().is_some() || verdict.is_some() && args.missed.is_some() {
+        eprintln!("error: specify only one of --fp, --tp, --doesnt-apply, --accepted-risk, --fix-in-followup, or --missed <description>");
+        std::process::exit(1);
+    }
+    if let Some(description) = args.missed {
+        return run_missed_report(repo, &args.id, &description);
+    }
+    let Some(verdict) = verdict else {
+        eprintln!("error: specify one of --fp, --tp, --doesnt-apply, --accepted-risk, --fix-in-followup, or --missed <description>");
+        std::process::exit(1);
+    };
+    run_feedback(repo, &args.id, verdict, args.note.as_deref())
+}
+
+type MineSource = fn(&std::path::Path) -> anyhow::Result<()>;
+
+fn run_mining(repo: &std::path::Path, sources: &[(bool, MineSource)]) -> anyhow::Result<()> {
+    let mut selected = sources.iter().filter_map(|&(enabled, run)| enabled.then_some(run));
+    let run = selected.next().unwrap_or(run_rules_mine);
+    if selected.next().is_some() {
+        eprintln!("error: --from-comments, --from-code, --from-bugfix-commits, --from-suppressions, --from-bitbucket-comments, --from-linter-config, and --from-llm-patterns are mutually exclusive");
+        std::process::exit(1);
+    }
+    run(repo)
+}
+
+fn run_rules(repo: &std::path::Path, action: RulesAction) -> anyhow::Result<()> {
+    match action {
+        RulesAction::Mine { from_comments, from_code, from_bugfix_commits, from_suppressions, from_bitbucket_comments, from_linter_config, from_llm_patterns } =>
+            run_mining(repo, &[(from_comments, run_rules_mine_comments), (from_code, run_rules_mine_code),
+                (from_bugfix_commits, run_rules_mine_bugfix_commits), (from_suppressions, run_rules_mine_suppressions),
+                (from_bitbucket_comments, run_rules_mine_bitbucket_comments), (from_linter_config, run_rules_mine_linter_config),
+                (from_llm_patterns, run_rules_mine_llm_patterns)])?,
+        RulesAction::Draft { finding_id, fixed, proposal } => commands::rule_draft::run(repo, &finding_id, fixed.as_deref(), proposal.as_deref())?,
+        RulesAction::Bench { cluster_id } => run_rules_bench(repo, &cluster_id)?,
+        RulesAction::Replay { suite } => commands::replay::run_replay(repo, &suite)?,
+        RulesAction::Gate { base, head } => commands::replay::run_gate(repo, &base, &head)?,
+        RulesAction::Review { approve, reject, reason } => run_rules_review(repo, approve, reject, reason)?,
+        RulesAction::ShadowLog { rule_id } => run_rules_shadow_log(repo, &rule_id)?,
+        RulesAction::Rollback { rule_id } => run_rules_rollback(repo, &rule_id)?,
+        RulesAction::Packs { action } => run_packs(repo, action)?,
+    }
+    Ok(())
+}
+
+fn run_packs(repo: &std::path::Path, action: Option<PacksAction>) -> anyhow::Result<()> {
+    match action {
+        None => run_rules_packs(repo),
+        Some(PacksAction::Add { source }) => run_rules_packs_add(repo, &source),
+        Some(PacksAction::Validate { path }) => run_rules_packs_validate(std::path::Path::new(&path)),
+        Some(PacksAction::Refresh) => run_rules_packs_refresh(repo),
+    }
+}
+
+fn run_skills(repo: &std::path::Path, action: SkillsAction) -> anyhow::Result<()> {
+    match action {
+        SkillsAction::List => run_skills_list(repo)?,
+        SkillsAction::Mine => run_skills_mine(repo)?,
+        SkillsAction::Bench { aspect, proposal_id } => run_skills_bench(repo, &aspect, &proposal_id)?,
+        SkillsAction::Review { approve, reject, reason } => run_skills_review(repo, approve, reject, reason)?,
+        SkillsAction::Rollback { aspect, version } => run_skills_rollback(repo, &aspect, &version)?,
+    }
+    Ok(())
+}
+
+fn run_history(repo: &std::path::Path, action: HistoryAction) -> anyhow::Result<()> {
+    match action {
+        HistoryAction::Sync => run_history_sync(repo)?,
+        HistoryAction::Costs { since } => run_history_costs(repo, since.as_deref())?,
+    }
+    Ok(())
+}
+
+fn run_spec(repo: &std::path::Path, action: SpecAction) -> anyhow::Result<()> {
+    match action {
+        SpecAction::Draft { base, head, force } => run_spec_draft(SpecDraftOptions { repo_root: repo.to_path_buf(), base_ref: base, head_ref: head, force })?,
+    }
+    Ok(())
+}
+
+fn run_auth(repo: &std::path::Path, action: AuthAction) -> anyhow::Result<()> {
+    match action {
+        AuthAction::Login { provider, email, token } => run_auth_login(repo, &provider, email, token)?,
+        AuthAction::Status => run_auth_status()?,
+        AuthAction::Logout { provider } => run_auth_logout(&provider)?,
+    }
     Ok(())
 }

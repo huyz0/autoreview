@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 
@@ -14,87 +15,240 @@ pub(super) struct ReviewInput<'a> {
     pub tier4_go: bool,
 }
 
-pub(super) fn collect(input: ReviewInput<'_>, changed_files: &[String], registered_packs: &[ResolvedRulePack]) -> (Vec<AgentFinding>, Vec<String>) {
-    let ReviewInput { repo_root, source_root, files, aspects, audit_rust_deps, tier4_go } = input;
-    let wants = |category: &str| aspects.is_none_or(|aspects| aspects.iter().any(|aspect| aspect == category));
-    let languages_present = autoreview_langsupport::languages_present(changed_files.iter().map(String::as_str));
-    let mut stage1_agent_findings = Vec::new();
-    let mut analyzer_warnings = Vec::new();
-    let mut warn = |message: String| {
-        println!("  [warn] {message}");
-        analyzer_warnings.push(message);
-    };
-    let available = |binary: &str| Command::new(binary).arg("--version").output().is_ok_and(|output| output.status.success());
-    if !languages_present.is_empty() && !available("ast-grep") {
-        warn("ast-grep is unavailable. Pattern rules were skipped.".to_string());
+impl ReviewInput<'_> {
+    fn wants(&self, category: &str) -> bool {
+        self.aspects
+            .is_none_or(|aspects| aspects.iter().any(|aspect| aspect == category))
     }
-    if languages_present.contains(&Language::Go) && !available("golangci-lint") {
-        warn("golangci-lint is unavailable. Go linter checks were skipped.".to_string());
+}
+
+pub(super) fn collect(
+    input: ReviewInput<'_>,
+    changed_files: &[String],
+    packs: &[ResolvedRulePack],
+) -> (Vec<AgentFinding>, Vec<String>) {
+    let languages =
+        autoreview_langsupport::languages_present(changed_files.iter().map(String::as_str));
+    let mut warnings = Vec::new();
+    let mut findings = lint(
+        input.source_root,
+        changed_files,
+        packs,
+        &languages,
+        &mut warnings,
+    );
+    if input.audit_rust_deps && input.wants("security") {
+        findings.extend(audit_dependencies(
+            input.source_root,
+            changed_files,
+            &mut warnings,
+        ));
     }
-    match run_ast_grep(source_root, changed_files, registered_packs) {
-        Ok(findings) => stage1_agent_findings.extend(findings),
-        Err(err) => warn(format!("ast-grep run failed: {err}")),
+    findings.extend(structural(
+        input.source_root,
+        changed_files,
+        packs,
+        &languages,
+        input.wants("design"),
+    ));
+    findings.extend(check_layers(
+        input.repo_root,
+        input.source_root,
+        changed_files,
+        &mut warnings,
+    ));
+    findings.extend(cross_file(&input, changed_files, packs));
+    (findings, warnings)
+}
+
+fn record_warning(warnings: &mut Vec<String>, message: String) {
+    println!("  [warn] {message}");
+    warnings.push(message);
+}
+
+fn binary_available(binary: &str) -> bool {
+    Command::new(binary)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn lint(
+    root: &Path,
+    files: &[String],
+    packs: &[ResolvedRulePack],
+    languages: &HashSet<Language>,
+    warnings: &mut Vec<String>,
+) -> Vec<AgentFinding> {
+    if !languages.is_empty() && !binary_available("ast-grep") {
+        record_warning(
+            warnings,
+            "ast-grep is unavailable. Pattern rules were skipped.".into(),
+        );
     }
-    match run_golangci_lint(source_root, changed_files) {
-        Ok(findings) => stage1_agent_findings.extend(findings),
-        Err(err) => warn(format!("golangci-lint run failed: {err}")),
+    if languages.contains(&Language::Go) && !binary_available("golangci-lint") {
+        record_warning(
+            warnings,
+            "golangci-lint is unavailable. Go linter checks were skipped.".into(),
+        );
     }
-    match autoreview_core::run_clippy(source_root, changed_files) {
-        Ok(findings) => stage1_agent_findings.extend(findings),
-        Err(err) => warn(format!("clippy run failed: {err}")),
-    }
-    stage1_agent_findings.extend(autoreview_core::run_rust_review(source_root, changed_files));
-    if audit_rust_deps && wants("security") {
-        for path in changed_files.iter().filter(|path| Path::new(path).file_name().is_some_and(|name| name == "Cargo.lock")) {
-            match autoreview_core::run_cargo_audit(source_root, path) {
-                Ok(findings) => stage1_agent_findings.extend(findings),
-                Err(err) => warn(format!("cargo audit failed for {path}: {err:#}")),
-            }
+    let results = [
+        ("ast-grep", run_ast_grep(root, files, packs)),
+        ("golangci-lint", run_golangci_lint(root, files)),
+        ("clippy", autoreview_core::run_clippy(root, files)),
+    ];
+    let mut findings = Vec::new();
+    for (tool, result) in results {
+        match result {
+            Ok(items) => findings.extend(items),
+            Err(err) => record_warning(warnings, format!("{tool} run failed: {err}")),
         }
     }
+    findings.extend(autoreview_core::run_rust_review(root, files));
+    findings
+}
+
+fn audit_dependencies(
+    root: &Path,
+    paths: &[String],
+    warnings: &mut Vec<String>,
+) -> Vec<AgentFinding> {
+    let mut findings = Vec::new();
+    for path in paths.iter().filter(|path| {
+        Path::new(path)
+            .file_name()
+            .is_some_and(|name| name == "Cargo.lock")
+    }) {
+        match autoreview_core::run_cargo_audit(root, path) {
+            Ok(items) => findings.extend(items),
+            Err(err) => record_warning(warnings, format!("cargo audit failed for {path}: {err:#}")),
+        }
+    }
+    findings
+}
+
+fn structural(
+    source_root: &Path,
+    changed_files: &[String],
+    registered_packs: &[ResolvedRulePack],
+    languages_present: &HashSet<Language>,
+    design: bool,
+) -> Vec<AgentFinding> {
+    let mut findings = Vec::new();
     // Duplication detection is deliberately NOT gated by language here: its
     // sliding-window line-hash algorithm is language-agnostic and already
     // fires on non-source text files (.sql/.proto/.md/etc) — gating it to
     // the tracked source-language set would silently drop that coverage,
     // a behavior change, not a speed win.
-    stage1_agent_findings.extend(autoreview_core::run_duplication_check(source_root, changed_files));
-    stage1_agent_findings.extend(autoreview_core::run_cross_file_duplication_check(source_root, changed_files));
-    const STRUCTURAL: &[Language] = &[Language::Go, Language::Java, Language::Kotlin, Language::TypeScript, Language::Tsx, Language::JavaScript];
-    let has_structural_language = STRUCTURAL.iter().any(|language| languages_present.contains(language));
-    if (has_structural_language || languages_present.contains(&Language::Rust))
-        && wants("design")
-    {
-        stage1_agent_findings.extend(autoreview_core::run_complexity_check(source_root, changed_files, registered_packs));
+    findings.extend(autoreview_core::run_duplication_check(
+        source_root,
+        changed_files,
+    ));
+    findings.extend(autoreview_core::run_cross_file_duplication_check(
+        source_root,
+        changed_files,
+    ));
+    const STRUCTURAL: &[Language] = &[
+        Language::Go,
+        Language::Java,
+        Language::Kotlin,
+        Language::TypeScript,
+        Language::Tsx,
+        Language::JavaScript,
+    ];
+    let has_structural_language = STRUCTURAL
+        .iter()
+        .any(|language| languages_present.contains(language));
+    if (has_structural_language || languages_present.contains(&Language::Rust)) && design {
+        findings.extend(autoreview_core::run_complexity_check(
+            source_root,
+            changed_files,
+            registered_packs,
+        ));
     }
     if has_structural_language {
-        stage1_agent_findings.extend(autoreview_core::run_practices_check(source_root, changed_files));
+        findings.extend(autoreview_core::run_practices_check(
+            source_root,
+            changed_files,
+        ));
     }
-    // Architecture layer check is opt-in: only runs when the repo has a
-    // .autoreview/architecture.yaml declaring layers, per the plan ("no sane
-    // generic default for what a repo's layers are").
-    let architecture = match autoreview_core::load_architecture_config(&repo_root.join(".autoreview").join("architecture.yaml")) {
+    findings
+}
+
+fn check_layers(
+    repo_root: &Path,
+    source_root: &Path,
+    changed_files: &[String],
+    warnings: &mut Vec<String>,
+) -> Vec<AgentFinding> {
+    let mut findings = Vec::new();
+    let architecture = match autoreview_core::load_architecture_config(
+        &repo_root.join(".autoreview").join("architecture.yaml"),
+    ) {
         Ok(config) => config,
         Err(err) => {
-            warn(format!("failed to parse .autoreview/architecture.yaml: {err}"));
+            record_warning(
+                warnings,
+                format!("failed to parse .autoreview/architecture.yaml: {err}"),
+            );
             None
         }
     };
     if let Some(architecture) = architecture.as_ref() {
-        stage1_agent_findings.extend(autoreview_core::run_architecture_check(source_root, changed_files, architecture));
+        findings.extend(autoreview_core::run_architecture_check(
+            source_root,
+            changed_files,
+            architecture,
+        ));
     }
-    let cargo_review = autoreview_core::run_cargo_review(source_root, changed_files, architecture.as_ref());
-    stage1_agent_findings.extend(cargo_review.findings);
+    let cargo_review =
+        autoreview_core::run_cargo_review(source_root, changed_files, architecture.as_ref());
+    findings.extend(cargo_review.findings);
     for warning in cargo_review.warnings {
-        warn(format!("Cargo review: {warning}"));
+        record_warning(warnings, format!("Cargo review: {warning}"));
     }
+    findings
+}
+
+fn cross_file(
+    input: &ReviewInput<'_>,
+    changed_files: &[String],
+    registered_packs: &[ResolvedRulePack],
+) -> Vec<AgentFinding> {
+    let ReviewInput {
+        repo_root,
+        source_root,
+        files,
+        tier4_go,
+        ..
+    } = *input;
+    let mut findings = Vec::new();
     // archgraph (Tier 2): whole-repo import-cycle detection (Go and
     // Java/Kotlin, each its own graph), a no-op for a repo/diff with
     // neither a go.mod nor any .go/.java/.kt files touched.
-    stage1_agent_findings.extend(autoreview_core::run_archgraph_check(source_root, changed_files));
-    stage1_agent_findings.extend(autoreview_core::run_symindex_check_with_tier4(source_root, changed_files, tier4_go));
-    stage1_agent_findings.extend(autoreview_core::run_dataflow_check_for_snapshot(repo_root, source_root, changed_files, registered_packs));
-    stage1_agent_findings.extend(autoreview_core::detect_shotgun_surgery(files));
-    stage1_agent_findings.extend(autoreview_core::run_divergent_change_check(source_root, changed_files));
-    stage1_agent_findings.extend(autoreview_core::run_bidi_control_character_check(source_root, changed_files));
-    (stage1_agent_findings, analyzer_warnings)
+    findings.extend(autoreview_core::run_archgraph_check(
+        source_root,
+        changed_files,
+    ));
+    findings.extend(autoreview_core::run_symindex_check_with_tier4(
+        source_root,
+        changed_files,
+        tier4_go,
+    ));
+    findings.extend(autoreview_core::run_dataflow_check_for_snapshot(
+        repo_root,
+        source_root,
+        changed_files,
+        registered_packs,
+    ));
+    findings.extend(autoreview_core::detect_shotgun_surgery(files));
+    findings.extend(autoreview_core::run_divergent_change_check(
+        source_root,
+        changed_files,
+    ));
+    findings.extend(autoreview_core::run_bidi_control_character_check(
+        source_root,
+        changed_files,
+    ));
+    findings
 }

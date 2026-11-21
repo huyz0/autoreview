@@ -169,19 +169,25 @@ fn sample_repo_files(repo_root: &Path, extension: &str) -> Vec<PathBuf> {
         let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
-            let Ok(kind) = entry.file_type() else { continue };
-            let path = entry.path();
-            if kind.is_dir() && !path.file_name().and_then(|n| n.to_str()).is_some_and(|n| SKIP_DIRS.contains(&n)) {
-                stack.push(path);
-            } else if kind.is_file() && path.extension().and_then(|e| e.to_str()) == Some(extension) {
+            if let Some(path) = sample_file(entry, extension, &mut stack) {
                 found.push(path);
-                if found.len() >= FP_SAMPLE_CAP {
-                    return found;
-                }
+            }
+            if found.len() == FP_SAMPLE_CAP {
+                return found;
             }
         }
     }
     found
+}
+
+fn sample_file(entry: std::fs::DirEntry, extension: &str, directories: &mut Vec<PathBuf>) -> Option<PathBuf> {
+    let kind = entry.file_type().ok()?;
+    let path = entry.path();
+    if kind.is_dir() && !entry.file_name().to_str().is_some_and(|name| SKIP_DIRS.contains(&name)) {
+        directories.push(path);
+        return None;
+    }
+    (kind.is_file() && path.extension().and_then(|value| value.to_str()) == Some(extension)).then_some(path)
 }
 
 /// Runs bench for one candidate cluster. `repo_root` is the repo whose

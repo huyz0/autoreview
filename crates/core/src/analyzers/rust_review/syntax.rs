@@ -2,6 +2,10 @@ use std::collections::{HashMap, HashSet};
 
 use tree_sitter::Node;
 
+mod bindings;
+mod indexing;
+use bindings::visible_local;
+
 pub(in crate::analyzers) fn children(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor)
@@ -42,11 +46,20 @@ pub(super) fn is_execution_boundary(node: Node<'_>) -> bool {
     )
 }
 
-pub(super) fn attributes(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
+pub(in crate::analyzers) fn attributes(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
     std::iter::successors(node.prev_named_sibling(), |prev| prev.prev_named_sibling())
         .take_while(|prev| prev.kind() == "attribute_item" || is_comment(*prev))
         .filter(|prev| prev.kind() == "attribute_item")
         .filter_map(|item| children(item).find(|child| child.kind() == "attribute"))
+}
+
+pub(in crate::analyzers) fn is_test_item(node: Node<'_>, text: &str) -> bool {
+    attributes(node).any(|attribute| {
+        let name: String = text[attribute.byte_range()].split_whitespace().collect();
+        matches!(name.as_str(), "cfg(test)" | "test" | "tokio::test" | "async_std::test")
+            || name.starts_with("tokio::test(")
+            || name.starts_with("async_std::test(")
+    })
 }
 
 pub(super) fn arguments(call: Node<'_>) -> impl Iterator<Item = Node<'_>> {
@@ -147,144 +160,8 @@ impl<'tree, 'text> Source<'tree, 'text> {
         &self.input[node.byte_range()]
     }
 
-    fn path(&self, node: Node<'_>) -> Option<Path> {
-        match node.kind() {
-            "generic_function" => self.path(node.child_by_field_name("function")?),
-            "generic_type" => self.path(node.child_by_field_name("type")?),
-            "scoped_identifier" | "scoped_type_identifier" => {
-                let name = node.child_by_field_name("name")?;
-                let mut path = match node.child_by_field_name("path") {
-                    Some(prefix) => self.path(prefix)?,
-                    None => Path {
-                        absolute: true,
-                        parts: Vec::new(),
-                    },
-                };
-                path.parts.push(identifier(self.text(name)).to_owned());
-                Some(path)
-            }
-            "identifier" | "type_identifier" | "crate" | "self" | "super" => Some(Path {
-                absolute: false,
-                parts: vec![identifier(self.text(node)).to_owned()],
-            }),
-            _ => None,
-        }
-    }
-
-    fn index_scope(&self, node: Node<'tree>) -> Scope<'tree> {
-        let mut scope = Scope::default();
-        for child in children(node) {
-            match child.kind() {
-                "use_declaration" => {
-                    if let Some(argument) = child.child_by_field_name("argument") {
-                        let conditional = attributes(child).any(|attr| {
-                            children(attr)
-                                .next()
-                                .is_some_and(|name| matches!(self.text(name), "cfg" | "cfg_attr"))
-                        });
-                        self.index_import(argument, Path::empty(), conditional, &mut scope);
-                    }
-                }
-                "let_declaration" => {
-                    if let Some(pattern) = child.child_by_field_name("pattern") {
-                        for value in
-                            descendants(pattern).filter(|value| value.kind() == "identifier")
-                        {
-                            scope
-                                .locals
-                                .entry(identifier(self.text(value)).to_owned())
-                                .or_default()
-                                .push(child);
-                        }
-                    }
-                }
-                "function_item"
-                | "struct_item"
-                | "enum_item"
-                | "type_item"
-                | "mod_item"
-                | "trait_item"
-                | "union_item"
-                | "const_item"
-                | "static_item"
-                | "macro_definition"
-                | "extern_crate_declaration" => {
-                    if matches!(child.kind(), "extern_crate_declaration" | "mod_item")
-                        && attributes(child).any(|attr| {
-                            children(attr)
-                                .next()
-                                .is_some_and(|name| self.text(name) == "macro_use")
-                        })
-                    {
-                        scope.opaque_macros = true;
-                    }
-                    if let Some(name) = child
-                        .child_by_field_name("alias")
-                        .or_else(|| child.child_by_field_name("name"))
-                    {
-                        scope.items.insert(identifier(self.text(name)).to_owned());
-                    }
-                }
-                _ => {}
-            }
-        }
-        scope
-    }
-
-    fn index_import(
-        &self,
-        node: Node<'_>,
-        mut prefix: Path,
-        conditional: bool,
-        scope: &mut Scope<'tree>,
-    ) {
-        match node.kind() {
-            "use_list" => {
-                for child in children(node) {
-                    self.index_import(child, prefix.clone(), conditional, scope);
-                }
-            }
-            "scoped_use_list" => {
-                if let Some(path) = node
-                    .child_by_field_name("path")
-                    .and_then(|path| self.path(path))
-                {
-                    prefix = prefix.join(path);
-                } else {
-                    prefix.absolute = true;
-                }
-                if let Some(list) = node.child_by_field_name("list") {
-                    self.index_import(list, prefix, conditional, scope);
-                }
-            }
-            "use_wildcard" => scope.glob = true,
-            _ => {
-                let (leaf, alias) = if node.kind() == "use_as_clause" {
-                    (
-                        node.child_by_field_name("path"),
-                        node.child_by_field_name("alias"),
-                    )
-                } else {
-                    (Some(node), None)
-                };
-                let Some(path) = leaf.and_then(|leaf| self.path(leaf)) else {
-                    return;
-                };
-                if path.parts != ["self"] || prefix.parts.is_empty() {
-                    prefix = prefix.join(path);
-                }
-                let name = alias
-                    .map(|alias| identifier(self.text(alias)).to_owned())
-                    .or_else(|| prefix.parts.last().cloned());
-                if let Some(name) = name {
-                    scope
-                        .imports
-                        .entry(name)
-                        .and_modify(|present| *present = None)
-                        .or_insert_with(|| (!conditional).then_some(prefix));
-                }
-            }
-        }
+    pub(super) fn is_test_item(&self, node: Node<'_>) -> bool {
+        is_test_item(node, self.input)
     }
 
     pub(super) fn external_path(&self, node: Node<'tree>) -> Option<String> {
@@ -399,131 +276,6 @@ impl<'tree, 'text> Source<'tree, 'text> {
         false
     }
 
-    pub(super) fn local_binding(&self, name: Node<'tree>) -> Option<Node<'tree>> {
-        self.declaration(name)
-            .filter(|binding| binding.kind() == "let_declaration")
-    }
-
-    pub(super) fn declaration(&self, name: Node<'tree>) -> Option<Node<'tree>> {
-        if name.kind() != "identifier" {
-            return None;
-        }
-        let text = identifier(self.text(name));
-        for scope_node in ancestors(name) {
-            if let Some(scope) = self.scopes.get(&scope_node.id()) {
-                if let Some(binding) = visible_local(scope, text, name) {
-                    return binding
-                        .child_by_field_name("pattern")
-                        .filter(|pattern| pattern.kind() == "identifier")
-                        .map(|_| binding);
-                }
-            }
-            if scope_node.kind() == "function_item" {
-                return scope_node
-                    .child_by_field_name("parameters")
-                    .into_iter()
-                    .flat_map(children)
-                    .find(|param| {
-                        param.child_by_field_name("pattern").is_some_and(|pattern| {
-                            pattern.kind() == "identifier" && identifier(self.text(pattern)) == text
-                        })
-                    });
-            }
-            if self.binds_in_context(scope_node, name, text)
-                || is_execution_boundary(scope_node)
-                || is_module_boundary(scope_node)
-            {
-                return None;
-            }
-        }
-        None
-    }
-
-    pub(super) fn references_iteration_binding(
-        &self,
-        node: Node<'tree>,
-        iteration: Node<'tree>,
-    ) -> bool {
-        if node.kind() != "identifier" {
-            return false;
-        }
-        let name = identifier(self.text(node));
-        for scope_node in ancestors(node) {
-            if scope_node == iteration {
-                return scope_node
-                    .child_by_field_name("pattern")
-                    .is_some_and(|pattern| {
-                        pattern.kind() == "identifier" && identifier(self.text(pattern)) == name
-                    });
-            }
-            if self
-                .scopes
-                .get(&scope_node.id())
-                .is_some_and(|scope| visible_local(scope, name, node).is_some())
-                || self.binds_in_context(scope_node, node, name)
-                || is_execution_boundary(scope_node)
-                || is_module_boundary(scope_node)
-            {
-                return false;
-            }
-        }
-        false
-    }
-
-    fn binds_in_context(&self, scope: Node<'tree>, anchor: Node<'tree>, name: &str) -> bool {
-        let matches = |pattern| {
-            descendants(pattern)
-                .any(|part| part.kind() == "identifier" && identifier(self.text(part)) == name)
-        };
-        match scope.kind() {
-            "function_item" | "closure_expression" => scope
-                .child_by_field_name("parameters")
-                .is_some_and(|params| {
-                    children(params)
-                        .any(|param| matches(param.child_by_field_name("pattern").unwrap_or(param)))
-                }),
-            "for_expression" => {
-                scope
-                    .child_by_field_name("body")
-                    .is_some_and(|body| contains(body, anchor))
-                    && scope.child_by_field_name("pattern").is_some_and(matches)
-            }
-            "match_arm" => scope.child_by_field_name("pattern").is_some_and(matches),
-            "if_expression" | "while_expression" => {
-                let in_body = ["consequence", "body"]
-                    .into_iter()
-                    .find_map(|field| scope.child_by_field_name(field))
-                    .is_some_and(|body| contains(body, anchor));
-                scope
-                    .child_by_field_name("condition")
-                    .is_some_and(|condition| {
-                        (in_body || contains(condition, anchor))
-                            && descendants(condition)
-                                .filter(|part| {
-                                    part.kind() == "let_condition"
-                                        && part.end_byte() <= anchor.start_byte()
-                                })
-                                .filter_map(|part| part.child_by_field_name("pattern"))
-                                .any(matches)
-                    })
-            }
-            _ => false,
-        }
-    }
-}
-
-fn contains(outer: Node<'_>, inner: Node<'_>) -> bool {
-    outer.start_byte() <= inner.start_byte() && inner.end_byte() <= outer.end_byte()
-}
-
-fn visible_local<'tree>(scope: &Scope<'tree>, name: &str, before: Node<'_>) -> Option<Node<'tree>> {
-    scope
-        .locals
-        .get(name)?
-        .iter()
-        .rev()
-        .copied()
-        .find(|binding| binding.end_byte() <= before.start_byte())
 }
 
 fn identifier(name: &str) -> &str {

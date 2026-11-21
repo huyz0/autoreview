@@ -1,98 +1,17 @@
 //! Threshold checks use syntax-tree ranges for Java and Rust and line-based metrics elsewhere.
 
 mod java;
+mod lexical;
+mod limits;
 mod rust;
 
 use std::collections::HashMap;
 
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
-const DEFAULT_MAX_METHOD_LINES: usize = 80;
-const DEFAULT_MAX_PARAMS: usize = 5;
-const DEFAULT_MAX_NESTING: usize = 4;
-const DEFAULT_MAX_CLASS_MEMBERS: usize = 20;
-/// Fowler's Switch Statements smell doesn't give a specific arm count, so
-/// this follows the same style as the other thresholds here: conservative
-/// enough that a legitimately large, unavoidable dispatch (a state machine,
-/// a protocol opcode table) doesn't get flagged constantly, while still
-/// catching the "this should probably be polymorphism/a lookup table"
-/// cases the smell is about.
-const DEFAULT_MAX_SWITCH_CASES: usize = 8;
-/// A class needs at least this many trivial-accessor-shaped methods before
-/// Data Class is even considered — a 1- or 2-method match (e.g. a real
-/// class that happens to have one getter) is too common to be meaningful.
-const MIN_DATA_CLASS_ACCESSORS: usize = 3;
-/// A class needs at least this many static methods before Utility Class
-/// is worth flagging — a single static helper on an otherwise-instantiable
-/// class is normal and not what this smell is about.
-const MIN_UTILITY_CLASS_STATIC_METHODS: usize = 2;
-/// Cyclomatic complexity = decision points + 1. This counts only
-/// control-block openings (if/for/while/switch/catch/case, already
-/// detected by `opens_control_block`/case-line scanning elsewhere in this
-/// file) as decision points — deliberately not `&&`/`||`/`?:`, which would
-/// need real expression parsing to count without false positives from
-/// string literals or comments containing those characters. This
-/// under-counts true cyclomatic complexity somewhat, the same conservative
-/// direction as this file's other line-scan-based heuristics.
-const DEFAULT_MAX_CYCLOMATIC_COMPLEXITY: usize = 10;
-/// A method with many return points is often doing too much conditional
-/// branching to be followed easily — same threshold family as the other
-/// metrics here (Checkstyle/detekt's own ReturnCount default is also
-/// single digits).
-const DEFAULT_MAX_RETURNS: usize = 4;
-/// detekt's CognitiveComplexMethod default (not on-by-default upstream,
-/// but this is the threshold it documents) — cognitive complexity grows
-/// faster than cyclomatic complexity for nested code, so its threshold is
-/// noticeably higher than `DEFAULT_MAX_CYCLOMATIC_COMPLEXITY`.
-const DEFAULT_MAX_COGNITIVE_COMPLEXITY: usize = 15;
-/// detekt's ComplexInterface default.
-const MAX_INTERFACE_MEMBERS: usize = 10;
-
-/// Every bare `metric > threshold` (or `>=`, for the two accessor/method
-/// -count floors below) comparison in this file, YAML-configurable via
-/// `kind: threshold` rules (see
-/// `crates/core/src/analyzers/threshold_rules.rs`). `data_class_min_accessors`
-/// and `utility_class_min_static_methods` sit inside more struct-shaped
-/// logic (trivial-accessor ratios, static/constructor detection) than a
-/// bare comparison, but the numeric limit itself is still a single value
-/// each check reads once — the surrounding boolean gates (`is_java`,
-/// `all_methods_static`, ...) stay hardcoded Rust logic regardless, the
-/// same way `god_class`/`complex_interface`'s own surrounding `SpanKind`
-/// matching already does. `Default` reproduces today's hardcoded behavior
-/// exactly, so `detect_complexity_in_file` (used by dozens of existing
-/// unit tests) keeps working unchanged.
-#[derive(Debug, Clone, Copy)]
-pub struct ComplexityThresholds {
-    pub cyclomatic_complexity: usize,
-    pub too_many_returns: usize,
-    pub cognitive_complexity: usize,
-    pub long_method: usize,
-    pub long_parameter_list: usize,
-    pub deep_nesting: usize,
-    pub god_class: usize,
-    pub large_switch: usize,
-    pub complex_interface: usize,
-    pub data_class_min_accessors: usize,
-    pub utility_class_min_static_methods: usize,
-}
-
-impl Default for ComplexityThresholds {
-    fn default() -> Self {
-        ComplexityThresholds {
-            cyclomatic_complexity: DEFAULT_MAX_CYCLOMATIC_COMPLEXITY,
-            too_many_returns: DEFAULT_MAX_RETURNS,
-            cognitive_complexity: DEFAULT_MAX_COGNITIVE_COMPLEXITY,
-            long_method: DEFAULT_MAX_METHOD_LINES,
-            long_parameter_list: DEFAULT_MAX_PARAMS,
-            deep_nesting: DEFAULT_MAX_NESTING,
-            god_class: DEFAULT_MAX_CLASS_MEMBERS,
-            large_switch: DEFAULT_MAX_SWITCH_CASES,
-            complex_interface: MAX_INTERFACE_MEMBERS,
-            data_class_min_accessors: MIN_DATA_CLASS_ACCESSORS,
-            utility_class_min_static_methods: MIN_UTILITY_CLASS_STATIC_METHODS,
-        }
-    }
-}
+pub use limits::ComplexityThresholds;
+pub(crate) use lexical::{function_name, opens_function};
+use lexical::{count_params, is_abstract_member_signature, opens_class, opens_control_block, opens_interface};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComplexityLanguage {
@@ -112,88 +31,6 @@ pub fn language_for_file(path: &str) -> Option<ComplexityLanguage> {
     }
 }
 
-const CONTROL_KEYWORDS: &[&str] = &["if", "for", "while", "switch", "select", "catch", "else"];
-
-/// Heuristic: does this line open a function/method body? Requires a
-/// parenthesized parameter list followed by an opening brace on the same
-/// line (the common "brace on same line as signature" style in all three
-/// languages), and excludes lines that are actually control-flow statements
-/// or type declarations that happen to also end in `) {` or `{`.
-pub(crate) fn opens_function(trimmed: &str) -> Option<&str> {
-    if !trimmed.ends_with('{') {
-        return None;
-    }
-    let before_brace = trimmed[..trimmed.len() - 1].trim_end();
-    if let Some(close_paren) = before_brace.rfind(')') {
-        if let Some(open_paren) = before_brace[..close_paren].rfind('(') {
-            let head = before_brace[..open_paren].trim();
-            let first_word = head.split_whitespace().next().unwrap_or("");
-            if !CONTROL_KEYWORDS.contains(&first_word) && !head.is_empty() {
-                return Some(&before_brace[open_paren + 1..close_paren]);
-            }
-        }
-    }
-    opens_unparenthesized_arrow(before_brace)
-}
-
-/// JS/TS's single-parameter arrow function skips the parens entirely
-/// (`x => {` / `async x => {`), which the paren-based check above can't
-/// see at all — no `(`/`)` appears on the line. `=>` can't appear in this
-/// position in Go/Java/Kotlin (Kotlin's own lambda arrow is `->`, a
-/// different token), so this fallback is safe to run unconditionally
-/// rather than gating it behind a language check.
-fn opens_unparenthesized_arrow(before_brace: &str) -> Option<&str> {
-    let before_arrow = before_brace.strip_suffix("=>")?.trim_end();
-    // The param is whatever identifier-shaped token sits immediately
-    // before `=>` — deliberately not requiring the *whole* line up to
-    // this point to be just that identifier, since a real line is often
-    // `items.map(x => {` (a chained call, not a bare assignment). `=>`
-    // is unique to arrow-function syntax in JS/TS, so a trailing
-    // `<ident> => {` is unambiguously an arrow function opening
-    // regardless of what precedes it.
-    let ident_start = before_arrow.rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).map(|i| i + 1).unwrap_or(0);
-    let param = &before_arrow[ident_start..];
-    let starts_like_identifier = param.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$');
-    starts_like_identifier.then_some(param)
-}
-
-/// Extracts a method's name from its declaration line (the same shape
-/// `opens_function` already validated) — the last identifier before the
-/// parameter list, e.g. `"public String getName()"` -> `"getName"`. Used
-/// for identifying named functions in line-based checks.
-pub(crate) fn function_name(trimmed: &str) -> Option<&str> {
-    if !trimmed.ends_with('{') {
-        return None;
-    }
-    let before_brace = trimmed[..trimmed.len() - 1].trim_end();
-    let close_paren = before_brace.rfind(')')?;
-    let open_paren = before_brace[..close_paren].rfind('(')?;
-    let head = before_brace[..open_paren].trim();
-    head.split_whitespace().next_back()
-}
-
-fn opens_class(trimmed: &str) -> bool {
-    let words: Vec<&str> = trimmed.split_whitespace().collect();
-    trimmed.ends_with('{') && words.contains(&"class")
-}
-
-fn opens_interface(trimmed: &str) -> bool {
-    let words: Vec<&str> = trimmed.split_whitespace().collect();
-    trimmed.ends_with('{') && words.contains(&"interface")
-}
-
-/// Heuristic: does this line look like an abstract method signature inside
-/// an interface body (no braces, just `name(...);`)? Distinct from
-/// `opens_function`, which requires a same-line opening brace — interface
-/// members are usually just a signature ending in `;`.
-fn is_abstract_member_signature(trimmed: &str) -> bool {
-    if !trimmed.ends_with(';') || trimmed.starts_with("//") || trimmed.starts_with('@') {
-        return false;
-    }
-    let Some(open_paren) = trimmed.find('(') else { return false };
-    trimmed[..open_paren].trim().chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_')
-}
-
 fn java_has_modifier(node: tree_sitter::Node<'_>, modifier: &str) -> bool {
     let mut cursor = node.walk();
     let Some(modifiers) = node.named_children(&mut cursor).find(|child| child.kind() == "modifiers") else { return false };
@@ -202,34 +39,6 @@ fn java_has_modifier(node: tree_sitter::Node<'_>, modifier: &str) -> bool {
     present
 }
 
-fn opens_control_block(trimmed: &str) -> bool {
-    if !trimmed.ends_with('{') {
-        return false;
-    }
-    let first_word = trimmed.split_whitespace().next().unwrap_or("");
-    CONTROL_KEYWORDS.contains(&first_word) || trimmed.starts_with("} else")
-}
-
-/// Counts top-level (bracket/paren/angle-depth-0) commas in a parameter
-/// list — so `foo(a []int, b map[string]int)` counts 2 params, not more,
-/// despite the internal commas a naive split would trip on.
-fn count_params(param_list: &str) -> usize {
-    let trimmed = param_list.trim();
-    if trimmed.is_empty() {
-        return 0;
-    }
-    let mut depth = 0i32;
-    let mut count = 1usize;
-    for c in trimmed.chars() {
-        match c {
-            '(' | '[' | '<' | '{' => depth += 1,
-            ')' | ']' | '>' | '}' => depth -= 1,
-            ',' if depth == 0 => count += 1,
-            _ => {}
-        }
-    }
-    count
-}
 
 struct OpenSpan {
     start_line: usize,

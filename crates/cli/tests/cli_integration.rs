@@ -110,6 +110,49 @@ fn report_path_from_stdout(stdout: &str) -> PathBuf {
 }
 
 #[test]
+fn rust_structural_rules_surface_and_replay_at_exact_commits() {
+    let path = "src/checkout.rs";
+    let clean = "struct Cart { base: i32, tax: i32, fee: i32 }\nstruct Checkout;\n";
+    let repo = init_repo(&[(path, clean)]);
+    let base = current_commit(repo.path());
+    let mut oversized = String::from(clean);
+    oversized.push_str("impl Checkout {\n    fn total(&self, cart: &Cart) -> i32 {\n        cart.base + cart.tax + cart.fee\n    }\n}\n");
+    for index in 0..21 {
+        oversized.push_str(&format!("fn step_{index}() {{\n"));
+        for value in 0..14 {
+            oversized.push_str(&format!("    let _ = {index} + {value};\n"));
+        }
+        oversized.push_str("}\n");
+    }
+    repo.commit(&[(path, &oversized)], "add a large checkout module");
+    let bad = current_commit(repo.path());
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["diff", "--base", &base, "--head", &bad, "--static-only", "--changed-lines", "--aspects", "design"])
+        .assert().success();
+    let report_path = report_path_from_stdout(&String::from_utf8_lossy(&result.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report_path).unwrap()).unwrap();
+    repo.commit(&[(path, clean)], "restore small checkout module");
+    let fixed = current_commit(repo.path());
+    let mut cases = Vec::new();
+    for (id, tool) in [("rust-god-module", "autoreview-complexity"), ("rust-feature-envy", "autoreview-rust")] {
+        let finding = report["findings"].as_array().unwrap().iter()
+            .find(|finding| finding["source"]["ruleId"] == id).expect(id);
+        cases.push(serde_json::json!({
+            "name": id, "rule": {"id": id, "tool": tool},
+            "before": {"commit": bad, "path": path, "lines": [finding["location"]["range"]["startLine"]]},
+            "after": {"commit": fixed, "path": path, "lines": []},
+        }));
+        Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+            .args(["explain", finding["id"].as_str().unwrap()])
+            .assert().success().stdout(predicate::str::contains(id));
+    }
+    let suite = repo.path().join("replay.yml");
+    std::fs::write(&suite, serde_json::json!({"cases": cases}).to_string()).unwrap();
+    Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["rules", "replay", "--suite"])
+        .arg(suite).assert().success().stdout(predicate::str::contains("\"falsePositives\": 0"));
+}
+
+#[test]
 fn finding_draft_replays_commits_and_only_persists_a_matching_rule() {
     if !ast_grep_available() {
         return;
