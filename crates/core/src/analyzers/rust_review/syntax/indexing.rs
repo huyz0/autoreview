@@ -105,19 +105,22 @@ impl<'tree, 'text> Source<'tree, 'text> {
                     self.index_import(child, prefix.clone(), conditional, scope);
                 }
             }
-            "scoped_use_list" => self.index_scoped_import(node, prefix, conditional, scope),
+            "scoped_use_list" => {
+                if let Some((list, prefix)) = self.scoped_import(node, prefix) {
+                    self.index_import(list, prefix, conditional, scope);
+                }
+            }
             "use_wildcard" => scope.glob = true,
             _ => self.index_import_leaf(node, prefix, conditional, scope),
         }
     }
 
-    fn index_scoped_import(
+    fn scoped_import<'node>(
         &self,
-        node: Node<'_>,
+        node: Node<'node>,
         mut prefix: Path,
-        conditional: bool,
-        scope: &mut Scope<'tree>,
-    ) {
+    ) -> Option<(Node<'node>, Path)> {
+        let list = node.child_by_field_name("list")?;
         if let Some(path) = node
             .child_by_field_name("path")
             .and_then(|path| self.path(path))
@@ -126,9 +129,7 @@ impl<'tree, 'text> Source<'tree, 'text> {
         } else {
             prefix.absolute = true;
         }
-        if let Some(list) = node.child_by_field_name("list") {
-            self.index_import(list, prefix, conditional, scope);
-        }
+        Some((list, prefix))
     }
 
     fn index_import_leaf(

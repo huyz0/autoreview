@@ -12,7 +12,7 @@
 //! intentional capability difference from the agentic backends, not an
 //! oversight. `allowed_tools`/`max_turns` on the request are ignored.
 
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use serde::Deserialize;
@@ -128,10 +128,11 @@ impl AgentBackend for LocalLlmBackend {
 /// same-port-different-service false positive can't slip through again.
 pub fn local_llm_available(base_url: &str, curl_binary: &str) -> bool {
     Command::new(curl_binary)
-        .args(["-sS", "-f", "-o", "/dev/null", "--max-time", "2", &format!("{}/models", base_url.trim_end_matches('/'))])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .args(["-sS", "-f", "--max-time", "2", &format!("{}/models", base_url.trim_end_matches('/'))])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 #[cfg(test)]
@@ -180,6 +181,15 @@ mod tests {
     /// 404, exactly reproducing that shape.
     #[test]
     fn local_llm_available_is_false_against_a_server_that_only_returns_404() {
+        assert!(!probe_models(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"));
+    }
+
+    #[test]
+    fn local_llm_available_accepts_a_successful_response_with_a_body() {
+        assert!(probe_models(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"data\":[]}"));
+    }
+
+    fn probe_models(response: &'static [u8]) -> bool {
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
@@ -189,12 +199,12 @@ mod tests {
             if let Ok((mut stream, _)) = listener.accept() {
                 let mut buf = [0u8; 512];
                 let _ = stream.read(&mut buf);
-                let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                let _ = stream.write_all(response);
             }
         });
 
         let available = local_llm_available(&format!("http://127.0.0.1:{port}"), "curl");
         handle.join().unwrap();
-        assert!(!available, "a 404-only server must not be reported as an available local-LLM backend");
+        available
     }
 }
