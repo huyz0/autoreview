@@ -129,6 +129,7 @@ packs:
 
 `autoreview rules replay` reads this YAML file from the working checkout.
 Each case labels one rule in one complete file before and after a fix.
+Use `tool: autoreview-frameworks` for the Go cancellation and Java framework rules.
 Use `tool: autoreview-rust` for the scoped Rust analyzer and `tool: ast-grep`
 for Rust rules written as YAML patterns.
 List the start line of every expected finding in that file. `lines: []`

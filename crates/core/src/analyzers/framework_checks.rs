@@ -1,0 +1,119 @@
+mod go_cancel;
+mod java;
+
+use std::path::Path;
+
+use autoreview_schema::{
+    AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side,
+};
+use tree_sitter::{Node, Parser, Tree};
+
+use super::ast_grep::RuleDefinition;
+
+fn rules() -> [&'static Rule; 3] {
+    [&go_cancel::RULE, &java::SPRING_RULE, &java::HIBERNATE_RULE]
+}
+
+pub(super) fn semantic_ids() -> impl Iterator<Item = String> {
+    rules().into_iter().map(|rule| rule.id.to_owned())
+}
+
+pub(super) fn definition(id: &str) -> Option<RuleDefinition> {
+    let rule = rules().into_iter().find(|rule| rule.id == id)?;
+    let metadata = serde_json::json!({
+        "id": rule.id, "kind": "framework", "category": rule.category, "semantic": true,
+        "message": rule.message, "references": [rule.reference],
+    });
+    Some(RuleDefinition {
+        id: rule.id.into(),
+        source_label: "builtin".into(),
+        kind: "framework".into(),
+        category: rule.category.into(),
+        semantic: true,
+        yaml: serde_yaml::to_string(&metadata).ok()?,
+    })
+}
+
+pub fn run_framework_checks(root: &Path, changed: &[String]) -> Vec<AgentFinding> {
+    let mut findings = go_cancel::run(root, changed);
+    findings.extend(java::run(root, changed));
+    findings
+}
+
+struct Rule {
+    id: &'static str,
+    category: &'static str,
+    title: &'static str,
+    message: &'static str,
+    reference: &'static str,
+}
+
+impl Rule {
+    fn finding(&self, anchor: Location, related: Vec<Location>) -> AgentFinding {
+        AgentFinding {
+            source: FindingSource {
+                kind: FindingSourceKind::Analyzer,
+                tool: "autoreview-frameworks".into(),
+                rule_id: Some(self.id.into()),
+                aspect: None,
+                backend: None,
+            },
+            category: self.category.into(),
+            severity: Severity::Medium,
+            confidence: 0.8,
+            title: self.title.into(),
+            message: self.message.into(),
+            location: anchor,
+            related_locations: (!related.is_empty()).then_some(related),
+            suggestion: None,
+            tags: None,
+            meta: Some(std::collections::HashMap::from([(
+                "references".into(),
+                serde_json::json!([self.reference]),
+            )])),
+            suggested_patch: None,
+        }
+    }
+}
+
+fn location(path: &str, node: Node<'_>, source: &str) -> Location {
+    Location {
+        path: path.into(),
+        range: LocationRange {
+            start_line: node.start_position().row as u32 + 1,
+            end_line: Some(node.end_position().row as u32 + 1),
+            ..Default::default()
+        },
+        snippet: text(node, source).lines().next().unwrap_or("").into(),
+        side: Side::New,
+    }
+}
+
+fn text<'s>(node: Node<'_>, source: &'s str) -> &'s str {
+    node.utf8_text(source.as_bytes()).unwrap_or("")
+}
+
+fn parse_source(parser: &mut Parser, path: &Path) -> Option<(String, Tree)> {
+    let source = std::fs::read_to_string(path).ok()?;
+    let tree = parser.parse(&source, None)?;
+    (!tree.root_node().has_error()).then_some((source, tree))
+}
+
+fn children(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
+fn descendants(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
+    let mut stack = vec![node];
+    std::iter::from_fn(move || {
+        let node = stack.pop()?;
+        let mut cursor = node.walk();
+        let start = stack.len();
+        stack.extend(node.named_children(&mut cursor));
+        stack[start..].reverse();
+        Some(node)
+    })
+}
