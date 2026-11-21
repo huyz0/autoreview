@@ -1,0 +1,40 @@
+id: go-prometheus-counter-add-negative
+language: Go
+category: correctness
+severity: warning
+message: >-
+  Prometheus counters cannot decrease. A negative Add panics. Use a gauge for a value that can decrease.
+metadata:
+  references:
+    - "https://pkg.go.dev/github.com/prometheus/client_golang/prometheus#Counter"
+rule:
+  all:
+    - kind: call_expression
+    - has:
+        field: function
+        kind: selector_expression
+        has:
+          field: operand
+          pattern: $COUNTER
+        regex: '\.Add$'
+    - has:
+        field: arguments
+        regex: '^\(\s*-\s*[1-9][0-9_]*(\.[0-9_]+)?\s*,?\s*\)$'
+    - inside:
+        stopBy: end
+        kind: function_declaration
+        has:
+          stopBy: neighbor
+          kind: parameter_list
+          has:
+            stopBy: neighbor
+            pattern:
+              context: 'func f($COUNTER prometheus.Counter) {}'
+              selector: parameter_declaration
+    - inside:
+        stopBy: end
+        kind: source_file
+        has:
+          stopBy: end
+          kind: import_spec
+          regex: '^"github\.com/prometheus/client_golang/prometheus"$'

@@ -166,7 +166,9 @@ pub fn build_go_import_graph(repo_root: &Path, module_path: &str) -> ImportGraph
         let Ok(content) = std::fs::read_to_string(file) else { continue };
         let entry = graph.edges.entry(package.clone()).or_default();
         for import in extract_go_imports(&content) {
-            if import.starts_with(module_path) && import != package {
+            let is_internal = import == module_path
+                || import.strip_prefix(module_path).is_some_and(|suffix| suffix.starts_with('/'));
+            if is_internal && import != package {
                 // Go's own symbol granularity ceiling — see ImportGraph's
                 // doc comment: the import path itself is the only "symbol"
                 // recorded, since Go imports a whole package, not an

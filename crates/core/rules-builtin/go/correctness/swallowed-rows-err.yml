@@ -1,0 +1,30 @@
+id: go-swallowed-rows-err
+language: Go
+category: correctness
+severity: warning
+message: >-
+  This assignment discards the error from Rows.Err(). Check and propagate it so the caller can distinguish an iteration failure from a complete result.
+metadata:
+  references:
+    - "https://pkg.go.dev/database/sql#Rows.Err"
+rule:
+  all:
+    - pattern: _ = $ROWS.Err()
+    - inside:
+        stopBy: end
+        kind: function_declaration
+        has:
+          stopBy: neighbor
+          kind: parameter_list
+          has:
+            stopBy: neighbor
+            pattern:
+              context: 'func f($ROWS *sql.Rows) {}'
+              selector: parameter_declaration
+    - inside:
+        stopBy: end
+        kind: source_file
+        has:
+          stopBy: end
+          kind: import_spec
+          regex: '^"database/sql"$'

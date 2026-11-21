@@ -37,6 +37,9 @@ pub struct ArchitectureConfig {
     pub layers: Vec<ArchitectureLayer>,
     #[serde(default)]
     pub rules: Vec<ArchitectureRuleEntry>,
+    /// Maximum direct internal dependencies by exact Go or JVM package name.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub internal_dependency_budgets: std::collections::BTreeMap<String, usize>,
 }
 
 /// The root of `.autoreview/architecture.yaml` — wraps everything under a

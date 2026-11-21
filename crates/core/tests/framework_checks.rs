@@ -19,6 +19,101 @@ fn scan(sources: &[(&str, &str)], changed: &[&str]) -> Vec<autoreview_schema::Ag
 }
 
 #[test]
+fn constructor_dispatch_reports_resolved_overridable_calls() {
+    let source = r#"class Base {
+    Base(String value) {
+        if (value != null) { this.configure(value); }
+        cache();
+        metric();
+        local();
+        Runnable later = () -> configure(value);
+        Runnable listener = new Runnable() {
+            public void run() { configure(value); }
+        };
+        new Base(null).configure(value);
+        overload(value);
+    }
+
+    protected void configure(String value) {}
+    private void local() {}
+    final void cache() {}
+    static void metric() {}
+    void overload(String value) {}
+    void overload(Object value) {}
+}
+final class Closed {
+    Closed() { configure(); }
+    void configure() {}
+}
+class Parent {
+    final void resolve(String key) {}
+}
+class Child extends Parent {
+    Child() { resolve("key"); }
+    void resolve(Object key) {}
+}
+"#;
+    let found = scan(&[("Base.java", source)], &["Base.java"]);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].source.rule_id.as_deref(), Some("java-constructor-calls-overridable-method"));
+    assert_eq!(found[0].location.snippet, "this.configure(value)");
+    assert_eq!(found[0].related_locations.as_ref().unwrap()[0].snippet, "protected void configure(String value) {}");
+}
+
+#[test]
+fn outbound_http_calls_in_handlers_keep_the_parent_context() {
+    let source = r#"package example
+import ctx "context"
+import web "net/http"
+func proxy(w web.ResponseWriter, req *web.Request) {
+    _, _ = web.NewRequest("GET", "https://example.test", nil)
+    _, _ = web.NewRequestWithContext(ctx.Background(), "GET", "https://example.test", nil)
+    _, _ = web.NewRequestWithContext(req.Context(), "GET", "https://example.test", nil)
+    _, _ = web.NewRequestWithContext(ctx.WithoutCancel(req.Context()), "GET", "https://example.test", nil)
+    go func() { _, _ = web.NewRequest("GET", "https://example.test", nil) }()
+}
+func helper() {
+    _, _ = web.NewRequest("GET", "https://example.test", nil)
+}
+"#;
+    let found = scan(&[("proxy.go", source)], &["proxy.go"]);
+    assert_eq!(found.len(), 2, "{found:#?}");
+    for finding in found {
+        assert_eq!(finding.source.rule_id.as_deref(), Some("go-http-handler-discards-request-context"));
+        assert_eq!(finding.related_locations.as_ref().unwrap()[0].snippet, "req");
+    }
+}
+
+#[test]
+fn spring_reports_explicitly_unpaged_get_endpoints_with_known_repositories() {
+    let source = r#"import org.springframework.data.domain.Pageable;
+import org.springframework.data.repository.PagingAndSortingRepository;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController class Endpoint {
+    PagingAndSortingRepository<String, Long> rows;
+    @GetMapping("/all") Object all() {
+        return this.rows.findAll(Pageable.unpaged());
+    }
+    @GetMapping("/page") Object page(Pageable page) {
+        return rows.findAll(page);
+    }
+    @GetMapping("/inventory") Object unrelated(Inventory rows) {
+        return rows.findAll(Pageable.unpaged());
+    }
+    Object batch() {
+        return rows.findAll(Pageable.unpaged());
+    }
+}
+"#;
+    let found = scan(&[("Endpoint.java", source)], &["Endpoint.java"]);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].source.rule_id.as_deref(), Some("java-spring-unpaged-repository-endpoint"));
+    assert_eq!(found[0].location.snippet, "this.rows.findAll(Pageable.unpaged())");
+}
+
+#[test]
 fn open_telemetry_span_ownership_tracks_return_paths() {
     let source = r#"package demo
 import "context"

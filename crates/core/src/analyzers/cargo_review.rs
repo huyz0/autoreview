@@ -580,6 +580,7 @@ mod tests {
                     to: vec!["storage".into()],
                 },
             }],
+            ..ArchitectureConfig::default()
         }
     }
 

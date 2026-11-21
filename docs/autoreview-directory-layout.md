@@ -71,14 +71,15 @@ sections:
 
 ## `architecture.yaml`
 
-Declares named layers (glob patterns over file paths) and `forbid` rules
-between them — e.g. "the `repository` layer may never import from
-`handler`". Checked per changed file's own imports (Go, Java/Kotlin,
-TypeScript/JavaScript) by
-[`analyzers::architecture`](../crates/core/src/analyzers/architecture.rs); a
-direct-import check only, not a transitive one (that's what `archgraph`, Tier
-2's real dependency graph, is for). No file means no layers are declared, so
-nothing is ever flagged.
+Declares named layers and forbidden dependencies between them. Autoreview checks
+direct imports in changed Go, Java, Kotlin, JavaScript, and TypeScript files.
+It also checks transitive package dependencies for Go, Java, and Kotlin.
+
+`internalDependencyBudgets` optionally limits the number of distinct internal
+packages imported directly by a Go, Java, or Kotlin package. Use the exact Go
+import path or JVM package name. Set a budget of zero to disallow direct
+internal dependencies. A finding points to supporting imports in a changed
+file. The budget works independently of layer rules.
 
 For Rust, the same layer globs match workspace member `Cargo.toml` paths.
 Autoreview checks declared direct normal dependencies between those members,
@@ -90,6 +91,9 @@ dependencies.
 
 ```yaml
 architecture:
+  internalDependencyBudgets:
+    example.com/app/handler: 4
+    com.example.handler: 3
   layers:
     - name: handler
       match: ["**/handler/**"]

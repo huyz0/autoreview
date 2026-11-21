@@ -1,0 +1,21 @@
+id: js-discarded-async-assertion
+language: JavaScript
+category: correctness
+severity: warning
+message: >-
+  Jest-style .resolves and .rejects matchers return a promise. Await or return the assertion so the test runner observes its result.
+metadata:
+  references:
+    - "https://jestjs.io/docs/asynchronous#resolves--rejects"
+rule:
+  all:
+    - inside:
+        kind: expression_statement
+    - any:
+        - pattern: expect($INPUT).$MODE.$MATCHER($$$ARGS)
+        - pattern: expect($INPUT).$MODE.not.$MATCHER($$$ARGS)
+constraints:
+  MODE:
+    regex: '^(resolves|rejects)$'
+  MATCHER:
+    regex: '^to[A-Z]'

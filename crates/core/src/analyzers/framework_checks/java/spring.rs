@@ -2,7 +2,7 @@ use autoreview_schema::AgentFinding;
 use tree_sitter::Node;
 
 use super::super::Rule;
-use super::{children, class_members, containing, descendants, Java};
+use super::{arity, arity_of, children, class_members, containing, descendants, Java};
 
 const TX: &str = "org.springframework.transaction.annotation.Transactional";
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
@@ -94,23 +94,6 @@ fn target_annotation<'a>(
         return None;
     }
     Some(annotation)
-}
-
-fn arity(node: Node<'_>, field: &str) -> Option<usize> {
-    let list = node.child_by_field_name(field)?;
-    Some(
-        children(list)
-            .filter(|node| !matches!(node.kind(), "line_comment" | "block_comment"))
-            .count(),
-    )
-}
-
-fn arity_of(method: Node<'_>) -> Option<usize> {
-    let params = method.child_by_field_name("parameters")?;
-    children(params)
-        .all(|node| node.kind() != "spread_parameter")
-        .then(|| arity(method, "parameters"))
-        .flatten()
 }
 
 fn proxyable(method: Node<'_>) -> bool {

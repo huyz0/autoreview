@@ -26,6 +26,8 @@
 
 use std::path::Path;
 
+mod budgets;
+
 use globset::Glob;
 
 use autoreview_schema::{AgentFinding, ArchitectureConfig, ArchitectureLayer, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
@@ -199,16 +201,20 @@ fn check_transitive_violation(graph: &autoreview_archgraph::ImportGraph, own_pac
 /// forbidden on its own (see this module's own doc comment and
 /// `check_transitive_violation`'s).
 pub fn run_architecture_check(repo_root: &Path, changed_files: &[String], config: &ArchitectureConfig) -> Vec<AgentFinding> {
-    if config.layers.is_empty() || config.rules.is_empty() {
-        return Vec::new();
-    }
-
-    let mut findings = Vec::new();
     // Built lazily, at most once each, only if some changed file of that
-    // language actually has a forbidden target to check against — a
-    // repo with no Go layers configured never pays for a Go graph walk.
+    // language has a package budget or a forbidden target.
     let mut go_graph: Option<(String, autoreview_archgraph::ImportGraph)> = None;
     let mut java_kotlin_graph: Option<autoreview_archgraph::ImportGraph> = None;
+    let mut findings = budgets::check(
+        repo_root,
+        changed_files,
+        &config.internal_dependency_budgets,
+        &mut go_graph,
+        &mut java_kotlin_graph,
+    );
+    if config.layers.is_empty() || config.rules.is_empty() {
+        return findings;
+    }
 
     for file in changed_files {
         let Some(language) = language_for_file(file) else { continue };
@@ -306,6 +312,7 @@ mod tests {
                 ArchitectureRuleEntry { forbid: ArchitectureForbidRule { from: "repository".to_string(), to: vec!["handler".to_string(), "service".to_string()] } },
                 ArchitectureRuleEntry { forbid: ArchitectureForbidRule { from: "handler".to_string(), to: vec!["repository".to_string()] } },
             ],
+            ..ArchitectureConfig::default()
         }
     }
 

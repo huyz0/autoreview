@@ -1,4 +1,5 @@
 mod flow;
+mod http;
 mod package;
 mod span;
 
@@ -9,6 +10,7 @@ use autoreview_schema::AgentFinding;
 use tree_sitter::Node;
 
 use super::{location, Rule};
+pub(super) use http::RULE as HTTP_RULE;
 pub(super) use span::RULE as SPAN_RULE;
 
 pub(super) const RULE: Rule = Rule {
@@ -46,6 +48,7 @@ fn package_findings(peers: &[&package::File], paths: &[String]) -> Vec<AgentFind
     for &file in peers {
         if paths.contains(&file.path) {
             findings.extend(span::findings(file));
+            findings.extend(http::findings(file));
         }
         for (binding, exit, used) in package::leaks(file, &helpers) {
             let sources: Vec<_> = helpers.evidence(used).collect();
