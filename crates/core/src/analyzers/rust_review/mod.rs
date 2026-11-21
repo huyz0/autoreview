@@ -43,8 +43,8 @@ fn rules() -> impl Iterator<Item = &'static RustReviewRule> {
         .chain(mocking::RULES)
         .chain(panics::RULES)
         .chain(design::RULES)
+        .chain(test_state::RULES)
         .copied()
-        .chain(std::iter::once(&test_state::RULE))
 }
 
 struct Review<'tree, 'text> {

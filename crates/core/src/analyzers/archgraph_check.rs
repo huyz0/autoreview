@@ -9,6 +9,8 @@
 //! separate package-resolution strategies — see `autoreview_archgraph`'s
 //! own module doc for why) and their findings are simply concatenated.
 
+mod web;
+
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -139,6 +141,7 @@ pub fn run_archgraph_check(repo_root: &Path, changed_files: &[String]) -> Vec<Ag
         findings.extend(report_cycles_touching_changed_files(repo_root, &graph, &changed_java_kotlin_files, |f| java_kotlin_package_for_file(repo_root, f), java_kotlin_imports_with_lines));
     }
 
+    findings.extend(web::run(repo_root, changed_files));
     findings
 }
 

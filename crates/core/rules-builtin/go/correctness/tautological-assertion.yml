@@ -1,0 +1,23 @@
+id: go-tautological-testify-assertion
+language: Go
+category: correctness
+severity: warning
+semantic: true
+message: >-
+  This assertion compares the same variable on both sides. Assert against
+  an independent expected value so the test can detect incorrect behavior.
+rule:
+  all:
+    - pattern: $PACKAGE.Equal($TEST, $VALUE, $VALUE)
+    - inside:
+        kind: source_file
+        has:
+          kind: import_spec
+          regex: '^"github\.com/stretchr/testify/(assert|require)"$'
+          stopBy: end
+        stopBy: end
+constraints:
+  PACKAGE:
+    regex: '^(assert|require)$'
+  VALUE:
+    kind: identifier

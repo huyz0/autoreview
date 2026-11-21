@@ -32,6 +32,8 @@ deep tier.
 - **Telemetry checks** flag likely high-cardinality Prometheus and Micrometer
   labels, Go OpenTelemetry spans that can exit without ending, and Java
   OpenTelemetry scopes discarded without a cleanup owner.
+- **Test checks** flag equality assertions that compare the same variable
+  in supported Testify, JUnit, Kotlin Test, Jest-style, and Rust APIs.
 - **Complexity metrics** with YAML-configurable thresholds. Java and Rust use
   syntax trees to measure function length, parameters, nesting, branches, and
   explicit returns. Rust also checks required trait items and oversized
@@ -41,7 +43,8 @@ deep tier.
   Rust feature envy reports an inherent method that uses at least three
   distinct fields of one typed parameter and accesses at least two fewer
   members on its own receiver.
-- **Cross-file structure**: import-cycle detection (Go, Java, Kotlin),
+- **Cross-file structure**: import-cycle detection (Go, Java, Kotlin,
+  JavaScript, TypeScript, and TSX),
   ArchUnit-style layer rules from `.autoreview/architecture.yaml`, symbol-index-backed
   smells like feature envy and data clumps. Cargo metadata resolves direct
   Rust workspace package boundaries and the build scripts that Cargo runs.
@@ -243,12 +246,16 @@ for the comparison and replay commits. [Suite format and gate criteria](docs/aut
 | Taint and call-sequence DSL | Yes | Yes | Yes | Intraprocedural subset |
 | Feature envy | Symbol index | Symbol index | Symbol index | Typed parameters in inherent methods |
 | Layer policies | Imports | Imports | Imports | Direct Cargo workspace dependencies |
-| Import cycles | Go packages | JVM packages | Unavailable | Unavailable |
+| Import cycles | Go packages | JVM packages | Relative module imports | Unavailable |
 
 JavaScript and TypeScript analysis and triage recognize JSX, TSX, and
 module extensions such as `.mjs` and `.mts`. Rules with
 `language: TypeScript` also run on TSX. Use `language: Tsx` to target only
 TSX. [DSL reference](.claude/skills/authoring-rules/reference/rule-dsl.md)
+
+Web cycle checks follow static relative imports and re-exports, plus direct
+top-level `require` calls in `.cjs` and `.cts` files. They skip type-only
+imports, dynamic imports, and paths requiring package or alias configuration.
 
 ## Driving autoreview from a coding agent
 
