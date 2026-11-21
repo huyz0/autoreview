@@ -249,6 +249,7 @@ fn run_diff_at_revisions(options: &DiffCommandOptions, base: &str, head: &str) -
         Ok(findings) => stage1_agent_findings.extend(findings),
         Err(err) => warn(format!("clippy run failed: {err}")),
     }
+    stage1_agent_findings.extend(autoreview_core::run_rust_review(source_root, &changed_file_paths));
     if options.audit_rust_deps && categories_present.as_ref().is_none_or(|categories| categories.contains("security")) {
         for path in changed_file_paths.iter().filter(|path| Path::new(path).file_name().is_some_and(|name| name == "Cargo.lock")) {
             match autoreview_core::run_cargo_audit(source_root, path) {
@@ -276,10 +277,20 @@ fn run_diff_at_revisions(options: &DiffCommandOptions, base: &str, head: &str) -
     // Architecture layer check is opt-in: only runs when the repo has a
     // .autoreview/architecture.yaml declaring layers, per the plan ("no sane
     // generic default for what a repo's layers are").
-    match autoreview_core::load_architecture_config(&options.repo_root.join(".autoreview").join("architecture.yaml")) {
-        Ok(Some(arch_config)) => stage1_agent_findings.extend(autoreview_core::run_architecture_check(source_root, &changed_file_paths, &arch_config)),
-        Ok(None) => {}
-        Err(err) => warn(format!("failed to parse .autoreview/architecture.yaml: {err}")),
+    let architecture = match autoreview_core::load_architecture_config(&options.repo_root.join(".autoreview").join("architecture.yaml")) {
+        Ok(config) => config,
+        Err(err) => {
+            warn(format!("failed to parse .autoreview/architecture.yaml: {err}"));
+            None
+        }
+    };
+    if let Some(architecture) = architecture.as_ref() {
+        stage1_agent_findings.extend(autoreview_core::run_architecture_check(source_root, &changed_file_paths, architecture));
+    }
+    let cargo_review = autoreview_core::run_cargo_review(source_root, &changed_file_paths, architecture.as_ref());
+    stage1_agent_findings.extend(cargo_review.findings);
+    for warning in cargo_review.warnings {
+        warn(format!("Cargo review: {warning}"));
     }
     // archgraph (Tier 2): whole-repo import-cycle detection (Go and
     // Java/Kotlin, each its own graph), a no-op for a repo/diff with
@@ -569,6 +580,7 @@ fn run_diff_at_revisions(options: &DiffCommandOptions, base: &str, head: &str) -
         // volume) for a semantic claim ("this comment is stale/no longer
         // useful") it can't verify on its own, so it needs the LLM check.
         let mut semantic_ids = autoreview_core::semantic_rule_ids(&registered_packs);
+        semantic_ids.extend(autoreview_core::rust_review_semantic_ids().map(str::to_owned));
         semantic_ids.extend([
             "message-chain".to_string(),
             "feature-envy".to_string(),

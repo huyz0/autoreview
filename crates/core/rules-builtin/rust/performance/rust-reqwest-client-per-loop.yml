@@ -1,0 +1,34 @@
+id: rust-reqwest-client-per-loop
+language: Rust
+category: performance
+severity: info
+semantic: true
+message: >-
+  This Reqwest convenience call creates a new client for each iteration.
+  Reuse a Client across requests so its connection pool can be shared.
+metadata:
+  confidence: HIGH
+  references:
+    - https://docs.rs/reqwest/latest/reqwest/fn.get.html
+    - https://docs.rs/reqwest/latest/reqwest/struct.Client.html
+rule:
+  any:
+    - pattern: reqwest::get($URL).await
+    - pattern: reqwest::blocking::get($URL)
+  inside:
+    kind: block
+    inside:
+      field: body
+      any:
+        - kind: for_expression
+        - kind: while_expression
+        - kind: loop_expression
+    stopBy:
+      any:
+        - kind: function_item
+        - kind: async_block
+        - kind: closure_expression
+        - kind: const_block
+        - kind: const_item
+        - kind: static_item
+        - kind: gen_block

@@ -210,6 +210,82 @@ fn rust_design_and_performance_findings_follow_aspect_filters() {
 }
 
 #[test]
+fn scoped_rust_rules_report_explain_and_replay_historical_commits() {
+    let repo = init_repo(&[("lib.rs", "fn now() {}\n")]);
+    let base = current_commit(repo.path());
+    let before_source = "use std::time::SystemTime as Clock;\nfn elapsed() {\n    let start = Clock::now();\n    start.elapsed().unwrap();\n}\n";
+    repo.commit(&[("lib.rs", before_source)], "use wall clock for elapsed time");
+    let before = current_commit(repo.path());
+    let after_source = "use std::time::Instant as Clock;\nfn elapsed() {\n    let start = Clock::now();\n    start.elapsed();\n}\n";
+    repo.commit(&[("lib.rs", after_source)], "use monotonic clock");
+    let after = current_commit(repo.path());
+    let id = "rust-wall-clock-elapsed-unwrap";
+
+    let diff = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["diff", "--base", &base, "--head", &before, "--static-only", "--changed-lines", "--aspects", "correctness"])
+        .assert().success();
+    let stdout = String::from_utf8_lossy(&diff.get_output().stdout);
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report_path_from_stdout(&stdout)).unwrap()).unwrap();
+    let findings = report["findings"].as_array().unwrap();
+    let finding = findings.iter().find(|finding| finding["source"]["ruleId"] == id).unwrap();
+    assert_eq!(finding["source"]["tool"], "autoreview-rust");
+    assert_eq!(finding["location"]["range"]["startLine"], 4);
+    Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["explain", finding["id"].as_str().unwrap()])
+        .assert().success().stdout(predicate::str::contains("Built-in Rust analyzer rule"));
+
+    let suite = serde_json::json!({"cases": [{
+        "name": "wall-clock-timer",
+        "rule": {"tool": "autoreview-rust", "id": id},
+        "before": {"commit": before, "path": "lib.rs", "lines": [4]},
+        "after": {"commit": after, "path": "lib.rs", "lines": []},
+    }]}).to_string();
+    std::fs::write(repo.path().join("suite.yaml"), suite).unwrap();
+    let replay = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["rules", "replay", "--suite", "suite.yaml"]).assert().success();
+    let results: serde_json::Value = serde_json::from_slice(&replay.get_output().stdout).unwrap();
+    assert_eq!(results["rules"][0]["precision"], 1.0);
+    assert_eq!(results["rules"][0]["recall"], 1.0);
+}
+
+#[test]
+fn cargo_review_uses_confirmed_build_paths_and_reports_manifest_layer_edges() {
+    let workspace = "[workspace]\nmembers = [\"domain\", \"infra\"]\nresolver = \"2\"\n";
+    let domain = "[package]\nname = \"domain\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = \"generate\"\n";
+    let infra = "[package]\nname = \"infra\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+    let policy = "architecture:\n  layers:\n    - name: domain\n      match: ['domain/**']\n    - name: infra\n      match: ['infra/**']\n  rules:\n    - forbid: {from: domain, to: [infra]}\n";
+    let domain_with_edge = format!("{domain}\n[dependencies]\nimplementation = {{ package = \"infra\", path = \"../infra\" }}\n");
+    let repo = init_repo_with_diff(&[
+        ("Cargo.toml", workspace),
+        ("domain/Cargo.toml", domain),
+        ("domain/src/lib.rs", ""),
+        ("domain/generate", "fn main() { println!(\"cargo:rerun-if-env-changed=CC\"); }\n"),
+        ("domain/build.rs", "fn main() { println!(\"cargo:rerun-if-env-changed=TARGET\"); }\n"),
+        ("infra/Cargo.toml", infra),
+        ("infra/src/lib.rs", ""),
+        (".autoreview/architecture.yaml", policy),
+    ], &[
+        ("domain/Cargo.toml", &domain_with_edge),
+        ("domain/generate", "fn main() { println!(\"cargo:rerun-if-env-changed=TARGET\"); }\n"),
+    ], "add a forbidden workspace dependency and ineffective build trigger");
+
+    let diff = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["diff", "--base", "main~1", "--head", "main", "--static-only", "--changed-lines"])
+        .assert().success();
+    let stdout = String::from_utf8_lossy(&diff.get_output().stdout);
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report_path_from_stdout(&stdout)).unwrap()).unwrap();
+    let findings = report["findings"].as_array().unwrap();
+    for (rule, path) in [
+        ("rust-cargo-generated-env-trigger", "domain/generate"),
+        ("rust-cargo-layer-violation", "domain/Cargo.toml"),
+    ] {
+        assert!(findings.iter().any(|finding| {
+            finding["source"]["ruleId"] == rule && finding["location"]["path"] == path
+        }), "{findings:#?}");
+    }
+}
+
+#[test]
 fn a_shadow_trust_rule_packs_finding_is_suppressed_not_surfaced() {
     if !ast_grep_available() {
         eprintln!("skipping: ast-grep not on PATH");

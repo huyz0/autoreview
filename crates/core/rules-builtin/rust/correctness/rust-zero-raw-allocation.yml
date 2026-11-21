@@ -1,0 +1,22 @@
+id: rust-zero-raw-allocation
+language: Rust
+category: correctness
+severity: error
+message: >-
+  The raw allocation function requires a nonzero size. Handle zero-sized
+  values separately or use an owning standard-library allocation type.
+metadata:
+  confidence: HIGH
+  references:
+    - https://doc.rust-lang.org/std/alloc/trait.GlobalAlloc.html
+rule:
+  any:
+    - pattern: $ALLOC(std::alloc::Layout::from_size_align($ZERO, $ALIGN).unwrap())
+    - pattern: $ALLOC(std::alloc::Layout::from_size_align($ZERO, $ALIGN).expect($REASON))
+    - pattern: std::alloc::realloc($PTR, $LAYOUT, $ZERO)
+constraints:
+  ALLOC:
+    regex: '^(::\s*)?(std|alloc)\s*::\s*alloc\s*::\s*(alloc|alloc_zeroed)$'
+  ZERO:
+    kind: integer_literal
+    regex: '^(?:0[0_]*|0[xob][0_]*0[0_]*)(?:usize)?$'

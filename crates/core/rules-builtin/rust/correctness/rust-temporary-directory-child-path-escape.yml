@@ -1,0 +1,73 @@
+id: rust-temporary-directory-child-path-escape
+language: Rust
+category: correctness
+severity: warning
+message: >-
+  This child path outlives its temporary directory owner. The owner's cleanup can
+  remove the directory before the path is used. Keep the directory owner alive
+  while using the path or persist the directory.
+metadata:
+  confidence: HIGH
+  references:
+    - https://docs.rs/tempfile/latest/tempfile/#early-drop-pitfall
+    - https://docs.rs/tempfile/latest/tempfile/struct.TempDir.html#method.keep
+    - https://doc.rust-lang.org/std/path/struct.Path.html#method.join
+utils:
+  directory-constructor:
+    all:
+      - pattern: $CONSTRUCTOR()
+      - has:
+          field: function
+          regex: '^(::\s*)?tempfile\s*::\s*(tempdir|TempDir\s*::\s*new)$'
+  escaping-value:
+    any:
+      - inside:
+          kind: let_declaration
+          field: value
+          not:
+            has:
+              field: pattern
+              regex: '^_$'
+      - inside:
+          kind: return_expression
+      - inside:
+          kind: block
+          inside:
+            kind: function_item
+            field: body
+rule:
+  all:
+    - pattern: $DIRECTORY.path().join($CHILD)
+    - any:
+        - matches: escaping-value
+        - inside:
+            kind: arguments
+            inside:
+              kind: call_expression
+              all:
+                - has:
+                    field: function
+                    regex: '^(Ok|Result::Ok|std::result::Result::Ok)$'
+                - matches: escaping-value
+constraints:
+  DIRECTORY:
+    any:
+      - kind: try_expression
+        has:
+          matches: directory-constructor
+      - kind: call_expression
+        has:
+          field: function
+          kind: field_expression
+          all:
+            - has:
+                field: value
+                matches: directory-constructor
+            - has:
+                field: field
+                regex: '^(unwrap|expect)$'
+  CHILD:
+    kind: string_literal
+    regex: '^"[A-Za-z0-9_-][A-Za-z0-9._-]*"$'
+    not:
+      regex: '^"(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.[^"]*)?"$'

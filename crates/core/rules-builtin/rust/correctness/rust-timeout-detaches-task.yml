@@ -1,0 +1,17 @@
+id: rust-timeout-detaches-task
+language: Rust
+category: correctness
+severity: info
+semantic: true
+message: >-
+  On expiry this timeout drops the owned join handle. The spawned task can
+  continue running. Keep the handle if the caller needs to cancel or join the task.
+metadata:
+  confidence: HIGH
+  references:
+    - https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
+    - https://docs.rs/tokio/latest/tokio/task/struct.JoinHandle.html
+rule:
+  any:
+    - pattern: tokio::time::timeout($DEADLINE, tokio::spawn($TASK)).await
+    - pattern: tokio::time::timeout_at($DEADLINE, tokio::spawn($TASK)).await

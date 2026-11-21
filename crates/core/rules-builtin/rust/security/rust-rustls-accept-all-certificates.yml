@@ -1,0 +1,44 @@
+id: rust-rustls-accept-all-certificates
+language: Rust
+category: security
+severity: warning
+semantic: true
+message: >-
+  This Rustls method returns success without checking the certificate chain or
+  hostname. Validate both or use the built-in verifier with appropriate roots.
+metadata:
+  cwe: [CWE-295, CWE-297]
+  confidence: HIGH
+  references:
+    - https://docs.rs/rustls/latest/rustls/client/danger/trait.ServerCertVerifier.html
+rule:
+  all:
+    - pattern:
+        context: 'fn placeholder() { $CHECK }'
+        selector: block
+        strictness: relaxed
+    - inside:
+        kind: function_item
+        field: body
+        has:
+          field: name
+          regex: '^verify_server_cert$'
+        inside:
+          kind: declaration_list
+          inside:
+            kind: impl_item
+            has:
+              field: trait
+              regex: '^(::\s*)?rustls\s*::\s*client\s*::\s*(danger\s*::\s*)?ServerCertVerifier$'
+constraints:
+  CHECK:
+    any:
+      - kind: call_expression
+        matches: returns-assertion
+      - kind: expression_statement
+        all:
+          - regex: '^return\s+'
+          - matches: returns-assertion
+utils:
+  returns-assertion:
+    regex: '^(?:return\s+)?Ok\s*\(\s*(?:::)?(?:rustls\s*::\s*client\s*::\s*(?:danger\s*::\s*)?)?ServerCertVerified\s*::\s*assertion\s*\(\s*\)\s*,?\s*\)\s*;?$'

@@ -46,19 +46,6 @@ struct ClippySourceLine {
     text: String,
 }
 
-#[derive(Deserialize)]
-struct CargoMetadata {
-    workspace_members: HashSet<String>,
-    packages: Vec<CargoPackage>,
-}
-
-#[derive(Deserialize)]
-struct CargoPackage {
-    id: String,
-    name: String,
-    manifest_path: std::path::PathBuf,
-}
-
 fn map_severity(level: &str) -> Severity {
     match level {
         "error" => Severity::High,
@@ -71,11 +58,15 @@ fn map_severity(level: &str) -> Severity {
 fn diagnostic_category(code: Option<&str>) -> &'static str {
     match code.and_then(|code| code.strip_prefix("clippy::")) {
         Some("await_holding_lock" | "await_holding_refcell_ref" | "infinite_iter" | "invalid_regex"
-            | "out_of_bounds_indexing" | "suspicious_open_options" | "unused_io_amount" | "zombie_processes") => "correctness",
+            | "out_of_bounds_indexing" | "suspicious_open_options" | "unused_io_amount" | "zombie_processes"
+            | "lines_filter_map_ok" | "let_underscore_future" | "assertions_on_constants"
+            | "should_panic_without_expect" | "fallible_impl_from" | "uninit_vec") => "correctness",
         Some("box_collection" | "iter_overeager_cloned" | "large_enum_variant" | "manual_memcpy"
             | "readonly_write_lock" | "redundant_allocation" | "regex_creation_in_loops"
-            | "result_large_err" | "slow_vector_initialization") => "performance",
-        Some("cognitive_complexity" | "too_many_arguments" | "type_complexity") => "design",
+            | "result_large_err" | "slow_vector_initialization" | "format_push_string") => "performance",
+        Some("cognitive_complexity" | "too_many_arguments" | "type_complexity" | "ptr_arg"
+            | "return_self_not_must_use" | "missing_errors_doc" | "missing_safety_doc"
+            | "undocumented_unsafe_blocks") => "design",
         Some(_) => "style",
         None => "correctness",
     }
@@ -97,7 +88,7 @@ fn parse_clippy_output(stdout: &str, changed_files: &HashSet<&str>) -> Vec<Agent
         let code = diagnostic.code.as_ref().map(|code| code.code.as_str());
         let is_clippy = code.is_some_and(|code| code.starts_with("clippy::"));
         let is_error = diagnostic.level == "error";
-        if !(is_error || diagnostic.level == "warning" && is_clippy) {
+        if !(is_error || diagnostic.level == "warning" && (is_clippy || code == Some("unused_must_use"))) {
             continue;
         }
         let Some((span, path)) = diagnostic.spans.iter().filter(|span| span.is_primary).find_map(|span| {
@@ -132,18 +123,15 @@ fn parse_clippy_output(stdout: &str, changed_files: &HashSet<&str>) -> Vec<Agent
 }
 
 fn changed_packages(repo_root: &Path, changed_files: &HashSet<&str>) -> Option<BTreeSet<String>> {
-    let output = Command::new("cargo").args(["metadata", "--no-deps", "--format-version=1"]).current_dir(repo_root).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let metadata: CargoMetadata = serde_json::from_slice(&output.stdout).ok()?;
+    let root = repo_root.canonicalize().ok()?;
+    let metadata = super::cargo_review::load_cargo_metadata(&root.join("Cargo.toml")).ok()?;
     let members: Vec<_> = metadata.packages.iter()
         .filter(|package| metadata.workspace_members.contains(&package.id))
-        .filter_map(|package| package.manifest_path.parent().map(|directory| (directory, &package.name)))
+        .filter_map(|package| package.manifest_path.parent()?.canonicalize().ok().map(|directory| (directory, &package.name)))
         .collect();
     let mut packages = BTreeSet::new();
     for file in changed_files {
-        let absolute = repo_root.join(file);
+        let absolute = root.join(file);
         let (_, package) = members.iter().filter(|(directory, _)| absolute.starts_with(directory))
             .max_by_key(|(directory, _)| directory.components().count())?;
         packages.insert((*package).clone());
@@ -161,9 +149,14 @@ pub fn run_clippy(repo_root: &Path, changed_files: &[String]) -> anyhow::Result<
 
     let mut command = Command::new("cargo");
     command.args(["clippy", "--message-format=json", "--quiet"]).current_dir(repo_root);
-    // Standalone test, example and benchmark files need their Cargo
-    // targets. Ordinary source changes can use Cargo's default targets.
-    if relevant.iter().any(|path| path.split('/').any(|part| matches!(part, "tests" | "examples" | "benches"))) {
+    // Standalone examples and benchmarks need their targets. Inline test
+    // modules also need a test build even when the source is under src/.
+    if relevant.iter().any(|path| {
+        path.split('/').any(|part| matches!(part, "tests" | "examples" | "benches"))
+            || std::fs::read_to_string(repo_root.join(path))
+                .is_ok_and(|source| super::rust_review::contains_inline_tests(&source))
+    })
+    {
         command.arg("--all-targets");
     }
     match changed_packages(repo_root, &relevant) {
@@ -257,5 +250,31 @@ mod tests {
 
         let findings = run_clippy(dir.path(), &["src/lib.rs".to_string()]).unwrap();
         assert!(findings.iter().any(|f| f.source.rule_id.as_deref() == Some("clippy::needless_return")), "got: {findings:#?}");
+    }
+
+    #[test]
+    fn runs_the_test_target_and_surfaces_compiler_must_use_warnings() {
+        if !clippy_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"scratch_tests\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), r#"
+pub fn outcome() -> Result<(), &'static str> { Ok(()) }
+
+#[cfg(not(test))]
+pub fn ignores_production_outcome() { outcome(); }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ignores_outcome() { super::outcome(); }
+}
+"#).unwrap();
+        let findings = run_clippy(dir.path(), &["src/lib.rs".to_owned()]).unwrap();
+        assert_eq!(findings.iter().filter(|finding| {
+            finding.source.rule_id.as_deref() == Some("unused_must_use") && finding.category == "correctness"
+        }).count(), 2, "{findings:#?}");
     }
 }

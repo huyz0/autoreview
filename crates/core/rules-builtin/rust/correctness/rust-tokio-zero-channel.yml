@@ -1,0 +1,20 @@
+id: rust-tokio-zero-channel
+language: Rust
+category: correctness
+severity: warning
+message: >-
+  This Tokio channel panics when its capacity is zero. Choose a positive bound
+  for a buffered channel.
+metadata:
+  confidence: HIGH
+  references:
+    - https://docs.rs/tokio/latest/tokio/sync/mpsc/fn.channel.html#panics
+    - https://docs.rs/tokio/latest/tokio/sync/broadcast/fn.channel.html#panics
+rule:
+  pattern: $CHANNEL($CAPACITY)
+constraints:
+  CHANNEL:
+    regex: '^(::\s*)?tokio\s*::\s*sync\s*::\s*(mpsc|broadcast)\s*::\s*channel(\s*::\s*<.+>)?$'
+  CAPACITY:
+    kind: integer_literal
+    regex: '^(?:0[0_]*|0[xob][0_]*0[0_]*)(?:usize)?$'

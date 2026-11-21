@@ -80,6 +80,14 @@ direct-import check only, not a transitive one (that's what `archgraph`, Tier
 2's real dependency graph, is for). No file means no layers are declared, so
 nothing is ever flagged.
 
+For Rust, the same layer globs match workspace member `Cargo.toml` paths.
+Autoreview checks declared direct normal dependencies between those members,
+including renamed and inherited workspace dependencies. A violation points
+to the dependency declaration. For a changed inherited dependency it can
+also point to the workspace declaration. Autoreview applies the policy from
+your checkout to the manifests in the reviewed head. The policy covers normal
+dependencies.
+
 ```yaml
 architecture:
   layers:
@@ -121,6 +129,8 @@ packs:
 
 `autoreview rules replay` reads this YAML file from the working checkout.
 Each case labels one rule in one complete file before and after a fix.
+Use `tool: autoreview-rust` for the scoped Rust analyzer and `tool: ast-grep`
+for Rust rules written as YAML patterns.
 List the start line of every expected finding in that file. `lines: []`
 marks a snapshot where the rule should stay silent. Use the head path on
 each side if the fix renamed the file. The fixed commit must descend from

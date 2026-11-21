@@ -1,0 +1,22 @@
+id: rust-cstring-nul-unwrap
+language: Rust
+category: correctness
+severity: warning
+message: >-
+  This literal contains a NUL byte, so `CString::new` returns an error and the
+  unwrap or expect panics. Pass a string with no NUL bytes and let the
+  constructor append its terminator.
+metadata:
+  confidence: HIGH
+  references:
+    - https://doc.rust-lang.org/std/ffi/struct.CString.html#method.new
+rule:
+  any:
+    - pattern: std::ffi::CString::new($TEXT).unwrap()
+    - pattern: std::ffi::CString::new($TEXT).expect($MESSAGE)
+constraints:
+  TEXT:
+    kind: string_literal
+    has:
+      kind: escape_sequence
+      regex: '^\\(?:0|x00|u\{0[0_]*\})$'

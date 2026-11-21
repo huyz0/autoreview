@@ -36,7 +36,7 @@ fn print_finding_summary(finding: &Finding) {
 /// — for those, a failed lookup really does mean the rule was renamed/
 /// removed, and saying otherwise would be a false explanation from the one
 /// command whose whole job is truthful ones.
-const CODE_ONLY_ANALYZER_TOOLS: &[&str] = &["autoreview-duplication", "autoreview-practices", "autoreview-architecture", "autoreview-archgraph", "autoreview-symindex", "autoreview-churn"];
+const CODE_ONLY_ANALYZER_TOOLS: &[&str] = &["autoreview-duplication", "autoreview-practices", "autoreview-architecture", "autoreview-archgraph", "autoreview-symindex", "autoreview-churn", "autoreview-cargo"];
 
 /// `autoreview-dataflow`'s own rule ids are a MIX: `run_loaded_taint_rules`
 /// produces findings for genuinely YAML-backed (`kind: taint`) rule ids,
@@ -68,6 +68,20 @@ fn print_definition_text(header_detail: &str, text: &str) {
 /// builtin-rule finding (the common case) never pays for a git pack
 /// fetch it doesn't need.
 fn print_rule_definition(repo_root: &Path, tool: &str, rule_id: &str) {
+    if tool == "autoreview-rust" {
+        if let Some(rule) = autoreview_core::rust_review_rule(rule_id) {
+            println!("\nBuilt-in Rust analyzer rule '{}'", rule.id);
+            println!("  reference:   {}", rule.reference);
+            if let Some(cwe) = rule.cwe {
+                println!("  CWE:         {cwe}");
+            }
+            return;
+        }
+    }
+    if tool == "autoreview-cargo" {
+        println!("\n{}", no_definition_found_message(tool, rule_id));
+        return;
+    }
     if let Some(def) = autoreview_core::find_rule_definition(rule_id, &[]) {
         print_definition_text(&format!("{}, kind: {}{}", def.source_label, def.kind, if def.semantic { ", semantic: true" } else { "" }), &def.yaml);
         return;

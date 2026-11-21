@@ -1,0 +1,50 @@
+id: rust-forgotten-lock-guard
+language: Rust
+category: correctness
+severity: warning
+message: >-
+  Forgetting this lock guard skips the destructor that releases the lock.
+  Drop the guard explicitly or let it go out of scope to release the lock.
+metadata:
+  confidence: HIGH
+  references:
+    - https://doc.rust-lang.org/std/mem/fn.forget.html
+    - https://doc.rust-lang.org/std/sync/struct.MutexGuard.html
+    - https://doc.rust-lang.org/std/sync/struct.RwLockReadGuard.html
+    - https://doc.rust-lang.org/std/sync/struct.RwLockWriteGuard.html
+utils:
+  typed-guard:
+    any:
+      - pattern:
+          context: 'fn placeholder() { let $GUARD: $GUARD_TYPE = $INIT; }'
+          selector: let_declaration
+      - pattern:
+          context: 'fn placeholder() { let mut $GUARD: $GUARD_TYPE = $INIT; }'
+          selector: let_declaration
+  non-comment:
+    not:
+      any:
+        - kind: line_comment
+        - kind: block_comment
+rule:
+  all:
+    - pattern: $FORGET($GUARD)
+    - any:
+        - follows:
+            matches: typed-guard
+            stopBy:
+              matches: non-comment
+        - inside:
+            kind: expression_statement
+            follows:
+              matches: typed-guard
+              stopBy:
+                matches: non-comment
+constraints:
+  FORGET:
+    regex: '^(::\s*)?(std|core)\s*::\s*mem\s*::\s*forget$'
+  GUARD:
+    kind: identifier
+  GUARD_TYPE:
+    kind: generic_type
+    regex: '^(::\s*)?std\s*::\s*sync\s*::\s*(MutexGuard|RwLockReadGuard|RwLockWriteGuard)\s*<'
