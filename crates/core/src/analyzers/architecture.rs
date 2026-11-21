@@ -26,6 +26,8 @@
 
 use std::path::Path;
 
+mod budgets;
+
 use globset::Glob;
 
 use autoreview_schema::{AgentFinding, ArchitectureConfig, ArchitectureLayer, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
@@ -199,95 +201,148 @@ fn check_transitive_violation(graph: &autoreview_archgraph::ImportGraph, own_pac
 /// forbidden on its own (see this module's own doc comment and
 /// `check_transitive_violation`'s).
 pub fn run_architecture_check(repo_root: &Path, changed_files: &[String], config: &ArchitectureConfig) -> Vec<AgentFinding> {
-    if config.layers.is_empty() || config.rules.is_empty() {
-        return Vec::new();
-    }
-
-    let mut findings = Vec::new();
     // Built lazily, at most once each, only if some changed file of that
-    // language actually has a forbidden target to check against — a
-    // repo with no Go layers configured never pays for a Go graph walk.
+    // language has a package budget or a forbidden target.
     let mut go_graph: Option<(String, autoreview_archgraph::ImportGraph)> = None;
     let mut java_kotlin_graph: Option<autoreview_archgraph::ImportGraph> = None;
+    let mut findings = budgets::check(
+        repo_root,
+        changed_files,
+        &config.internal_dependency_budgets,
+        &mut go_graph,
+        &mut java_kotlin_graph,
+    );
+    if config.layers.is_empty() || config.rules.is_empty() {
+        return findings;
+    }
 
     for file in changed_files {
         let Some(language) = language_for_file(file) else { continue };
-        let Some(file_layer) = layer_for_path(file, &config.layers) else { continue };
-        let forbidden_targets: Vec<&str> = config.rules.iter().filter(|r| r.forbid.from == file_layer).flat_map(|r| r.forbid.to.iter().map(String::as_str)).collect();
-        if forbidden_targets.is_empty() {
+        let Some(layer) = layer_for_path(file, &config.layers) else { continue };
+        let targets: Vec<_> = config.rules.iter().filter(|rule| rule.forbid.from == layer)
+            .flat_map(|rule| rule.forbid.to.iter().map(String::as_str)).collect();
+        if targets.is_empty() {
             continue;
         }
-
-        let full_path = repo_root.join(file);
-        let Ok(content) = std::fs::read_to_string(&full_path) else { continue };
-
-        for (line_no, import_path) in extract_imports(&content, language) {
-            let normalized = normalize_import(&import_path, language);
-            let Some(import_layer) = layer_for_path(&normalized, &config.layers) else { continue };
-            if !forbidden_targets.contains(&import_layer) {
-                continue;
-            }
-
-            findings.push(AgentFinding {
-                source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-architecture".to_string(), rule_id: Some("layer-violation".to_string()), aspect: None, backend: None },
-                category: "architecture".to_string(),
-                severity: Severity::High,
-                confidence: 1.0,
-                title: format!("Layer violation: {file_layer} -> {import_layer}"),
-                message: format!("{file_layer} imports `{import_path}`, which resolves to the {import_layer} layer — {file_layer} is configured to never depend on {import_layer} in architecture.yaml."),
-                location: Location { path: file.clone(), range: LocationRange { start_line: line_no, ..Default::default() }, snippet: import_path.clone(), side: Side::New },
-                related_locations: None,
-                suggestion: None,
-                tags: None,
-                meta: None,
-                suggested_patch: None,
-            });
-        }
-
-        let transitive = match language {
-            ImportLanguage::Go => {
-                if go_graph.is_none() {
-                    go_graph = autoreview_archgraph::discover_go_module_path(repo_root).map(|module_path| {
-                        let graph = autoreview_archgraph::build_go_import_graph(repo_root, &module_path);
-                        (module_path, graph)
-                    });
-                }
-                go_graph.as_ref().and_then(|(module_path, graph)| {
-                    let own_package = autoreview_archgraph::go_package_for_file(file, module_path)?;
-                    check_transitive_violation(graph, &own_package, language, &config.layers, &forbidden_targets)
-                })
-            }
-            ImportLanguage::JavaOrKotlin => {
-                let graph = java_kotlin_graph.get_or_insert_with(|| autoreview_archgraph::build_java_kotlin_import_graph(repo_root));
-                autoreview_archgraph::java_kotlin_package_for_file(repo_root, file).and_then(|own_package| check_transitive_violation(graph, &own_package, language, &config.layers, &forbidden_targets))
-            }
-            // No archgraph-backed whole-repo import graph for JS/TS yet —
-            // stays direct-import-only, same as before this roadmap item.
-            ImportLanguage::JavaScriptOrTypeScript => None,
-        };
-
-        if let Some((path, target_layer)) = transitive {
-            let chain = path.join(" -> ");
-            findings.push(AgentFinding {
-                source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-architecture".to_string(), rule_id: Some("transitive-layer-violation".to_string()), aspect: None, backend: None },
-                category: "architecture".to_string(),
-                severity: Severity::High,
-                confidence: 1.0,
-                title: format!("Transitive layer violation: {file_layer} -> {target_layer}"),
-                message: format!(
-                    "{file_layer} transitively depends on the {target_layer} layer through: {chain}. No single import here is directly forbidden, but the dependency chain reaches {target_layer} anyway — {file_layer} is configured to never depend on it in architecture.yaml."
-                ),
-                location: Location { path: file.clone(), range: LocationRange { start_line: 1, ..Default::default() }, snippet: chain, side: Side::New },
-                related_locations: None,
-                suggestion: None,
-                tags: None,
-                meta: None,
-                suggested_patch: None,
-            });
-        }
+        let Ok(content) = std::fs::read_to_string(repo_root.join(file)) else { continue };
+        let policy = LayerPolicy { name: layer, layers: &config.layers, targets: &targets };
+        findings.extend(policy.direct_findings(file, language, extract_imports(&content, language)));
+        let package = graph_package(
+            repo_root, file, language, &mut go_graph, &mut java_kotlin_graph,
+        );
+        findings.extend(package.and_then(|(name, graph)| {
+            let (path, target) = check_transitive_violation(graph, &name, language, policy.layers, policy.targets)?;
+            Some(transitive_layer_finding(file, policy.name, &target, &path))
+        }));
     }
 
     findings
+}
+
+fn graph_package<'a>(
+    root: &Path,
+    file: &str,
+    language: ImportLanguage,
+    go: &'a mut Option<(String, autoreview_archgraph::ImportGraph)>,
+    jvm: &'a mut Option<autoreview_archgraph::ImportGraph>,
+) -> Option<(String, &'a autoreview_archgraph::ImportGraph)> {
+    match language {
+        ImportLanguage::Go => {
+            if go.is_none() {
+                let module = autoreview_archgraph::discover_go_module_path(root)?;
+                let graph = autoreview_archgraph::build_go_import_graph(root, &module);
+                *go = Some((module, graph));
+            }
+            let (module, graph) = go.as_ref()?;
+            Some((autoreview_archgraph::go_package_for_file(file, module)?, graph))
+        }
+        ImportLanguage::JavaOrKotlin => {
+            let graph = jvm.get_or_insert_with(|| autoreview_archgraph::build_java_kotlin_import_graph(root));
+            let name = autoreview_archgraph::java_kotlin_package_for_file(root, file)?;
+            Some((name, graph))
+        }
+        ImportLanguage::JavaScriptOrTypeScript => None,
+    }
+}
+
+struct LayerPolicy<'a> {
+    name: &'a str,
+    layers: &'a [ArchitectureLayer],
+    targets: &'a [&'a str],
+}
+
+impl<'a> LayerPolicy<'a> {
+    fn direct_findings(
+        &'a self,
+        file: &'a str,
+        language: ImportLanguage,
+        imports: Vec<(u32, String)>,
+    ) -> impl Iterator<Item = AgentFinding> + 'a {
+        imports.into_iter().filter_map(move |(line, import)| {
+            let normalized = normalize_import(&import, language);
+            let target = layer_for_path(&normalized, self.layers)?;
+            let layer = self.name;
+            self.targets.contains(&target).then(|| {
+                let message = format!(
+                    "{layer} imports `{import}`, which resolves to the {target} layer. Architecture policy forbids this dependency."
+                );
+                architecture_finding(
+                    "layer-violation",
+                    Severity::High,
+                    format!("Layer violation: {layer} -> {target}"),
+                    message,
+                    import_location(file, line..=line, import),
+                )
+            })
+        })
+    }
+}
+
+fn transitive_layer_finding(file: &str, layer: &str, target: &str, path: &[String]) -> AgentFinding {
+    let chain = path.join(" -> ");
+    architecture_finding(
+        "transitive-layer-violation",
+        Severity::High,
+        format!("Transitive layer violation: {layer} -> {target}"),
+        format!("{layer} transitively depends on the {target} layer through {chain}. Architecture policy forbids this dependency."),
+        import_location(file, 1..=1, chain),
+    )
+}
+
+fn architecture_finding(
+    id: &str,
+    severity: Severity,
+    title: String,
+    message: String,
+    location: Location,
+) -> AgentFinding {
+    AgentFinding {
+        source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-architecture".into(), rule_id: Some(id.into()), aspect: None, backend: None },
+        category: "architecture".into(),
+        severity,
+        confidence: 1.0,
+        title,
+        message,
+        location,
+        related_locations: None,
+        suggestion: None,
+        tags: None,
+        meta: None,
+        suggested_patch: None,
+    }
+}
+
+fn import_location(file: &str, lines: std::ops::RangeInclusive<u32>, snippet: String) -> Location {
+    Location {
+        path: file.into(),
+        range: LocationRange {
+            start_line: *lines.start(),
+            end_line: (lines.start() != lines.end()).then_some(*lines.end()),
+            ..Default::default()
+        },
+        snippet,
+        side: Side::New,
+    }
 }
 
 #[cfg(test)]
@@ -306,6 +361,7 @@ mod tests {
                 ArchitectureRuleEntry { forbid: ArchitectureForbidRule { from: "repository".to_string(), to: vec!["handler".to_string(), "service".to_string()] } },
                 ArchitectureRuleEntry { forbid: ArchitectureForbidRule { from: "handler".to_string(), to: vec!["repository".to_string()] } },
             ],
+            ..ArchitectureConfig::default()
         }
     }
 

@@ -10,13 +10,16 @@ use tree_sitter::{Node, Parser, Tree};
 
 use super::ast_grep::RuleDefinition;
 
-fn rules() -> [&'static Rule; 5] {
+fn rules() -> [&'static Rule; 8] {
     [
         &go_cancel::RULE,
         &go_cancel::SPAN_RULE,
+        &go_cancel::HTTP_RULE,
         &java::SPRING_RULE,
         &java::HIBERNATE_RULE,
         &java::OTEL_RULE,
+        &java::CONSTRUCTOR_RULE,
+        &java::PAGINATION_RULE,
     ]
 }
 

@@ -1,0 +1,62 @@
+id: go-test-sleeps-after-starting-goroutine
+language: Go
+category: correctness
+severity: warning
+semantic: true
+message: >-
+  This test starts a goroutine, waits for a fixed duration, then checks an
+  outcome. A sleep gives no completion guarantee. If the check depends on
+  the goroutine, wait on a channel or another explicit completion signal.
+metadata:
+  references:
+    - "https://go.dev/blog/testing-time"
+rule:
+  kind: expression_statement
+  all:
+    - has:
+        kind: call_expression
+        has:
+          field: function
+          regex: '^time\.Sleep$'
+    - follows:
+        kind: go_statement
+    - precedes:
+        kind: if_statement
+        has:
+          stopBy: end
+          kind: selector_expression
+          all:
+            - has:
+                field: operand
+                pattern: $TEST
+            - has:
+                field: field
+                regex: '^(Error|Errorf|Fatal|Fatalf|Fail|FailNow)$'
+    - inside:
+        kind: statement_list
+        inside:
+          kind: block
+          inside:
+            kind: function_declaration
+            all:
+              - has:
+                  field: name
+                  regex: '^Test([A-Z0-9_]|$)'
+              - has:
+                  field: parameters
+                  has:
+                    pattern:
+                      context: 'func f($TEST *testing.T) {}'
+                      selector: parameter_declaration
+    - inside:
+        stopBy: end
+        kind: source_file
+        all:
+          - has:
+              stopBy: end
+              kind: import_spec
+              regex: '^"time"$'
+          - has:
+              stopBy: end
+              kind: import_spec
+              regex: '^"testing"$'

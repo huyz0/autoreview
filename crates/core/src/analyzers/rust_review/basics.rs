@@ -78,23 +78,38 @@ pub(super) const RULES: &[&RustReviewRule] = &[
 ];
 
 pub(super) fn check<'tree>(review: &mut Review<'tree, '_>, node: Node<'tree>) {
-    if node.kind() == "let_declaration" {
-        if let Some(awaited) = await_with_live_trace_guard(&review.source, node) {
-            review.report_related(&TRACE_GUARD, node, &[awaited]);
+    match node.kind() {
+        "let_declaration" => check_binding(review, node),
+        _ => {
+            if let Some(rule) = local_expression_rule(&review.source, node) {
+                review.report(rule, node);
+            }
         }
     }
-    let rule = match node.kind() {
-        "call_expression" if wall_clock_unwrapped(&review.source, node) => &WALL_CLOCK,
-        "call_expression" if blocks_current_thread(&review.source, node) => &BLOCK_IN_PLACE,
-        "expression_statement" if discards_test_matches(&review.source, node) => &DISCARDED_MATCHES,
-        "expression_statement" if discards_assertion_task(&review.source, node, false) => {
-            &DETACHED_ASSERTION
-        }
-        "let_declaration" if discards_assertion_task(&review.source, node, true) => &DISCARDED_JOIN,
-        _ => return,
-    };
-    review.report(rule, node);
 }
+
+fn check_binding<'tree>(review: &mut Review<'tree, '_>, binding: Node<'tree>) {
+    if let Some(awaited) = await_with_live_trace_guard(&review.source, binding) {
+        review.report_related(&TRACE_GUARD, binding, &[awaited]);
+    }
+    if discards_assertion_task(&review.source, binding, true) {
+        review.report(&DISCARDED_JOIN, binding);
+    }
+}
+
+fn local_expression_rule<'tree>(
+    source: &Source<'tree, '_>,
+    node: Node<'tree>,
+) -> Option<&'static RustReviewRule> {
+    match node.kind() {
+        "call_expression" if wall_clock_unwrapped(source, node) => Some(&WALL_CLOCK),
+        "call_expression" if blocks_current_thread(source, node) => Some(&BLOCK_IN_PLACE),
+        "expression_statement" if discards_test_matches(source, node) => Some(&DISCARDED_MATCHES),
+        "expression_statement" if discards_assertion_task(source, node, false) => Some(&DETACHED_ASSERTION),
+        _ => None,
+    }
+}
+
 
 fn discards_test_matches<'tree>(source: &Source<'tree, '_>, node: Node<'tree>) -> bool {
     children(node)

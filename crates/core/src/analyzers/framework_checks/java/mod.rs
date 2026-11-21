@@ -1,5 +1,7 @@
+mod constructor;
 mod hibernate;
 mod otel;
+mod pagination;
 mod spring;
 
 use std::{collections::HashMap, path::Path};
@@ -10,8 +12,10 @@ use tree_sitter::{Node, Tree};
 
 use super::{children, descendants, location, parse_source, text};
 
+pub(super) use constructor::RULE as CONSTRUCTOR_RULE;
 pub(super) use hibernate::RULE as HIBERNATE_RULE;
 pub(super) use otel::RULE as OTEL_RULE;
+pub(super) use pagination::RULE as PAGINATION_RULE;
 pub(super) use spring::RULE as SPRING_RULE;
 
 pub(super) fn run(root: &Path, paths: &[String]) -> Vec<AgentFinding> {
@@ -25,7 +29,11 @@ pub(super) fn run(root: &Path, paths: &[String]) -> Vec<AgentFinding> {
             continue;
         };
         let java = Java::new(path, &source, &tree);
+        findings.extend(constructor::findings(&java));
         findings.extend(spring::findings(&java));
+        if source.contains("unpaged") {
+            findings.extend(pagination::findings(&java));
+        }
         if source.contains("makeCurrent") {
             findings.extend(otel::findings(&java));
         }
@@ -136,4 +144,37 @@ fn class_members(class: Node<'_>) -> impl Iterator<Item = Node<'_>> {
 
 fn containing<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
     std::iter::successors(node.parent(), |node| node.parent()).find(|node| node.kind() == kind)
+}
+
+fn modifiers(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
+    let Some(modifiers) = children(node).find(|child| child.kind() == "modifiers") else {
+        return Vec::new().into_iter();
+    };
+    let mut cursor = modifiers.walk();
+    modifiers.children(&mut cursor).collect::<Vec<_>>().into_iter()
+}
+
+fn arity(node: Node<'_>, field: &str) -> Option<usize> {
+    Some(children(node.child_by_field_name(field)?).filter(|node| {
+        !matches!(node.kind(), "line_comment" | "block_comment")
+    }).count())
+}
+
+fn arity_of(method: Node<'_>) -> Option<usize> {
+    let params = method.child_by_field_name("parameters")?;
+    if children(params).any(|node| node.kind() == "spread_parameter") {
+        return None;
+    }
+    arity(method, "parameters")
+}
+
+fn local_target<'a>(java: &Java<'a>, call: Node<'a>, methods: &[Node<'a>]) -> Option<Node<'a>> {
+    if call.child_by_field_name("object").is_some_and(|receiver| receiver.kind() != "this") {
+        return None;
+    }
+    let name = java.field(call, "name")?;
+    let arguments = arity(call, "arguments")?;
+    let mut candidates = methods.iter().copied().filter(|method| java.field(*method, "name") == Some(name));
+    let target = candidates.next()?;
+    (candidates.next().is_none() && arity_of(target) == Some(arguments)).then_some(target)
 }

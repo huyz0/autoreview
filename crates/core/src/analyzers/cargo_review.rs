@@ -564,6 +564,7 @@ mod tests {
 
     fn policy() -> ArchitectureConfig {
         ArchitectureConfig {
+            internal_dependency_budgets: BTreeMap::new(),
             layers: vec![
                 ArchitectureLayer {
                     name: "frontend".into(),

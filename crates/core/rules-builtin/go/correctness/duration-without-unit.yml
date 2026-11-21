@@ -1,0 +1,26 @@
+id: go-duration-without-unit
+language: Go
+category: correctness
+severity: warning
+message: >-
+  A bare integer passed to this time API is interpreted as nanoseconds. Use an explicit unit so the intended interval is visible.
+metadata:
+  references:
+    - "https://pkg.go.dev/time#Duration"
+rule:
+  all:
+    - kind: call_expression
+    - has:
+        field: function
+        kind: selector_expression
+        regex: '^time\.(Sleep|After|NewTimer|NewTicker|Tick)$'
+    - has:
+        field: arguments
+        regex: '^\(\s*[1-9][0-9_]{0,3}\s*,?\s*\)$'
+    - inside:
+        stopBy: end
+        kind: source_file
+        has:
+          stopBy: end
+          kind: import_spec
+          regex: '^"time"$'
