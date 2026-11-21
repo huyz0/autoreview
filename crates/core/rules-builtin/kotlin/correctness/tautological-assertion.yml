@@ -20,4 +20,6 @@ rule:
         stopBy: end
 constraints:
   VALUE:
-    kind: simple_identifier
+    kind: value_argument
+    has:
+      kind: simple_identifier
