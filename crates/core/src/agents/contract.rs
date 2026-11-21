@@ -28,39 +28,30 @@ impl std::error::Error for ContractError {}
 /// block (rather than the first) is what makes the contract robust to that.
 /// Accepts both ```json and bare ``` fences.
 pub fn extract_last_fenced_block(text: &str) -> Option<&str> {
-    let mut search_from = 0usize;
-    let mut last_block: Option<&str> = None;
-
-    loop {
-        let Some(open_rel) = text[search_from..].find("```") else {
-            // No further fence — return whatever we already found, don't
-            // let a failed search on a later iteration discard it.
-            return last_block;
-        };
-        let open_idx = search_from + open_rel;
-        let after_open = open_idx + 3;
-
-        // Skip an optional language tag (e.g. "json") up to the newline.
-        let line_end_rel = text[after_open..].find('\n');
-        let content_start = match line_end_rel {
-            Some(rel) => after_open + rel + 1,
-            None => return last_block, // opening fence with no newline: malformed, stop here
-        };
-
-        let close_rel = match text[content_start..].find("```") {
-            Some(rel) => rel,
-            None => return last_block, // unterminated fence: ignore this one
-        };
-        let content_end = content_start + close_rel;
-
-        last_block = Some(text[content_start..content_end].trim());
-        search_from = content_end + 3;
-
-        if search_from >= text.len() {
-            break;
+    let mut offset = 0;
+    let mut open: Option<(usize, usize)> = None;
+    let mut last_block = None;
+    for line in text.split_inclusive('\n') {
+        let line_start = offset;
+        offset += line.len();
+        let trimmed = line.trim_start_matches(' ');
+        if line.len() - trimmed.len() > 3 {
+            continue;
+        }
+        let ticks = trimmed.bytes().take_while(|byte| *byte == b'`').count();
+        if ticks < 3 {
+            continue;
+        }
+        let rest = trimmed[ticks..].trim();
+        if let Some((start, opening_ticks)) = open {
+            if ticks >= opening_ticks && rest.is_empty() {
+                last_block = Some(text[start..line_start].trim_matches(['\r', '\n']));
+                open = None;
+            }
+        } else if !rest.contains('`') {
+            open = Some((offset, ticks));
         }
     }
-
     last_block
 }
 
@@ -131,5 +122,16 @@ But actually I found something:
         let text = "```\n{\"findings\": []}\n```";
         let output = parse_agent_output(text).unwrap();
         assert_eq!(output.findings.len(), 0);
+    }
+
+    #[test]
+    fn keeps_inline_backticks_and_nested_fences_inside_the_response() {
+        let text = "````markdown\r\nline with ``` inside\r\n```rust\r\nfn main() {}\r\n```\r\n````";
+        assert_eq!(
+            extract_last_fenced_block(text),
+            Some("line with ``` inside\r\n```rust\r\nfn main() {}\r\n```")
+        );
+        let response = "```json\n{\"findings\": [], \"context\": \"```\"}\n```";
+        assert!(parse_agent_output(response).is_ok());
     }
 }

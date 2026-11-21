@@ -68,4 +68,4 @@ pub use storage::{
     FpFeedbackRow, HistoryStore, KnownVerdict, MinedFindingRow, RunCostRecord,
 };
 pub use triage::*;
-pub use verify::{run_verify_pass, select_for_verification, verify_finding, VerifyPassResult, VerifyResult};
+pub use verify::{run_verify_pass, run_verify_pass_with_budget, select_for_verification, verify_finding, VerifyBudget, VerifyPassResult, VerifyResult};

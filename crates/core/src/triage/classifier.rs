@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use autoreview_schema::Tier;
 
-use crate::agents::claude_code::{AgentBackend, InvokeRequest};
+use crate::agents::claude_code::{AgentBackend, InvokeRequest, Usage};
 use crate::agents::contract::extract_last_fenced_block;
 use crate::triage::signals::DiffFacts;
 
@@ -52,6 +52,10 @@ fn build_prompt(facts: &DiffFacts, score: f64, lower: Tier, upper: Tier) -> Stri
 /// confused classifier should never be able to silently escalate or
 /// downgrade a review.
 pub fn classify_ambiguous_tier(backend: &dyn AgentBackend, facts: &DiffFacts, score: f64, lower: Tier, upper: Tier, model: &str, cwd: &Path) -> Option<Tier> {
+    classify_ambiguous_tier_with_usage(backend, facts, score, lower, upper, model, cwd).0
+}
+
+pub fn classify_ambiguous_tier_with_usage(backend: &dyn AgentBackend, facts: &DiffFacts, score: f64, lower: Tier, upper: Tier, model: &str, cwd: &Path) -> (Option<Tier>, Usage, u64) {
     let request = InvokeRequest {
         prompt: build_prompt(facts, score, lower, upper),
         system_prompt: "You are a precise, low-latency triage classifier for a code review tool. You answer with only the requested JSON, no other tools or exploration needed.".to_string(),
@@ -61,16 +65,12 @@ pub fn classify_ambiguous_tier(backend: &dyn AgentBackend, facts: &DiffFacts, sc
         cwd: cwd.to_path_buf(),
     };
 
-    let invoked = backend.invoke(&request).ok()?;
-    let block = extract_last_fenced_block(&invoked.final_text)?;
-    let verdict: ClassifierVerdict = serde_json::from_str(block).ok()?;
-    let tier = parse_tier(&verdict.tier)?;
-
-    if tier == lower || tier == upper {
-        Some(tier)
-    } else {
-        None
-    }
+    let Ok(invoked) = backend.invoke(&request) else { return (None, Usage::default(), 0) };
+    let tier = extract_last_fenced_block(&invoked.final_text)
+        .and_then(|block| serde_json::from_str::<ClassifierVerdict>(block).ok())
+        .and_then(|verdict| parse_tier(&verdict.tier))
+        .filter(|tier| *tier == lower || *tier == upper);
+    (tier, invoked.usage, invoked.wall_ms)
 }
 
 #[cfg(test)]

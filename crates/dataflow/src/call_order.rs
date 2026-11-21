@@ -114,13 +114,13 @@ pub fn check(spec: &CallOrderSpec, cfg: &Cfg<Stmt>) -> Vec<CallOrderHit> {
     for (node_id, node) in cfg.nodes.iter().enumerate() {
         let preds = cfg.predecessors(node_id);
         let mut pending = preds.iter().any(|&p| out_facts[p].0);
-        for stmt in &node.stmts {
+        for (index, stmt) in node.stmts.iter().enumerate() {
             match stmt {
                 Stmt::Call { target: crate::cfg::CallTarget::Named(name), .. } if pending && spec.before.iter().any(|p| p.matches(name)) => {
-                    hits.push(CallOrderHit { trigger_call: name.clone(), node: node_id, source_line: node.source_line });
+                    hits.push(CallOrderHit { trigger_call: name.clone(), node: node_id, source_line: node.statement_line(index) });
                 }
                 Stmt::Return { .. } if pending && spec.check_before_return => {
-                    hits.push(CallOrderHit { trigger_call: "return".to_string(), node: node_id, source_line: node.source_line });
+                    hits.push(CallOrderHit { trigger_call: "return".to_string(), node: node_id, source_line: node.statement_line(index) });
                 }
                 _ => {}
             }

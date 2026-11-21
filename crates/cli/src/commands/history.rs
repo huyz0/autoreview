@@ -16,6 +16,10 @@ use autoreview_schema::Finding;
 /// resolve an id back to its fingerprint. Shared by `apply` (needs the
 /// finding's suggestion patch) and `explain` (needs its source/rule info).
 pub fn find_finding_in_run_reports(history_dir: &Path, finding_id: &str) -> anyhow::Result<Option<Finding>> {
+    Ok(find_finding_with_target(history_dir, finding_id)?.map(|(finding, _)| finding))
+}
+
+pub(super) fn find_finding_with_target(history_dir: &Path, finding_id: &str) -> anyhow::Result<Option<(Finding, autoreview_schema::ReviewTarget)>> {
     let runs_dir = history_dir.join("runs");
     let mut run_dirs: Vec<_> = match std::fs::read_dir(&runs_dir) {
         Ok(entries) => entries.filter_map(|e| e.ok()).map(|e| e.path()).collect(),
@@ -29,7 +33,7 @@ pub fn find_finding_in_run_reports(history_dir: &Path, finding_id: &str) -> anyh
         let Ok(text) = std::fs::read_to_string(&report_path) else { continue };
         let Ok(report) = serde_json::from_str::<autoreview_schema::ReviewReport>(&text) else { continue };
         if let Some(finding) = report.findings.into_iter().find(|f| f.id == finding_id) {
-            return Ok(Some(finding));
+            return Ok(Some((finding, report.target)));
         }
     }
     Ok(None)

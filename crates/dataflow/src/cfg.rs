@@ -80,6 +80,23 @@ pub enum Stmt {
 pub struct CfgNode<S> {
     pub stmts: Vec<S>,
     pub source_line: u32,
+    statement_lines: Vec<Option<u32>>,
+}
+
+impl<S> CfgNode<S> {
+    pub(crate) fn record_statement_lines(&mut self, start: usize, line: u32) {
+        if start == self.stmts.len() {
+            return;
+        }
+        self.statement_lines.resize(self.stmts.len(), None);
+        for slot in &mut self.statement_lines[start..] {
+            slot.get_or_insert(line);
+        }
+    }
+
+    pub(crate) fn statement_line(&self, index: usize) -> u32 {
+        self.statement_lines.get(index).copied().flatten().unwrap_or(self.source_line)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,7 +133,7 @@ impl<S> Cfg<S> {
     /// a fluent builder API, since the lowering passes' control flow is
     /// varied enough that a generic builder would just get in the way.
     pub fn push_node(&mut self, source_line: u32) -> NodeId {
-        self.nodes.push(CfgNode { stmts: Vec::new(), source_line });
+        self.nodes.push(CfgNode { stmts: Vec::new(), source_line, statement_lines: Vec::new() });
         self.nodes.len() - 1
     }
 

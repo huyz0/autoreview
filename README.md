@@ -191,6 +191,23 @@ autoreview rules mine
 autoreview rules review
 ```
 
+### Draft a rule from one finding
+
+```sh
+autoreview rules draft <finding-id> --fixed <fix-commit>
+autoreview rules draft <finding-id> --proposal proposal.yaml --fixed <fix-commit>
+```
+
+The first command sends bounded excerpts from the recorded commits to your
+configured model. Use `--proposal` to verify a saved rule without calling a
+model. Autoreview checks the proposed rule against the reported lines with
+its real analyzer and, when you supply `--fixed`, requires the same file to
+be clean at that commit. Successful drafts are saved as unregistered packs
+under `.autoreview/rules/drafts/`. Review their scope before registering one.
+A threshold rule changes the corresponding repository-wide metric.
+See the [rule DSL reference](.claude/skills/authoring-rules/reference/rule-dsl.md)
+for supported rule kinds.
+
 ### Replay rules and opt into a merge gate
 
 Use `autoreview rules replay` to compare a built-in rule's findings with

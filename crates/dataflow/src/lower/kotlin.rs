@@ -132,6 +132,13 @@ fn lower_block(cfg: &mut Cfg<Stmt>, block: Node, source: &[u8], mut current: Nod
 }
 
 fn lower_statement(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {
+    let start = cfg.nodes[current].stmts.len();
+    let next = lower_statement_inner(cfg, stmt, source, current);
+    cfg.nodes[current].record_statement_lines(start, stmt.start_position().row as u32 + 1);
+    next
+}
+
+fn lower_statement_inner(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {
     match stmt.kind() {
         "property_declaration" => {
             cfg.nodes[current].stmts.push(lower_property_declaration(stmt, source));
