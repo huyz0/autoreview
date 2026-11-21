@@ -9,17 +9,31 @@
 use std::path::Path;
 use std::process::Command;
 
+const TSX_EXPORT_PREFIX: &str = "__autoreview_tsx__";
+
 /// Writes only the ast-grep portion of an Autoreview pattern rule. Recent
 /// ast-grep versions reject unknown top-level fields.
 pub(crate) fn write_rule_file(dest_path: &Path, contents: &str) -> anyhow::Result<()> {
     let mut rule: serde_yaml::Mapping = serde_yaml::from_str(contents)?;
+    let language = serde_yaml::Value::String("language".to_owned());
+    let typescript_only = rule.remove("typescriptOnly").and_then(|value| value.as_bool()).unwrap_or(false);
     for key in ["category", "semantic", "kind"] {
         rule.remove(serde_yaml::Value::String(key.to_string()));
     }
     if let Some(parent) = dest_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(dest_path, serde_yaml::to_string(&rule)?)?;
+    let mut yaml = serde_yaml::to_string(&rule)?;
+    if !typescript_only && rule.get(&language).and_then(serde_yaml::Value::as_str) == Some("TypeScript") {
+        let id = rule.get("id").and_then(serde_yaml::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("TypeScript pattern rule requires an id"))?;
+        let variant_id = serde_yaml::Value::String(format!("{TSX_EXPORT_PREFIX}{id}"));
+        rule.insert("id".into(), variant_id);
+        rule.insert(language, serde_yaml::Value::String("Tsx".to_owned()));
+        yaml.push_str("---\n");
+        yaml.push_str(&serde_yaml::to_string(&rule)?);
+    }
+    std::fs::write(dest_path, yaml)?;
     Ok(())
 }
 
@@ -71,8 +85,22 @@ fn scan_batch(sgconfig_path: &Path, repo_root: &Path, relevant: &[&str]) -> anyh
     // signal, not failure. Only a genuinely unparsable stdout means the
     // tool itself broke (bad rule file, crash, etc).
     let stdout = String::from_utf8_lossy(&output.stdout);
-    match serde_json::from_str(&stdout) {
-        Ok(matches) => Ok(Some(matches)),
+    match serde_json::from_str::<Vec<serde_json::Value>>(&stdout) {
+        Ok(mut matches) => {
+            restore_pattern_rule_ids(&mut matches);
+            Ok(Some(matches))
+        }
         Err(err) => anyhow::bail!("ast-grep produced unparsable output: {err}. stderr: {}", String::from_utf8_lossy(&output.stderr)),
+    }
+}
+
+fn restore_pattern_rule_ids(matches: &mut [serde_json::Value]) {
+    for hit in matches {
+        if hit.get("language").and_then(serde_json::Value::as_str) != Some("Tsx") {
+            continue;
+        }
+        if let Some(id) = hit.get("ruleId").and_then(serde_json::Value::as_str).and_then(|id| id.strip_prefix(TSX_EXPORT_PREFIX)) {
+            hit["ruleId"] = serde_json::Value::String(id.to_owned());
+        }
     }
 }

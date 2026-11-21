@@ -176,8 +176,8 @@ fn propose(
              Use id, language, category, severity (error, warning or info), message, and kind.\n\
              pattern: put ast-grep match syntax in rule, with optional constraints.\n\
              threshold: use a nonnegative integer threshold for an existing metric such as long-method, cyclomatic-complexity, cognitive-complexity, deep-nesting, long-parameter-list, too-many-returns, or complex-interface. This changes a repository-wide metric.\n\
-             taint: list sources and sinks as call or callRegex entries, with optional sanitizers. Supported for Go, Java, Kotlin, JavaScript and TypeScript. TSX uses TypeScript for taint.\n\
-             call-sequence: list after and unless calls with before and/or checkBeforeReturn. Supported for Go, Java, Kotlin, JavaScript and TypeScript. TSX uses TypeScript. Go return checks skip functions containing defer.\n\
+             taint: list sources and sinks as call or callRegex entries, with optional sanitizers. Supported for Go, Java, Kotlin, JavaScript, TypeScript, TSX and Rust.\n\
+             call-sequence: list after and unless calls with before and/or checkBeforeReturn. Same languages as taint. Go return checks skip functions containing defer. Rust supports explicit calls, with no analysis of macros or destructors.\n\
              Mark semantic true if findings still need human judgment. Include no fix, literal secret, repository-specific variable name or filename.\n\
              Return one fenced YAML block. If the evidence requires capabilities outside these primitives, return a fenced text block beginning INEXPRESSIBLE: with a reason."
         ),

@@ -16,6 +16,13 @@ pub(super) fn function_declarations(tree: &Tree) -> Vec<Node<'_>> {
     descendants_of_kinds(tree, &["function_declaration"])
 }
 
+pub(super) fn rust_functions(tree: &Tree) -> Vec<Node<'_>> {
+    descendants_of_kinds(tree, &["function_item"])
+        .into_iter()
+        .filter(|item| !item.has_error() && item.child_by_field_name("body").is_some())
+        .collect()
+}
+
 fn descendants_of_kinds<'tree>(tree: &'tree Tree, kinds: &[&str]) -> Vec<Node<'tree>> {
     fn visit<'tree>(node: Node<'tree>, kinds: &[&str], functions: &mut Vec<Node<'tree>>) {
         if kinds.contains(&node.kind()) {
