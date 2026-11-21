@@ -1,0 +1,17 @@
+id: js-discarded-promise-combinator
+language: JavaScript
+category: correctness
+severity: warning
+message: >-
+  This Promise combinator is discarded. Await or return the promise, or handle its rejection explicitly.
+metadata:
+  references:
+    - "https://typescript-eslint.io/rules/no-floating-promises/"
+rule:
+  all:
+    - pattern: Promise.$METHOD($INPUT)
+    - inside:
+        kind: expression_statement
+constraints:
+  METHOD:
+    regex: '^(all|any|race|allSettled)$'
