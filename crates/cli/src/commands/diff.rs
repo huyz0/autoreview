@@ -5,12 +5,12 @@ use std::process::Command;
 use autoreview_core::{
     append_event_log, assign_fingerprints, collect_context, collect_diff_facts, compile_skill,
     dedupe_exact, dedupe_fuzzy, discover_manifests, events_from_report, load_config, plan_review,
-    render_context_block, run_ast_grep, run_golangci_lint, run_specialist, to_finding,
-    AgentBackend, ApplyCondition, HistoryStore, InvokeRequest, PlanOverrides, SpecialistStatus,
+    render_context_block, run_specialist, to_finding,
+    AgentBackend, HistoryStore, InvokeRequest, PlanOverrides, SpecialistStatus,
 };
-use autoreview_langsupport::Language;
 use autoreview_schema::{
-    AgentBackendKind, AutoreviewConfig, CostEntry, DiffStats, Finding, ReviewReport, ReviewSummary, ReviewTarget, RunCosts, Tier,
+    AgentBackendKind, AgentFinding, AutoreviewConfig, CostEntry, DiffStats, Finding, FindingSource,
+    FindingSourceKind, PatchSafety, ReviewReport, ReviewSummary, ReviewTarget, RunCosts, Suggestion, Tier,
 };
 
 use super::history::{history_dir_for, hostname};
@@ -148,6 +148,37 @@ fn stage1_summary_for_category(stage1_findings: &[Finding], category: &str) -> S
         .join("\n")
 }
 
+fn normalize_specialist_finding(finding: &mut AgentFinding, aspect: &str, backend: AgentBackendKind) {
+    let tool = match backend {
+        AgentBackendKind::ClaudeCode => "claude-code",
+        other => backend_label(other),
+    };
+    finding.source = FindingSource {
+        kind: FindingSourceKind::Agent,
+        tool: tool.into(),
+        rule_id: None,
+        aspect: Some(aspect.into()),
+        backend: Some(tool.into()),
+    };
+    if let Some(meta) = &mut finding.meta {
+        meta.remove("rulePackId");
+    }
+    finding.confidence = finding.confidence.clamp(0.0, 1.0);
+    let patch = finding.suggested_patch.take().filter(|patch| !patch.trim().is_empty());
+    if let Some(suggestion) = &mut finding.suggestion {
+        suggestion.safety = PatchSafety::NeedsReview;
+        if suggestion.patch.is_none() {
+            suggestion.patch = patch;
+        }
+    } else if patch.is_some() {
+        finding.suggestion = Some(Suggestion {
+            description: "Suggested patch from the reviewer".into(),
+            patch,
+            safety: PatchSafety::NeedsReview,
+        });
+    }
+}
+
 pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
     let (base, head) = diff_revisions(&options.repo_root, &options.base_ref, &options.head_ref)?;
     run_diff_at_revisions(&options, &base, &head)
@@ -185,22 +216,7 @@ fn run_diff_at_revisions(options: &DiffCommandOptions, base: &str, head: &str) -
     // Stage 1: deterministic analyzers, always run (near-free), before Stage 2
     // triage so analyzer finding density can factor into the tier decision.
     let changed_file_paths: Vec<String> = facts.files.iter().map(|f| f.path.clone()).collect();
-    // Computed once, shared by every rule-group apply-condition gate below —
-    // "which languages does this diff touch," the deterministic fast-path
-    // question every language-scoped analyzer would otherwise re-derive
-    // internally on every call.
-    let languages_present = autoreview_langsupport::languages_present(changed_file_paths.iter().map(String::as_str));
-    const STRUCTURAL_RULE_LANGUAGES: ApplyCondition = ApplyCondition::AnyLanguage(&[Language::Go, Language::Java, Language::Kotlin, Language::TypeScript, Language::Tsx, Language::JavaScript]);
-    // `--aspects` restricts which categories the user asked to review —
-    // real, honest consumer of the AnyCategory apply-condition axis:
-    // complexity.rs's findings are always category "design" (a single,
-    // fixed category, unlike practices.rs's mixed-category output), so
-    // when the user explicitly asked for other aspects only, running it at
-    // all is wasted work for output that would never surface anyway. `None`
-    // (the common case, no --aspects given) means unrestricted — every
-    // AnyCategory condition applies, same as before this gate existed.
     let categories_present: Option<std::collections::HashSet<String>> = options.aspects.as_ref().map(|aspects| aspects.iter().cloned().collect());
-    const DESIGN_ONLY: ApplyCondition = ApplyCondition::AnyCategory(&["design"]);
 
     // Registered external rule packs (.autoreview/rulepacks.yaml) — resolved
     // once here, run "full trust immediately" (no shadow/promoted staging
@@ -224,83 +240,18 @@ fn run_diff_at_revisions(options: &DiffCommandOptions, base: &str, head: &str) -
         }
     }
 
-    let mut stage1_agent_findings = Vec::new();
-    let mut analyzer_warnings = Vec::new();
-    let mut warn = |message: String| {
-        println!("  [warn] {message}");
-        analyzer_warnings.push(message);
-    };
-    let available = |binary: &str| Command::new(binary).arg("--version").output().is_ok_and(|output| output.status.success());
-    if !languages_present.is_empty() && !available("ast-grep") {
-        warn("ast-grep is unavailable. Pattern rules were skipped.".to_string());
-    }
-    if languages_present.contains(&Language::Go) && !available("golangci-lint") {
-        warn("golangci-lint is unavailable. Go linter checks were skipped.".to_string());
-    }
-    match run_ast_grep(source_root, &changed_file_paths, &registered_packs) {
-        Ok(findings) => stage1_agent_findings.extend(findings),
-        Err(err) => warn(format!("ast-grep run failed: {err}")),
-    }
-    match run_golangci_lint(source_root, &changed_file_paths) {
-        Ok(findings) => stage1_agent_findings.extend(findings),
-        Err(err) => warn(format!("golangci-lint run failed: {err}")),
-    }
-    match autoreview_core::run_clippy(source_root, &changed_file_paths) {
-        Ok(findings) => stage1_agent_findings.extend(findings),
-        Err(err) => warn(format!("clippy run failed: {err}")),
-    }
-    stage1_agent_findings.extend(autoreview_core::run_rust_review(source_root, &changed_file_paths));
-    if options.audit_rust_deps && categories_present.as_ref().is_none_or(|categories| categories.contains("security")) {
-        for path in changed_file_paths.iter().filter(|path| Path::new(path).file_name().is_some_and(|name| name == "Cargo.lock")) {
-            match autoreview_core::run_cargo_audit(source_root, path) {
-                Ok(findings) => stage1_agent_findings.extend(findings),
-                Err(err) => warn(format!("cargo audit failed for {path}: {err:#}")),
-            }
-        }
-    }
-    // Duplication detection is deliberately NOT gated by language here: its
-    // sliding-window line-hash algorithm is language-agnostic and already
-    // fires on non-source text files (.sql/.proto/.md/etc) — gating it to
-    // the tracked source-language set would silently drop that coverage,
-    // a behavior change, not a speed win.
-    stage1_agent_findings.extend(autoreview_core::run_duplication_check(source_root, &changed_file_paths));
-    stage1_agent_findings.extend(autoreview_core::run_cross_file_duplication_check(source_root, &changed_file_paths));
-    let has_structural_language = STRUCTURAL_RULE_LANGUAGES.applies(&languages_present, None);
-    if (has_structural_language || languages_present.contains(&Language::Rust))
-        && DESIGN_ONLY.applies(&languages_present, categories_present.as_ref())
-    {
-        stage1_agent_findings.extend(autoreview_core::run_complexity_check(source_root, &changed_file_paths, &registered_packs));
-    }
-    if has_structural_language {
-        stage1_agent_findings.extend(autoreview_core::run_practices_check(source_root, &changed_file_paths));
-    }
-    // Architecture layer check is opt-in: only runs when the repo has a
-    // .autoreview/architecture.yaml declaring layers, per the plan ("no sane
-    // generic default for what a repo's layers are").
-    let architecture = match autoreview_core::load_architecture_config(&options.repo_root.join(".autoreview").join("architecture.yaml")) {
-        Ok(config) => config,
-        Err(err) => {
-            warn(format!("failed to parse .autoreview/architecture.yaml: {err}"));
-            None
-        }
-    };
-    if let Some(architecture) = architecture.as_ref() {
-        stage1_agent_findings.extend(autoreview_core::run_architecture_check(source_root, &changed_file_paths, architecture));
-    }
-    let cargo_review = autoreview_core::run_cargo_review(source_root, &changed_file_paths, architecture.as_ref());
-    stage1_agent_findings.extend(cargo_review.findings);
-    for warning in cargo_review.warnings {
-        warn(format!("Cargo review: {warning}"));
-    }
-    // archgraph (Tier 2): whole-repo import-cycle detection (Go and
-    // Java/Kotlin, each its own graph), a no-op for a repo/diff with
-    // neither a go.mod nor any .go/.java/.kt files touched.
-    stage1_agent_findings.extend(autoreview_core::run_archgraph_check(source_root, &changed_file_paths));
-    stage1_agent_findings.extend(autoreview_core::run_symindex_check_with_tier4(source_root, &changed_file_paths, config.symindex.tier4_go));
-    stage1_agent_findings.extend(autoreview_core::run_dataflow_check_for_snapshot(&options.repo_root, source_root, &changed_file_paths, &registered_packs));
-    stage1_agent_findings.extend(autoreview_core::detect_shotgun_surgery(&facts.files));
-    stage1_agent_findings.extend(autoreview_core::run_divergent_change_check(source_root, &changed_file_paths));
-    stage1_agent_findings.extend(autoreview_core::run_bidi_control_character_check(source_root, &changed_file_paths));
+    let (mut stage1_agent_findings, mut analyzer_warnings) = super::static_review::collect(
+        super::static_review::ReviewInput {
+            repo_root: &options.repo_root,
+            source_root,
+            files: &facts.files,
+            aspects: options.aspects.as_deref(),
+            audit_rust_deps: options.audit_rust_deps,
+            tier4_go: config.symindex.tier4_go,
+        },
+        &changed_file_paths,
+        &registered_packs,
+    );
     let in_review_scope = |finding: &autoreview_schema::AgentFinding| {
         categories_present.as_ref().is_none_or(|categories| categories.contains(&finding.category))
             && changed_lines.as_ref().is_none_or(|lines| lines.contains_finding(finding))
@@ -331,12 +282,16 @@ fn run_diff_at_revisions(options: &DiffCommandOptions, base: &str, head: &str) -
     // LLM triage classifier (M2): only consulted when no explicit --tier was
     // given and the heuristic score itself landed within the ambiguity band
     // of a tier boundary — the common case never pays for this call.
+    let model_work_started = std::time::Instant::now();
     let mut classified_tier = None;
+    let mut classification_cost = None;
     if use_model && options.tier.is_none() && backend_available(backend_kind, &config) {
         let (heuristic_score, _) = autoreview_core::score_diff_facts(&facts, &config, stage1_finding_count);
         if let Some((lower, upper)) = autoreview_core::ambiguous_tier_boundary(heuristic_score, &config) {
             let backend = build_backend(backend_kind, &config);
-            classified_tier = autoreview_core::classify_ambiguous_tier(backend.as_ref(), &facts, heuristic_score, lower, upper, cheap_model_for(backend_kind, &config), source_root);
+            let (tier, usage, wall_ms) = autoreview_core::classify_ambiguous_tier_with_usage(backend.as_ref(), &facts, heuristic_score, (lower, upper), cheap_model_for(backend_kind, &config), source_root);
+            classified_tier = tier;
+            classification_cost = Some(CostEntry { input_tokens: usage.input_tokens, output_tokens: usage.output_tokens, usd: usage.usd, wall_ms });
             if let Some(tier) = classified_tier {
                 println!("  [triage] score {heuristic_score:.1} is ambiguous between {lower} and {upper} — classifier picked '{tier}'");
             }
@@ -380,11 +335,18 @@ fn run_diff_at_revisions(options: &DiffCommandOptions, base: &str, head: &str) -
 
     let mut findings = stage1_findings.clone();
     let mut per_stage_costs: HashMap<String, CostEntry> = HashMap::new();
-    let mut total_input_tokens = 0u64;
-    let mut total_output_tokens = 0u64;
-    let mut total_wall_ms = 0u64;
-    let mut total_usd = 0.0f64;
-    let mut any_usd_reported = false;
+    let mut total_input_tokens = classification_cost.as_ref().map_or(0, |cost| cost.input_tokens);
+    let mut total_output_tokens = classification_cost.as_ref().map_or(0, |cost| cost.output_tokens);
+    let mut total_wall_ms = classification_cost.as_ref().map_or(0, |cost| cost.wall_ms);
+    let classification_usd = classification_cost.as_ref().and_then(|cost| cost.usd);
+    let mut total_usd = classification_usd.unwrap_or_default();
+    let mut any_usd_reported = classification_usd.is_some();
+    if let Some(cost) = classification_cost {
+        per_stage_costs.insert("triage".to_string(), cost);
+    }
+    // This deadline stops dispatch of new model work. Calls already running
+    // are allowed to finish.
+    let deadline = model_work_started + std::time::Duration::from_secs(u64::from(plan.budgets.wall_clock_sec));
 
     if options.static_only {
         println!("  [info] Static-only review. Model stages are disabled.");
@@ -450,25 +412,12 @@ fn run_diff_at_revisions(options: &DiffCommandOptions, base: &str, head: &str) -
             // dollar figure for a run that actually ran out of time would
             // point the user at the wrong knob.
             let mut budget_stopped: Option<String> = None;
-            // `wallClockSec` is printed to the user as part of the budget
-            // line, so it has to mean something. It previously did not:
-            // the planner computed it, `diff` displayed it, and the report
-            // serialized it, but nothing ever compared elapsed time
-            // against it — only the *cost* budget was enforced.
-            //
-            // Checked between chunks, which is an honest bound rather than
-            // a hard one: a specialist already in flight is allowed to
-            // finish, because `std::process` offers no way to time out a
-            // running child and killing one mid-call would waste tokens
-            // already spent. So this caps how long a review keeps
-            // *starting* new work, not the absolute wall time.
-            let specialist_deadline = std::time::Instant::now() + std::time::Duration::from_secs(u64::from(plan.budgets.wall_clock_sec));
             for chunk in plan.specialists.chunks(max_concurrency.max(1)) {
                 if autoreview_core::should_stop_for_budget(total_usd, any_usd_reported, options.max_usd) {
                     budget_stopped = Some(format!("spent ${total_usd:.4} of the --max-usd {:.2} cap", options.max_usd.unwrap_or(0.0)));
                     break;
                 }
-                if std::time::Instant::now() >= specialist_deadline {
+                if std::time::Instant::now() >= deadline {
                     budget_stopped = Some(format!("hit the {}s wallClockSec budget for this tier", plan.budgets.wall_clock_sec));
                     break;
                 }
@@ -509,7 +458,7 @@ fn run_diff_at_revisions(options: &DiffCommandOptions, base: &str, head: &str) -
 
                 for (aspect, result) in results {
                     match result {
-                        Ok(specialist_result) => {
+                        Ok(mut specialist_result) => {
                             total_input_tokens += specialist_result.usage.input_tokens;
                             total_output_tokens += specialist_result.usage.output_tokens;
                             total_wall_ms += specialist_result.wall_ms;
@@ -528,6 +477,9 @@ fn run_diff_at_revisions(options: &DiffCommandOptions, base: &str, head: &str) -
                             );
                             match &specialist_result.status {
                                 SpecialistStatus::Ok => {
+                                    for finding in &mut specialist_result.findings {
+                                        normalize_specialist_finding(finding, &aspect, backend_kind);
+                                    }
                                     println!(
                                         "    ✓ {aspect:<12} {} finding(s)",
                                         specialist_result.findings.len()
@@ -615,16 +567,25 @@ fn run_diff_at_revisions(options: &DiffCommandOptions, base: &str, head: &str) -
             println!("\n  verify:         checking {to_check} finding(s) against the diff...");
             let diff_text = diff_context(&options.repo_root, base, head, &facts.files);
             let backend = build_backend(backend_kind, &config);
-            let verify_result = autoreview_core::run_verify_pass(
+            let verify_result = autoreview_core::run_verify_pass_with_budget(
                 backend.as_ref(),
                 findings,
                 &diff_text,
-                cheap_model_for(backend_kind, &config),
-                4,
-                source_root,
-                &config.verify.noisy_categories,
-                &semantic_ids,
+                autoreview_core::VerifyOptions {
+                    model: cheap_model_for(backend_kind, &config),
+                    max_turns: 4,
+                    cwd: source_root,
+                    noisy_categories: &config.verify.noisy_categories,
+                    semantic_rule_ids: &semantic_ids,
+                    budget: autoreview_core::VerifyBudget {
+                        remaining_usd: options.max_usd.map(|limit| limit - total_usd),
+                        deadline: Some(deadline),
+                    },
+                },
             );
+            if verify_result.checked < to_check {
+                println!("  [budget] verified {} of {to_check} selected finding(s). Unchecked findings remain in the report.", verify_result.checked);
+            }
             findings = verify_result.kept;
             if !verify_result.suppressed.is_empty() {
                 println!("  [verify] refuted {} finding(s):", verify_result.suppressed.len());
@@ -655,7 +616,7 @@ fn run_diff_at_revisions(options: &DiffCommandOptions, base: &str, head: &str) -
     // tier for the same reason: it's a real LLM cost on top of the
     // finding-based review, not a replacement for it.
     let mut spec_verdicts = Vec::new();
-    if use_model && !autoreview_core::should_stop_for_budget(total_usd, any_usd_reported, options.max_usd) && plan.tier != Tier::Quick && backend_available(backend_kind, &config) {
+    if use_model && std::time::Instant::now() < deadline && !autoreview_core::should_stop_for_budget(total_usd, any_usd_reported, options.max_usd) && plan.tier != Tier::Quick && backend_available(backend_kind, &config) {
         let spec_path = options.repo_root.join(".autoreview").join("spec.md");
         match std::fs::read_to_string(&spec_path) {
             Ok(contents) => match autoreview_core::parse_spec(&contents) {
@@ -779,7 +740,11 @@ fn run_diff_at_revisions(options: &DiffCommandOptions, base: &str, head: &str) -
             Err(err) => println!("  [warn] shadow rules: failed to open history store: {err}"),
         },
         Ok(_) => {}
-        Err(err) => warn(format!("shadow rules run failed: {err}")),
+        Err(err) => {
+            let warning = format!("shadow rules run failed: {err}");
+            println!("  [warn] {warning}");
+            analyzer_warnings.push(warning);
+        }
     }
 
     // Incremental mode: suppress findings already reported in the most
@@ -1119,5 +1084,32 @@ mod watch_tests {
         let repo = init_repo(&[("main.go", "package main\n")]);
         let options = DiffCommandOptions { repo_root: repo.path().to_path_buf(), base_ref: "HEAD".to_string(), head_ref: "HEAD".to_string(), tier: None, aspects: None, max_usd: None, incremental: false, static_only: true, changed_lines: false, audit_rust_deps: false, backend: None };
         run_diff_watch(options, std::time::Duration::from_millis(1), Some(3)).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod specialist_tests {
+    use super::*;
+
+    #[test]
+    fn records_reviewer_provenance_and_preserves_patch_for_explicit_review() {
+        let mut finding: AgentFinding = serde_json::from_value(serde_json::json!({
+            "source": {"kind":"analyzer", "tool":"clippy", "ruleId":"unrelated"},
+            "category": "correctness", "severity": "high", "confidence": 2.0,
+            "title": "Report", "message": "Fix the failing comparison",
+            "location": {"path": "main.rs", "range":{"startLine": 1}, "side": "new", "snippet": "fn main() {}"},
+            "suggestedPatch": "test patch",
+            "meta": {"rulePackId": "incorrect"}
+        })).unwrap();
+        normalize_specialist_finding(&mut finding, "correctness", AgentBackendKind::Pi);
+        assert!(matches!(finding.source.kind, FindingSourceKind::Agent));
+        assert_eq!(finding.source.tool, "pi");
+        assert_eq!(finding.source.aspect.as_deref(), Some("correctness"));
+        assert!(finding.source.rule_id.is_none());
+        assert!(finding.meta.unwrap().is_empty());
+        assert_eq!(finding.confidence, 1.0);
+        let suggestion = finding.suggestion.unwrap();
+        assert_eq!(suggestion.patch.as_deref(), Some("test patch"));
+        assert_eq!(suggestion.safety, PatchSafety::NeedsReview);
     }
 }

@@ -101,6 +101,9 @@ reach a `sinks` call without passing through a `sanitizers` call first? This
 needs real interprocedural tracing (`crates/dataflow`), not something a bare
 `pattern` rule can express.
 
+Supported source languages are Go, Java, Kotlin, JavaScript, and TypeScript.
+Use `language: TypeScript` for TSX taint rules.
+
 ```yaml
 id: go-command-injection-taint
 language: Go
@@ -133,6 +136,8 @@ A single numeric metric compared against a fixed bound — no `rule:` block
 at all, since there's no pattern to match, just a computed number per
 function/class/file.
 
+Registering a threshold rule changes that metric for the repository.
+
 ```yaml
 id: utility-class-public-constructor
 language: Java
@@ -157,6 +162,8 @@ A boolean "pending" fact along a CFG path: after calling `after`, was
 `unless` called before either `before` or (if `checkBeforeReturn: true`) a
 `return`? Use for must-follow/must-precede conventions across statements —
 lock/unlock, open/close, a required check before use.
+
+The call-sequence engine runs on Java and Kotlin.
 
 ```yaml
 id: java-unreleased-lock

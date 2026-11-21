@@ -323,7 +323,7 @@ pub fn lower_function(source: &[u8], fn_node: Node) -> Cfg<Stmt> {
 /// through to after the block. `current`'s stmts get appended to directly
 /// for straight-line statements; control-flow statements close it out and
 /// open fresh nodes for their branches/loop bodies.
-fn lower_block(cfg: &mut Cfg<Stmt>, block: Node, source: &[u8], mut current: NodeId) -> NodeId {
+fn lower_block(cfg: &mut Cfg<Stmt>, block: Node, source: &[u8], current: NodeId) -> NodeId {
     // `statement_list` is a positional child of `block`, not a named
     // field (confirmed via `--debug-query=ast`: it has no `field:`
     // prefix in the dump) — find it by kind rather than
@@ -333,14 +333,14 @@ fn lower_block(cfg: &mut Cfg<Stmt>, block: Node, source: &[u8], mut current: Nod
     let list = block.named_children(&mut cursor).find(|n| n.kind() == "statement_list");
     let Some(list) = list else { return current };
 
-    let mut cursor = list.walk();
-    for stmt in list.named_children(&mut cursor) {
-        current = lower_statement(cfg, stmt, source, current);
-    }
-    current
+    super::lower_block(cfg, list, source, current, lower_statement_inner)
 }
 
 fn lower_statement(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {
+    super::lower_statement(cfg, stmt, source, current, lower_statement_inner)
+}
+
+fn lower_statement_inner(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {
     match stmt.kind() {
         "short_var_declaration" | "assignment_statement" => {
             cfg.nodes[current].stmts.extend(lower_assign_like(stmt, source));

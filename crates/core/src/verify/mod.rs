@@ -106,6 +106,21 @@ pub struct VerifyPassResult {
     pub checked: usize,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct VerifyBudget {
+    pub remaining_usd: Option<f64>,
+    pub deadline: Option<std::time::Instant>,
+}
+
+pub struct VerifyOptions<'a> {
+    pub model: &'a str,
+    pub max_turns: u32,
+    pub cwd: &'a Path,
+    pub noisy_categories: &'a [String],
+    pub semantic_rule_ids: &'a std::collections::HashSet<String>,
+    pub budget: VerifyBudget,
+}
+
 /// Runs the verify pass over a finding set: findings selected by
 /// `select_for_verification` are judged one at a time; everything else
 /// passes through untouched. Findings are matched by id (stable within one
@@ -116,6 +131,13 @@ pub struct VerifyPassResult {
 // wouldn't just be a struct wrapping "everything but backend and findings".
 #[allow(clippy::too_many_arguments)]
 pub fn run_verify_pass(backend: &dyn AgentBackend, findings: Vec<Finding>, diff_text: &str, model: &str, max_turns: u32, cwd: &Path, noisy_categories: &[String], semantic_rule_ids: &std::collections::HashSet<String>) -> VerifyPassResult {
+    run_verify_pass_with_budget(backend, findings, diff_text, VerifyOptions {
+        model, max_turns, cwd, noisy_categories, semantic_rule_ids, budget: VerifyBudget::default(),
+    })
+}
+
+pub fn run_verify_pass_with_budget(backend: &dyn AgentBackend, findings: Vec<Finding>, diff_text: &str, options: VerifyOptions<'_>) -> VerifyPassResult {
+    let VerifyOptions { model, max_turns, cwd, noisy_categories, semantic_rule_ids, budget } = options;
     let to_verify: std::collections::HashSet<String> = select_for_verification(&findings, noisy_categories, semantic_rule_ids).into_iter().map(|f| f.id.clone()).collect();
 
     let mut kept = Vec::with_capacity(findings.len());
@@ -125,14 +147,16 @@ pub fn run_verify_pass(backend: &dyn AgentBackend, findings: Vec<Finding>, diff_
     let mut checked = 0usize;
 
     for finding in findings {
-        if !to_verify.contains(&finding.id) {
+        if !to_verify.contains(&finding.id)
+            || budget.deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
+            || crate::triage::should_stop_for_budget(usage.usd.unwrap_or_default(), usage.usd.is_some(), budget.remaining_usd)
+        {
             kept.push(finding);
             continue;
         }
         checked += 1;
         let result = verify_finding(backend, &finding, diff_text, model, max_turns, cwd);
-        usage.input_tokens += result.usage.input_tokens;
-        usage.output_tokens += result.usage.output_tokens;
+        usage.add(&result.usage);
         wall_ms += result.wall_ms;
 
         if result.keep {
@@ -263,5 +287,50 @@ mod tests {
         let result = run_verify_pass(&backend, findings, "diff text", "haiku", 2, Path::new("/repo"), &[], &std::collections::HashSet::new());
         assert_eq!(result.kept.len(), 1);
         assert!(result.suppressed.is_empty());
+    }
+
+    #[test]
+    fn accounts_for_verifier_cost_and_stops_dispatch_at_the_remaining_budget() {
+        struct MeteredBackend(std::cell::Cell<usize>);
+        impl AgentBackend for MeteredBackend {
+            fn invoke(&self, _request: &InvokeRequest) -> anyhow::Result<crate::InvokeResult> {
+                self.0.set(self.0.get() + 1);
+                Ok(crate::InvokeResult {
+                    final_text: " ```json\n{\"keep\":false,\"reason\":\"refuted\"}\n```".into(),
+                    usage: Usage { usd: Some(0.25), ..Usage::default() },
+                    wall_ms: 5,
+                })
+            }
+        }
+        let backend = MeteredBackend(std::cell::Cell::new(0));
+        let findings = ["a", "b", "c"].into_iter().map(|id|
+            make_finding(id, FindingSourceKind::Agent, "correctness", Severity::High)
+        ).collect();
+        let result = run_verify_pass_with_budget(
+            &backend, findings, "diff", VerifyOptions {
+                model: "model", max_turns: 1, cwd: Path::new("/repo"), noisy_categories: &[],
+                semantic_rule_ids: &std::collections::HashSet::new(),
+                budget: VerifyBudget { remaining_usd: Some(0.50), deadline: None },
+            }
+        );
+        assert_eq!(backend.0.get(), 2);
+        assert_eq!(result.usage.usd, Some(0.50));
+        assert_eq!(result.suppressed.len(), 2);
+        assert_eq!(result.kept[0].id, "c");
+    }
+
+    #[test]
+    fn preserves_selected_findings_if_the_deadline_has_elapsed() {
+        let backend = ScriptedBackend { responses: RefCell::new(vec![]) };
+        let findings = vec![make_finding("a", FindingSourceKind::Agent, "correctness", Severity::Blocker)];
+        let result = run_verify_pass_with_budget(
+            &backend, findings, "diff", VerifyOptions {
+                model: "model", max_turns: 1, cwd: Path::new("/repo"), noisy_categories: &[],
+                semantic_rule_ids: &std::collections::HashSet::new(),
+                budget: VerifyBudget { remaining_usd: None, deadline: Some(std::time::Instant::now()) },
+            }
+        );
+        assert_eq!(result.kept.len(), 1);
+        assert_eq!(result.checked, 0);
     }
 }

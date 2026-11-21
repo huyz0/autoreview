@@ -153,7 +153,8 @@ fn count_matching_files(rule_path: &Path, target_files: &[PathBuf], cwd: &Path) 
 
 fn list_fixture_files(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_file()).collect()
+    entries.filter_map(Result::ok).filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| entry.path()).collect()
 }
 
 const SKIP_DIRS: &[&str] = &[".git", "vendor", "node_modules", "target", ".autoreview"];
@@ -164,21 +165,18 @@ fn sample_repo_files(repo_root: &Path, extension: &str) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut stack = vec![repo_root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        if found.len() >= FP_SAMPLE_CAP {
-            break;
-        }
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for entry in entries.filter_map(|e| e.ok()) {
+        let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let Ok(kind) = entry.file_type() else { continue };
             let path = entry.path();
-            if path.is_dir() {
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !SKIP_DIRS.contains(&name) {
-                    stack.push(path);
-                }
-            } else if path.extension().and_then(|e| e.to_str()) == Some(extension) {
+            if kind.is_dir() && !path.file_name().and_then(|n| n.to_str()).is_some_and(|n| SKIP_DIRS.contains(&n)) {
+                stack.push(path);
+            } else if kind.is_file() && path.extension().and_then(|e| e.to_str()) == Some(extension) {
                 found.push(path);
                 if found.len() >= FP_SAMPLE_CAP {
-                    break;
+                    return found;
                 }
             }
         }
@@ -191,11 +189,16 @@ fn sample_repo_files(repo_root: &Path, extension: &str) -> Vec<PathBuf> {
 /// (`rule.yaml`, from the draft stage) and optional `tests/positive`,
 /// `tests/negative` fixture directories a human has supplied.
 pub fn run_bench(repo_root: &Path, cluster_id: &str) -> anyhow::Result<BenchReport> {
+    super::validate_rule_path_id(cluster_id)?;
     let candidate_dir = repo_root.join(".autoreview").join("rules").join("candidates").join(cluster_id);
     let rule_path = candidate_dir.join("rule.yaml");
     if !rule_path.exists() {
         anyhow::bail!("no drafted rule found at {} — run `autoreview rules mine` first", rule_path.display());
     }
+    anyhow::ensure!(
+        rule_path.symlink_metadata()?.is_file() && rule_path.canonicalize()?.starts_with(repo_root.canonicalize()?),
+        "candidate YAML must be a regular file inside the repository"
+    );
 
     let rule_contents = std::fs::read_to_string(&rule_path)?;
     let rule_meta: RuleLanguage = serde_yaml::from_str(&rule_contents)?;

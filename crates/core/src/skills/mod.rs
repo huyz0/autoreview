@@ -34,7 +34,7 @@ code block like this, and nothing after it:
       "suggestion": {
         "description": "<what to change>",
         "patch": "<unified diff, optional>",
-        "safety": "safe-autofix|needs-review"
+        "safety": "needs-review"
       }
     }
   ]

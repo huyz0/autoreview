@@ -122,8 +122,7 @@ pub fn mine_candidates(findings: Vec<MinedFindingRow>) -> Vec<CandidateSeed> {
 /// per the plan's file layout. Idempotent — overwrites on re-mine, since the
 /// seed is a derived artifact, not something a human edits directly.
 pub fn write_seed_file(repo_root: &std::path::Path, seed: &CandidateSeed) -> anyhow::Result<std::path::PathBuf> {
-    let dir = repo_root.join(".autoreview").join("rules").join("candidates").join(&seed.cluster_id);
-    std::fs::create_dir_all(&dir)?;
+    let dir = super::rule_store_directory(repo_root, &["candidates", &seed.cluster_id])?;
     let path = dir.join("seed.json");
     let json = serde_json::to_string_pretty(&SeedFile {
         cluster_id: seed.cluster_id.clone(),
@@ -133,7 +132,9 @@ pub fn write_seed_file(repo_root: &std::path::Path, seed: &CandidateSeed) -> any
         distinct_run_count: seed.distinct_run_count,
         representative_snippets: seed.representative_snippets.iter().map(|s| SeedSnippet { fingerprint: s.fingerprint.clone(), title: s.title.clone(), message: s.message.clone() }).collect(),
     })?;
-    std::fs::write(&path, json)?;
+    let mut output = tempfile::NamedTempFile::new_in(&dir)?;
+    std::io::Write::write_all(&mut output, json.as_bytes())?;
+    output.persist(&path)?;
     Ok(path)
 }
 

@@ -24,13 +24,14 @@ use autoreview_core::{
     BenchVerdict, CandidateSeed, CredentialStore, DraftOutcome, HistoryStore, BITBUCKET_SERVICE,
 };
 use autoreview_schema::AgentBackendKind;
+use autoreview_core::rule_factory::{rule_store_directory, validate_rule_path_id};
 use serde::Deserialize;
 
 use super::backend::{backend_available, build_backend};
 use super::diff::move_shadow_rule_file;
 use super::history::history_dir_for;
 
-fn cheap_model_for(kind: AgentBackendKind, config: &autoreview_schema::AutoreviewConfig) -> &str {
+pub(super) fn cheap_model_for(kind: AgentBackendKind, config: &autoreview_schema::AutoreviewConfig) -> &str {
     match kind {
         AgentBackendKind::LocalLlm => &config.agents.local_llm.model,
         AgentBackendKind::OpenAiCompatible => &config.agents.open_ai_compatible.model,
@@ -102,6 +103,12 @@ fn draft_and_write_seeds(repo_root: &std::path::Path, config: &autoreview_schema
             seed.distinct_run_count,
             seed_path.display()
         );
+        let directory = seed_path.parent().expect("the seed is written inside a candidate directory");
+        let rule_path = directory.join("rule.yaml");
+        if rule_path.symlink_metadata().is_ok() {
+            println!("    [draft] kept existing rule at {}", rule_path.display());
+            continue;
+        }
 
         let Some(backend) = &backend else {
             println!("    [draft] skipped — no agent backend available (needed to attempt a rule draft)");
@@ -110,10 +117,9 @@ fn draft_and_write_seeds(repo_root: &std::path::Path, config: &autoreview_schema
         let (outcome, _usage) = draft_candidate(backend.as_ref(), seed, &model, 2, repo_root);
         match outcome {
             DraftOutcome::Drafted { rule_yaml, agreement_count } => {
-                let dir = repo_root.join(".autoreview").join("rules").join("candidates").join(&seed.cluster_id);
-                std::fs::create_dir_all(&dir)?;
-                let rule_path = dir.join("rule.yaml");
-                std::fs::write(&rule_path, &rule_yaml)?;
+                let mut draft = tempfile::NamedTempFile::new_in(directory)?;
+                std::io::Write::write_all(&mut draft, rule_yaml.as_bytes())?;
+                draft.persist_noclobber(&rule_path)?;
                 println!("    [draft] {agreement_count}/5 attempts agreed -> {}", rule_path.display());
             }
             DraftOutcome::Inexpressible { rationale } => {
@@ -496,11 +502,6 @@ pub fn run_rules_shadow_log(repo_root: &std::path::Path, rule_id: &str) -> anyho
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
-struct RuleIdOnly {
-    id: String,
-}
-
 fn candidates_dir(repo_root: &std::path::Path) -> std::path::PathBuf {
     repo_root.join(".autoreview").join("rules").join("candidates")
 }
@@ -560,33 +561,54 @@ pub fn run_rules_review(repo_root: &std::path::Path, approve: Option<String>, re
 }
 
 fn approve_candidate(repo_root: &std::path::Path, cluster_id: &str) -> anyhow::Result<()> {
+    validate_rule_path_id(cluster_id)?;
     let dir = candidates_dir(repo_root).join(cluster_id);
     let rule_path = dir.join("rule.yaml");
+    anyhow::ensure!(dir.is_dir() && dir.canonicalize()?.starts_with(repo_root.canonicalize()?), "candidate directory must be inside the repository");
+    anyhow::ensure!(rule_path.symlink_metadata().is_ok_and(|meta| meta.is_file()), "no regular candidate rule found at {}", rule_path.display());
     let contents = std::fs::read_to_string(&rule_path).map_err(|_| anyhow::anyhow!("no drafted rule found at {} — run `autoreview rules mine` first", rule_path.display()))?;
-    let meta: RuleIdOnly = serde_yaml::from_str(&contents)?;
+    let (id, kind) = validate_rule_file(&contents)?;
+    validate_rule_path_id(&id)?;
+    anyhow::ensure!(kind == "pattern", "only pattern rules can use the learned rule lifecycle");
+    anyhow::ensure!(
+        autoreview_core::find_rule_definition(&id, &resolved_packs_for_mining(repo_root)).is_none()
+            && autoreview_core::rust_review_rule(&id).is_none(),
+        "rule '{id}' is already active in the rule catalog"
+    );
     let bench = run_bench(repo_root, cluster_id)?;
     anyhow::ensure!(bench.verdict == BenchVerdict::Candidate, "candidate '{cluster_id}' failed its approval checks ({:?}). Run autoreview rules bench {cluster_id} for details", bench.verdict);
     anyhow::ensure!(std::fs::read_to_string(&rule_path)? == contents, "candidate '{cluster_id}' changed during the benchmark. Retry approval");
 
-    let shadow_dir = repo_root.join(".autoreview").join("rules").join("shadow");
-    std::fs::create_dir_all(&shadow_dir)?;
-    std::fs::write(shadow_dir.join(format!("{}.yaml", meta.id)), &contents)?;
-
     let history_dir = history_dir_for(repo_root);
     let store = HistoryStore::open(&history_dir)?;
-    store.ensure_rule_tracked(&meta.id, "shadow", &chrono::Utc::now().to_rfc3339())?;
+    anyhow::ensure!(store.rule_state(&id)?.is_none(), "rule '{id}' is already tracked");
+    let shadow_dir = rule_store_directory(repo_root, &["shadow"])?;
+    let mut output = tempfile::NamedTempFile::new_in(&shadow_dir)?;
+    std::io::Write::write_all(&mut output, contents.as_bytes())?;
+    let installed = shadow_dir.join(format!("{id}.yaml"));
+    output.persist_noclobber(&installed)?;
+    if let Err(err) = store.ensure_rule_tracked(&id, "shadow", &chrono::Utc::now().to_rfc3339()) {
+        std::fs::remove_file(&installed)?;
+        return Err(err);
+    }
 
-    std::fs::write(dir.join("approved.json"), serde_json::json!({ "ruleId": meta.id, "approvedAt": chrono::Utc::now().to_rfc3339() }).to_string())?;
-    println!("Approved '{cluster_id}' — rule '{}' is now in shadow mode (see `autoreview rules shadow-log {}`).", meta.id, meta.id);
+    let mut approval = tempfile::NamedTempFile::new_in(&dir)?;
+    serde_json::to_writer(&mut approval, &serde_json::json!({ "ruleId": id, "approvedAt": chrono::Utc::now().to_rfc3339() }))?;
+    approval.persist(dir.join("approved.json"))?;
+    println!("Approved '{cluster_id}' — rule '{id}' is now in shadow mode (see `autoreview rules shadow-log {id}`).");
     Ok(())
 }
 
 fn reject_candidate(repo_root: &std::path::Path, cluster_id: &str, reason: &str) -> anyhow::Result<()> {
+    validate_rule_path_id(cluster_id)?;
     let dir = candidates_dir(repo_root).join(cluster_id);
     if !dir.exists() {
         anyhow::bail!("no candidate '{cluster_id}' found under {}", candidates_dir(repo_root).display());
     }
-    std::fs::write(dir.join("rejected.json"), serde_json::json!({ "reason": reason, "rejectedAt": chrono::Utc::now().to_rfc3339() }).to_string())?;
+    anyhow::ensure!(dir.canonicalize()?.starts_with(repo_root.canonicalize()?), "candidate directory is outside the repository");
+    let mut rejection = tempfile::NamedTempFile::new_in(&dir)?;
+    serde_json::to_writer(&mut rejection, &serde_json::json!({ "reason": reason, "rejectedAt": chrono::Utc::now().to_rfc3339() }))?;
+    rejection.persist(dir.join("rejected.json"))?;
     println!("Rejected '{cluster_id}': {reason}");
     Ok(())
 }
@@ -746,7 +768,7 @@ struct MinimalCallSequenceRule {
 /// *minimum* required keys (the same ones each real loader in
 /// `autoreview-core` requires), not re-implementing full rule semantics
 /// here. Returns `Err` with a message naming what's missing/malformed.
-fn validate_rule_file(contents: &str) -> anyhow::Result<(String, String)> {
+pub(super) fn validate_rule_file(contents: &str) -> anyhow::Result<(String, String)> {
     let meta: MinimalRuleMeta = serde_yaml::from_str(contents).map_err(|err| anyhow::anyhow!("not a valid rule file: {err}"))?;
     #[derive(Deserialize)]
     struct IdOnly {

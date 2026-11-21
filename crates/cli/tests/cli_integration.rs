@@ -110,6 +110,48 @@ fn report_path_from_stdout(stdout: &str) -> PathBuf {
 }
 
 #[test]
+fn finding_draft_replays_commits_and_only_persists_a_matching_rule() {
+    if !ast_grep_available() {
+        return;
+    }
+    let clean = "package fixture\nfunc Equal(a, b int) bool { return a == b }\n";
+    let bad = "package fixture\nfunc Equal(a, b int) bool { return a == a }\n";
+    let repo = init_repo(&[("compare.go", clean)]);
+    let base = current_commit(repo.path());
+    repo.commit(&[("compare.go", bad)], "add defect");
+    let broken = current_commit(repo.path());
+    let review = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["diff", "--base", &base, "--head", &broken, "--static-only", "--changed-lines"])
+        .assert().success();
+    let report_file = report_path_from_stdout(&String::from_utf8_lossy(&review.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report_file).unwrap()).unwrap();
+    let finding = report["findings"].as_array().unwrap().iter()
+        .find(|finding| finding["source"]["ruleId"] == "go-no-self-comparison").unwrap();
+    let id = finding["id"].as_str().unwrap();
+    repo.commit(&[("compare.go", clean)], "fix defect");
+    let fixed = current_commit(repo.path());
+    std::fs::write(repo.path().join("compare.go"), bad).unwrap();
+    let proposal = repo.path().join("proposal.yml");
+    let yaml = "id: demo-repeated-return-operand\nlanguage: Go\ncategory: correctness\nseverity: warning\nmessage: Compare the distinct arguments\nrule:\n  pattern: return $A == $A\n";
+    std::fs::write(&proposal, yaml).unwrap();
+
+    Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["rules", "draft", id, "--proposal", "proposal.yml", "--fixed", &broken])
+        .assert().failure().stderr(predicate::str::contains("still matches"));
+    assert!(!repo.path().join(".autoreview/rules/drafts").exists());
+
+    Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["rules", "draft", id, "--proposal", "proposal.yml", "--fixed", &fixed])
+        .assert().success().stdout(predicate::str::contains("Unregistered draft pack"));
+    let draft = std::fs::read_dir(repo.path().join(".autoreview/rules/drafts"))
+        .unwrap().next().unwrap().unwrap().path();
+    Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["rules", "packs", "validate"]).arg(draft).assert().success();
+    assert!(!repo.path().join(".autoreview/rulepacks.yaml").exists());
+    assert_eq!(std::fs::read_to_string(repo.path().join("compare.go")).unwrap(), bad);
+}
+
+#[test]
 fn doctor_reports_on_all_required_tools_and_the_cost_model_caveat() {
     let mut cmd = Command::cargo_bin("autoreview").unwrap();
     cmd.arg("doctor");

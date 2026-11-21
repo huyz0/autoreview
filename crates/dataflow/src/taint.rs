@@ -229,7 +229,7 @@ pub fn check_with_summaries(spec: &TaintSpec, cfg: &Cfg<Stmt>, summaries: Option
     for (node_id, node) in cfg.nodes.iter().enumerate() {
         let preds = cfg.predecessors(node_id);
         let mut facts = preds.iter().fold(TaintFacts::bottom(), |acc, &p| acc.join(&out_facts[p]));
-        for stmt in &node.stmts {
+        for (index, stmt) in node.stmts.iter().enumerate() {
             if let Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, .. } = stmt {
                 // Every matching sink is checked, not just the first — a
                 // rule authoring two sink entries for the same call name
@@ -241,7 +241,7 @@ pub fn check_with_summaries(spec: &TaintSpec, cfg: &Cfg<Stmt>, summaries: Option
                     for (_, arg) in dangerous {
                         let var = arg.trim_start_matches('&');
                         if is_tainted(&facts, var) {
-                            hits.push(TaintHit { sink_call: name.clone(), tainted_arg: var.to_string(), node: node_id, source_line: node.source_line });
+                            hits.push(TaintHit { sink_call: name.clone(), tainted_arg: var.to_string(), node: node_id, source_line: node.statement_line(index) });
                         }
                     }
                 }

@@ -219,6 +219,16 @@ enum RulesAction {
         #[arg(long)]
         from_llm_patterns: bool,
     },
+    /// Draft and verify an unregistered DSL rule from a retained finding
+    Draft {
+        finding_id: String,
+        /// Verify that the same source file is clean at this commit
+        #[arg(long)]
+        fixed: Option<String>,
+        /// Validate a local YAML proposal instead of asking the configured model
+        #[arg(long)]
+        proposal: Option<std::path::PathBuf>,
+    },
     /// Bench a candidate rule against its fixtures and sample repository files
     Bench { cluster_id: String },
     /// Measure built-in rules on labelled Git snapshots
@@ -408,6 +418,7 @@ fn main() -> anyhow::Result<()> {
                     run_rules_mine(&repo_root)?
                 }
             }
+            RulesAction::Draft { finding_id, fixed, proposal } => commands::rule_draft::run(&repo_root, &finding_id, fixed.as_deref(), proposal.as_deref())?,
             RulesAction::Bench { cluster_id } => run_rules_bench(&repo_root, &cluster_id)?,
             RulesAction::Replay { suite } => commands::replay::run_replay(&repo_root, &suite)?,
             RulesAction::Gate { base, head } => commands::replay::run_gate(&repo_root, &base, &head)?,
