@@ -139,6 +139,24 @@ fn changed_packages(repo_root: &Path, changed_files: &HashSet<&str>) -> Option<B
     Some(packages)
 }
 
+fn additional_targets(repo_root: &Path, relevant: &HashSet<&str>) -> Vec<&'static str> {
+    let includes = |name| relevant.iter().any(|path| path.split('/').any(|part| part == name));
+    let mut targets = Vec::new();
+    if includes("tests") || relevant.iter().any(|path| {
+        std::fs::read_to_string(repo_root.join(path))
+            .is_ok_and(|source| super::rust_review::contains_inline_tests(&source))
+    }) {
+        targets.push("--tests");
+    }
+    if includes("examples") {
+        targets.push("--examples");
+    }
+    if includes("benches") {
+        targets.push("--benches");
+    }
+    targets
+}
+
 pub fn run_clippy(repo_root: &Path, changed_files: &[String]) -> anyhow::Result<Vec<AgentFinding>> {
     let relevant: HashSet<&str> = changed_files.iter().map(String::as_str)
         .filter(|p| is_relevant_source_file(p) && repo_root.join(p).is_file())
@@ -149,16 +167,6 @@ pub fn run_clippy(repo_root: &Path, changed_files: &[String]) -> anyhow::Result<
 
     let mut command = Command::new("cargo");
     command.args(["clippy", "--message-format=json", "--quiet"]).current_dir(repo_root);
-    // Standalone examples and benchmarks need their targets. Inline test
-    // modules also need a test build even when the source is under src/.
-    if relevant.iter().any(|path| {
-        path.split('/').any(|part| matches!(part, "tests" | "examples" | "benches"))
-            || std::fs::read_to_string(repo_root.join(path))
-                .is_ok_and(|source| super::rust_review::contains_inline_tests(&source))
-    })
-    {
-        command.arg("--all-targets");
-    }
     match changed_packages(repo_root, &relevant) {
         Some(packages) => {
             for package in packages {
@@ -167,16 +175,28 @@ pub fn run_clippy(repo_root: &Path, changed_files: &[String]) -> anyhow::Result<
         }
         None => { command.arg("--workspace"); }
     }
-    let output = command.output()?;
-
-    // A nonzero exit can carry a valid diagnostic, including errors in
-    // the changed code. Surface failed invocations that yielded none.
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let findings = parse_clippy_output(&stdout, &relevant);
-    if !output.status.success() && findings.is_empty() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    // Keep the default build so production lints still run when the test
+    // build omits that target or fails in a development dependency.
+    let production = command.output()?;
+    let extra = additional_targets(repo_root, &relevant);
+    let additional = (!extra.is_empty()).then(|| command.args(extra).output()).transpose()?;
+    let mut stdout = production.stdout;
+    if let Some(output) = additional.as_ref() {
+        stdout.push(b'\n');
+        stdout.extend_from_slice(&output.stdout);
+    }
+    let findings = parse_clippy_output(&String::from_utf8_lossy(&stdout), &relevant);
+    let failed = if production.status.success() {
+        additional.as_ref().filter(|output| !output.status.success())
+            .map(|output| (output.status, &output.stderr))
+    } else {
+        Some((production.status, &production.stderr))
+    };
+    // A nonzero exit can carry a diagnostic for changed code.
+    if let Some((status, stderr)) = failed.filter(|_| findings.is_empty()) {
+        let stderr = String::from_utf8_lossy(stderr);
         let excerpt = stderr.lines().take(20).collect::<Vec<_>>().join("\n");
-        anyhow::bail!("cargo clippy failed ({}): {}", output.status, excerpt.trim());
+        anyhow::bail!("cargo clippy failed ({status}): {}", excerpt.trim());
     }
     Ok(findings)
 }
@@ -260,6 +280,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"scratch_tests\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::create_dir_all(dir.path().join("examples")).unwrap();
+        std::fs::write(
+            dir.path().join("examples/unrelated.rs"),
+            "compile_error!(\"unrelated example\");\nfn main() {}",
+        ).unwrap();
         std::fs::write(dir.path().join("src/lib.rs"), r#"
 pub fn outcome() -> Result<(), &'static str> { Ok(()) }
 
@@ -276,5 +301,16 @@ mod tests {
         assert_eq!(findings.iter().filter(|finding| {
             finding.source.rule_id.as_deref() == Some("unused_must_use") && finding.category == "correctness"
         }).count(), 2, "{findings:#?}");
+
+        std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+        std::fs::write(
+            dir.path().join("tests/unrelated.rs"),
+            "compile_error!(\"unrelated integration test\");",
+        ).unwrap();
+        let findings = run_clippy(dir.path(), &["src/lib.rs".to_owned()]).unwrap();
+        assert!(findings.iter().any(|finding| {
+            finding.source.rule_id.as_deref() == Some("unused_must_use")
+                && finding.location.snippet.contains("ignores_production_outcome")
+        }), "{findings:#?}");
     }
 }
