@@ -1,11 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use autoreview_langsupport::{parser_for, Language};
 use tree_sitter::{Node, Tree};
 
-use super::super::{children, descendants, text};
-use super::flow::{Check, Helpers};
+use super::super::{children, descendants, parse_source, text};
+use super::flow::{Check, Helper, Helpers};
 
 pub(super) struct File {
     pub path: String,
@@ -31,10 +31,7 @@ pub(super) fn load(root: &Path, directory: &Path) -> Vec<File> {
         if absolute.extension().is_none_or(|ext| ext != "go") {
             continue;
         }
-        let Ok(source) = std::fs::read_to_string(&absolute) else {
-            continue;
-        };
-        let Some(tree) = parser.parse(&source, None) else {
+        let Some((source, tree)) = parse_source(&mut parser, &absolute) else {
             continue;
         };
         let Some(file) = file(root, &absolute, source, tree) else {
@@ -48,9 +45,6 @@ pub(super) fn load(root: &Path, directory: &Path) -> Vec<File> {
 
 fn file(root: &Path, absolute: &Path, source: String, tree: Tree) -> Option<File> {
     let node = tree.root_node();
-    if node.has_error() {
-        return None;
-    }
     let package = children(node).find(|part| part.kind() == "package_clause")?;
     let context = descendants(node)
         .filter(|part| part.kind() == "import_spec")
@@ -162,7 +156,24 @@ impl File {
 pub(super) struct Summaries<'a> {
     pub helpers: Helpers,
     wrappers: HashSet<String>,
-    pub helper_files: HashMap<String, (&'a File, Node<'a>)>,
+    helper_files: HashMap<String, (&'a File, Node<'a>)>,
+}
+
+impl<'a> Summaries<'a> {
+    pub fn evidence(&self, names: Vec<String>) -> impl Iterator<Item = (&'a File, Node<'a>)> + '_ {
+        let mut seen = BTreeSet::new();
+        let mut pending = names;
+        while let Some(name) = pending.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if let Some(helper) = self.helpers.get(&name) {
+                pending.extend(helper.calls.iter().cloned());
+            }
+        }
+        seen.into_iter()
+            .filter_map(|name| self.helper_files.get(&name).copied())
+    }
 }
 
 pub(super) fn summaries<'a>(files: &[&'a File]) -> Summaries<'a> {
@@ -218,7 +229,15 @@ fn advance(sites: &HashMap<String, (&File, Node<'_>)>, helpers: &mut Helpers) ->
             &shadowed,
         );
         if let Some(consumes) = check.check(body) {
-            helpers.insert(name.clone(), (index, consumes));
+            let calls = std::mem::take(&mut check.used);
+            helpers.insert(
+                name.clone(),
+                Helper {
+                    position: index,
+                    consumes,
+                    calls,
+                },
+            );
         }
     }
     before != helpers.len()

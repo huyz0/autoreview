@@ -63,22 +63,22 @@ fn source_files(root: &Path) -> Vec<std::path::PathBuf> {
                 continue;
             };
             let path = entry.path();
-            if kind.is_dir() {
-                let name = entry.file_name();
-                if !name.to_string_lossy().starts_with('.')
-                    && !matches!(
-                        name.to_str(),
-                        Some("target" | "build" | "node_modules" | "vendor" | "out")
-                    )
-                {
-                    pending.push(path);
-                }
+            if kind.is_dir() && source_directory(&entry.file_name()) {
+                pending.push(path);
             } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "java") {
                 java.push(path);
             }
         }
     }
     java
+}
+
+fn source_directory(name: &std::ffi::OsStr) -> bool {
+    !name.to_string_lossy().starts_with('.')
+        && !matches!(
+            name.to_str(),
+            Some("target" | "build" | "node_modules" | "vendor" | "out")
+        )
 }
 
 fn entity(java: &Java<'_>, declaration: Node<'_>) -> Option<(String, Entity)> {

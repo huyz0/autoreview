@@ -7,7 +7,7 @@ use autoreview_langsupport::{parser_for, Language};
 use autoreview_schema::AgentFinding;
 use tree_sitter::{Node, Tree};
 
-use super::{children, descendants, location, text};
+use super::{children, descendants, location, parse_source, text};
 
 pub(super) use hibernate::RULE as HIBERNATE_RULE;
 pub(super) use spring::RULE as SPRING_RULE;
@@ -19,15 +19,9 @@ pub(super) fn run(root: &Path, paths: &[String]) -> Vec<AgentFinding> {
     };
     let mut entity_index = None;
     for path in paths.iter().filter(|path| path.ends_with(".java")) {
-        let Ok(source) = std::fs::read_to_string(root.join(path)) else {
+        let Some((source, tree)) = parse_source(&mut parser, &root.join(path)) else {
             continue;
         };
-        let Some(tree) = parser.parse(&source, None) else {
-            continue;
-        };
-        if tree.root_node().has_error() {
-            continue;
-        }
         let java = Java::new(path, &source, &tree);
         findings.extend(spring::findings(&java));
         if source.contains("getResultList") {

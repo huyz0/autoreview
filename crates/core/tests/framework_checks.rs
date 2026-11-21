@@ -53,14 +53,22 @@ import stdctx "context"
 func newContext(parent stdctx.Context) (stdctx.Context, stdctx.CancelFunc) {
     return stdctx.WithCancel(parent)
 }
-func cleanup(cancel stdctx.CancelFunc) { defer cancel() }
+func cleanup(cancel stdctx.CancelFunc) { finish(cancel) }
 func conditionalCleanup(cancel stdctx.CancelFunc, stop bool) {
+    conditionalFinish(cancel, stop)
+}
+"#;
+    let leaf = r#"package demo
+import "context"
+func finish(cancel context.CancelFunc) { defer cancel() }
+func conditionalFinish(cancel context.CancelFunc, stop bool) {
     if stop { cancel() }
 }
 "#;
     let files = [
         ("service/callers.go", callers),
         ("service/helpers.go", helpers),
+        ("service/leaf.go", leaf),
     ];
     let found = scan(&files, &["service/callers.go"]);
     let lines: Vec<_> = found
@@ -74,7 +82,7 @@ func conditionalCleanup(cancel stdctx.CancelFunc, stop bool) {
             .all(|finding| finding.source.rule_id.as_deref()
                 == Some("go-context-cancel-on-all-paths"))
     );
-    let helper_change = scan(&files, &["service/helpers.go"]);
+    let helper_change = scan(&files, &["service/leaf.go"]);
     assert!(helper_change
         .iter()
         .any(|finding| finding.location.path == "service/callers.go"
@@ -83,7 +91,7 @@ func conditionalCleanup(cancel stdctx.CancelFunc, stop bool) {
                 .as_ref()
                 .unwrap()
                 .iter()
-                .any(|site| site.path == "service/helpers.go")));
+                .any(|site| site.path == "service/leaf.go")));
 }
 
 #[test]
@@ -110,6 +118,10 @@ class Service {
         .map(|finding| finding.location.range.start_line)
         .collect();
     assert_eq!(lines, [4, 5], "{found:#?}");
+    let woven = format!(
+        "import org.springframework.transaction.annotation.EnableTransactionManagement;\n{java}\n@EnableTransactionManagement(mode = AdviceMode.ASPECTJ) class Config {{}}"
+    );
+    assert!(scan(&[("Service.java", &woven)], &["Service.java"]).is_empty());
 }
 
 #[test]
@@ -153,5 +165,11 @@ class App {
     assert_eq!(
         found[0].related_locations.as_ref().unwrap()[0].path,
         "model/Book.java"
+    );
+    assert_eq!(
+        found[0].related_locations.as_ref().unwrap()[1]
+            .range
+            .start_line,
+        7
     );
 }

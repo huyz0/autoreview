@@ -4,7 +4,13 @@ use tree_sitter::Node;
 
 use super::super::{children, descendants, text};
 
-pub(super) type Helpers = HashMap<String, (usize, bool)>;
+pub(super) type Helpers = HashMap<String, Helper>;
+
+pub(super) struct Helper {
+    pub position: usize,
+    pub consumes: bool,
+    pub calls: Vec<String>,
+}
 
 pub(super) struct Check<'a, 'tree> {
     pub source: &'a str,
@@ -106,7 +112,7 @@ impl<'tree> Check<'_, 'tree> {
             return Some(CLEAR);
         }
         let name = text(callee, self.source);
-        let Some(&(position, consumes)) = self
+        let Some(helper) = self
             .helpers
             .get(name)
             .filter(|_| !self.shadowed.contains(name))
@@ -115,11 +121,11 @@ impl<'tree> Check<'_, 'tree> {
         };
         let arguments = call.child_by_field_name("arguments")?;
         if children(arguments)
-            .nth(position)
+            .nth(helper.position)
             .is_some_and(|argument| self.is_binding(argument))
         {
             self.used.push(name.to_owned());
-            return Some(if consumes { CLEAR } else { live });
+            return Some(if helper.consumes { CLEAR } else { live });
         }
         self.opaque(call, live)
     }

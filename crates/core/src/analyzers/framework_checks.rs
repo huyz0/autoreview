@@ -6,7 +6,7 @@ use std::path::Path;
 use autoreview_schema::{
     AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side,
 };
-use tree_sitter::Node;
+use tree_sitter::{Node, Parser, Tree};
 
 use super::ast_grep::RuleDefinition;
 
@@ -91,6 +91,12 @@ fn location(path: &str, node: Node<'_>, source: &str) -> Location {
 
 fn text<'s>(node: Node<'_>, source: &'s str) -> &'s str {
     node.utf8_text(source.as_bytes()).unwrap_or("")
+}
+
+fn parse_source(parser: &mut Parser, path: &Path) -> Option<(String, Tree)> {
+    let source = std::fs::read_to_string(path).ok()?;
+    let tree = parser.parse(&source, None)?;
+    (!tree.root_node().has_error()).then_some((source, tree))
 }
 
 fn children(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {

@@ -3,11 +3,11 @@ use tree_sitter::Node;
 use super::super::{children, class_members, containing, descendants, Java};
 use super::mapping::{Entities, Entity};
 
-pub(super) fn iterated_entity<'a>(
+pub(super) fn iterated_entity<'a, 'tree>(
     java: &Java<'_>,
-    loop_node: Node<'_>,
+    loop_node: Node<'tree>,
     entities: &'a Entities,
-) -> Option<&'a Entity> {
+) -> Option<(&'a Entity, Node<'tree>)> {
     let row_type = java.field(loop_node, "type")?;
     let entity = resolve_entity(java, row_type, entities)?;
     let iterable = loop_node.child_by_field_name("value")?;
@@ -17,7 +17,8 @@ pub(super) fn iterated_entity<'a>(
         iterable
     };
     let query = typed_query(java, results, row_type)?;
-    (selects_entity(java, query, entity) && known_manager(java, loop_node, query)).then_some(entity)
+    (selects_entity(java, query, entity) && known_manager(java, loop_node, query))
+        .then_some((entity, query))
 }
 
 fn resolve_entity<'a>(java: &Java<'_>, name: &str, entities: &'a Entities) -> Option<&'a Entity> {

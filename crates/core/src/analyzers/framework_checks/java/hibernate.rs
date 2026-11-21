@@ -20,7 +20,7 @@ pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
 pub(super) fn findings(java: &Java<'_>, entities: &mapping::Entities) -> Vec<AgentFinding> {
     let mut findings = Vec::new();
     for loop_node in descendants(java.root).filter(|node| node.kind() == "enhanced_for_statement") {
-        let Some(entity) = query::iterated_entity(java, loop_node, entities) else {
+        let Some((entity, query)) = query::iterated_entity(java, loop_node, entities) else {
             continue;
         };
         let Some(row) = java.field(loop_node, "name") else {
@@ -43,7 +43,10 @@ pub(super) fn findings(java: &Java<'_>, entities: &mapping::Entities) -> Vec<Age
                 .get(getter)
                 .filter(|_| reported.insert(getter))
             {
-                findings.push(RULE.finding(java.location(access), vec![field.clone()]));
+                findings.push(RULE.finding(
+                    java.location(access),
+                    vec![field.clone(), java.location(query)],
+                ));
             }
         }
     }
