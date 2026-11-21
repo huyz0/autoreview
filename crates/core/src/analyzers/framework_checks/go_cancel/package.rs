@@ -74,9 +74,13 @@ fn file(root: &Path, absolute: &Path, source: String, tree: Tree) -> Option<File
 }
 
 impl File {
-    fn functions(&self) -> impl Iterator<Item = Node<'_>> {
+    pub(super) fn functions(&self) -> impl Iterator<Item = Node<'_>> {
         children(self.tree.root_node())
             .filter(|item| matches!(item.kind(), "function_declaration" | "method_declaration"))
+    }
+
+    pub(super) fn root(&self) -> Node<'_> {
+        self.tree.root_node()
     }
 
     fn factory(&self, call: Node<'_>, shadowed: &HashSet<&str>) -> bool {
@@ -302,7 +306,7 @@ fn acquisition<'tree, 'src>(
         .then_some((binding, Some(name)))
 }
 
-fn local_names<'src>(function: Node<'_>, source: &'src str) -> HashSet<&'src str> {
+pub(super) fn local_names<'src>(function: Node<'_>, source: &'src str) -> HashSet<&'src str> {
     descendants(function)
         .flat_map(|node| {
             match node.kind() {

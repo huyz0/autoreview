@@ -1,5 +1,6 @@
 mod flow;
 mod package;
+mod span;
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -7,6 +8,7 @@ use std::path::Path;
 use autoreview_schema::AgentFinding;
 
 use super::{location, Rule};
+pub(super) use span::RULE as SPAN_RULE;
 
 pub(super) const RULE: Rule = Rule {
     id: "go-context-cancel-on-all-paths",
@@ -41,6 +43,9 @@ fn package_findings(peers: &[&package::File], paths: &[String]) -> Vec<AgentFind
     let helpers = package::summaries(peers);
     let mut findings = Vec::new();
     for &file in peers {
+        if paths.contains(&file.path) {
+            findings.extend(span::findings(file));
+        }
         for (binding, exit, used) in package::leaks(file, &helpers) {
             let sources: Vec<_> = helpers.evidence(used).collect();
             if !paths.contains(&file.path)

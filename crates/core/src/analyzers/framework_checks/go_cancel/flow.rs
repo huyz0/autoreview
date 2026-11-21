@@ -18,6 +18,7 @@ pub(super) struct Check<'a, 'tree> {
     pub acquire: Option<Node<'tree>>,
     pub helpers: &'a Helpers,
     shadowed: &'a HashSet<&'a str>,
+    span: bool,
     pub exit: Option<Node<'tree>>,
     pub used: Vec<String>,
 }
@@ -108,7 +109,9 @@ impl<'tree> Check<'_, 'tree> {
 
     fn call(&mut self, call: Node<'tree>, live: u8) -> Option<u8> {
         let callee = call.child_by_field_name("function")?;
-        if self.is_binding(callee) {
+        if (self.span && self.span_method(callee) == Some("End"))
+            || (!self.span && self.is_binding(callee))
+        {
             return Some(CLEAR);
         }
         let name = text(callee, self.source);
@@ -131,7 +134,40 @@ impl<'tree> Check<'_, 'tree> {
     }
 
     fn opaque(&self, node: Node<'_>, live: u8) -> Option<u8> {
-        (!descendants(node).any(|part| self.is_binding(part))).then_some(live)
+        (!descendants(node).any(|part| self.is_binding(part) && !self.reads_span(part)))
+            .then_some(live)
+    }
+
+    fn span_method(&self, selector: Node<'_>) -> Option<&str> {
+        if selector.kind() != "selector_expression"
+            || !selector
+                .child_by_field_name("operand")
+                .is_some_and(|node| self.is_binding(node))
+        {
+            return None;
+        }
+        selector
+            .child_by_field_name("field")
+            .map(|field| text(field, self.source))
+    }
+
+    fn reads_span(&self, node: Node<'_>) -> bool {
+        if !self.span {
+            return false;
+        }
+        matches!(
+            node.parent().and_then(|parent| self.span_method(parent)),
+            Some(
+                "AddEvent"
+                    | "IsRecording"
+                    | "RecordError"
+                    | "SetAttributes"
+                    | "SetName"
+                    | "SetStatus"
+                    | "SpanContext"
+                    | "TracerProvider"
+            )
+        )
     }
 
     fn is_binding(&self, node: Node<'_>) -> bool {
@@ -153,8 +189,14 @@ impl<'a, 'tree> Check<'a, 'tree> {
             acquire,
             helpers,
             shadowed,
+            span: false,
             exit: None,
             used: Vec::new(),
         }
+    }
+
+    pub fn for_span(mut self) -> Self {
+        self.span = true;
+        self
     }
 }
