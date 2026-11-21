@@ -67,16 +67,6 @@ const TRACE_GUARD: RustReviewRule = RustReviewRule {
     reference: "https://docs.rs/tracing/latest/tracing/struct.Span.html#method.enter",
     cwe: None,
 };
-const TEST_CURRENT_DIR: RustReviewRule = RustReviewRule {
-    id: "rust-test-mutates-current-dir",
-    category: "correctness",
-    severity: Severity::Medium,
-    semantic: true,
-    title: "Test changes the process working directory",
-    message: "Other tests in this process can observe the directory change, even if this test restores it. Use absolute paths for file operations or set the working directory on a child process with Command::current_dir.",
-    reference: "https://doc.rust-lang.org/std/env/fn.set_current_dir.html",
-    cwe: None,
-};
 
 pub(super) const RULES: &[&RustReviewRule] = &[
     &WALL_CLOCK,
@@ -85,7 +75,6 @@ pub(super) const RULES: &[&RustReviewRule] = &[
     &DISCARDED_JOIN,
     &BLOCK_IN_PLACE,
     &TRACE_GUARD,
-    &TEST_CURRENT_DIR,
 ];
 
 pub(super) fn check<'tree>(review: &mut Review<'tree, '_>, node: Node<'tree>) {
@@ -97,7 +86,6 @@ pub(super) fn check<'tree>(review: &mut Review<'tree, '_>, node: Node<'tree>) {
     let rule = match node.kind() {
         "call_expression" if wall_clock_unwrapped(&review.source, node) => &WALL_CLOCK,
         "call_expression" if blocks_current_thread(&review.source, node) => &BLOCK_IN_PLACE,
-        "call_expression" if changes_test_current_dir(&review.source, node) => &TEST_CURRENT_DIR,
         "expression_statement" if discards_test_matches(&review.source, node) => &DISCARDED_MATCHES,
         "expression_statement" if discards_assertion_task(&review.source, node, false) => {
             &DETACHED_ASSERTION
@@ -106,13 +94,6 @@ pub(super) fn check<'tree>(review: &mut Review<'tree, '_>, node: Node<'tree>) {
         _ => return,
     };
     review.report(rule, node);
-}
-
-fn changes_test_current_dir<'tree>(source: &Source<'tree, '_>, call: Node<'tree>) -> bool {
-    call.child_by_field_name("function")
-        .and_then(|function| source.external_path(function))
-        .is_some_and(|name| name == "std::env::set_current_dir")
-        && test_body(source, call)
 }
 
 fn discards_test_matches<'tree>(source: &Source<'tree, '_>, node: Node<'tree>) -> bool {
@@ -124,7 +105,7 @@ fn discards_test_matches<'tree>(source: &Source<'tree, '_>, node: Node<'tree>) -
         && test_body(source, node)
 }
 
-fn test_body<'tree>(source: &Source<'tree, '_>, node: Node<'tree>) -> bool {
+pub(super) fn test_body<'tree>(source: &Source<'tree, '_>, node: Node<'tree>) -> bool {
     let Some(function) = function_owner(node) else {
         return false;
     };
@@ -321,35 +302,6 @@ mod tests {
             .into_iter()
             .filter_map(|f| f.source.rule_id)
             .collect()
-    }
-
-    #[test]
-    fn flags_process_directory_changes_in_test_bodies() {
-        let findings = ids(r#"
-use std::env::set_current_dir as switch_dir;
-
-#[test]
-fn changes_process_directory() {
-    switch_dir("fixtures").unwrap();
-}
-
-#[test]
-fn uses_absolute_paths_and_child_working_directory() {
-    let path = std::env::current_dir().unwrap().join("fixtures");
-    let _child = std::process::Command::new("example").current_dir(path);
-}
-
-fn application_entrypoint() {
-    std::env::set_current_dir("fixtures").unwrap();
-}
-
-#[test]
-fn uses_unrelated_function() {
-    let switch_dir = |_| Ok::<(), ()>(());
-    switch_dir("fixtures").unwrap();
-}
-"#);
-        assert_eq!(findings, ["rust-test-mutates-current-dir"]);
     }
 
     #[test]

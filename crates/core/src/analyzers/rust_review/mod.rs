@@ -3,6 +3,7 @@ mod design;
 mod mocking;
 mod panics;
 mod sql;
+mod test_state;
 pub(super) mod syntax;
 
 use std::collections::HashMap;
@@ -43,6 +44,7 @@ fn rules() -> impl Iterator<Item = &'static RustReviewRule> {
         .chain(panics::RULES)
         .chain(design::RULES)
         .copied()
+        .chain(std::iter::once(&test_state::RULE))
 }
 
 struct Review<'tree, 'text> {
@@ -135,6 +137,7 @@ fn analyze_file(path: &str, text: &str) -> Vec<AgentFinding> {
         mocking::check(&mut review, node);
         panics::check(&mut review, node);
         design::check(&mut review, node);
+        test_state::check(&mut review, node);
     }
     review.findings
 }

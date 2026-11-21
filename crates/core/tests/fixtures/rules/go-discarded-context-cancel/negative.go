@@ -2,7 +2,7 @@ package review
 
 import "context"
 
-func Example() {
+func queryWithCancel() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	_ = ctx

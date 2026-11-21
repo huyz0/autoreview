@@ -2,7 +2,7 @@ package review
 
 import "testing"
 
-func TestConfig(t *testing.T) {
+func TestSequentialConfig(t *testing.T) {
 	t.Setenv("CONFIG_PATH", "fixture.toml")
 }
 
