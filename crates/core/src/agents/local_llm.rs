@@ -127,8 +127,12 @@ impl AgentBackend for LocalLlmBackend {
 /// with a 404. `--fail` makes curl itself exit non-zero on 4xx/5xx, so a
 /// same-port-different-service false positive can't slip through again.
 pub fn local_llm_available(base_url: &str, curl_binary: &str) -> bool {
-    Command::new(curl_binary)
-        .args(["-sS", "-f", "--max-time", "2", &format!("{}/models", base_url.trim_end_matches('/'))])
+    models_endpoint_available(&mut Command::new(curl_binary), base_url, "2")
+}
+
+pub(super) fn models_endpoint_available(command: &mut Command, base_url: &str, timeout_seconds: &str) -> bool {
+    command
+        .args(["-sS", "-f", "--max-time", timeout_seconds, &format!("{}/models", base_url.trim_end_matches('/'))])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
