@@ -3,6 +3,7 @@ mod design;
 mod mocking;
 mod panics;
 mod sql;
+mod tasks;
 mod test_state;
 pub(super) mod syntax;
 
@@ -43,6 +44,7 @@ fn rules() -> impl Iterator<Item = &'static RustReviewRule> {
         .chain(mocking::RULES)
         .chain(panics::RULES)
         .chain(design::RULES)
+        .chain(tasks::RULES)
         .chain(test_state::RULES)
         .copied()
 }
@@ -137,6 +139,7 @@ fn analyze_file(path: &str, text: &str) -> Vec<AgentFinding> {
         mocking::check(&mut review, node);
         panics::check(&mut review, node);
         design::check(&mut review, node);
+        tasks::check(&mut review, node);
         test_state::check(&mut review, node);
     }
     review.findings

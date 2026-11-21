@@ -30,7 +30,7 @@ mod budgets;
 
 use globset::Glob;
 
-use autoreview_schema::{AgentFinding, ArchitectureConfig, ArchitectureLayer, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
+use autoreview_schema::{AgentFinding, ArchitectureConfig, ArchitectureLayer, Location, LocationRange, Severity, Side};
 
 /// Reads and parses `.autoreview/architecture.yaml`. Returns `None` (not an
 /// error) when the file doesn't exist — this feature is opt-in.
@@ -225,59 +225,77 @@ pub fn run_architecture_check(repo_root: &Path, changed_files: &[String], config
             continue;
         }
         let Ok(content) = std::fs::read_to_string(repo_root.join(file)) else { continue };
-        findings.extend(direct_layer_findings(file, layer, &config.layers, &targets, extract_imports(&content, language), language));
-
-        let package = match language {
-            ImportLanguage::Go => {
-                if go_graph.is_none() {
-                    go_graph = autoreview_archgraph::discover_go_module_path(repo_root).map(|module| {
-                        let graph = autoreview_archgraph::build_go_import_graph(repo_root, &module);
-                        (module, graph)
-                    });
-                }
-                go_graph.as_ref().and_then(|(module, graph)| {
-                    Some((autoreview_archgraph::go_package_for_file(file, module)?, graph))
-                })
-            }
-            ImportLanguage::JavaOrKotlin => {
-                let graph = java_kotlin_graph.get_or_insert_with(|| autoreview_archgraph::build_java_kotlin_import_graph(repo_root));
-                autoreview_archgraph::java_kotlin_package_for_file(repo_root, file).map(|name| (name, &*graph))
-            }
-            ImportLanguage::JavaScriptOrTypeScript => None,
-        };
+        let policy = LayerPolicy { name: layer, layers: &config.layers, targets: &targets };
+        findings.extend(policy.direct_findings(file, language, extract_imports(&content, language)));
+        let package = graph_package(
+            repo_root, file, language, &mut go_graph, &mut java_kotlin_graph,
+        );
         findings.extend(package.and_then(|(name, graph)| {
-            let (path, target) = check_transitive_violation(graph, &name, language, &config.layers, &targets)?;
-            Some(transitive_layer_finding(file, layer, &target, &path))
+            let (path, target) = check_transitive_violation(graph, &name, language, policy.layers, policy.targets)?;
+            Some(transitive_layer_finding(file, policy.name, &target, &path))
         }));
     }
 
     findings
 }
 
-fn direct_layer_findings<'a>(
-    file: &'a str,
-    layer: &'a str,
+fn graph_package<'a>(
+    root: &Path,
+    file: &str,
+    language: ImportLanguage,
+    go: &'a mut Option<(String, autoreview_archgraph::ImportGraph)>,
+    jvm: &'a mut Option<autoreview_archgraph::ImportGraph>,
+) -> Option<(String, &'a autoreview_archgraph::ImportGraph)> {
+    match language {
+        ImportLanguage::Go => {
+            if go.is_none() {
+                let module = autoreview_archgraph::discover_go_module_path(root)?;
+                let graph = autoreview_archgraph::build_go_import_graph(root, &module);
+                *go = Some((module, graph));
+            }
+            let (module, graph) = go.as_ref()?;
+            Some((autoreview_archgraph::go_package_for_file(file, module)?, graph))
+        }
+        ImportLanguage::JavaOrKotlin => {
+            let graph = jvm.get_or_insert_with(|| autoreview_archgraph::build_java_kotlin_import_graph(root));
+            let name = autoreview_archgraph::java_kotlin_package_for_file(root, file)?;
+            Some((name, graph))
+        }
+        ImportLanguage::JavaScriptOrTypeScript => None,
+    }
+}
+
+struct LayerPolicy<'a> {
+    name: &'a str,
     layers: &'a [ArchitectureLayer],
     targets: &'a [&'a str],
-    imports: Vec<(u32, String)>,
-    language: ImportLanguage,
-) -> impl Iterator<Item = AgentFinding> + 'a {
-    imports.into_iter().filter_map(move |(line, import)| {
-        let normalized = normalize_import(&import, language);
-        let target = layer_for_path(&normalized, layers)?;
-        targets.contains(&target).then(|| {
-            let message = format!(
-                "{layer} imports `{import}`, which resolves to the {target} layer. Architecture policy forbids this dependency."
-            );
-            architecture_finding(
-                "layer-violation",
-                Severity::High,
-                format!("Layer violation: {layer} -> {target}"),
-                message,
-                import_location(file, line..=line, import),
-            )
+}
+
+impl<'a> LayerPolicy<'a> {
+    fn direct_findings(
+        &'a self,
+        file: &'a str,
+        language: ImportLanguage,
+        imports: Vec<(u32, String)>,
+    ) -> impl Iterator<Item = AgentFinding> + 'a {
+        imports.into_iter().filter_map(move |(line, import)| {
+            let normalized = normalize_import(&import, language);
+            let target = layer_for_path(&normalized, self.layers)?;
+            let layer = self.name;
+            self.targets.contains(&target).then(|| {
+                let message = format!(
+                    "{layer} imports `{import}`, which resolves to the {target} layer. Architecture policy forbids this dependency."
+                );
+                architecture_finding(
+                    "layer-violation",
+                    Severity::High,
+                    format!("Layer violation: {layer} -> {target}"),
+                    message,
+                    import_location(file, line..=line, import),
+                )
+            })
         })
-    })
+    }
 }
 
 fn transitive_layer_finding(file: &str, layer: &str, target: &str, path: &[String]) -> AgentFinding {
@@ -291,27 +309,14 @@ fn transitive_layer_finding(file: &str, layer: &str, target: &str, path: &[Strin
     )
 }
 
-fn architecture_finding(
+pub(super) fn architecture_finding(
     id: &str,
     severity: Severity,
     title: String,
     message: String,
     location: Location,
 ) -> AgentFinding {
-    AgentFinding {
-        source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "autoreview-architecture".into(), rule_id: Some(id.into()), aspect: None, backend: None },
-        category: "architecture".into(),
-        severity,
-        confidence: 1.0,
-        title,
-        message,
-        location,
-        related_locations: None,
-        suggestion: None,
-        tags: None,
-        meta: None,
-        suggested_patch: None,
-    }
+    super::analyzer_finding(("autoreview-architecture", id), "architecture", severity, (title, message), location)
 }
 
 fn import_location(file: &str, lines: std::ops::RangeInclusive<u32>, snippet: String) -> Location {
