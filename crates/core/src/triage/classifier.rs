@@ -52,10 +52,11 @@ fn build_prompt(facts: &DiffFacts, score: f64, lower: Tier, upper: Tier) -> Stri
 /// confused classifier should never be able to silently escalate or
 /// downgrade a review.
 pub fn classify_ambiguous_tier(backend: &dyn AgentBackend, facts: &DiffFacts, score: f64, lower: Tier, upper: Tier, model: &str, cwd: &Path) -> Option<Tier> {
-    classify_ambiguous_tier_with_usage(backend, facts, score, lower, upper, model, cwd).0
+    classify_ambiguous_tier_with_usage(backend, facts, score, (lower, upper), model, cwd).0
 }
 
-pub fn classify_ambiguous_tier_with_usage(backend: &dyn AgentBackend, facts: &DiffFacts, score: f64, lower: Tier, upper: Tier, model: &str, cwd: &Path) -> (Option<Tier>, Usage, u64) {
+pub fn classify_ambiguous_tier_with_usage(backend: &dyn AgentBackend, facts: &DiffFacts, score: f64, bounds: (Tier, Tier), model: &str, cwd: &Path) -> (Option<Tier>, Usage, u64) {
+    let (lower, upper) = bounds;
     let request = InvokeRequest {
         prompt: build_prompt(facts, score, lower, upper),
         system_prompt: "You are a precise, low-latency triage classifier for a code review tool. You answer with only the requested JSON, no other tools or exploration needed.".to_string(),

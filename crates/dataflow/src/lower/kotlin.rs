@@ -123,19 +123,8 @@ pub fn lower_function(source: &[u8], fn_node: Node) -> Cfg<Stmt> {
     cfg
 }
 
-fn lower_block(cfg: &mut Cfg<Stmt>, block: Node, source: &[u8], mut current: NodeId) -> NodeId {
-    let mut cursor = block.walk();
-    for stmt in block.named_children(&mut cursor) {
-        current = lower_statement(cfg, stmt, source, current);
-    }
-    current
-}
-
-fn lower_statement(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {
-    let start = cfg.nodes[current].stmts.len();
-    let next = lower_statement_inner(cfg, stmt, source, current);
-    cfg.nodes[current].record_statement_lines(start, stmt.start_position().row as u32 + 1);
-    next
+fn lower_block(cfg: &mut Cfg<Stmt>, block: Node, source: &[u8], current: NodeId) -> NodeId {
+    super::lower_block(cfg, block, source, current, lower_statement_inner)
 }
 
 fn lower_statement_inner(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {

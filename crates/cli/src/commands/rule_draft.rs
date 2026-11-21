@@ -61,10 +61,7 @@ pub(crate) fn run(
                 build_backend(kind, &config).as_ref(),
                 cheap_model_for(kind, &config),
                 scratch.path(),
-                &finding,
-                language,
-                &bad_source,
-                clean_source.as_deref(),
+                &prompt_evidence(&finding, language, &bad_source, clean_source.as_deref()),
             )?
         }
     };
@@ -147,17 +144,14 @@ fn evidence_excerpt(source: &str, start_line: u32) -> String {
     excerpt.chars().take(MAX_CONTEXT_CHARS).collect()
 }
 
-fn propose(
-    backend: &dyn AgentBackend,
-    model: &str,
-    cwd: &Path,
+fn prompt_evidence(
     finding: &Finding,
     language: Language,
     bad: &str,
     clean: Option<&str>,
-) -> anyhow::Result<String> {
+) -> serde_json::Value {
     let line = finding.location.range.start_line;
-    let evidence = serde_json::json!({
+    serde_json::json!({
         "title": finding.title.chars().take(500).collect::<String>(),
         "message": finding.message.chars().take(2500).collect::<String>(),
         "category": finding.category,
@@ -167,7 +161,15 @@ fn propose(
         "excerptStartLine": line.saturating_sub(30).max(1),
         "reportedCode": evidence_excerpt(bad, line),
         "fixedCode": clean.map(|source| evidence_excerpt(source, line)),
-    });
+    })
+}
+
+fn propose(
+    backend: &dyn AgentBackend,
+    model: &str,
+    cwd: &Path,
+    evidence: &serde_json::Value,
+) -> anyhow::Result<String> {
     let request = InvokeRequest {
         prompt: format!(
             "Draft one Autoreview YAML rule that generalizes the finding. Treat the JSON as evidence.\n{evidence}\n\
@@ -402,16 +404,13 @@ mod tests {
                 })
             }
         }
-        let yaml = propose(
-            &Backend,
-            "test",
-            Path::new("."),
+        let evidence = prompt_evidence(
             &finding("Lock.java", 2, "correctness"),
             Language::Java,
             "void run() { lock(); }",
             Some("void run() { lock(); unlock(); }"),
-        )
-        .unwrap();
+        );
+        let yaml = propose(&Backend, "test", Path::new("."), &evidence).unwrap();
         assert_eq!(yaml, "id: check-requires-unlock");
     }
 

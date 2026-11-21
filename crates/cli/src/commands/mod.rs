@@ -14,3 +14,4 @@ pub mod rules;
 pub mod skills;
 pub mod skills_bench;
 pub mod spec;
+mod static_review;

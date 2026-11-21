@@ -165,24 +165,18 @@ fn sample_repo_files(repo_root: &Path, extension: &str) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut stack = vec![repo_root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        if found.len() >= FP_SAMPLE_CAP {
-            break;
-        }
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             let Ok(kind) = entry.file_type() else { continue };
             let path = entry.path();
-            if kind.is_dir() {
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !SKIP_DIRS.contains(&name) {
-                    stack.push(path);
-                }
+            if kind.is_dir() && !path.file_name().and_then(|n| n.to_str()).is_some_and(|n| SKIP_DIRS.contains(&n)) {
+                stack.push(path);
             } else if kind.is_file() && path.extension().and_then(|e| e.to_str()) == Some(extension) {
                 found.push(path);
                 if found.len() >= FP_SAMPLE_CAP {
-                    break;
+                    return found;
                 }
             }
         }
