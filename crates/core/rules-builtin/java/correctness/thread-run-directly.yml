@@ -1,0 +1,33 @@
+id: java-thread-run-directly
+language: Java
+category: correctness
+severity: warning
+message: >-
+  Calling run() on a newly constructed Thread does not start concurrent execution. Call start() if the work should run on a separate thread.
+metadata:
+  references:
+    - "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Thread.html#start()"
+rule:
+  any:
+    - pattern: new java.lang.Thread($$$ARGS).run()
+    - all:
+        - pattern: new Thread($$$ARGS).run()
+        - not:
+            inside:
+              kind: program
+              has:
+                stopBy: end
+                any:
+                  - kind: import_declaration
+                    regex: '^import\s+(?:static\s+)?[^;]+\.Thread\s*;$'
+                    not:
+                      pattern: import java.lang.Thread;
+                  - kind: class_declaration
+                    has:
+                      field: name
+                      regex: '^Thread$'
+                  - kind: record_declaration
+                    has:
+                      field: name
+                      regex: '^Thread$'
+              stopBy: end

@@ -257,6 +257,9 @@ Web cycle checks follow static relative imports and re-exports, plus direct
 top-level `require` calls in `.cjs` and `.cts` files. They skip type-only
 imports, dynamic imports, and paths requiring package or alias configuration.
 
+See [antipattern coverage](docs/antipattern-coverage.md) for the current checks
+and the evidence needed to expand them.
+
 ## Driving autoreview from a coding agent
 
 This repo ships two skills under `.claude/skills/`, picked up automatically

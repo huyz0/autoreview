@@ -1,0 +1,29 @@
+id: java-mockito-verification-discarded
+language: Java
+category: correctness
+severity: warning
+message: >-
+  Mockito.verify() must be followed by the method call to verify. Add the expected invocation to the verification.
+metadata:
+  references:
+    - "https://site.mockito.org/javadoc/current/org/mockito/Mockito.html#verify-T-"
+rule:
+  all:
+    - inside:
+        kind: expression_statement
+    - any:
+        - pattern: org.mockito.Mockito.verify($$$ARGS)
+        - all:
+            - pattern: verify($$$ARGS)
+            - inside:
+                kind: program
+                has:
+                  pattern: import static org.mockito.Mockito.verify;
+                stopBy: end
+        - all:
+            - pattern: Mockito.verify($$$ARGS)
+            - inside:
+                kind: program
+                has:
+                  pattern: import org.mockito.Mockito;
+                stopBy: end

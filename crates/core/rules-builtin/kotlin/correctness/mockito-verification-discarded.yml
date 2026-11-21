@@ -1,0 +1,31 @@
+id: kotlin-mockito-verification-discarded
+language: Kotlin
+category: correctness
+severity: warning
+message: >-
+  Mockito.verify() must be followed by the method call to verify. Add the
+  expected invocation to the verification.
+metadata:
+  references:
+    - "https://site.mockito.org/javadoc/current/org/mockito/Mockito.html#verify-T-"
+rule:
+  all:
+    - inside:
+        kind: statements
+        inside:
+          kind: function_body
+    - any:
+        - pattern:
+            context: 'fun check() { org.mockito.Mockito.verify($$$ARGS) }'
+            selector: call_expression
+        - all:
+            - pattern:
+                context: 'fun check() { Mockito.verify($$$ARGS) }'
+                selector: call_expression
+            - inside:
+                kind: source_file
+                has:
+                  kind: import_header
+                  regex: '^import\s+org\.mockito\.Mockito\s*;?$'
+                  stopBy: end
+                stopBy: end
