@@ -1,4 +1,5 @@
 use globset::{Glob, GlobSetBuilder};
+use autoreview_langsupport::{language_for_path, Language};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
@@ -52,24 +53,30 @@ fn is_test_path(path: &str) -> bool {
         || lower.starts_with("tests/")
         || lower.ends_with("_test.go")
         || lower.ends_with("_test.py")
-        || lower.ends_with(".test.ts")
-        || lower.ends_with(".test.js")
+        || is_web_test(&lower)
         || path.ends_with("Test.java")
         || path.ends_with("Test.kt")
 }
 
 fn extension_language(path: &str) -> Option<&'static str> {
-    let ext = Path::new(path).extension()?.to_str()?;
-    Some(match ext {
-        "java" => "java",
-        "kt" | "kts" => "kotlin",
-        "go" => "go",
-        "rs" => "rust",
-        "ts" | "tsx" => "typescript",
-        "js" | "jsx" => "javascript",
-        "py" => "python",
+    let path = Path::new(path);
+    Some(match language_for_path(path) {
+        Some(Language::Java) => "java",
+        Some(Language::Kotlin) => "kotlin",
+        Some(Language::Go) => "go",
+        Some(Language::Rust) => "rust",
+        Some(Language::TypeScript | Language::Tsx) => "typescript",
+        Some(Language::JavaScript) => "javascript",
+        None if path.extension().is_some_and(|extension| extension == "py") => "python",
         _ => return None,
     })
+}
+
+fn is_web_test(path: &str) -> bool {
+    let path = Path::new(path);
+    matches!(language_for_path(path), Some(Language::TypeScript | Language::Tsx | Language::JavaScript))
+        && path.file_stem().and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem.ends_with(".test") || stem.ends_with(".spec"))
 }
 
 fn build_globset(patterns: &[&str]) -> globset::GlobSet {
@@ -202,4 +209,22 @@ pub fn collect_diff_facts(
         files,
         languages,
     })
+}
+
+#[cfg(test)]
+mod extension_tests {
+    use super::*;
+
+    #[test]
+    fn module_extensions_are_counted_for_triage_and_test_detection() {
+        for extension in ["ts", "tsx", "mts", "cts"] {
+            assert_eq!(extension_language(&format!("worker.{extension}")), Some("typescript"));
+            assert!(is_test_path(&format!("worker.test.{extension}")));
+        }
+        for extension in ["js", "jsx", "mjs", "cjs"] {
+            assert_eq!(extension_language(&format!("worker.{extension}")), Some("javascript"));
+            assert!(is_test_path(&format!("worker.spec.{extension}")));
+        }
+        assert!(!is_test_path("worker.spec.rs"));
+    }
 }

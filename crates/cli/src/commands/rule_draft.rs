@@ -177,7 +177,7 @@ fn propose(
              pattern: put ast-grep match syntax in rule, with optional constraints.\n\
              threshold: use a nonnegative integer threshold for an existing metric such as long-method, cyclomatic-complexity, cognitive-complexity, deep-nesting, long-parameter-list, too-many-returns, or complex-interface. This changes a repository-wide metric.\n\
              taint: list sources and sinks as call or callRegex entries, with optional sanitizers. Supported for Go, Java, Kotlin, JavaScript and TypeScript. TSX uses TypeScript for taint.\n\
-             call-sequence: list after and unless calls with before and/or checkBeforeReturn. Supported for Java and Kotlin.\n\
+             call-sequence: list after and unless calls with before and/or checkBeforeReturn. Supported for Go, Java, Kotlin, JavaScript and TypeScript. TSX uses TypeScript. Go return checks skip functions containing defer.\n\
              Mark semantic true if findings still need human judgment. Include no fix, literal secret, repository-specific variable name or filename.\n\
              Return one fenced YAML block. If the evidence requires capabilities outside these primitives, return a fenced text block beginning INEXPRESSIBLE: with a reason."
         ),
@@ -226,7 +226,7 @@ fn prepare(yaml: &str, finding: &Finding, language: Language) -> anyhow::Result<
         "rule '{id}' is already built in"
     );
     let rule: Value = serde_yaml::from_str(yaml)?;
-    let expected_language = if language == Language::Tsx && kind == "taint" {
+    let expected_language = if language == Language::Tsx && matches!(kind.as_str(), "taint" | "call-sequence") {
         Language::TypeScript
     } else {
         language

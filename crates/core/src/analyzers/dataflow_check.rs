@@ -33,189 +33,36 @@
 //! own `run_*_taint` wrapper here. They're now declarative YAML
 //! (`kind: taint` in `crates/core/rules-builtin/`), loaded at runtime by
 //! `taint_rules::load_taint_rules` and run generically via
-//! `run_loaded_taint_rules` — adding a new taint rule for a language that
+//! `dsl::run_taint_rules` — adding a new taint rule for a language that
 //! already has a lowering pass doesn't touch this file at all.
 //!
 //! Java (`lower::java`), Kotlin (`lower::kotlin`), and JavaScript/
 //! TypeScript/TSX (`lower::javascript`, one lowering module shared across
-//! all three — see its own doc comment) only get taint rules run against
-//! them for now — see `run_dataflow_check`'s own doc comment.
+//! all three) share the taint and call-sequence engines with Go.
 
-use std::cell::RefCell;
+mod cache;
+mod dispatch;
+mod dsl;
+mod functions;
+mod go_practices;
+mod source;
+
+pub use dsl::DataflowRuleDef;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::path::Path;
 
 use tree_sitter::{Node, Tree};
 
 use autoreview_dataflow::cfg::{Cfg, Stmt};
-use autoreview_dataflow::rules::{go_append_shared_backing_array, go_loopvar, go_typed_nil_interface_return};
+use autoreview_dataflow::rules::go_typed_nil_interface_return;
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
+use cache::{content_hash, ParseCache, ParsedFile, PersistentSummaryCache, SummaryCaches};
+use functions::{function_declarations, go_functions, java_functions};
+use source::SummarySource;
 use super::call_order_rules;
 use super::taint_rules;
 use crate::rule_packs::ResolvedRulePack;
-
-/// A read+parse cache shared across one `run_dataflow_check` invocation —
-/// Rule engine roadmap item 1 (see `RULE_ENGINE_RESEARCH.md`): every
-/// interprocedural rule's same-package/cross-package resolution
-/// (`package_summaries`, `imported_package_summaries`,
-/// `npe_package_summaries`, `npe_imported_package_summaries`) previously
-/// independently re-read and re-parsed the same sibling/imported files
-/// from scratch, once per changed file that needed them — if N changed
-/// files in one diff import the same package, that package's files got
-/// parsed N times. This cache makes each file's read+parse pay its cost
-/// at most once per `run_dataflow_check` call, regardless of how many
-/// changed files or rules end up needing it. `Rc` rather than a plain
-/// owned return because `Tree`'s clone is cheap (an internal refcount
-/// bump, backed by tree-sitter's own C library) but re-parsing is not —
-/// sharing one parse via `Rc` avoids paying for a second clone of the
-/// tree on every cache hit.
-type ParsedFile = Rc<(String, Tree)>;
-
-struct ParseCache {
-    entries: RefCell<HashMap<PathBuf, Option<ParsedFile>>>,
-}
-
-impl ParseCache {
-    fn new() -> Self {
-        ParseCache { entries: RefCell::new(HashMap::new()) }
-    }
-
-    /// Returns the cached (content, tree) for `path`, parsing and caching
-    /// it on first request. `None` on a read or parse failure — cached as
-    /// `None` too, so a missing/unparseable file isn't retried on every
-    /// subsequent lookup within this run.
-    fn get(&self, path: &Path, language: autoreview_langsupport::Language) -> Option<ParsedFile> {
-        if let Some(cached) = self.entries.borrow().get(path) {
-            return cached.clone();
-        }
-        let parsed = (|| {
-            let content = std::fs::read_to_string(path).ok()?;
-            let mut parser = autoreview_langsupport::parser_for(language)?;
-            let tree = parser.parse(&content, None)?;
-            Some(Rc::new((content, tree)))
-        })();
-        self.entries.borrow_mut().insert(path.to_path_buf(), parsed.clone());
-        parsed
-    }
-}
-
-/// Rule engine roadmap item 5 (persistent cross-run summary cache, see
-/// `RULE_ENGINE_RESEARCH.md`): `ParseCache` above (item 1) only dedupes
-/// work *within* one `run_dataflow_check` call — a `diff --watch` session
-/// or repeated CLI invocations against the same working tree still
-/// rescan every sibling/imported file's summaries from scratch on every
-/// call, even when that file hasn't changed since the last run. This
-/// persists `(rule_id, file_path) -> (content_hash, per-function summary
-/// map)` to one JSON file per repo under
-/// `~/.cache/autoreview/dataflow-summaries/<fingerprint>.json`.
-///
-/// Content-hash keyed rather than mtime-keyed so it's correctness-neutral
-/// by construction: a hit only ever returns a summary this exact
-/// byte-for-byte file content has already produced, so a stale entry is
-/// definitionally impossible — an edited file simply gets a different
-/// hash and misses, recomputing exactly as if there were no cache at
-/// all. `rule_id` is part of the key because two rules scanning the same
-/// file want different summaries from it (e.g. "does this function ever
-/// return a nil pointer" vs. "does this function ever return tainted
-/// data") — folding them into one map keyed by function name alone would
-/// let one rule's cached answer silently leak into another's lookup.
-///
-/// Best-effort throughout: a missing, corrupt, or unwritable cache file
-/// degrades silently to an empty cache (everything recomputed, and
-/// persisted normally on success) rather than a hard error — losing this
-/// cache should never be able to break a scan, only slow it down.
-struct PersistentSummaryCache {
-    cache_path: PathBuf,
-    source_root: PathBuf,
-    data: RefCell<PersistentSummaryCacheData>,
-    dirty: RefCell<bool>,
-}
-
-#[derive(Default, serde::Serialize, serde::Deserialize)]
-struct PersistentSummaryCacheData {
-    #[serde(default)]
-    entries: HashMap<String, HashMap<String, CachedFileSummaries>>,
-}
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct CachedFileSummaries {
-    content_hash: String,
-    summaries: HashMap<String, bool>,
-}
-
-impl PersistentSummaryCache {
-    fn load(repo_root: &Path, source_root: &Path) -> Self {
-        let cache_path = summary_cache_path(repo_root);
-        let data = std::fs::read_to_string(&cache_path).ok().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
-        PersistentSummaryCache { cache_path, source_root: source_root.to_path_buf(), data: RefCell::new(data), dirty: RefCell::new(false) }
-    }
-
-    fn get(&self, rule_id: &str, path: &Path, content_hash: &str) -> Option<HashMap<String, bool>> {
-        let data = self.data.borrow();
-        let relative = path.strip_prefix(&self.source_root).ok()?;
-        let entry = data.entries.get(rule_id)?.get(relative.to_string_lossy().as_ref())?;
-        (entry.content_hash == content_hash).then(|| entry.summaries.clone())
-    }
-
-    fn put(&self, rule_id: &str, path: &Path, content_hash: String, summaries: HashMap<String, bool>) {
-        let Ok(relative) = path.strip_prefix(&self.source_root) else { return };
-        self.data.borrow_mut().entries.entry(rule_id.to_string()).or_default().insert(relative.to_string_lossy().into_owned(), CachedFileSummaries { content_hash, summaries });
-        *self.dirty.borrow_mut() = true;
-    }
-
-    /// Writes the cache back to disk, but only if `put` actually added
-    /// something new this run — an unchanged cache has nothing worth the
-    /// write, and skipping it also means a read-only or missing
-    /// `~/.cache` never turns into spurious write attempts on every scan.
-    fn save(&self) {
-        if !*self.dirty.borrow() {
-            return;
-        }
-        let Some(parent) = self.cache_path.parent() else { return };
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
-        }
-        if let Ok(json) = serde_json::to_string(&*self.data.borrow()) {
-            if let Ok(mut file) = tempfile::NamedTempFile::new_in(parent) {
-                use std::io::Write;
-                if file.write_all(json.as_bytes()).is_ok() {
-                    let _ = file.persist(&self.cache_path);
-                }
-            }
-        }
-    }
-}
-
-/// One cache file per repo, named by a short hash of the repo's
-/// canonicalized path — avoids collisions between unrelated repos
-/// sharing the same cache directory without needing a full path (which
-/// can contain characters unsafe for a filename) as the name itself.
-fn summary_cache_path(repo_root: &Path) -> PathBuf {
-    use sha2::{Digest, Sha256};
-    let canonical = std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
-    let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
-    let fingerprint: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
-    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("autoreview").join("dataflow-summaries").join(format!("{fingerprint}-v2.json"))
-}
-
-fn content_hash(content: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(content.as_bytes());
-    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
-}
-
-/// The in-run and cross-run caches always travel together through every
-/// summary-computation call below — bundled into one struct rather than
-/// two separate parameters purely to stay under clippy's argument-count
-/// lint on the functions that also take a rule id, package filter, and
-/// summary closure.
-struct SummaryCaches<'a> {
-    parse: &'a ParseCache,
-    persistent: &'a PersistentSummaryCache,
-    java_kotlin_packages: std::cell::OnceCell<HashMap<String, Vec<PathBuf>>>,
-}
 
 fn make_finding(rule_id: &str, category: &str, severity: Severity, path: &str, line: u32, title: String, message: String) -> AgentFinding {
     AgentFinding {
@@ -234,13 +81,6 @@ fn make_finding(rule_id: &str, category: &str, severity: Severity, path: &str, l
     }
 }
 
-/// Builds the `meta` map carrying `rulePackId` when `rule`'s taint rule
-/// definition came from a registered pack — `None` for builtin rules,
-/// matching `ast_grep.rs`'s own pattern-rule provenance tagging.
-fn taint_pack_meta(rule: &taint_rules::TaintRuleDef) -> Option<HashMap<String, serde_json::Value>> {
-    rule_meta(rule.pack_id.as_ref(), rule.metadata.as_ref())
-}
-
 /// The `meta` map for a dataflow-engine finding: the rule's own
 /// `metadata:` block (CWE/OWASP/...) plus `rulePackId` when it came from
 /// a registered pack.
@@ -257,116 +97,6 @@ fn rule_meta(pack_id: Option<&String>, metadata: Option<&super::ast_grep::RuleMe
         meta.insert("rulePackId".to_string(), serde_json::Value::String(pack_id.clone()));
     }
     (!meta.is_empty()).then_some(meta)
-}
-
-/// Every top-level `func`/method declaration in a parsed Go file.
-fn go_functions(tree: &tree_sitter::Tree) -> Vec<tree_sitter::Node<'_>> {
-    let mut out = Vec::new();
-    let mut cursor = tree.root_node().walk();
-    for node in tree.root_node().named_children(&mut cursor) {
-        if node.kind() == "function_declaration" || node.kind() == "method_declaration" {
-            out.push(node);
-        }
-    }
-    out
-}
-
-/// Parses and lowers every function in the file exactly once, shared by
-/// all four rule families below — previously each family independently
-/// re-parsed the file and re-lowered every function's CFG, up to 4x
-/// redundant work per file for logic that all operates on the same
-/// underlying functions.
-fn lower_all_functions<'a>(source: &[u8], tree: &'a Tree) -> Vec<(Node<'a>, Cfg<Stmt>)> {
-    go_functions(tree).into_iter().map(|fn_node| (fn_node, autoreview_dataflow::lower::go::lower_function(source, fn_node))).collect()
-}
-
-/// Every `method_declaration`/`constructor_declaration` anywhere in a
-/// parsed Java file, at any nesting depth — unlike Go's top-level-only
-/// `function_declaration`s, Java methods always sit inside a
-/// `class_declaration`'s `class_body` (possibly several classes deep for
-/// nested/inner classes), so this walks the whole tree rather than just
-/// `root_node()`'s immediate children.
-fn java_functions(tree: &Tree) -> Vec<Node<'_>> {
-    fn walk<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
-        if node.kind() == "method_declaration" || node.kind() == "constructor_declaration" {
-            out.push(node);
-        }
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            walk(child, out);
-        }
-    }
-    let mut out = Vec::new();
-    walk(tree.root_node(), &mut out);
-    out
-}
-
-/// Every `function_declaration` anywhere in a parsed Kotlin file — same
-/// nested-class rationale as `java_functions`.
-fn kotlin_functions(tree: &Tree) -> Vec<Node<'_>> {
-    fn walk<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
-        if node.kind() == "function_declaration" {
-            out.push(node);
-        }
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            walk(child, out);
-        }
-    }
-    let mut out = Vec::new();
-    walk(tree.root_node(), &mut out);
-    out
-}
-
-/// Every `function_declaration` anywhere in a parsed JavaScript/TypeScript/
-/// TSX file — same nested-scope rationale as `java_functions`, since a
-/// function can sit inside a module, namespace, or another function's body.
-fn javascript_functions(tree: &Tree) -> Vec<Node<'_>> {
-    fn walk<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
-        if node.kind() == "function_declaration" {
-            out.push(node);
-        }
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            walk(child, out);
-        }
-    }
-    let mut out = Vec::new();
-    walk(tree.root_node(), &mut out);
-    out
-}
-
-fn lower_all_java_functions<'a>(source: &[u8], tree: &'a Tree) -> Vec<(Node<'a>, Cfg<Stmt>)> {
-    java_functions(tree).into_iter().map(|fn_node| (fn_node, autoreview_dataflow::lower::java::lower_function(source, fn_node))).collect()
-}
-
-fn lower_all_kotlin_functions<'a>(source: &[u8], tree: &'a Tree) -> Vec<(Node<'a>, Cfg<Stmt>)> {
-    kotlin_functions(tree).into_iter().map(|fn_node| (fn_node, autoreview_dataflow::lower::kotlin::lower_function(source, fn_node))).collect()
-}
-
-fn lower_all_javascript_functions<'a>(source: &[u8], tree: &'a Tree) -> Vec<(Node<'a>, Cfg<Stmt>)> {
-    javascript_functions(tree).into_iter().map(|fn_node| (fn_node, autoreview_dataflow::lower::javascript::lower_function(source, fn_node))).collect()
-}
-
-fn run_append_shared_backing_array(path: &str, lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
-    let mut findings = Vec::new();
-    for (_, cfg) in lowered {
-        for hit in go_append_shared_backing_array::check(cfg) {
-            findings.push(make_finding(
-                "append-shared-backing-array",
-                "correctness",
-                Severity::Medium,
-                path,
-                hit.source_line,
-                format!("`{} = append({}, ...)` may overwrite `{}`'s backing array", hit.sub, hit.sub, hit.full),
-                format!(
-                    "`{}` was created by re-slicing `{}` (`{} := {}[...]`), and `{}` is still used later in this function. `append({}, ...)` may reuse `{}`'s shared backing array when there's spare capacity, silently overwriting memory `{}` still references. Use `{} := append([]T{{}}, {}[a:b]...)` (or `copy`) to force a fresh backing array if `{}` needs to stay untouched, or restructure so `{}` doesn't outlive its use.",
-                    hit.sub, hit.full, hit.sub, hit.full, hit.full, hit.sub, hit.sub, hit.full, hit.sub, hit.full, hit.full, hit.sub
-                ),
-            ));
-        }
-    }
-    findings
 }
 
 /// A language's adapter into the shared cross-file summary resolver below
@@ -406,7 +136,7 @@ const JAVA_ADAPTER: LanguageAdapter = LanguageAdapter {
 const KOTLIN_ADAPTER: LanguageAdapter = LanguageAdapter {
     language: autoreview_langsupport::Language::Kotlin,
     extensions: &["kt", "kts"],
-    extract_functions: kotlin_functions,
+    extract_functions: function_declarations,
     function_name: autoreview_dataflow::lower::kotlin::function_name,
     lower_function: autoreview_dataflow::lower::kotlin::lower_function,
 };
@@ -559,20 +289,19 @@ fn go_imported_package_summaries(
     summaries
 }
 
-fn run_typed_nil_interface_return(repo_root: &Path, path: &str, source: &[u8], lowered: &[(Node, Cfg<Stmt>)], caches: &SummaryCaches) -> Vec<AgentFinding> {
+fn run_typed_nil_interface_return(file: &SummarySource, lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
     // Pass 1: same-package summaries plus every other in-module package
     // this file imports — see `go_package_summaries`/
     // `go_imported_package_summaries` above.
     let returns_pointer: Option<fn(Node) -> bool> = Some(autoreview_dataflow::lower::go::function_returns_pointer);
     let rule_id = "typed-nil-interface-return";
-    let mut summaries = go_package_summaries(repo_root, path, returns_pointer, &go_typed_nil_interface_return::compute_summary, rule_id, caches);
-    summaries.extend(go_imported_package_summaries(repo_root, path, returns_pointer, &go_typed_nil_interface_return::compute_summary, rule_id, caches));
+    let summaries = file.go_summaries(returns_pointer, &go_typed_nil_interface_return::compute_summary, rule_id);
 
     // Pass 2: check every function declaring an `error` return against
     // those summaries.
     let mut findings = Vec::new();
     for (fn_node, cfg) in lowered {
-        if !autoreview_dataflow::lower::go::function_returns_error(*fn_node, source) {
+        if !autoreview_dataflow::lower::go::function_returns_error(*fn_node, file.content.as_bytes()) {
             continue;
         }
         for hit in go_typed_nil_interface_return::check(cfg, &summaries) {
@@ -580,7 +309,7 @@ fn run_typed_nil_interface_return(repo_root: &Path, path: &str, source: &[u8], l
                 "typed-nil-interface-return",
                 "correctness",
                 Severity::High,
-                path,
+                file.path,
                 hit.source_line,
                 format!("Returning typed pointer `{}` where an `error` is expected", hit.var),
                 format!(
@@ -662,6 +391,7 @@ fn java_kotlin_package_summaries(
 /// is a whole-repo scan rather than a module-path-relative directory jump
 /// the way Go's cross-package resolution is. Generic over
 /// `compute_summary` for the same reason as `java_kotlin_package_summaries`.
+/// Summarizes functions in packages imported by a Java or Kotlin file.
 fn java_kotlin_imported_package_summaries(
     repo_root: &Path,
     own_content: &str,
@@ -689,19 +419,10 @@ fn java_kotlin_imported_package_summaries(
 /// at all (Java's default/unnamed package) falls back to summarizing just
 /// its own functions, so same-file resolution still works even without
 /// cross-file scope.
-fn run_npe_risk(repo_root: &Path, path: &str, own_content: &str, lowered: &[(Node, Cfg<Stmt>)], null_safe_methods: &[&str], caches: &SummaryCaches) -> Vec<AgentFinding> {
-    let compute_summary = &autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary;
+fn run_npe_risk(file: &SummarySource, lowered: &[(Node, Cfg<Stmt>)], null_safe_methods: &[&str]) -> Vec<AgentFinding> {
+    let compute = &autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary;
     let rule_id = "npe-risk-from-helper-return";
-    let mut summaries = match autoreview_archgraph::declared_package(own_content) {
-        Some(package) => java_kotlin_package_summaries(repo_root, path, &package, compute_summary, rule_id, caches),
-        None => {
-            let mut own_only = HashMap::new();
-            add_java_kotlin_summaries_from_file(&repo_root.join(path), &mut own_only, compute_summary, rule_id, caches);
-            own_only
-        }
-    };
-    summaries.extend(java_kotlin_imported_package_summaries(repo_root, own_content, compute_summary, rule_id, caches));
-
+    let summaries = file.java_kotlin_summaries(compute, rule_id);
     let mut findings = Vec::new();
     for (_, cfg) in lowered {
         for hit in autoreview_dataflow::rules::java_kotlin_npe_risk::check(cfg, &summaries, null_safe_methods) {
@@ -709,7 +430,7 @@ fn run_npe_risk(repo_root: &Path, path: &str, own_content: &str, lowered: &[(Nod
                 "npe-risk-from-helper-return",
                 "correctness",
                 Severity::High,
-                path,
+                file.path,
                 hit.source_line,
                 format!("`{}` may be null after `{}`", hit.var, hit.call_name),
                 format!(
@@ -717,180 +438,6 @@ fn run_npe_risk(repo_root: &Path, path: &str, own_content: &str, lowered: &[(Nod
                     hit.var, hit.call_name, hit.var
                 ),
             ));
-        }
-    }
-    findings
-}
-
-fn run_loopvar_checks(path: &str, lowered: &[(Node, Cfg<Stmt>)]) -> Vec<AgentFinding> {
-    let mut findings = Vec::new();
-    for (_, cfg) in lowered {
-        for hit in go_loopvar::check_capture(cfg) {
-            let kind = if hit.kind == autoreview_dataflow::cfg::ClosureKind::Goroutine { "goroutine" } else { "deferred closure" };
-            findings.push(make_finding(
-                "loopvar-capture-pre-1.22",
-                "correctness",
-                Severity::Medium,
-                path,
-                hit.source_line,
-                format!("Loop variable `{}` captured by a {kind} on a pre-1.22 Go module", hit.var),
-                format!(
-                    "This {kind} references the enclosing loop's `{}` without shadowing it first, and `go.mod` targets a Go version before 1.22. Before 1.22, `for`/`range` loop variables have per-loop (not per-iteration) scope — every {kind} launched by this loop ends up seeing the same, final value of `{}` instead of its own iteration's value. Shadow it first (`{} := {}`) right inside the closure, or pass it as a parameter.",
-                    hit.var, hit.var, hit.var, hit.var
-                ),
-            ));
-        }
-
-        for hit in go_loopvar::check_address(cfg) {
-            findings.push(make_finding(
-                "loopvar-address-pre-1.22",
-                "correctness",
-                Severity::Medium,
-                path,
-                hit.source_line,
-                format!("Address of loop variable `{}` taken on a pre-1.22 Go module", hit.var),
-                format!(
-                    "This takes `&{}` inside the loop that declares `{}`, and `go.mod` targets a Go version before 1.22. Before 1.22, `for`/`range` loop variables have per-loop (not per-iteration) scope — every `&{}` taken across iterations points at the same shared variable, so a slice/map built from these pointers ends up holding N copies of the loop's final value instead of each iteration's own value. Shadow the variable first (`{} := {}`) before taking its address, or upgrade the module's Go version.",
-                    hit.var, hit.var, hit.var, hit.var, hit.var
-                ),
-            ));
-        }
-    }
-    findings
-}
-
-/// Substitutes `{tainted_arg}`/`{sink_call}` in a rule's YAML `message`
-/// template with the actual hit's values — the declarative-rule
-/// equivalent of what the three old hand-written Rust closures each did
-/// inline.
-fn render_taint_message(template: &str, hit: &autoreview_dataflow::taint::TaintHit) -> String {
-    template.replace("{tainted_arg}", &hit.tainted_arg).replace("{sink_call}", &hit.sink_call)
-}
-
-/// Deliberately doesn't name the source (e.g. "an HTTP form field") the
-/// way an earlier, Go-only version of this string did — now that taint
-/// rules cover multiple languages and source families (HTTP form values,
-/// request parameters, ...), a single hardcoded source description would
-/// misdescribe whichever rules don't match it. The rule's own `message`
-/// (YAML `message:` field) is where a rule-specific, accurate source
-/// description belongs.
-fn taint_title(hit: &autoreview_dataflow::taint::TaintHit) -> String {
-    format!("`{}` reaches `{}` with an unsanitized value from an untrusted source", hit.tainted_arg, hit.sink_call)
-}
-
-/// Runs every `kind: taint` rule declared in `rules-builtin/` or a
-/// registered pack (loaded via `taint_rules::load_taint_rules`) whose
-/// `language` matches, against one file's already-lowered functions.
-/// Adding a new taint rule means adding a new YAML file — this function
-/// doesn't change.
-/// Interprocedural taint-source summaries for one rule's own `sources`
-/// (rule engine roadmap item 6, `RULE_ENGINE_RESEARCH.md`): does a same-
-/// file/same-package/imported-package helper have a path where this
-/// specific rule's source reaches its own return? Closes a real gap the
-/// existing intraprocedural default (taint auto-propagates through an
-/// unrecognized call only from an already-tainted *argument*) structurally
-/// can't see — a niladic wrapper like `func getUserID() string { return
-/// req.FormValue("id") }` has no argument for that default to look at.
-/// Only Go, Java, and Kotlin have the same-package/cross-package
-/// resolution machinery this needs (see `go_package_summaries`/
-/// `java_kotlin_package_summaries` and friends) — JavaScript/TypeScript/
-/// TSX return an empty map, which `check_with_summaries` treats exactly
-/// like the "no interprocedural info" case it already handled before this
-/// change, so their behavior is unaffected.
-fn taint_interprocedural_summaries(
-    repo_root: &Path,
-    path: &str,
-    own_content: &str,
-    language: &str,
-    spec: &autoreview_dataflow::taint::TaintSpec,
-    rule_id: &str,
-    caches: &SummaryCaches,
-) -> HashMap<String, bool> {
-    let compute_summary = |cfg: &Cfg<Stmt>| autoreview_dataflow::taint::compute_source_summary(spec, cfg);
-    match language {
-        "Go" => {
-            let mut summaries = go_package_summaries(repo_root, path, None, &compute_summary, rule_id, caches);
-            summaries.extend(go_imported_package_summaries(repo_root, path, None, &compute_summary, rule_id, caches));
-            summaries
-        }
-        "Java" | "Kotlin" => {
-            let mut summaries = match autoreview_archgraph::declared_package(own_content) {
-                Some(package) => java_kotlin_package_summaries(repo_root, path, &package, &compute_summary, rule_id, caches),
-                None => {
-                    let mut own_only = HashMap::new();
-                    add_java_kotlin_summaries_from_file(&repo_root.join(path), &mut own_only, &compute_summary, rule_id, caches);
-                    own_only
-                }
-            };
-            summaries.extend(java_kotlin_imported_package_summaries(repo_root, own_content, &compute_summary, rule_id, caches));
-            summaries
-        }
-        _ => HashMap::new(),
-    }
-}
-
-fn run_loaded_taint_rules(repo_root: &Path, path: &str, own_content: &str, language: &str, lowered: &[(Node, Cfg<Stmt>)], registered_packs: &[ResolvedRulePack], caches: &SummaryCaches) -> Vec<AgentFinding> {
-    let rules: Vec<_> = taint_rules::load_taint_rules(registered_packs).into_iter().filter(|r| r.language == language).collect();
-    if rules.is_empty() {
-        return Vec::new();
-    }
-
-    let mut findings = Vec::new();
-    for rule in &rules {
-        // Computed once per rule (not per function) — every function in
-        // this file shares the same same-package/imported-package scope.
-        // `rule.id` doubles as the persistent cache's rule key: it's
-        // already unique per taint rule, so a niladic-source-wrapper
-        // summary computed for one rule never leaks into another's
-        // lookup.
-        let summaries = taint_interprocedural_summaries(repo_root, path, own_content, language, &rule.spec, &rule.id, caches);
-        for (_, cfg) in lowered {
-            for hit in autoreview_dataflow::taint::check_with_summaries(&rule.spec, cfg, Some(&summaries)) {
-                let mut finding = make_finding(&rule.id, &rule.category, rule.severity, path, hit.source_line, taint_title(&hit), render_taint_message(&rule.message, &hit));
-                finding.meta = taint_pack_meta(rule);
-                findings.push(finding);
-            }
-        }
-    }
-    findings
-}
-
-/// Renders a `call-sequence` rule's `{trigger_call}` placeholder — the
-/// call (or, for a `checkBeforeReturn` hit, the literal text `"return"`)
-/// that actually tripped the rule while its obligation was still open.
-fn render_call_order_message(template: &str, hit: &autoreview_dataflow::call_order::CallOrderHit) -> String {
-    template.replace("{trigger_call}", &hit.trigger_call)
-}
-
-/// Runs every `kind: call-sequence` rule (see
-/// `autoreview_dataflow::call_order`'s own module docs for what this
-/// engine models and why it's a separate primitive from taint) whose
-/// `language` matches, against one file's already-lowered functions.
-/// Purely intraprocedural — no summaries/caches involved, unlike
-/// `run_loaded_taint_rules`, since the obligation this models is meant to
-/// resolve within one function.
-fn run_call_order_rules(path: &str, language: &str, lowered: &[(Node, Cfg<Stmt>)], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
-    let rules: Vec<_> = call_order_rules::load_call_order_rules(registered_packs).into_iter().filter(|r| r.language == language).collect();
-    if rules.is_empty() {
-        return Vec::new();
-    }
-
-    let mut findings = Vec::new();
-    for rule in &rules {
-        for (_, cfg) in lowered {
-            for hit in autoreview_dataflow::call_order::check(&rule.spec, cfg) {
-                let mut finding = make_finding(
-                    &rule.id,
-                    &rule.category,
-                    rule.severity,
-                    path,
-                    hit.source_line,
-                    format!("`{}` reached with an unresolved `{}` obligation still open", hit.trigger_call, rule.id),
-                    render_call_order_message(&rule.message, &hit),
-                );
-                finding.meta = rule_meta(rule.pack_id.as_ref(), rule.metadata.as_ref());
-                findings.push(finding);
-            }
         }
     }
     findings
@@ -912,10 +459,8 @@ fn read_and_parse(repo_root: &Path, path: &str, language: autoreview_langsupport
 /// backing-array, typed-nil-interface-return, loopvar, plus taint rules).
 /// Java/Kotlin also get the interprocedural NPE-risk check
 /// (`java_kotlin_npe_risk`, the Java/Kotlin analog of Go's typed-nil-
-/// return rule — see that module's docs). JavaScript/TypeScript/TSX only
-/// get taint rules so far — the generic taint engine already works
-/// against any lowered `Cfg`, so a `kind: taint` YAML rule for any of
-/// them needs no dataflow-crate changes to run. Parses and lowers each
+/// return rule — see that module's docs). All supported CFG languages
+/// run both taint and call-sequence rules. Parses and lowers each
 /// file's functions exactly once per language, shared across that
 /// language's rule families rather than each re-parsing/re-lowering
 /// independently — and, via `ParseCache`, shared across every
@@ -926,78 +471,13 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
 }
 
 pub fn run_dataflow_check_for_snapshot(repo: &Path, repo_root: &Path, changed_files: &[String], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
-    let go_pre_1_22 = crate::analyzers::practices::go_module_targets_pre_1_22(repo_root);
-    let cache = ParseCache::new();
-    let persistent = PersistentSummaryCache::load(repo, repo_root);
-    let caches = SummaryCaches { parse: &cache, persistent: &persistent, java_kotlin_packages: Default::default() };
-    let findings: Vec<AgentFinding> = changed_files
-        .iter()
-        .filter_map(|path| {
-            if path.ends_with(".go") {
-                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Go, &cache)?;
-                let (content, tree) = cached.as_ref();
-                let source = content.as_bytes();
-                let lowered = lower_all_functions(source, tree);
-
-                let mut findings = run_append_shared_backing_array(path, &lowered);
-                findings.extend(run_typed_nil_interface_return(repo_root, path, source, &lowered, &caches));
-                findings.extend(run_loaded_taint_rules(repo_root, path, content, "Go", &lowered, registered_packs, &caches));
-                if go_pre_1_22 {
-                    findings.extend(run_loopvar_checks(path, &lowered));
-                }
-                Some(findings)
-            } else if path.ends_with(".java") {
-                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Java, &cache)?;
-                let (content, tree) = cached.as_ref();
-                let lowered = lower_all_java_functions(content.as_bytes(), tree);
-                let mut findings = run_npe_risk(repo_root, path, content, &lowered, &[], &caches);
-                findings.extend(run_loaded_taint_rules(repo_root, path, content, "Java", &lowered, registered_packs, &caches));
-                findings.extend(run_call_order_rules(path, "Java", &lowered, registered_packs));
-                Some(findings)
-            } else if path.ends_with(".kt") || path.ends_with(".kts") {
-                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Kotlin, &cache)?;
-                let (content, tree) = cached.as_ref();
-                let lowered = lower_all_kotlin_functions(content.as_bytes(), tree);
-                // Kotlin's stdlib defines Any?.toString() as a null-safe
-                // extension (see java_kotlin_npe_risk's own docs) — the
-                // only call this rule's dereference-walk must not treat as
-                // risky on a nullable receiver in Kotlin specifically.
-                let mut findings = run_npe_risk(repo_root, path, content, &lowered, &["toString"], &caches);
-                findings.extend(run_loaded_taint_rules(repo_root, path, content, "Kotlin", &lowered, registered_packs, &caches));
-                findings.extend(run_call_order_rules(path, "Kotlin", &lowered, registered_packs));
-                Some(findings)
-            } else if path.ends_with(".tsx") {
-                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::Tsx, &cache)?;
-                let (content, tree) = cached.as_ref();
-                let lowered = lower_all_javascript_functions(content.as_bytes(), tree);
-                // Reuses the "TypeScript" taint rules rather than a separate
-                // "Tsx" bucket — TSX's grammar only adds JSX syntax on top
-                // of TypeScript's, so the same taint rules apply verbatim; a
-                // duplicate set of Tsx-only YAML files would just be the
-                // same rules twice.
-                Some(run_loaded_taint_rules(repo_root, path, content, "TypeScript", &lowered, registered_packs, &caches))
-            } else if path.ends_with(".ts") || path.ends_with(".mts") || path.ends_with(".cts") {
-                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::TypeScript, &cache)?;
-                let (content, tree) = cached.as_ref();
-                let lowered = lower_all_javascript_functions(content.as_bytes(), tree);
-                Some(run_loaded_taint_rules(repo_root, path, content, "TypeScript", &lowered, registered_packs, &caches))
-            } else if path.ends_with(".js") || path.ends_with(".jsx") || path.ends_with(".mjs") || path.ends_with(".cjs") {
-                let cached = read_and_parse(repo_root, path, autoreview_langsupport::Language::JavaScript, &cache)?;
-                let (content, tree) = cached.as_ref();
-                let lowered = lower_all_javascript_functions(content.as_bytes(), tree);
-                Some(run_loaded_taint_rules(repo_root, path, content, "JavaScript", &lowered, registered_packs, &caches))
-            } else {
-                None
-            }
-        })
-        .flatten()
-        .collect();
-    persistent.save();
-    findings
+    dispatch::run(repo, repo_root, changed_files, registered_packs)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+    use super::cache::summary_cache_path;
     use super::*;
 
     #[test]

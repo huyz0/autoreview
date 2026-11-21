@@ -54,6 +54,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use autoreview_langsupport::{language_for_path, Language};
 
 use crate::analyzers::rule_pack::{run_ast_grep_scan, write_rule_file};
 
@@ -118,19 +119,6 @@ struct RuleLanguage {
     language: String,
 }
 
-fn extension_for_language(language: &str) -> Option<&'static str> {
-    match language {
-        "Go" => Some("go"),
-        "Java" => Some("java"),
-        "Kotlin" => Some("kt"),
-        "TypeScript" => Some("ts"),
-        "Tsx" => Some("tsx"),
-        "JavaScript" => Some("js"),
-        "Rust" => Some("rs"),
-        _ => None,
-    }
-}
-
 /// Runs `ast-grep scan` with exactly one rule file against a set of target
 /// files, returning the count of files with at least one match. Files that
 /// don't exist are skipped (mirrors `run_ast_grep`'s own tolerance).
@@ -161,7 +149,7 @@ const SKIP_DIRS: &[&str] = &[".git", "vendor", "node_modules", "target", ".autor
 
 /// Samples up to `FP_SAMPLE_CAP` files with the rule's language extension
 /// from the current repo, for the FP smoke test.
-fn sample_repo_files(repo_root: &Path, extension: &str) -> Vec<PathBuf> {
+fn sample_repo_files(repo_root: &Path, language: Language) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut stack = vec![repo_root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -169,7 +157,7 @@ fn sample_repo_files(repo_root: &Path, extension: &str) -> Vec<PathBuf> {
         let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
-            if let Some(path) = sample_file(entry, extension, &mut stack) {
+            if let Some(path) = sample_file(entry, language, &mut stack) {
                 found.push(path);
             }
             if found.len() == FP_SAMPLE_CAP {
@@ -180,14 +168,14 @@ fn sample_repo_files(repo_root: &Path, extension: &str) -> Vec<PathBuf> {
     found
 }
 
-fn sample_file(entry: std::fs::DirEntry, extension: &str, directories: &mut Vec<PathBuf>) -> Option<PathBuf> {
+fn sample_file(entry: std::fs::DirEntry, language: Language, directories: &mut Vec<PathBuf>) -> Option<PathBuf> {
     let kind = entry.file_type().ok()?;
     let path = entry.path();
     if kind.is_dir() && !entry.file_name().to_str().is_some_and(|name| SKIP_DIRS.contains(&name)) {
         directories.push(path);
         return None;
     }
-    (kind.is_file() && path.extension().and_then(|value| value.to_str()) == Some(extension)).then_some(path)
+    (kind.is_file() && language_for_path(&path).is_some_and(|actual| actual.matches_rule_language(language))).then_some(path)
 }
 
 /// Runs bench for one candidate cluster. `repo_root` is the repo whose
@@ -208,7 +196,7 @@ pub fn run_bench(repo_root: &Path, cluster_id: &str) -> anyhow::Result<BenchRepo
 
     let rule_contents = std::fs::read_to_string(&rule_path)?;
     let rule_meta: RuleLanguage = serde_yaml::from_str(&rule_contents)?;
-    let extension = extension_for_language(&rule_meta.language).ok_or_else(|| anyhow::anyhow!("unsupported rule language '{}'", rule_meta.language))?;
+    let language = Language::from_rule_name(&rule_meta.language).ok_or_else(|| anyhow::anyhow!("unsupported rule language '{}'", rule_meta.language))?;
 
     let positive_files = list_fixture_files(&candidate_dir.join("tests").join("positive"));
     let negative_files = list_fixture_files(&candidate_dir.join("tests").join("negative"));
@@ -221,7 +209,7 @@ pub fn run_bench(repo_root: &Path, cluster_id: &str) -> anyhow::Result<BenchRepo
         Some(SelfTestResult { positive_total: positive_files.len(), positive_matched, negative_total: negative_files.len(), negative_matched })
     };
 
-    let sampled = sample_repo_files(repo_root, extension);
+    let sampled = sample_repo_files(repo_root, language);
     let fp_smoke = if sampled.is_empty() {
         None
     } else {
@@ -248,8 +236,20 @@ pub fn run_bench(repo_root: &Path, cluster_id: &str) -> anyhow::Result<BenchRepo
 }
 
 #[cfg(test)]
-mod tests {
+mod bench_tests {
     use super::*;
+
+    #[test]
+    fn smoke_samples_use_the_full_rule_language_family() {
+        let repo = tempfile::tempdir().unwrap();
+        for filename in ["foo.ts", "foo.tsx", "foo.mts", "foo.cts", "foo.mjs", "build.kts"] {
+            std::fs::write(repo.path().join(filename), "").unwrap();
+        }
+        assert_eq!(sample_repo_files(repo.path(), Language::TypeScript).len(), 4);
+        assert_eq!(sample_repo_files(repo.path(), Language::Tsx).len(), 1);
+        assert_eq!(sample_repo_files(repo.path(), Language::JavaScript).len(), 1);
+        assert_eq!(sample_repo_files(repo.path(), Language::Kotlin).len(), 1);
+    }
     use std::process::Command;
 
     fn ast_grep_available() -> bool {

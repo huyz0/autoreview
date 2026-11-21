@@ -72,23 +72,7 @@ struct TaintRuleYaml {
 
 /// A loaded `kind: taint` rule, ready to hand to
 /// `autoreview_dataflow::taint::check`.
-pub struct TaintRuleDef {
-    pub id: String,
-    pub language: String,
-    pub category: String,
-    pub severity: Severity,
-    /// May contain `{tainted_arg}`/`{sink_call}` placeholders, substituted
-    /// by the caller from a `TaintHit`.
-    pub message: String,
-    pub spec: TaintSpec,
-    /// `Some(packId)` when this rule came from a registered pack rather
-    /// than the embedded builtin tree — see `ast_grep::pack_rule_provenance`.
-    pub pack_id: Option<String>,
-    /// The rule's own `metadata:` block (CWE/OWASP/confidence), carried so
-    /// it can reach `AgentFinding.meta` the same way a pattern rule's
-    /// does — see `RuleMetadataBlock`'s docs.
-    pub metadata: Option<super::ast_grep::RuleMetadataBlock>,
-}
+pub type TaintRuleDef = super::dataflow_check::DataflowRuleDef<TaintSpec>;
 
 fn parse_taint_rule(contents: &str) -> Option<TaintRuleDef> {
     let yaml: TaintRuleYaml = serde_yaml::from_str(contents).ok()?;
