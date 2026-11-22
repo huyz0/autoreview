@@ -2,14 +2,14 @@ use std::collections::{BTreeMap, HashMap};
 
 use autoreview_schema::{ImportedOperation, OutboxOperationConfig};
 
-use super::super::web::{binding_nodes, first_argument, imports_from, is_function, named_imports};
+use super::super::web::{first_argument, imports_from, named_imports, BindingScopes};
 use super::super::{children, descendants, text};
 use super::Node;
 
 pub(super) struct FileCalls<'tree, 'source> {
     root: Node<'tree>,
     source: &'source str,
-    bindings: HashMap<&'source str, Vec<Node<'tree>>>,
+    bindings: BindingScopes<'tree, 'source>,
     calls: Vec<Node<'tree>>,
 }
 
@@ -28,23 +28,13 @@ impl Endpoints<'_> {
 
 impl<'tree, 'source> FileCalls<'tree, 'source> {
     pub fn new(root: Node<'tree>, source: &'source str) -> Self {
-        let mut bindings: HashMap<&str, Vec<Node<'_>>> = HashMap::new();
-        let mut calls = Vec::new();
-        for node in descendants(root) {
-            if node.kind() == "call_expression" {
-                calls.push(node);
-            }
-            for binding in binding_nodes(node) {
-                bindings
-                    .entry(text(binding, source))
-                    .or_default()
-                    .push(binding_scope(binding));
-            }
-        }
+        let calls = descendants(root)
+            .filter(|node| node.kind() == "call_expression")
+            .collect();
         Self {
             root,
             source,
-            bindings,
+            bindings: BindingScopes::new(root, source),
             calls,
         }
     }
@@ -69,7 +59,7 @@ impl<'tree, 'source> FileCalls<'tree, 'source> {
                 let (root, members) =
                     member_path(call.child_by_field_name("function")?, self.source)?;
                 if !imported.get(root)?.contains(&members)
-                    || self.shadowed(root, call)
+                    || self.bindings.visible(root, call).is_some()
                     || !literal_matches(call, self.source, operation)
                 {
                     return None;
@@ -77,15 +67,6 @@ impl<'tree, 'source> FileCalls<'tree, 'source> {
                 Some((call.start_byte(), call))
             })
             .collect()
-    }
-
-    fn shadowed(&self, name: &str, use_site: Node<'_>) -> bool {
-        self.bindings.get(name).is_some_and(|scopes| {
-            scopes.iter().any(|scope| {
-                scope.start_byte() <= use_site.start_byte()
-                    && use_site.end_byte() <= scope.end_byte()
-            })
-        })
     }
 }
 
@@ -154,31 +135,4 @@ fn literal_matches(call: Node<'_>, source: &str, operation: &ImportedOperation) 
             .and_then(|s| s.strip_suffix(quote))
             .is_some_and(|value| !value.contains('\\') && value == expected)
     })
-}
-
-fn binding_scope(binding: Node<'_>) -> Node<'_> {
-    let Some(parent) = binding.parent() else {
-        return binding;
-    };
-    let owner = if matches!(parent.kind(), "function_declaration" | "class_declaration") {
-        parent.parent().unwrap_or(parent)
-    } else {
-        parent
-    };
-    let is_var = parent.kind() == "variable_declarator"
-        && parent
-            .parent()
-            .is_some_and(|declaration| declaration.kind() == "variable_declaration");
-    std::iter::successors(Some(owner), |node| node.parent())
-        .find(|scope| {
-            is_function(*scope) || scope.kind() == "program" || !is_var && lexical_scope(*scope)
-        })
-        .unwrap_or(owner)
-}
-
-fn lexical_scope(node: Node<'_>) -> bool {
-    matches!(
-        node.kind(),
-        "statement_block" | "for_statement" | "for_in_statement" | "switch_body" | "catch_clause"
-    )
 }

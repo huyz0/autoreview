@@ -99,9 +99,16 @@ every row is implemented and its acceptance cases are verified.
 
 ## First implementation
 
-The first protocol checks
-cover adjacent Fetch statements and direct promise callbacks. The
-Node write check starts with equal string-literal paths, and the OTel
+The Fetch lifecycle and status checks use the JavaScript and TypeScript
+control-flow graph, including TSX. They follow local response aliases,
+reassignments, clone identities, and supported status branches. They
+recognize global Fetch and explicit imports from Undici and node-fetch.
+The status rule also recognizes the direct returned promise callback
+case. The TypeScript assertion rule uses the same response identity
+before reporting a direct cast to a concrete type. Helper return
+values, dynamically selected response methods, and
+arbitrary user-defined guards are outside this first implementation.
+The Node write check starts with equal string-literal paths, and the OTel
 check starts with an explicitly wrong unit on a known metric. These
 limits keep the matches reproducible while the framework analyzers
 grow alias, control-flow, and helper resolution.

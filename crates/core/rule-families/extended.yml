@@ -144,59 +144,6 @@ jsx-button-without-keyboard:
                 has: {kind: property_identifier, regex: '^onKey(Down|Up|Press)$'}
   languages: {JavaScript: {}, Tsx: {}}
 
-fetch-response-body-read-twice:
-  category: correctness
-  severity: warning
-  semantic: true
-  message: These reads consume the same Fetch response body. Use the first decoded value or clone the response before the first read.
-  metadata:
-    references: ["https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch#setting_a_body"]
-    subcategory: [protocol.response-lifecycle]
-  rule:
-    pattern: const $SECOND_RESULT = await $RESPONSE.$SECOND()
-    follows:
-      pattern: const $FIRST_RESULT = await $RESPONSE.$FIRST()
-      follows:
-        pattern: const $RESPONSE = await fetch($$$ARGS)
-  constraints:
-    FIRST: {regex: '^(arrayBuffer|blob|bytes|formData|json|text)$'}
-    SECOND: {regex: '^(arrayBuffer|blob|bytes|formData|json|text)$'}
-  languages: {JavaScript: {}, TypeScript: {}}
-
-json-cast-without-validation:
-  category: correctness
-  severity: warning
-  semantic: true
-  message: This type assertion gives the decoded Fetch payload a domain type without checking its runtime shape. Validate the decoded value at this boundary.
-  metadata:
-    references: ["https://www.typescriptlang.org/docs/handbook/2/everyday-types.html#type-assertions"]
-    subcategory: [validation.runtime-boundaries]
-  rule:
-    pattern: const $VALUE = (await $RESPONSE.json()) as $TYPE
-    follows:
-      pattern: const $RESPONSE = await fetch($$$ARGS)
-  constraints:
-    TYPE: {kind: type_identifier}
-  languages: {TypeScript: {}}
-
-fetch-json-without-status-check:
-  category: correctness
-  severity: info
-  semantic: true
-  message: Fetch also resolves for HTTP error statuses. Check the response status before returning decoded data as the successful result.
-  metadata:
-    references: ["https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch#checking_response_status"]
-    subcategory: [protocol.status-handling]
-  rule:
-    any:
-      - pattern: return fetch($$$ARGS).then($RESPONSE => $RESPONSE.json());
-      - pattern: return await fetch($$$ARGS).then($RESPONSE => $RESPONSE.json());
-      - all:
-          - pattern: return $RESPONSE.json();
-          - follows:
-              pattern: const $RESPONSE = await fetch($$$ARGS)
-  languages: {JavaScript: {}, TypeScript: {}}
-
 otel-http-duration-unit:
   category: correctness
   severity: warning

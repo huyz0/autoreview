@@ -1,3 +1,7 @@
+mod bindings;
+
+pub(super) use bindings::BindingScopes;
+
 use std::path::Path;
 
 use autoreview_langsupport::{language_for_path, parser_for, Language};

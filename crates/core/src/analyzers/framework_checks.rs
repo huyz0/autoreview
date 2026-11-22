@@ -1,3 +1,4 @@
+mod fetch;
 mod go_cancel;
 mod java;
 mod jest;
@@ -18,8 +19,8 @@ use tree_sitter::{Node, Parser, Tree};
 
 use super::ast_grep::{RuleCatalogEntry, RuleDefinition};
 
-fn rules() -> &'static [&'static Rule] {
-    &[
+fn rules() -> impl Iterator<Item = &'static Rule> {
+    [
         &go_cancel::RULE,
         &go_cancel::SPAN_RULE,
         &go_cancel::TRACE_PARENT_RULE,
@@ -34,15 +35,15 @@ fn rules() -> &'static [&'static Rule] {
         &react::INTERVAL_RULE,
         &prisma::RULE,
         &rabbitmq::RULE,
-    ]
+    ].into_iter().chain(fetch::RULES)
 }
 
 pub(super) fn semantic_ids() -> impl Iterator<Item = String> {
-    rules().iter().map(|rule| rule.id.to_owned())
+    rules().map(|rule| rule.id.to_owned())
 }
 
 pub(super) fn catalog_entries() -> impl Iterator<Item = RuleCatalogEntry> {
-    rules().iter().map(|rule| RuleCatalogEntry {
+    rules().map(|rule| RuleCatalogEntry {
         id: rule.id.into(),
         kind: "framework".into(),
         category: rule.category.into(),
@@ -51,7 +52,7 @@ pub(super) fn catalog_entries() -> impl Iterator<Item = RuleCatalogEntry> {
 }
 
 pub(super) fn definition(id: &str) -> Option<RuleDefinition> {
-    let rule = rules().iter().find(|rule| rule.id == id)?;
+    let rule = rules().find(|rule| rule.id == id)?;
     let metadata = serde_json::json!({
         "id": rule.id, "kind": "framework", "category": rule.category, "semantic": true,
         "message": rule.message, "references": [rule.reference],
@@ -75,6 +76,7 @@ pub fn run_framework_checks(root: &Path, changed: &[String]) -> Vec<AgentFinding
         web_findings.extend(prisma::inspect(path, source, file));
         web_findings.extend(rabbitmq::inspect(path, source, file));
         web_findings.extend(jest::inspect(root, path, source, file));
+        web_findings.extend(fetch::inspect(path, source, file));
         web_findings
     }));
     findings

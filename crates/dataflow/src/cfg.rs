@@ -88,6 +88,16 @@ pub struct BindingWrite {
     pub(crate) value: Option<IdentityOperand>,
 }
 
+impl BindingWrite {
+    pub fn target(&self) -> (&str, usize) {
+        (&self.name, self.start)
+    }
+
+    pub fn value(&self) -> Option<&IdentityOperand> {
+        self.value.as_ref()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Assign { lhs: VarId, rhs: RhsShape },
@@ -122,11 +132,21 @@ pub struct CfgNode<S> {
     pub source_line: u32,
     statement_lines: Vec<Option<u32>>,
     pub(crate) condition: Option<(String, bool)>,
+    pub(crate) condition_span: Option<std::ops::Range<usize>>,
+    pub(crate) return_start: Option<usize>,
     pub(crate) throwing_call: Option<ThrowingCall>,
     pub(crate) loop_condition: bool,
 }
 
 impl<S> CfgNode<S> {
+    pub fn condition_span(&self) -> Option<std::ops::Range<usize>> {
+        self.condition_span.clone()
+    }
+
+    pub fn return_start(&self) -> Option<usize> {
+        self.return_start
+    }
+
     pub(crate) fn record_statement_lines(&mut self, start: usize, line: u32) {
         if start == self.stmts.len() {
             return;
@@ -181,7 +201,7 @@ impl<S> Cfg<S> {
     /// a fluent builder API, since the lowering passes' control flow is
     /// varied enough that a generic builder would just get in the way.
     pub fn push_node(&mut self, source_line: u32) -> NodeId {
-        self.nodes.push(CfgNode { stmts: Vec::new(), source_line, statement_lines: Vec::new(), condition: None, throwing_call: None, loop_condition: false });
+        self.nodes.push(CfgNode { stmts: Vec::new(), source_line, statement_lines: Vec::new(), condition: None, condition_span: None, return_start: None, throwing_call: None, loop_condition: false });
         self.nodes.len() - 1
     }
 

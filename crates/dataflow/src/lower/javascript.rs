@@ -97,7 +97,13 @@ fn lower_assignment_expression(node: Node, source: &[u8], keyed: bool) -> Stmt {
 }
 
 fn initializer_call(value: Node<'_>, keyed: bool) -> Option<Node<'_>> {
-    let expression = if keyed { super::keyed_syntax::expression_value(value)? } else { value };
+    let mut expression = value;
+    if keyed {
+        expression = super::keyed_syntax::expression_value(expression)?;
+        while matches!(expression.kind(), "as_expression" | "satisfies_expression" | "non_null_expression") {
+            expression = super::keyed_syntax::expression_value(expression.named_child(0)?)?;
+        }
+    }
     (expression.kind() == "call_expression").then_some(expression)
 }
 
@@ -171,6 +177,7 @@ fn lower_statement_inner(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current
 fn lower_if(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {
     if let Some(cond) = stmt.child_by_field_name("condition") {
         cfg.nodes[current].stmts.push(Stmt::Other(format!("if {}", text(cond, source))));
+        cfg.nodes[current].condition_span = Some(cond.byte_range());
     }
 
     let true_start = cfg.push_node(stmt.start_position().row as u32 + 1);

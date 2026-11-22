@@ -82,6 +82,7 @@ impl Flow<'_> {
         if !matches!(node.kind(), "return_statement" | "return_expression") {
             return;
         }
+        cfg.nodes[current].return_start = Some(node.start_byte());
         let expr = keyed_syntax::expression(node);
         if let Some(call) = expr.and_then(|expr| direct_call(expr, self.source)) {
             cfg.emit(current, call, line(node));
