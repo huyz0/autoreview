@@ -2,6 +2,6 @@ package collections
 
 import "slices"
 
-func unique(values []string) []string {
+func Unique(values []string) []string {
 	return slices.Compact(values)
 }

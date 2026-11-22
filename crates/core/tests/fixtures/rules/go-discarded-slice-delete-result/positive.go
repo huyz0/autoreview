@@ -2,6 +2,6 @@ package collections
 
 import "slices"
 
-func removeFirst(items []*string) {
+func RemoveFirst(items []*string) {
 	slices.Delete(items, 0, 1)
 }

@@ -2,12 +2,12 @@ package collections
 
 import "slices"
 
-func header() []byte {
+func Header() []byte {
 	bytes := make([]byte, 200000)
 	return slices.Clone(bytes[:16])
 }
 
-func smallSample() []byte {
+func SmallSample() []byte {
 	data := make([]byte, 256)
 	return data[:16]
 }
