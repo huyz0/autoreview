@@ -36,10 +36,7 @@ impl Rule {
     }
 
     fn metadata(&self) -> std::collections::HashMap<String, serde_json::Value> {
-        std::collections::HashMap::from([
-            ("references".into(), serde_json::json!([self.reference])),
-            ("subcategory".into(), serde_json::json!([self.subcategory])),
-        ])
+        rule_metadata(self.reference, self.subcategory)
     }
 
     pub fn finding(&self, path: &str, range: LocationRange, snippet: &str, message: String) -> AgentFinding {
@@ -56,6 +53,13 @@ impl Rule {
     }
 }
 
+pub(super) fn rule_metadata(reference: &str, subcategory: &str) -> std::collections::HashMap<String, serde_json::Value> {
+    std::collections::HashMap::from([
+        ("references".into(), serde_json::json!([reference])),
+        ("subcategory".into(), serde_json::json!([subcategory])),
+    ])
+}
+
 pub(super) fn rules() -> impl Iterator<Item = &'static Rule> {
     [
         &super::workflow_policy::RULE,
@@ -65,6 +69,7 @@ pub(super) fn rules() -> impl Iterator<Item = &'static Rule> {
         &super::protobuf_schema::REUSED_TAG,
         &super::protobuf_schema::UNRESERVED_TAG,
         &super::protobuf_schema::INCOMPATIBLE_FIELD,
+        &super::framework_checks::outbox::RULE,
     ].into_iter()
 }
 

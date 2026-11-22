@@ -513,6 +513,26 @@ pub struct ArtifactChecksConfig {
     pub locale_catalogs: Vec<LocaleCatalogConfig>,
     #[serde(default)]
     pub protobuf_compatibility: Vec<String>,
+    #[serde(default)]
+    pub outbox_operations: Vec<OutboxOperationConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboxOperationConfig {
+    pub paths: Vec<String>,
+    pub database_write: ImportedOperation,
+    pub broker_publish: ImportedOperation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedOperation {
+    pub module: String,
+    pub export: String,
+    #[serde(default)]
+    pub members: Vec<String>,
+    pub first_argument: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

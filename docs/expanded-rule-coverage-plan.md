@@ -182,3 +182,32 @@ artifactChecks:
   protobufCompatibility:
     - 'schemas/**/*.proto'
 ```
+
+The outbox policy uses explicit pairs of imported operations. Each pair
+defines the database write and direct broker publication that need to
+be atomic on the configured paths. The broker selector can restrict the
+first argument to a literal event name. Use the imported transaction
+helper as the database operation when it represents the business write.
+
+```yaml
+artifactChecks:
+  outboxOperations:
+    - paths: ['src/orders/**/*.ts']
+      databaseWrite:
+        module: './orders'
+        export: 'repository'
+        members: ['update']
+      brokerPublish:
+        module: './events'
+        export: 'publish'
+        firstArgument: 'orders.updated'
+```
+
+JavaScript, TypeScript and TSX checks report a direct publication when
+the paired write is reachable in the same function or callback. The
+report points to the broker call and links to the database call. An
+operation that writes its event to an outbox and leaves delivery to a
+separate worker passes, as does a publication for a different event.
+The check resolves static import aliases and member paths. Calls reached
+only inside a helper and dynamic topic values require a directly
+configured wrapper or a follow-up extension.

@@ -549,6 +549,90 @@ fn rules_list_filters_builtin_rule_kinds_by_subcategory() {
 }
 
 #[test]
+fn outbox_policy_pairs_only_configured_operations_on_a_reachable_path() {
+    let source_path = "src/orders.tsx";
+    let source = r#"
+import * as storage from './storage';
+import { send as publish } from './broker';
+import { enqueue } from './outbox';
+
+export async function direct(values: Order) {
+    const result = await storage.db.orders.update(values);
+    if (result) await publish('orders.updated', result);
+    return <section />;
+}
+export const reversed = async (values: Order) => {
+    await publish('orders.updated', values);
+    let result;
+    result = await storage.db.orders.update(values);
+    return result;
+};
+export async function atomic(values: Order) {
+    await storage.db.orders.update(values);
+    await enqueue('orders.updated', values);
+}
+export async function unrelated(values: Order) {
+    await storage.db.orders.update(values);
+    await publish('metrics.updated', values);
+}
+export async function either(shouldWrite: boolean, values: Order) {
+    if (shouldWrite) {
+        await storage.db.orders.update(values);
+    } else {
+        await publish('orders.updated', values);
+    }
+}
+export async function stopped(values: Order) {
+    await storage.db.orders.update(values);
+    return values;
+    await publish('orders.updated', values);
+}
+export async function shadowed(publish: Sender, values: Order) {
+    await storage.db.orders.update(values);
+    await publish('orders.updated', values);
+}
+"#;
+    let repo = init_repo(&[(source_path, "// orders operation\n"), ("examples/orders.tsx", "")]);
+    repo.commit(&[(source_path, source), ("examples/orders.tsx", source)], "add order operations");
+    assert!(review_artifact_diff(repo.path(), "messaging.atomic-publication").findings.is_empty());
+
+    std::fs::create_dir_all(repo.path().join(".autoreview")).unwrap();
+    std::fs::write(repo.path().join(".autoreview/config.yaml"), r#"
+artifactChecks:
+  outboxOperations:
+    - paths: ['src/*.tsx']
+      databaseWrite:
+        module: ./storage
+        export: db
+        members: [orders, update]
+      brokerPublish:
+        module: ./broker
+        export: send
+        firstArgument: orders.updated
+"#).unwrap();
+    let report = review_artifact_diff(repo.path(), "messaging.atomic-publication");
+    let expected = [(8, 7), (12, 14)];
+    assert_eq!(report.findings.len(), expected.len(), "{:#?}", report.findings);
+    for (finding, (publish, write)) in report.findings.iter().zip(expected) {
+        assert_eq!(finding.source.rule_id.as_deref(), Some("outbox-direct-database-and-broker-write"));
+        assert_eq!(finding.location.path, source_path);
+        assert_eq!(finding.location.range.start_line, publish);
+        let evidence = &finding.related_locations.as_ref().unwrap()[0];
+        assert_eq!(evidence.path, source_path);
+        assert_eq!(evidence.range.start_line, write);
+    }
+}
+
+fn review_artifact_diff(repo: &std::path::Path, subcategory: &str) -> autoreview_schema::ReviewReport {
+    let output = Command::cargo_bin("autoreview").unwrap()
+        .current_dir(repo)
+        .args(["diff", "--base", "HEAD~1", "--static-only", "--changed-lines", "--subcategories", subcategory])
+        .assert().success().get_output().stdout.clone();
+    let report_path = report_path_from_stdout(&String::from_utf8(output).unwrap());
+    serde_json::from_slice(&std::fs::read(report_path).unwrap()).unwrap()
+}
+
+#[test]
 fn icu_catalog_policy_reports_missing_arguments_and_nested_select_other() {
     let base = "locales/en.json";
     let translation = "locales/fr.json";
@@ -569,12 +653,7 @@ fn icu_catalog_policy_reports_missing_arguments_and_nested_select_other() {
     let dir = repo.path().join(".autoreview");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("config.yaml"), "artifactChecks:\n  localeCatalogs:\n    - reference: locales/en.json\n      translations: [locales/fr.json]\n").unwrap();
-    let output = Command::cargo_bin("autoreview").unwrap()
-        .current_dir(repo.path())
-        .args(["diff", "--base", "HEAD~1", "--static-only", "--changed-lines", "--subcategories", "internationalization"])
-        .assert().success().get_output().stdout.clone();
-    let path = report_path_from_stdout(&String::from_utf8(output).unwrap());
-    let report: autoreview_schema::ReviewReport = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let report = review_artifact_diff(repo.path(), "internationalization");
     assert_eq!(report.findings.len(), 2);
     for finding in report.findings {
         assert_eq!(finding.location.path, translation);
@@ -613,13 +692,7 @@ fn postgres_policy_tracks_changed_sql_and_transaction_sidecars() {
             std::fs::write(dir.join("config.yaml"),
                 "artifactChecks:\n  transactionalPostgresMigrations: ['migration/*.sql']\n").unwrap();
         }
-        let output = Command::cargo_bin("autoreview").unwrap()
-            .current_dir(repo.path())
-            .args(["diff", "--base", "HEAD~1", "--static-only", "--changed-lines",
-                "--subcategories", "deployment.migrations"])
-            .assert().success().get_output().stdout.clone();
-        let path = report_path_from_stdout(&String::from_utf8(output).unwrap());
-        let report: autoreview_schema::ReviewReport = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let report = review_artifact_diff(repo.path(), "deployment.migrations");
         let findings: Vec<_> = report.findings.iter()
             .filter(|finding| finding.source.rule_id.as_deref() == Some("postgres-concurrent-index-in-transaction"))
             .collect();
@@ -674,12 +747,7 @@ message Envelope {
             std::fs::create_dir_all(repo.path().join(".autoreview")).unwrap();
             std::fs::write(repo.path().join(config), "artifactChecks:\n  protobufCompatibility: ['schemas/*.proto']\n").unwrap();
         }
-        let output = Command::cargo_bin("autoreview").unwrap()
-            .current_dir(repo.path())
-            .args(["diff", "--base", "HEAD~1", "--static-only", "--changed-lines", "--subcategories", "compatibility"])
-            .assert().success().get_output().stdout.clone();
-        let path_to_report = report_path_from_stdout(&String::from_utf8(output).unwrap());
-        let report: autoreview_schema::ReviewReport = serde_json::from_slice(&std::fs::read(path_to_report).unwrap()).unwrap();
+        let report = review_artifact_diff(repo.path(), "compatibility");
         let expected = [
             ("protobuf-field-tag-reused", 6, Side::New),
             ("protobuf-incompatible-field-change", 7, Side::New),
@@ -713,13 +781,7 @@ fn workflow_pinning_policy_is_opt_in_and_points_to_the_changed_steps() {
             std::fs::write(dir.join("config.yaml"),
                 "artifactChecks:\n  immutableGithubActionRefs: true\n").unwrap();
         }
-        let output = Command::cargo_bin("autoreview").unwrap()
-            .current_dir(repo.path())
-            .args(["diff", "--base", "HEAD~1", "--static-only", "--changed-lines",
-                "--subcategories", "build.dependency-integrity"])
-            .assert().success().get_output().stdout.clone();
-        let path = report_path_from_stdout(&String::from_utf8(output).unwrap());
-        let report: autoreview_schema::ReviewReport = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let report = review_artifact_diff(repo.path(), "build.dependency-integrity");
         let lines: Vec<_> = report.findings.iter()
             .filter(|finding| finding.source.rule_id.as_deref() == Some("github-actions-mutable-reference"))
             .map(|finding| finding.location.range.start_line).collect();

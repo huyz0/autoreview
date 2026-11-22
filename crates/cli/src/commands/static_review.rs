@@ -4,7 +4,7 @@ use std::process::Command;
 
 use autoreview_core::{run_ast_grep, run_golangci_lint, FileChange, ResolvedRulePack};
 use autoreview_langsupport::Language;
-use autoreview_schema::{AgentFinding, LocaleCatalogConfig};
+use autoreview_schema::{AgentFinding, ArtifactChecksConfig};
 
 pub(super) struct ReviewInput<'a> {
     pub repo_root: &'a Path,
@@ -13,9 +13,7 @@ pub(super) struct ReviewInput<'a> {
     pub aspects: Option<&'a [String]>,
     pub audit_rust_deps: bool,
     pub tier4_go: bool,
-    pub immutable_github_action_refs: bool,
-    pub transactional_postgres_migrations: &'a [String],
-    pub locale_catalogs: &'a [LocaleCatalogConfig],
+    pub artifact_checks: &'a ArtifactChecksConfig,
 }
 
 impl ReviewInput<'_> {
@@ -47,22 +45,7 @@ pub(super) fn collect(
             &mut warnings,
         ));
     }
-    if input.immutable_github_action_refs && input.wants("security") {
-        findings.extend(autoreview_core::run_workflow_policy(input.source_root, changed_files));
-    }
-    if !input.transactional_postgres_migrations.is_empty() && input.wants("correctness") {
-        match autoreview_core::run_postgres_migration_policy(
-            input.source_root, changed_files, input.transactional_postgres_migrations,
-        ) {
-            Ok(migrations) => findings.extend(migrations),
-            Err(error) => record_warning(&mut warnings, format!("PostgreSQL migration policy failed: {error}")),
-        }
-    }
-    if !input.locale_catalogs.is_empty() && input.wants("correctness") {
-        findings.extend(autoreview_core::run_locale_catalog_policy(
-            input.source_root, changed_files, input.locale_catalogs,
-        ));
-    }
+    findings.extend(artifact_findings(&input, changed_files, &mut warnings));
     findings.extend(structural(
         input.source_root,
         changed_files,
@@ -83,6 +66,37 @@ pub(super) fn collect(
 fn record_warning(warnings: &mut Vec<String>, message: String) {
     println!("  [warn] {message}");
     warnings.push(message);
+}
+
+fn artifact_findings(
+    input: &ReviewInput<'_>,
+    paths: &[String],
+    warnings: &mut Vec<String>,
+) -> Vec<AgentFinding> {
+    let checks = input.artifact_checks;
+    let root = input.source_root;
+    let mut findings = Vec::new();
+    if checks.immutable_github_action_refs && input.wants("security") {
+        findings.extend(autoreview_core::run_workflow_policy(root, paths));
+    }
+    if !input.wants("correctness") {
+        return findings;
+    }
+    findings.extend(autoreview_core::run_locale_catalog_policy(
+        root, paths, &checks.locale_catalogs,
+    ));
+    for (name, result) in [
+        ("PostgreSQL migration", autoreview_core::run_postgres_migration_policy(
+            root, paths, &checks.transactional_postgres_migrations,
+        )),
+        ("Outbox", autoreview_core::run_outbox_policy(root, paths, &checks.outbox_operations)),
+    ] {
+        match result {
+            Ok(result) => findings.extend(result),
+            Err(error) => record_warning(warnings, format!("{name} policy failed: {error}")),
+        }
+    }
+    findings
 }
 
 fn binary_available(binary: &str) -> bool {

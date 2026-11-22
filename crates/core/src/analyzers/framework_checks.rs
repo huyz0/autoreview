@@ -1,10 +1,13 @@
 mod go_cancel;
 mod java;
 mod jest;
+pub(super) mod outbox;
 mod prisma;
 mod rabbitmq;
 mod react;
 mod web;
+
+pub use outbox::run_outbox_policy;
 
 use std::path::Path;
 
@@ -88,10 +91,7 @@ struct Rule {
 
 impl Rule {
     fn metadata(&self) -> std::collections::HashMap<String, serde_json::Value> {
-        std::collections::HashMap::from([
-            ("references".into(), serde_json::json!([self.reference])),
-            ("subcategory".into(), serde_json::json!([self.subcategory])),
-        ])
+        super::artifact_policy::rule_metadata(self.reference, self.subcategory)
     }
 
     fn finding(&self, anchor: Location, related: Vec<Location>) -> AgentFinding {
