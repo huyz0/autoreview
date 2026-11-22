@@ -8,6 +8,7 @@ use super::{class_members, descendants, modifiers, Java};
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     id: "java-constructor-calls-overridable-method",
     category: "correctness",
+    subcategory: "design.initialization",
     title: "Constructor calls an overridable method",
     message: "This call can dispatch to a subclass before its fields have been initialized. Move the overridable behavior after construction or keep the initialization method private or final.",
     reference: "https://docs.pmd-code.org/pmd-doc-7.22.0/pmd_rules_java_errorprone.html#constructorcallsoverridablemethod",

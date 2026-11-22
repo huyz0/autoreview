@@ -12,6 +12,7 @@ const TYPES: [&str; 2] = [
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     id: "java-otel-discarded-current-scope",
     category: "correctness",
+    subcategory: "observability.trace-propagation",
     title: "OpenTelemetry scope is activated and discarded",
     message: "makeCurrent returns a Scope that restores the previous context when closed. Keep it in a try-with-resources block so the current context is restored even on exceptions.",
     reference: "https://opentelemetry.io/docs/languages/java/api/#context",

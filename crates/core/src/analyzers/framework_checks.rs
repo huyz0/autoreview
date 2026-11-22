@@ -1,5 +1,6 @@
 mod go_cancel;
 mod java;
+mod react;
 
 use std::path::Path;
 
@@ -10,8 +11,8 @@ use tree_sitter::{Node, Parser, Tree};
 
 use super::ast_grep::RuleDefinition;
 
-fn rules() -> [&'static Rule; 8] {
-    [
+fn rules() -> &'static [&'static Rule] {
+    &[
         &go_cancel::RULE,
         &go_cancel::SPAN_RULE,
         &go_cancel::HTTP_RULE,
@@ -20,11 +21,12 @@ fn rules() -> [&'static Rule; 8] {
         &java::OTEL_RULE,
         &java::CONSTRUCTOR_RULE,
         &java::PAGINATION_RULE,
+        &react::INTERVAL_RULE,
     ]
 }
 
 pub(super) fn semantic_ids() -> impl Iterator<Item = String> {
-    rules().into_iter().map(|rule| rule.id.to_owned())
+    rules().iter().map(|rule| rule.id.to_owned())
 }
 
 pub(super) fn definition(id: &str) -> Option<RuleDefinition> {
@@ -32,6 +34,7 @@ pub(super) fn definition(id: &str) -> Option<RuleDefinition> {
     let metadata = serde_json::json!({
         "id": rule.id, "kind": "framework", "category": rule.category, "semantic": true,
         "message": rule.message, "references": [rule.reference],
+        "metadata": rule.metadata(),
     });
     Some(RuleDefinition {
         id: rule.id.into(),
@@ -46,18 +49,27 @@ pub(super) fn definition(id: &str) -> Option<RuleDefinition> {
 pub fn run_framework_checks(root: &Path, changed: &[String]) -> Vec<AgentFinding> {
     let mut findings = go_cancel::run(root, changed);
     findings.extend(java::run(root, changed));
+    findings.extend(react::run(root, changed));
     findings
 }
 
 struct Rule {
     id: &'static str,
     category: &'static str,
+    subcategory: &'static str,
     title: &'static str,
     message: &'static str,
     reference: &'static str,
 }
 
 impl Rule {
+    fn metadata(&self) -> std::collections::HashMap<String, serde_json::Value> {
+        std::collections::HashMap::from([
+            ("references".into(), serde_json::json!([self.reference])),
+            ("subcategory".into(), serde_json::json!([self.subcategory])),
+        ])
+    }
+
     fn finding(&self, anchor: Location, related: Vec<Location>) -> AgentFinding {
         AgentFinding {
             source: FindingSource {
@@ -76,10 +88,7 @@ impl Rule {
             related_locations: (!related.is_empty()).then_some(related),
             suggestion: None,
             tags: None,
-            meta: Some(std::collections::HashMap::from([(
-                "references".into(),
-                serde_json::json!([self.reference]),
-            )])),
+            meta: Some(self.metadata()),
             suggested_patch: None,
         }
     }

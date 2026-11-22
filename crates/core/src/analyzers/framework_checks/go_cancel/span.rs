@@ -11,6 +11,7 @@ use super::two_result_call;
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     id: "go-otel-span-not-ended",
     category: "correctness",
+    subcategory: "observability.span-lifecycle",
     title: "OpenTelemetry span can leave the function without ending",
     message: "At least one path leaves this span open. Defer span.End after starting the span, or explicitly transfer the span to the caller.",
     reference: "https://opentelemetry.io/docs/languages/go/instrumentation/#creating-spans",

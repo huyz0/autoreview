@@ -8,6 +8,7 @@ use super::{class_members, containing, descendants, Java};
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     id: "java-spring-transaction-self-invocation",
     category: "correctness",
+    subcategory: "persistence.transaction-boundaries",
     title: "Self-invocation bypasses Spring transaction advice",
     message: "This call goes directly to a transactional method on the same instance. In Spring proxy mode the call bypasses the proxy, so the callee's transaction settings are not applied. Move the transaction boundary to the caller or invoke the method through a separate bean.",
     reference: "https://docs.spring.io/spring/reference/data-access/transaction/declarative/annotations.html",
