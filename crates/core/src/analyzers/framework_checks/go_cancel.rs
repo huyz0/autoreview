@@ -12,6 +12,7 @@ use tree_sitter::Node;
 use super::{location, Rule};
 pub(super) use http::RULE as HTTP_RULE;
 pub(super) use span::RULE as SPAN_RULE;
+pub(super) use span::TRACE_PARENT_RULE;
 
 pub(super) const RULE: Rule = Rule {
     id: "go-context-cancel-on-all-paths",

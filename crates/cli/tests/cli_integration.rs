@@ -528,6 +528,59 @@ fn diff_subcategories_intersect_with_aspects() {
 }
 
 #[test]
+fn rules_list_filters_builtin_rule_kinds_by_subcategory() {
+    let repo = init_repo(&[("README.md", "rules\n")]);
+    let output = Command::cargo_bin("autoreview").unwrap()
+        .current_dir(repo.path())
+        .args(["rules", "list", "--subcategories", "reliability,build", "--json"])
+        .assert().success().get_output().stdout.clone();
+    let rules: Vec<serde_json::Value> = serde_json::from_slice(&output).unwrap();
+    for (id, kind) in [
+        ("go-discarded-context-cancel", "pattern"),
+        ("go-context-cancel-on-all-paths", "framework"),
+        ("github-actions-mutable-reference", "artifact"),
+    ] {
+        assert!(rules.iter().any(|rule| rule["id"] == id && rule["kind"] == kind), "{id}");
+    }
+    assert!(rules.iter().all(|rule| rule["subcategory"].is_null()
+        && rule["subcategories"].as_array().unwrap().iter().any(|label| {
+            label.as_str().is_some_and(|label| label.starts_with("reliability.") || label.starts_with("build."))
+        })));
+}
+
+#[test]
+fn workflow_pinning_policy_is_opt_in_and_points_to_the_changed_steps() {
+    let workflow = ".github/workflows/checks.yml";
+    let baseline = "jobs:\n  test:\n    steps: []\n";
+    let changed = "jobs:\n  test:\n    steps:\n      - uses: vendor/action@v2\n      - uses: other/task@0123456789abcdef0123456789abcdef01234567\n      - uses: './.github/actions/local'\n      - run: echo vendor/action@v2\n  reusable:\n    uses: vendor/project/.github/workflows/run.yml@main\n";
+    let repo = init_repo(&[(workflow, baseline)]);
+    repo.commit(&[(workflow, changed)], "add external actions");
+    for enabled in [false, true] {
+        if enabled {
+            let dir = repo.path().join(".autoreview");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("config.yaml"),
+                "artifactChecks:\n  immutableGithubActionRefs: true\n").unwrap();
+        }
+        let output = Command::cargo_bin("autoreview").unwrap()
+            .current_dir(repo.path())
+            .args(["diff", "--base", "HEAD~1", "--static-only", "--changed-lines",
+                "--subcategories", "build.dependency-integrity"])
+            .assert().success().get_output().stdout.clone();
+        let path = report_path_from_stdout(&String::from_utf8(output).unwrap());
+        let report: autoreview_schema::ReviewReport = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let lines: Vec<_> = report.findings.iter()
+            .filter(|finding| finding.source.rule_id.as_deref() == Some("github-actions-mutable-reference"))
+            .map(|finding| finding.location.range.start_line).collect();
+        if enabled {
+            assert_eq!(lines, [4, 9]);
+        } else {
+            assert!(lines.is_empty());
+        }
+    }
+}
+
+#[test]
 fn rules_packs_refresh_reports_a_freshly_cloned_git_pack() {
     let remote = tempfile::tempdir().unwrap();
     run_git(remote.path(), &["init", "-q"]);

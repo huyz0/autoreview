@@ -13,6 +13,7 @@ pub(super) struct ReviewInput<'a> {
     pub aspects: Option<&'a [String]>,
     pub audit_rust_deps: bool,
     pub tier4_go: bool,
+    pub immutable_github_action_refs: bool,
 }
 
 impl ReviewInput<'_> {
@@ -43,6 +44,9 @@ pub(super) fn collect(
             changed_files,
             &mut warnings,
         ));
+    }
+    if input.immutable_github_action_refs && input.wants("security") {
+        findings.extend(autoreview_core::run_workflow_policy(input.source_root, changed_files));
     }
     findings.extend(structural(
         input.source_root,

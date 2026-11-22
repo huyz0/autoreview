@@ -195,6 +195,36 @@ func discard(parent context.Context) context.Context {
 }
 
 #[test]
+fn otel_reports_a_fresh_context_only_when_a_parent_is_available() {
+    let repo = tempfile::tempdir().unwrap();
+    let path = "trace.go";
+    std::fs::write(repo.path().join(path), r#"
+package sample
+import (
+    ctxpkg "context"
+    "go.opentelemetry.io/otel/trace"
+)
+func incoming(parent ctxpkg.Context, tracer trace.Tracer) {
+    _, span := tracer.Start(ctxpkg.Background(), "child")
+    defer span.End()
+}
+func preserved(parent ctxpkg.Context, tracer trace.Tracer) {
+    _, span := tracer.Start(parent, "child")
+    defer span.End()
+}
+func root(tracer trace.Tracer) {
+    _, span := tracer.Start(ctxpkg.Background(), "root")
+    defer span.End()
+}
+"#).unwrap();
+    let findings = autoreview_core::run_framework_checks(repo.path(), &[path.into()]);
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].source.rule_id.as_deref(), Some("go-otel-span-discards-parent-context"));
+    assert_eq!(findings[0].location.snippet, "ctxpkg.Background()");
+    assert_eq!(findings[0].related_locations.as_ref().unwrap()[0].snippet, "parent");
+}
+
+#[test]
 fn open_telemetry_scopes_must_have_an_owner() {
     let source = r#"import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Context;

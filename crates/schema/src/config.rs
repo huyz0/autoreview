@@ -504,7 +504,16 @@ impl Default for MineFromCommentsConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ArtifactChecksConfig {
+    #[serde(default)]
+    pub immutable_github_action_refs: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AutoreviewConfig {
+    #[serde(default)]
+    pub artifact_checks: ArtifactChecksConfig,
     #[serde(default)]
     pub triage: TriageConfig,
     #[serde(default)]

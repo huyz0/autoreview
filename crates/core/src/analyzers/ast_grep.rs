@@ -1,6 +1,6 @@
 mod catalog;
 
-pub use catalog::{find_rule_definition, semantic_rule_ids, RuleDefinition, RuleMeta, RuleMetadataBlock};
+pub use catalog::{find_rule_definition, list_builtin_rules, semantic_rule_ids, RuleCatalogEntry, RuleDefinition, RuleMeta, RuleMetadataBlock};
 pub(crate) use catalog::{metadata_to_meta_map, walk_rule_contents};
 use catalog::{default_category, default_kind, parse_rule_meta, rule_categories, rule_metadata, walk_disk_dir};
 

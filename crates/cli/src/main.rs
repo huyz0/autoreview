@@ -189,6 +189,13 @@ enum HistoryAction {
 
 #[derive(Subcommand)]
 enum RulesAction {
+    /// List built-in rules and their category and subcategory labels
+    List {
+        #[arg(long, value_delimiter = ',')]
+        subcategories: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Mine recurring agent findings into rule candidates. With
     /// --from-comments, mines recurring human PR review comments via `gh`
     /// instead (opt-in — see mineFromComments in .autoreview/config.yaml).
@@ -414,6 +421,7 @@ fn run_mining(repo: &std::path::Path, sources: &[(bool, MineSource)]) -> anyhow:
 
 fn run_rules(repo: &std::path::Path, action: RulesAction) -> anyhow::Result<()> {
     match action {
+        RulesAction::List { subcategories, json } => commands::rules::list_builtin(&subcategories, json)?,
         RulesAction::Mine { from_comments, from_code, from_bugfix_commits, from_suppressions, from_bitbucket_comments, from_linter_config, from_llm_patterns } =>
             run_mining(repo, &[(from_comments, run_rules_mine_comments), (from_code, run_rules_mine_code),
                 (from_bugfix_commits, run_rules_mine_bugfix_commits), (from_suppressions, run_rules_mine_suppressions),

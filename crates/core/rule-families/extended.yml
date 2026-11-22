@@ -223,3 +223,40 @@ otel-http-duration-unit:
           - has: {field: key, regex: '^unit$'}
           - has: {field: value, regex: '^["'']ms["'']$'}
   languages: {JavaScript: {}, TypeScript: {}}
+
+node-writable-ignored-backpressure:
+  category: performance
+  severity: warning
+  semantic: true
+  message: This loop keeps writing without checking the stream's backpressure signal. Pause when write returns false and resume after drain, or use a pipeline.
+  metadata:
+    references: ["https://nodejs.org/api/stream.html#writablewritechunk-encoding-callback"]
+    subcategory: [reliability.backpressure]
+  rule:
+    pattern: $STREAM.write($$$ARGS)
+    all:
+      - inside:
+          kind: expression_statement
+          not:
+            precedes:
+              pattern: await once($STREAM, 'drain')
+      - inside:
+          kind: for_in_statement
+          stopBy:
+            any:
+              - kind: arrow_function
+              - kind: function_expression
+              - kind: function_declaration
+          follows:
+            pattern: const $STREAM = createWriteStream($$$OPTIONS)
+      - inside:
+          kind: program
+          stopBy: end
+          has:
+            kind: import_statement
+            all:
+              - has: {field: source, regex: '^["''](?:node:)?fs["'']$'}
+              - has: {kind: import_specifier, regex: '^createWriteStream$', stopBy: end}
+  constraints:
+    STREAM: {kind: identifier}
+  languages: {JavaScript: {}, TypeScript: {}}

@@ -16,6 +16,15 @@ use super::history::{find_finding_in_run_reports, history_dir_for};
 fn print_finding_summary(finding: &Finding) {
     println!("[{:?}] {} ({})", finding.severity, finding.title, finding.id);
     println!("  category:    {}", finding.category);
+    if let Some(labels) = finding.meta.as_ref()
+        .and_then(|fields| fields.get("subcategory"))
+        .and_then(serde_json::Value::as_array)
+    {
+        let labels: Vec<_> = labels.iter().filter_map(serde_json::Value::as_str).collect();
+        if !labels.is_empty() {
+            println!("  subcategories: {}", labels.join(", "));
+        }
+    }
     println!("  confidence:  {:.2}", finding.confidence);
     println!("  location:    {}:{}", finding.location.path, finding.location.range.start_line);
     println!("  message:     {}", finding.message);

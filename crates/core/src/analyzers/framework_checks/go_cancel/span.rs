@@ -17,9 +17,19 @@ pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     reference: "https://opentelemetry.io/docs/languages/go/instrumentation/#creating-spans",
 };
 
+pub(in crate::analyzers::framework_checks) const TRACE_PARENT_RULE: Rule = Rule {
+    id: "go-otel-span-discards-parent-context",
+    category: "correctness",
+    subcategory: "observability.trace-propagation",
+    title: "OpenTelemetry span starts from a fresh context",
+    message: "This span starts from a fresh context even though the function has a context parameter. Use the existing or derived context when this span belongs to the same trace.",
+    reference: "https://opentelemetry.io/docs/languages/go/instrumentation/#creating-spans",
+};
+
 pub(super) fn findings(file: &File) -> Vec<AgentFinding> {
     let trace = aliases(file, "go.opentelemetry.io/otel/trace");
     let otel = aliases(file, "go.opentelemetry.io/otel");
+    let contexts = aliases(file, "context");
     if trace.is_empty() && otel.is_empty() {
         return Vec::new();
     }
@@ -34,6 +44,7 @@ pub(super) fn findings(file: &File) -> Vec<AgentFinding> {
             function,
             trace: &trace,
             otel: &otel,
+            contexts: &contexts,
             locals: &locals,
         };
         results.extend(scope.findings(body));
@@ -46,6 +57,7 @@ struct Scope<'a, 'tree> {
     function: Node<'tree>,
     trace: &'a HashSet<&'a str>,
     otel: &'a HashSet<&'a str>,
+    contexts: &'a HashSet<&'a str>,
     locals: &'a HashSet<&'a str>,
 }
 
@@ -54,10 +66,16 @@ impl Scope<'_, '_> {
         let helpers = Helpers::new();
         let mut findings = Vec::new();
         for assignment in descendants(body).filter(|node| node.kind() == "short_var_declaration") {
-            let Some(binding) = self.binding(assignment) else {
+            let Some((binding, call)) = self.binding(assignment) else {
                 continue;
             };
             let source = &self.file.source;
+            if let Some((fresh, parent)) = self.discarded_parent(call, body) {
+                findings.push(TRACE_PARENT_RULE.finding(
+                    location(&self.file.path, fresh, source),
+                    vec![location(&self.file.path, parent, source)],
+                ));
+            }
             if text(binding, source) == "_" {
                 findings.push(RULE.finding(location(&self.file.path, binding, source), Vec::new()));
                 continue;
@@ -83,10 +101,33 @@ impl Scope<'_, '_> {
         findings
     }
 
-    fn binding<'tree>(&self, assignment: Node<'tree>) -> Option<Node<'tree>> {
+    fn binding<'tree>(&self, assignment: Node<'tree>) -> Option<(Node<'tree>, Node<'tree>)> {
         let (binding, call) = two_result_call(assignment)?;
         let (object, method) = selector(call)?;
-        (self.text(method) == "Start" && self.tracer(object, assignment)).then_some(binding)
+        (self.text(method) == "Start" && self.tracer(object, assignment)).then_some((binding, call))
+    }
+
+    fn discarded_parent<'tree>(&self, call: Node<'tree>, body: Node<'tree>) -> Option<(Node<'tree>, Node<'_>)> {
+        let fresh = call.child_by_field_name("arguments")?.named_child(0)?;
+        let (package, method) = selector(fresh)?;
+        if !self.contexts.contains(self.text(package)) || self.locals.contains(self.text(package))
+            || !matches!(self.text(method), "Background" | "TODO")
+            || std::iter::successors(call.parent(), |node| node.parent())
+                .take_while(|node| *node != body).any(|node| node.kind() == "func_literal")
+        {
+            return None;
+        }
+        let body_locals = local_names(body, &self.file.source);
+        let mut parameters = self.function.child_by_field_name("parameters").into_iter()
+            .flat_map(children)
+            .filter(|param| {
+                self.field(*param, "type").and_then(|ty| ty.rsplit_once('.'))
+                    .is_some_and(|(pkg, ty)| ty == "Context" && self.contexts.contains(pkg))
+            })
+            .flat_map(children)
+            .filter(|name| name.kind() == "identifier" && !body_locals.contains(self.text(*name)));
+        let parent = parameters.next()?;
+        parameters.next().is_none().then_some((fresh, parent))
     }
 
     fn tracer(&self, object: Node<'_>, at: Node<'_>) -> bool {

@@ -65,9 +65,7 @@ impl ReviewRun<'_> {
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|labels| {
                     labels.iter().filter_map(serde_json::Value::as_str).any(|label| {
-                        selected.iter().map(|value| value.trim()).any(|value| {
-                            label == value || label.strip_prefix(value).is_some_and(|suffix| suffix.starts_with('.'))
-                        })
+                        selected.iter().any(|value| super::rules::subcategory_matches(label, value))
                     })
                 })
         })
@@ -165,6 +163,7 @@ fn run_static_analyzers(run: &ReviewRun<'_>) -> (Vec<Finding>, StaticFindings) {
             aspects: run.options.aspects.as_deref(),
             audit_rust_deps: run.options.audit_rust_deps,
             tier4_go: run.config.symindex.tier4_go,
+            immutable_github_action_refs: run.config.artifact_checks.immutable_github_action_refs,
         },
         run.changed_files,
         run.packs,

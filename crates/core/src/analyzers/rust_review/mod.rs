@@ -30,6 +30,17 @@ pub struct RustReviewRule {
     pub cwe: Option<&'static str>,
 }
 
+impl RustReviewRule {
+    pub(super) fn subcategories(&self) -> &'static [&'static str] {
+        match self.id {
+            "rust-vec-set-len-before-initialization" => &["memory.initialization"],
+            "rust-timeout-consumes-join-handle" => &["reliability.cancellation", "concurrency.task-lifecycle"],
+            "rust-sqlx-pool-write-during-transaction" => &["persistence.transaction-boundaries"],
+            _ => &[],
+        }
+    }
+}
+
 pub fn rust_review_rule(id: &str) -> Option<&'static RustReviewRule> {
     rules().find(|rule| rule.id == id)
 }
@@ -38,7 +49,7 @@ pub fn rust_review_semantic_ids() -> impl Iterator<Item = &'static str> {
     rules().filter(|rule| rule.semantic).map(|rule| rule.id)
 }
 
-fn rules() -> impl Iterator<Item = &'static RustReviewRule> {
+pub(super) fn rules() -> impl Iterator<Item = &'static RustReviewRule> {
     basics::RULES
         .iter()
         .chain(collections::RULES)
@@ -94,6 +105,9 @@ impl Review<'_, '_> {
             HashMap::from([("references".to_owned(), serde_json::json!([rule.reference]))]);
         if let Some(cwe) = rule.cwe {
             meta.insert("cwe".to_owned(), serde_json::json!([cwe]));
+        }
+        if !rule.subcategories().is_empty() {
+            meta.insert("subcategory".to_owned(), serde_json::json!(rule.subcategories()));
         }
         self.findings.push(AgentFinding {
             source: FindingSource {

@@ -1,6 +1,8 @@
 mod go_cancel;
 mod java;
+mod prisma;
 mod react;
+mod web;
 
 use std::path::Path;
 
@@ -9,12 +11,13 @@ use autoreview_schema::{
 };
 use tree_sitter::{Node, Parser, Tree};
 
-use super::ast_grep::RuleDefinition;
+use super::ast_grep::{RuleCatalogEntry, RuleDefinition};
 
 fn rules() -> &'static [&'static Rule] {
     &[
         &go_cancel::RULE,
         &go_cancel::SPAN_RULE,
+        &go_cancel::TRACE_PARENT_RULE,
         &go_cancel::HTTP_RULE,
         &java::SPRING_RULE,
         &java::HIBERNATE_RULE,
@@ -22,6 +25,7 @@ fn rules() -> &'static [&'static Rule] {
         &java::CONSTRUCTOR_RULE,
         &java::PAGINATION_RULE,
         &react::INTERVAL_RULE,
+        &prisma::RULE,
     ]
 }
 
@@ -29,8 +33,17 @@ pub(super) fn semantic_ids() -> impl Iterator<Item = String> {
     rules().iter().map(|rule| rule.id.to_owned())
 }
 
+pub(super) fn catalog_entries() -> impl Iterator<Item = RuleCatalogEntry> {
+    rules().iter().map(|rule| RuleCatalogEntry {
+        id: rule.id.into(),
+        kind: "framework".into(),
+        category: rule.category.into(),
+        subcategories: vec![rule.subcategory.into()],
+    })
+}
+
 pub(super) fn definition(id: &str) -> Option<RuleDefinition> {
-    let rule = rules().into_iter().find(|rule| rule.id == id)?;
+    let rule = rules().iter().find(|rule| rule.id == id)?;
     let metadata = serde_json::json!({
         "id": rule.id, "kind": "framework", "category": rule.category, "semantic": true,
         "message": rule.message, "references": [rule.reference],
@@ -50,6 +63,7 @@ pub fn run_framework_checks(root: &Path, changed: &[String]) -> Vec<AgentFinding
     let mut findings = go_cancel::run(root, changed);
     findings.extend(java::run(root, changed));
     findings.extend(react::run(root, changed));
+    findings.extend(prisma::run(root, changed));
     findings
 }
 

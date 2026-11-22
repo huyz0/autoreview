@@ -1,7 +1,7 @@
 use autoreview_schema::Severity;
 use tree_sitter::Node;
 
-use super::syntax::{arguments, children, method_call, Source};
+use super::syntax::{arguments, children, descendants, method_call, Source};
 use super::{Review, RustReviewRule};
 
 const STRONG_CYCLE: RustReviewRule = RustReviewRule {
@@ -26,7 +26,18 @@ const FORGOTTEN_DRAIN: RustReviewRule = RustReviewRule {
     cwe: None,
 };
 
-pub(super) const RULES: &[&RustReviewRule] = &[&STRONG_CYCLE, &FORGOTTEN_DRAIN];
+pub(super) const UNINITIALIZED_LEN: RustReviewRule = RustReviewRule {
+    id: "rust-vec-set-len-before-initialization",
+    category: "correctness",
+    severity: Severity::High,
+    semantic: false,
+    title: "Vec length exposes uninitialized elements",
+    message: "This vector has capacity but its elements have not been initialized. Initialize each new element before extending its logical length, or use a safe constructor or resize operation.",
+    reference: "https://doc.rust-lang.org/std/vec/struct.Vec.html#method.set_len",
+    cwe: None,
+};
+
+pub(super) const RULES: &[&RustReviewRule] = &[&STRONG_CYCLE, &FORGOTTEN_DRAIN, &UNINITIALIZED_LEN];
 
 pub(super) fn check<'tree>(review: &mut Review<'tree, '_>, node: Node<'tree>) {
     if node.kind() != "call_expression" {
@@ -38,6 +49,42 @@ pub(super) fn check<'tree>(review: &mut Review<'tree, '_>, node: Node<'tree>) {
     if let Some(binding) = forgotten_drain(&review.source, node) {
         review.report_related(&FORGOTTEN_DRAIN, node, &[binding]);
     }
+    if let Some(binding) = uninitialized_length(&review.source, node) {
+        review.report_related(&UNINITIALIZED_LEN, node, &[binding]);
+    }
+}
+
+fn uninitialized_length<'t>(source: &Source<'t, '_>, call: Node<'t>) -> Option<Node<'t>> {
+    let receiver = method_receiver(source, call, "set_len")?;
+    let length = arguments(call).next().filter(|arg| arg.kind() == "integer_literal")?;
+    let length = source.text(length).strip_suffix("usize").unwrap_or(source.text(length));
+    if length.replace('_', "").parse::<usize>().ok()? == 0 {
+        return None;
+    }
+    let binding = source.local_binding(receiver)?;
+    let initializer = binding.child_by_field_name("value").filter(|value| value.kind() == "call_expression")?;
+    let constructor = initializer.child_by_field_name("function")?;
+    let owner = constructor.child_by_field_name("path")?;
+    let owner = if owner.kind() == "generic_type" { owner.child_by_field_name("type")? } else { owner };
+    if source.text(constructor.child_by_field_name("name")?) != "with_capacity"
+        || !standard_vec(source, owner)
+    {
+        return None;
+    }
+    let scope = binding.parent().filter(|parent| parent.kind() == "block")?;
+    if std::iter::successors(call.parent(), |node| node.parent())
+        .take_while(|node| *node != scope)
+        .any(|node| matches!(node.kind(), "closure_expression" | "async_block" | "loop_expression" | "while_expression" | "for_expression"))
+    {
+        return None;
+    }
+    let intervening_reference = descendants(scope).any(|node| {
+        node.start_byte() >= binding.end_byte()
+            && node.end_byte() <= receiver.start_byte()
+            && node.kind() == "identifier"
+            && source.text(node) == source.text(receiver)
+    });
+    (!intervening_reference).then_some(binding)
 }
 
 fn strong_cycle<'tree>(source: &Source<'tree, '_>, call: Node<'tree>) -> Option<Node<'tree>> {
@@ -148,6 +195,39 @@ fn method_receiver<'tree>(
 #[cfg(test)]
 mod tests {
     use super::super::analyze_file;
+
+    #[test]
+    fn vec_set_len_checks_fresh_capacity_without_intervening_initialization() {
+        let source = r#"
+use std::vec::Vec as Buffer;
+
+fn bad() {
+    let mut values = Buffer::<u8>::with_capacity(2);
+    unsafe { values.set_len(2_usize); }
+}
+
+fn initialized() {
+    let mut values = Vec::<u8>::with_capacity(1);
+    values.spare_capacity_mut()[0].write(42);
+    unsafe { values.set_len(1); }
+}
+
+fn handed_to_ffi() {
+    let mut values = Vec::<u8>::with_capacity(1);
+    unsafe { fill(values.as_mut_ptr()); values.set_len(1); }
+}
+
+fn empty() {
+    let mut values = Vec::<u8>::with_capacity(1);
+    unsafe { values.set_len(0); }
+}
+"#;
+        let findings = analyze_file("vec.rs", source);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some(super::UNINITIALIZED_LEN.id));
+        assert_eq!(findings[0].meta.as_ref().unwrap()["subcategory"][0], "memory.initialization");
+        assert!(findings[0].related_locations.as_ref().unwrap()[0].snippet.contains("with_capacity"));
+    }
 
     #[test]
     fn detects_self_cycles_through_collection_elements() {

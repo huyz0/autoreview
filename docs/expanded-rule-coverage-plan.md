@@ -99,7 +99,7 @@ every row is implemented and its acceptance cases are verified.
 
 ## First implementation
 
-The catalog now has ten new rule families. The first protocol checks
+The first protocol checks
 cover adjacent Fetch statements and direct promise callbacks. The
 Node write check starts with equal string-literal paths, and the OTel
 check starts with an explicitly wrong unit on a known metric. These
@@ -107,5 +107,27 @@ limits keep the matches reproducible while the framework analyzers
 grow alias, control-flow, and helper resolution.
 
 The first reliability labels cover known timeout, cancellation, and
-retry rules. Rule listing and the remaining analyzer metadata still
-need the shared taxonomy work in step 1.
+retry rules. `autoreview rules list --subcategories reliability --json`
+lists built-in rules in that group. `autoreview explain <finding-id>`
+shows the labels saved in the finding. The first catalog includes
+pattern, flow, threshold, framework, Rust-specific, and artifact rules.
+
+React interval cleanup now traces aliases through direct setup and
+cleanup branches. The Prisma check resolves the outer client through
+module-level aliases and distinguishes unrelated clients. The GitHub
+Actions pack checks external references in changed workflow files when
+the repository opts in:
+
+```yaml
+artifactChecks:
+  immutableGithubActionRefs: true
+```
+
+It reports unpinned action steps and reusable workflows with a
+single-line `uses` value. Local actions and full commit SHAs pass.
+
+Additional local checks report an ignored Node writable-stream
+backpressure signal in a recognized producer loop, use of a fresh
+context when a Go tracer has a parent parameter, and a Rust vector
+length increase when a fresh capacity allocation has no preceding
+references that could initialize it.
