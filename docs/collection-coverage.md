@@ -69,9 +69,9 @@ can show what still owns an old allocation.
   maps have a similar requirement for the original collection and key.
   A scoped call-sequence rule can use `identity` to track the collection and
   key separately at branch joins and exits. It follows direct aliases
-  and reassignments and checks cleanup through catch handlers, finalizers,
-  and conditional Go defers. Use it where the function owns cleanup for the
-  registered entry. Caches, transferred ownership,
+  and reassignments through eligible same-file helpers and loops. It checks
+  cleanup through catch handlers, finalizers, and conditional Go defers.
+  Use it where the caller owns cleanup for the registered entry. Caches, transferred ownership,
   expiration, and append-only storage have different lifetime contracts.
   [Keyed call-sequence DSL](../.claude/skills/authoring-rules/reference/rule-dsl.md#track-a-collection-entry) · [DOM listener removal](https://dom.spec.whatwg.org/#dom-eventtarget-removeeventlistener)
 

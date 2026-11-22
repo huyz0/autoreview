@@ -33,7 +33,15 @@ pub(crate) fn capture(call: Node<'_>, source: &[u8]) -> Option<Box<CallSite>> {
         start: call.start_byte(),
         receiver,
         arguments,
+        local: local_call(call),
     }))
+}
+
+fn local_call(call: Node<'_>) -> bool {
+    if call.kind() == "method_invocation" {
+        return call.child_by_field_name("object").is_none_or(|object| object.kind() == "this");
+    }
+    call.child_by_field_name("function").or_else(|| call.named_child(0)).is_some_and(identifier)
 }
 
 fn optional(call: Node<'_>) -> bool {

@@ -2,13 +2,17 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use tree_sitter::Node;
 
-use crate::cfg::{CallTarget, Cfg, EdgeKind, IdentityOperand, NodeId, Stmt};
+use crate::cfg::{CallSite, CallTarget, Cfg, EdgeKind, IdentityOperand, NodeId, Stmt};
 
 use super::identity::{Entry, Values};
 use super::plan::Plan;
 use super::{CallOrderHit, CallOrderSpec, EntryHit};
 
+mod helpers;
+mod program;
 mod state;
+pub use program::KeyedFunction;
+use program::Program;
 use state::{Deferred, State};
 
 const PATH_BUDGET: usize = 16_384;
@@ -21,21 +25,57 @@ pub fn check_keyed(
     function: Node<'_>,
     source: &[u8],
 ) -> Vec<CallOrderHit> {
-    let Some(plan) = Plan::new(spec, cfg, function, source) else {
-        return Vec::new();
-    };
-    let mut engine = Engine {
-        plan,
-        remaining: PATH_BUDGET,
-        hits: Vec::new(),
-    };
-    engine.check(cfg).unwrap_or_default()
+    check_keyed_file(
+        spec,
+        &[KeyedFunction {
+            node: function,
+            graph: cfg,
+        }],
+        source,
+    )
 }
 
-struct Engine<'a, 'src> {
-    plan: Plan<'a, 'src>,
+/// Analyze helper bodies in the context of each same-file caller.
+pub fn check_keyed_file(
+    spec: &CallOrderSpec,
+    functions: &[KeyedFunction<'_, '_>],
+    source: &[u8],
+) -> Vec<CallOrderHit> {
+    let program = Program::new(spec, functions, source);
+    if !program
+        .frames
+        .iter()
+        .filter_map(|frame| frame.plan.as_ref())
+        .any(|plan| plan.syntax.has_registration(&spec.after))
+    {
+        return Vec::new();
+    }
+    program
+        .roots()
+        .into_iter()
+        .filter_map(|root| {
+            let mut engine = Engine {
+                program: &program,
+                active: vec![root],
+                remaining: PATH_BUDGET,
+                hits: Vec::new(),
+            };
+            engine.check(root)
+        })
+        .flatten()
+        .collect()
+}
+
+struct Engine<'program, 'spec, 'src, 'graph> {
+    program: &'program Program<'spec, 'src, 'graph>,
+    active: Vec<usize>,
     remaining: usize,
     hits: Vec<CallOrderHit>,
+}
+
+struct StatementLocation {
+    node: NodeId,
+    line: u32,
 }
 
 struct Exit<'graph> {
@@ -45,11 +85,13 @@ struct Exit<'graph> {
     line: u32,
 }
 
-impl Engine<'_, '_> {
-    fn check(&mut self, cfg: &Cfg<Stmt>) -> Option<Vec<CallOrderHit>> {
-        for exit in self.paths(cfg, State::default())? {
-            for state in self.unwind(exit.state)? {
-                if self.plan.spec.check_before_return {
+impl<'graph> Engine<'_, '_, '_, 'graph> {
+    fn check(&mut self, frame: usize) -> Option<Vec<CallOrderHit>> {
+        let root = &self.program.frames[frame];
+        let check_exits = root.plan.as_ref()?.spec.check_before_return;
+        for exit in self.paths(frame, root.graph, State::default())? {
+            for state in self.unwind(frame, exit.state)? {
+                if check_exits {
                     self.hits
                         .extend(state.pending.iter().map(|(entry, &registration)| {
                             hit(exit.trigger, exit.node, exit.line, entry, registration)
@@ -72,120 +114,144 @@ impl Engine<'_, '_> {
         Some(std::mem::take(&mut self.hits))
     }
 
-    fn paths<'graph>(
+    fn paths(
         &mut self,
+        frame: usize,
         cfg: &'graph Cfg<Stmt>,
         state: State<'graph>,
     ) -> Option<Vec<Exit<'graph>>> {
+        let plan = self.program.frames[frame].plan.as_ref()?;
         let outgoing = outgoing_edges(cfg);
         let mut work = VecDeque::from([(cfg.entry, state)]);
         let mut seen = BTreeSet::new();
         let mut exits = Vec::new();
-        while let Some((id, mut state)) = work.pop_front() {
+        while let Some((id, state)) = work.pop_front() {
             if !seen.insert((id, state.clone())) {
                 continue;
             }
             self.remaining = self.remaining.checked_sub(1)?;
-            if let Some((trigger, line)) = self.visit(cfg, id, &mut state)? {
-                exits.push(Exit {
+            let states = self.visit(frame, cfg, id, state)?;
+            if let Some((trigger, line)) = exit_at(cfg, id) {
+                exits.extend(states.into_iter().map(|state| Exit {
                     state,
                     trigger,
                     node: id,
                     line,
-                });
+                }));
                 continue;
             }
-            for &(to, edge) in &outgoing[id] {
-                if let Some(successor) = state.branch(&self.plan, &cfg.nodes[id], edge) {
-                    work.push_back((to, successor));
+            for state in states {
+                match self.fork_helper(frame, &cfg.nodes[id], &state)? {
+                    Some(outcomes) => {
+                        for (threw, state) in outcomes {
+                            work.extend(
+                                outgoing[id]
+                                    .iter()
+                                    .filter(|(_, edge)| (*edge == EdgeKind::Exceptional) == threw)
+                                    .map(|(to, _)| (*to, state.clone())),
+                            );
+                        }
+                    }
+                    None => work.extend(outgoing[id].iter().filter_map(|(to, edge)| {
+                        state
+                            .branch(plan, &cfg.nodes[id], *edge)
+                            .map(|successor| (*to, successor))
+                    })),
                 }
             }
         }
         Some(exits)
     }
 
-    fn visit<'graph>(
+    fn visit(
         &mut self,
+        frame: usize,
         cfg: &'graph Cfg<Stmt>,
         id: NodeId,
-        state: &mut State<'graph>,
-    ) -> Option<Option<(&'static str, u32)>> {
+        state: State<'graph>,
+    ) -> Option<Vec<State<'graph>>> {
         let node = &cfg.nodes[id];
+        let mut states = vec![state];
         for (index, stmt) in node.stmts.iter().enumerate() {
-            let line = node.statement_line(index);
-            if let Some(trigger) = exit_kind(stmt) {
-                return Some(Some((trigger, line)));
+            let mut next = Vec::new();
+            for state in states {
+                next.extend(self.apply(frame, stmt, state, id, node.statement_line(index))?);
             }
-            self.apply(stmt, state, id, line)?;
+            states = next;
         }
-        Some((id == cfg.exit).then_some(("fallthrough", node.source_line)))
+        Some(states)
     }
 
-    fn apply<'graph>(
+    fn apply(
         &mut self,
+        frame: usize,
         stmt: &'graph Stmt,
-        state: &mut State<'graph>,
+        mut state: State<'graph>,
         id: NodeId,
         line: u32,
-    ) -> Option<()> {
+    ) -> Option<Vec<State<'graph>>> {
+        let plan = self.program.frames[frame].plan.as_ref()?;
         match stmt {
-            Stmt::Rebind(write) => state.rebind(&self.plan, write),
-            Stmt::DeferredBlock(body) => state.deferred.push(Deferred::Block(body)),
+            Stmt::Rebind(write) => state.rebind(plan, write),
+            Stmt::DeferredBlock(body) => state.schedule(Deferred::Block(body))?,
             Stmt::DeferredCall { target, site } => {
-                let call = self.plan.call(target, site.as_deref(), &state.values)?;
-                if call.registered || call.trigger {
-                    return None;
-                }
-                if let Some(entry) = call.entry.filter(|_| call.removed) {
-                    state.deferred.push(Deferred::Remove(entry));
-                }
+                self.schedule_helper(frame, target, site.as_deref(), &mut state)?
             }
             Stmt::Call {
                 target: CallTarget::Named(name),
                 site,
                 ..
             } => {
-                let call = self.plan.call(name, site.as_deref(), &state.values)?;
-                if let Some(entry) = call.entry {
-                    if let Some(&registration) = state.pending.get(&entry).filter(|_| call.trigger)
-                    {
-                        self.hits.push(hit(name, id, line, &entry, registration));
-                    }
-                    state.update(entry, call.registered, call.removed, line);
+                if let Some(outcomes) = self.apply_call(
+                    frame,
+                    name,
+                    site.as_deref(),
+                    &mut state,
+                    StatementLocation { node: id, line },
+                )? {
+                    return Some(outcomes);
                 }
             }
             _ => {}
         }
-        Some(())
+        Some(vec![state])
     }
 
-    fn unwind<'graph>(&mut self, mut state: State<'graph>) -> Option<Vec<State<'graph>>> {
+    fn unwind(&mut self, frame: usize, mut state: State<'graph>) -> Option<Vec<State<'graph>>> {
         let deferred = std::mem::take(&mut state.deferred);
         let mut outcomes = vec![state];
         for action in deferred.into_iter().rev() {
             let mut next = BTreeSet::new();
             for state in outcomes {
-                next.extend(self.deferred(action.clone(), state)?);
+                next.extend(self.deferred(frame, action.clone(), state)?);
             }
             outcomes = next.into_iter().collect();
         }
         Some(outcomes)
     }
 
-    fn deferred<'graph>(
+    fn deferred(
         &mut self,
+        frame: usize,
         action: Deferred<'graph>,
         mut state: State<'graph>,
     ) -> Option<Vec<State<'graph>>> {
         match action {
             Deferred::Remove(entry) => {
-                state.pending.remove(&entry);
+                state.remove(&entry);
                 Some(vec![state])
+            }
+            Deferred::Helper(target, args) => {
+                let outcomes = self.invoke(target, args, state)?;
+                outcomes
+                    .into_iter()
+                    .map(|(threw, state)| (!threw).then_some(state))
+                    .collect()
             }
             Deferred::Block(cfg) => {
                 let mut outcomes = Vec::new();
-                for exit in self.paths(cfg, state)? {
-                    outcomes.extend(self.unwind(exit.state)?);
+                for exit in self.paths(frame, cfg, state)? {
+                    outcomes.extend(self.unwind(frame, exit.state)?);
                 }
                 Some(outcomes)
             }
@@ -199,6 +265,15 @@ fn outgoing_edges(cfg: &Cfg<Stmt>) -> Vec<Vec<(NodeId, EdgeKind)>> {
         outgoing[from].push((to, kind));
     }
     outgoing
+}
+
+fn exit_at(cfg: &Cfg<Stmt>, id: NodeId) -> Option<(&'static str, u32)> {
+    let node = &cfg.nodes[id];
+    node.stmts
+        .iter()
+        .enumerate()
+        .find_map(|(index, stmt)| exit_kind(stmt).map(|kind| (kind, node.statement_line(index))))
+        .or_else(|| (id == cfg.exit).then_some(("fallthrough", node.source_line)))
 }
 
 fn exit_kind(stmt: &Stmt) -> Option<&'static str> {

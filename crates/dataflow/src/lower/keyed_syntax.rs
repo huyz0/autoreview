@@ -68,6 +68,7 @@ fn write(node: Node<'_>, source: &[u8]) -> Option<BindingWrite> {
             Some(IdentityOperand::Fresh {
                 name: name.clone(),
                 start: value.start_byte(),
+                age: 0,
             })
         } else {
             binding_value(value, source)
@@ -85,25 +86,28 @@ fn write(node: Node<'_>, source: &[u8]) -> Option<BindingWrite> {
 
 pub(super) fn expression(node: Node<'_>) -> Option<Node<'_>> {
     match node.kind() {
-        "expression_statement" | "return_statement" | "return_expression" => {
-            node.named_child(0).and_then(unpack)
-        }
-        "if_statement" | "if_expression" => node.child_by_field_name("condition").and_then(unpack),
+        "expression_statement" | "return_statement" | "return_expression" => node
+            .named_child(0)
+            .and_then(simple)
+            .and_then(expression_value),
+        "if_statement" | "if_expression" => node
+            .child_by_field_name("condition")
+            .and_then(expression_value),
         "assignment" | "assignment_expression" => {
-            node.child_by_field_name("right").and_then(unpack)
+            node.child_by_field_name("right").and_then(expression_value)
         }
         "local_variable_declaration" | "lexical_declaration" | "variable_declaration" => {
             children(node)
                 .find(|child| child.kind() == "variable_declarator")?
                 .child_by_field_name("value")
-                .and_then(unpack)
+                .and_then(expression_value)
         }
-        "property_declaration" => unpack(kotlin_initializer(node)?.1),
-        _ => unpack(node),
+        "property_declaration" => expression_value(kotlin_initializer(node)?.1),
+        _ => expression_value(node),
     }
 }
 
-fn unpack(mut node: Node<'_>) -> Option<Node<'_>> {
+pub(super) fn expression_value(mut node: Node<'_>) -> Option<Node<'_>> {
     while matches!(node.kind(), "parenthesized_expression" | "await_expression") {
         node = node.named_child(0)?;
     }
@@ -114,8 +118,12 @@ fn unpack(mut node: Node<'_>) -> Option<Node<'_>> {
 }
 
 pub(crate) fn condition(node: Node<'_>, source: &[u8]) -> Option<(String, bool)> {
-    let test = unpack(node.child_by_field_name("condition")?)?;
-    if identifier(test) {
+    condition_value(node.child_by_field_name("condition")?, source)
+}
+
+pub(crate) fn condition_value(node: Node<'_>, source: &[u8]) -> Option<(String, bool)> {
+    let test = expression_value(node)?;
+    if identifier(test) || matches!(test.kind(), "true" | "false" | "boolean_literal") {
         return Some((test.utf8_text(source).ok()?.to_owned(), true));
     }
     let text = test.utf8_text(source).ok()?;

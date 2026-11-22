@@ -8,6 +8,7 @@ use super::{BTreeMap, Cfg, EdgeKind, Entry, IdentityOperand, Plan, Stmt, Values}
 pub(super) enum Deferred<'graph> {
     Remove(Entry),
     Block(&'graph Cfg<Stmt>),
+    Helper(usize, Values),
 }
 
 impl Ord for Deferred<'_> {
@@ -17,8 +18,19 @@ impl Ord for Deferred<'_> {
             (Self::Block(left), Self::Block(right)) => {
                 std::ptr::from_ref(*left).cmp(&std::ptr::from_ref(*right))
             }
-            (Self::Remove(_), Self::Block(..)) => Ordering::Less,
-            (Self::Block(..), Self::Remove(_)) => Ordering::Greater,
+            (Self::Helper(left, args), Self::Helper(right, other_args)) => {
+                (left, args).cmp(&(right, other_args))
+            }
+            _ => self.rank().cmp(&other.rank()),
+        }
+    }
+}
+impl Deferred<'_> {
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Remove(_) => 0,
+            Self::Block(_) => 1,
+            Self::Helper(..) => 2,
         }
     }
 }
@@ -40,10 +52,14 @@ pub(super) struct State<'graph> {
     pub(super) pending: BTreeMap<Entry, u32>,
     pub(super) deferred: Vec<Deferred<'graph>>,
     conditions: BTreeMap<IdentityOperand, bool>,
+    pub(super) executed_call: Option<usize>,
 }
 
-impl State<'_> {
+impl<'graph> State<'graph> {
     pub(super) fn rebind(&mut self, plan: &Plan<'_, '_>, write: &BindingWrite) {
+        if let Some(IdentityOperand::Fresh { start, .. }) = &write.value {
+            self.age(*start);
+        }
         let value = write
             .value
             .as_ref()
@@ -51,11 +67,69 @@ impl State<'_> {
         self.values.insert(write.name.clone(), value);
     }
 
+    // Two most recent values stay distinct. Older iterations form a
+    // summary that a single removal cannot discharge.
+    fn age(&mut self, site: usize) {
+        for value in self.values.values_mut().flatten() {
+            advance(value, site);
+        }
+        let mut pending = BTreeMap::new();
+        for (mut entry, line) in std::mem::take(&mut self.pending) {
+            advance_entry(&mut entry, site);
+            pending
+                .entry(entry)
+                .and_modify(|previous: &mut u32| *previous = (*previous).min(line))
+                .or_insert(line);
+        }
+        self.pending = pending;
+        for action in &mut self.deferred {
+            match action {
+                Deferred::Remove(entry) => advance_entry(entry, site),
+                Deferred::Helper(_, values) => {
+                    for value in values.values_mut().flatten() {
+                        advance(value, site);
+                    }
+                }
+                Deferred::Block(_) => {}
+            }
+        }
+        self.conditions.retain(
+            |value, _| !matches!(value, IdentityOperand::Fresh { start, .. } if *start == site),
+        );
+    }
+
+    pub(super) fn schedule(&mut self, action: Deferred<'graph>) -> Option<()> {
+        // Consecutive identical removals are idempotent, even after a
+        // back edge. Keep order around other deferred actions.
+        if let Deferred::Remove(entry) = &action {
+            if self
+                .deferred
+                .iter()
+                .rev()
+                .take_while(|item| matches!(item, Deferred::Remove(_)))
+                .any(|item| matches!(item, Deferred::Remove(previous) if previous == entry))
+            {
+                return Some(());
+            }
+        }
+        if self.deferred.len() >= 64 {
+            return None;
+        }
+        self.deferred.push(action);
+        Some(())
+    }
+
     pub(super) fn update(&mut self, entry: Entry, registered: bool, removed: bool, line: u32) {
         if removed {
-            self.pending.remove(&entry);
+            self.remove(&entry);
         } else if registered {
             self.pending.insert(entry, line);
+        }
+    }
+
+    pub(super) fn remove(&mut self, entry: &Entry) {
+        if !older(&entry.collection) && !older(&entry.key) {
+            self.pending.remove(entry);
         }
     }
 
@@ -67,35 +141,44 @@ impl State<'_> {
     ) -> Option<Self> {
         match edge {
             EdgeKind::Exceptional => {
-                let (name, start) = node.throwing_call.as_ref()?;
-                plan.may_throw(name, *start, &self.values)
+                let call = node.throwing_call.as_ref()?;
+                plan.may_throw(&call.name, call.start, &self.values)
                     .then(|| self.clone())
             }
             EdgeKind::True | EdgeKind::False => {
                 let mut state = self.clone();
-                state.assume(plan, node.condition.as_ref(), edge == EdgeKind::True)?;
+                state.assume(plan, node, edge == EdgeKind::True)?;
                 Some(state)
             }
             _ => Some(self.clone()),
         }
     }
 
-    fn assume(
-        &mut self,
-        plan: &Plan<'_, '_>,
-        guard: Option<&(String, bool)>,
-        arm: bool,
-    ) -> Option<()> {
-        let Some((name, positive)) = guard else {
-            return Some(());
-        };
-        let Some(value) = plan.syntax.resolve(&self.values, name, usize::MAX) else {
+    fn assume(&mut self, plan: &Plan<'_, '_>, node: &CfgNode<Stmt>, arm: bool) -> Option<()> {
+        let Some((name, positive)) = &node.condition else {
             return Some(());
         };
         let truth = arm == *positive;
-        if let IdentityOperand::Boolean(value) = value {
-            return (value == truth).then_some(());
+        let value = match name.as_str() {
+            "true" => Some(IdentityOperand::Boolean(true)),
+            "false" => Some(IdentityOperand::Boolean(false)),
+            _ => plan.syntax.resolve(&self.values, name, usize::MAX),
+        };
+        match value {
+            Some(IdentityOperand::Boolean(value)) => (value == truth).then_some(()),
+            Some(value) if !node.loop_condition => {
+                self.record_condition(value, truth, plan.syntax.repeated_guard(name))
+            }
+            _ => Some(()),
         }
+    }
+
+    fn record_condition(
+        &mut self,
+        value: IdentityOperand,
+        truth: bool,
+        remember: bool,
+    ) -> Option<()> {
         if self
             .conditions
             .get(&value)
@@ -103,9 +186,26 @@ impl State<'_> {
         {
             return None;
         }
-        if plan.syntax.repeated_guard(name) {
+        if remember {
             self.conditions.insert(value, truth);
         }
         Some(())
     }
+}
+
+fn advance_entry(entry: &mut Entry, site: usize) {
+    advance(&mut entry.collection, site);
+    advance(&mut entry.key, site);
+}
+
+fn advance(value: &mut IdentityOperand, site: usize) {
+    if let IdentityOperand::Fresh { start, age, .. } = value {
+        if *start == site {
+            *age = (*age + 1).min(2);
+        }
+    }
+}
+
+fn older(value: &IdentityOperand) -> bool {
+    matches!(value, IdentityOperand::Fresh { age: 2, .. })
 }
