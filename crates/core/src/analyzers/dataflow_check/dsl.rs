@@ -155,7 +155,7 @@ pub(super) fn call_order_finding(
         Some(entry) if rule.spec.contract.is_some() => format!(
             "`{}` leaves the `{}` handle incomplete", hit.trigger_call, entry.collection
         ),
-        None if rule.spec.contract.is_some() => format!("Discarded result of `{}`", hit.trigger_call),
+        None if rule.spec.contract.is_some() => format!("Unused result of `{}`", hit.trigger_call),
         Some(entry) => format!(
             "`{}` reached with key `{}` still pending in `{}` (registered at line {})",
             hit.trigger_call, entry.key, entry.collection, entry.registration_line

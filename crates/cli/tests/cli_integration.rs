@@ -669,7 +669,7 @@ fn api_contract_rules_replay_on_bad_and_fixed_commits() {
 
 fn contract_replay_case(id: &str, path: &str, line: u32, before: &str, after: &str) -> serde_json::Value {
     serde_json::json!({
-        "name": id,
+        "name": format!("{id} ({path})"),
         "rule": { "tool": "autoreview-dataflow", "id": id },
         "before": { "commit": before, "path": path, "lines": [line] },
         "after": { "commit": after, "path": path, "lines": [] }
@@ -678,10 +678,57 @@ fn contract_replay_case(id: &str, path: &str, line: u32, before: &str, after: &s
 
 fn assert_contract_replay(repo: &std::path::Path, cases: &[serde_json::Value]) {
     std::fs::write(repo.join("contracts.yaml"), serde_json::json!({ "cases": cases }).to_string()).unwrap();
-    Command::cargo_bin("autoreview").unwrap()
+    let replay = Command::cargo_bin("autoreview").unwrap()
         .current_dir(repo)
         .args(["rules", "replay", "--suite", "contracts.yaml"])
-        .assert().success();
+        .output().unwrap();
+    assert!(
+        replay.status.success(), "{}\n{}",
+        String::from_utf8_lossy(&replay.stderr), String::from_utf8_lossy(&replay.stdout),
+    );
+}
+
+#[test]
+fn assigned_api_results_replay_in_every_supported_language() {
+    let web = "import { rename } from 'node:fs/promises';\n\
+        async function publish(from, to, ready) {\n\
+            let result = rename(from, to);\n\
+            if (ready) { result = Promise.resolve(); }\n\
+            else { result = Promise.resolve(); }\n\
+            await result;\n";
+    let go = "package publish\nimport \"os\"\n\
+        func Promote(from, to string, ready bool) error {\n\
+            err := os.Rename(from, to)\n\
+            if ready { err = fallback() } else { err = nil }\n\
+            return err\n}\n";
+    let rust = "use std::fs::remove_file;\n\
+        fn purge(path: &str) {\n\
+            let result = remove_file(path);\n\
+            let alias = result;\n\
+        }\n";
+    let kotlin = "import kotlin.runCatching\nfun parse(value: String): Int {\n\
+        val result = runCatching { value.toInt() }\n\
+        return 0\n}\n";
+    let java = include_str!("../../core/tests/fixtures/rules/java-discarded-objects-comparison/positive.java");
+    let tsx = format!("{web}return <main />;\n}}\n");
+    let javascript = format!("{web}}}\n");
+    let typescript = javascript.replace("publish(from, to, ready)", "publish(from: string, to: string, ready: boolean)");
+    let web_fix = |text: &str| text.replace("let result = rename", "let result = await rename");
+    let fixtures = [
+        ("go-os-rename-discarded-error", "publish/move.go", go, go.replace("if ready { err = fallback() } else { err = nil }", "if ready && err == nil { err = fallback() }"), 4),
+        ("java-discarded-objects-comparison", "Label.java", java, include_str!("../../core/tests/fixtures/rules/java-discarded-objects-comparison/negative.java").into(), 5),
+        ("kotlin-discarded-run-catching-result", "Parse.kt", kotlin, kotlin.replace("return 0", "return result.getOrThrow()"), 3),
+        ("rust-discarded-remove-file-result", "lib.rs", rust, rust.replace("let alias = result;", "let alias = result;\n    alias.unwrap();"), 3),
+        ("javascript-node-fs-discarded-promise", "publish.js", &javascript, web_fix(&javascript), 3),
+        ("typescript-node-fs-discarded-promise", "publish.ts", &typescript, web_fix(&typescript), 3),
+        ("typescript-node-fs-discarded-promise", "Publish.tsx", &tsx, web_fix(&tsx), 3),
+    ];
+    let repo = init_repo(&fixtures.each_ref().map(|(_, path, bad, _, _)| (*path, *bad)));
+    let before = current_commit(repo.path());
+    repo.commit(&fixtures.each_ref().map(|(_, path, _, fixed, _)| (*path, fixed.as_str())), "Use the original API results");
+    let after = current_commit(repo.path());
+    let cases = fixtures.map(|(id, path, _, _, line)| contract_replay_case(id, path, line, &before, &after));
+    assert_contract_replay(repo.path(), &cases);
 }
 
 #[test]

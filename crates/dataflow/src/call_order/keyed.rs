@@ -59,6 +59,9 @@ pub fn check_keyed_units(
     spec: &CallOrderSpec,
     units: &[KeyedUnit<'_, '_, '_>],
 ) -> Vec<CallOrderHit> {
+    if spec.tracks_result_use() {
+        return super::result_use::check_units(spec, units);
+    }
     let program = Program::new(spec, units);
     if !program
         .frames

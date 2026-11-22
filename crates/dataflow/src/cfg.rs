@@ -10,6 +10,12 @@ pub type NodeId = usize;
 pub type VarId = String;
 
 #[derive(Debug, Clone)]
+pub(crate) struct Evaluation {
+    pub(crate) span: std::ops::Range<usize>,
+    pub(crate) syntax_kind: u16,
+}
+
+#[derive(Debug, Clone)]
 pub enum RhsShape {
     /// A bare `nil`/`null` literal.
     NilLiteral,
@@ -140,6 +146,7 @@ pub struct CfgNode<S> {
     pub(crate) return_start: Option<usize>,
     pub(crate) throwing_call: Option<ThrowingCall>,
     pub(crate) loop_condition: bool,
+    pub(crate) evaluations: Vec<Evaluation>,
 }
 
 impl<S> CfgNode<S> {
@@ -223,7 +230,7 @@ impl<S> Cfg<S> {
     /// a fluent builder API, since the lowering passes' control flow is
     /// varied enough that a generic builder would just get in the way.
     pub fn push_node(&mut self, source_line: u32) -> NodeId {
-        self.nodes.push(CfgNode { stmts: Vec::new(), source_line, statement_lines: Vec::new(), condition: None, condition_span: None, return_start: None, throwing_call: None, loop_condition: false });
+        self.nodes.push(CfgNode { stmts: Vec::new(), source_line, statement_lines: Vec::new(), condition: None, condition_span: None, return_start: None, throwing_call: None, loop_condition: false, evaluations: Vec::new() });
         self.nodes.len() - 1
     }
 

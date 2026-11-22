@@ -297,8 +297,8 @@ are outside this call-based DSL.
 ### Require a result or finish an owned handle
 
 A `contract` block selects known APIs by package, module, or class. It replaces `after`, `before`, `identity`, and
-`checkBeforeReturn`. This mode uses the same control-flow and helper
-analysis as keyed cleanup.
+`checkBeforeReturn`. Contracts use the same control-flow graph as keyed
+cleanup.
 
 ```yaml
 id: example-zip-writer-lifecycle
@@ -330,11 +330,14 @@ satisfies its contract.
 
 Use `mode: must-use` for APIs such as `os.Rename` whose result carries an
 error. This mode requires `import` and a nonempty `methods` list. It checks
-bare call statements, Go's explicit `_ = call()` form, and Rust's
-`let _ = call()` form. An awaited web promise already uses the result. Returning the
-result or assigning it to a named binding uses it for this rule. Tracking
-a named result until it is checked is a separate analysis. Omit `unless`
-and `borrows` for this mode.
+bare call statements, explicit wildcard assignments, and results assigned
+to locals. The rule reports the original call when no reachable path reads
+its value. A reassignment replaces the value on that path. Copying into
+another local carries the result forward until that copy is read. A check,
+return, await, or pass to another call counts as a read. A web promise
+awaited directly already satisfies the contract. This local analysis treats
+stores to fields and captures by nested functions as possible uses. Omit
+`unless` and `borrows` for this mode.
 
 Go matches explicit package imports. Java matches explicit class imports and
 fully qualified calls in supported top-level types. Kotlin and Rust also

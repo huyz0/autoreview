@@ -36,6 +36,9 @@ impl Flow<'_> {
     pub(super) fn lower_loop(&self, cfg: &mut Cfg<Stmt>, node: Node<'_>, start: NodeId) -> NodeId {
         let parts = Parts::new(node);
         let entry = self.sequence(cfg, start, parts.init);
+        if let Some(value) = iteration_value(node) {
+            super::super::record_evaluation(cfg, entry, value);
+        }
         let head = cfg.push_node(line(node));
         let body = cfg.push_node(line(node));
         let after = cfg.push_node(node.end_position().row as u32 + 1);
@@ -94,6 +97,7 @@ impl Flow<'_> {
             return head;
         };
         let branch = self.exceptional_edge(cfg, test, head);
+        super::super::record_evaluation(cfg, branch, test);
         if let Some(call) = super::direct_call(
             keyed_syntax::expression_value(test).unwrap_or(test),
             self.source,
@@ -240,6 +244,23 @@ fn iterable(node: Node<'_>) -> bool {
                 || (child.kind() == "variable_declaration"
                     && node.child_by_field_name("body").is_none())
         })
+}
+
+fn iteration_value(node: Node<'_>) -> Option<Node<'_>> {
+    match node.kind() {
+        "enhanced_for_statement" => node.child_by_field_name("value"),
+        "for_in_statement" => node.child_by_field_name("right"),
+        "for_statement" => {
+            if let Some(range) = site::children(node).find(|part| part.kind() == "range_clause") {
+                return range.child_by_field_name("right");
+            }
+            // Kotlin stores the iterable immediately after the binding.
+            let mut parts = site::children(node).skip_while(|part| part.kind() != "variable_declaration");
+            parts.next()?;
+            parts.next()
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn iterator_bindings(node: Node<'_>) -> Vec<Node<'_>> {

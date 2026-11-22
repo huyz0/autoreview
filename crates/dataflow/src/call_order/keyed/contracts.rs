@@ -1,6 +1,6 @@
 use crate::call_order::ContractMode;
 
-use super::{CallOrderHit, CallSite, Engine, Entry, IdentityOperand, State, StatementLocation};
+use super::{CallSite, Engine, Entry, IdentityOperand, State, StatementLocation};
 
 impl Engine<'_, '_, '_, '_> {
     pub(super) fn apply_contract_source(
@@ -12,29 +12,16 @@ impl Engine<'_, '_, '_, '_> {
         location: StatementLocation,
     ) -> Option<bool> {
         let plan = self.program.frames[frame].plan.as_ref()?;
-        match plan.source_mode(name) {
-            None => return Some(false),
-            Some(ContractMode::MustUse) if site.discarded => {
-                self.hits.push(CallOrderHit {
-                    trigger_call: name.to_owned(),
-                    node: location.node,
-                    source_line: location.line,
-                    path: self.program.path(self.program.frames[frame].unit),
-                    entry: None,
-                });
-            }
-            Some(ContractMode::MustUse) => {}
-            Some(ContractMode::MustComplete) => {
-                if !plan.needs_completion(site) {
-                    return Some(true);
-                }
-                let handle = state.allocate(plan, name, site.start);
-                state.pending.insert(
-                    Entry::handle(handle.clone()),
-                    self.registration(frame, location.line),
-                );
-                state.result = Some((site.start, Some(handle)));
-            }
+        if plan.source_mode(name) != Some(ContractMode::MustComplete) {
+            return Some(false);
+        }
+        if plan.needs_completion(site) {
+            let handle = state.allocate(plan, name, site.start);
+            state.pending.insert(
+                Entry::handle(handle.clone()),
+                self.registration(frame, location.line),
+            );
+            state.result = Some((site.start, Some(handle)));
         }
         Some(true)
     }

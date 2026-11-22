@@ -23,7 +23,7 @@ pub(crate) mod keyed_syntax;
 use autoreview_langsupport::Language;
 use tree_sitter::Node;
 
-use crate::cfg::{Cfg, EdgeKind, NodeId, Stmt};
+use crate::cfg::{Cfg, EdgeKind, Evaluation, NodeId, Stmt};
 
 /// Lower control flow used exclusively by keyed call-sequence rules.
 pub fn keyed_variant(language: Language, source: &[u8], node: Node<'_>) -> Cfg<Stmt> {
@@ -81,4 +81,10 @@ fn lower_statement(cfg: &mut Cfg<Stmt>, stmt: Node<'_>, source: &[u8], current: 
 
 fn line(node: Node<'_>) -> u32 {
     node.start_position().row as u32 + 1
+}
+
+fn record_evaluation(cfg: &mut Cfg<Stmt>, at: NodeId, node: Node<'_>) {
+    if cfg.keyed_flow.is_some() {
+        cfg.nodes[at].evaluations.push(Evaluation { span: node.byte_range(), syntax_kind: node.kind_id() });
+    }
 }

@@ -83,6 +83,7 @@ impl Lower<'_> {
             }
             "return_expression" => {
                 let at = self.value(stmt.named_child(0), at, names, None);
+                super::record_evaluation(&mut self.cfg, at, stmt);
                 if self.cfg.keyed_flow.is_some() {
                     let value = stmt.named_child(0).and_then(|value| super::keyed_syntax::result_operand(value, self.source, false));
                     self.cfg.emit(at, Stmt::ReturnIdentity(value), line(stmt));
@@ -111,10 +112,15 @@ impl Lower<'_> {
                     .child_by_field_name("left")
                     .and_then(|n| self.variable(n, names));
                 let end = self.value(expr.child_by_field_name("right"), at, names, target);
+                super::record_evaluation(&mut self.cfg, end, expr);
                 self.keyed_write(expr, end);
                 Some(end)
             }
-            _ => Some(self.value(Some(expr), at, names, None)),
+            _ => {
+                let end = self.value(Some(expr), at, names, None);
+                super::record_evaluation(&mut self.cfg, end, expr);
+                Some(end)
+            }
         }
     }
 
@@ -125,6 +131,7 @@ impl Lower<'_> {
             .map(|n| self.text(n).to_owned());
         let target = name.as_ref().map(|name| self.fresh(name));
         let at = self.value(stmt.child_by_field_name("value"), at, names, target.clone());
+        super::record_evaluation(&mut self.cfg, at, stmt);
         self.keyed_write(stmt, at);
         if let Some((name, target)) = name.zip(target) {
             names.insert(name, target);
@@ -149,6 +156,7 @@ impl Lower<'_> {
 
     fn jump(&mut self, stmt: Node<'_>, at: NodeId, names: &Bindings) {
         let at = self.value(stmt.named_child(0), at, names, None);
+        super::record_evaluation(&mut self.cfg, at, stmt);
         if let Some(&(head, after)) = self.loops.last() {
             let target = if stmt.kind() == "break_expression" {
                 after
@@ -160,7 +168,7 @@ impl Lower<'_> {
     }
 
     fn branch(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
-        let condition = self.value(expr.child_by_field_name("condition"), at, names, None);
+        let condition = self.test(expr, at, names);
         if self.cfg.keyed_flow.is_some() {
             self.cfg.nodes[condition].condition = super::keyed_syntax::condition(expr, self.source);
         }
@@ -205,9 +213,9 @@ impl Lower<'_> {
     fn loop_body(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
         let head = self.cfg.push_node(line(expr));
         let after = self.cfg.push_node(expr.end_position().row as u32 + 1);
-        let iterable = self.value(expr.child_by_field_name("value"), at, names, None);
+        let iterable = self.evaluate(expr.child_by_field_name("value"), at, names);
         self.edge(iterable, head, EdgeKind::Fallthrough);
-        let condition = self.value(expr.child_by_field_name("condition"), head, names, None);
+        let condition = self.test(expr, head, names);
         if self.cfg.keyed_flow.is_some() {
             self.cfg.nodes[condition].condition = super::keyed_syntax::condition(expr, self.source);
             self.cfg.nodes[condition].loop_condition = true;
@@ -247,6 +255,18 @@ impl Lower<'_> {
             let name = self.text(expr);
             names.get(name).cloned().unwrap_or_else(|| name.to_owned())
         })
+    }
+
+    fn test(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> NodeId {
+        self.evaluate(expr.child_by_field_name("condition"), at, names)
+    }
+
+    fn evaluate(&mut self, expr: Option<Node<'_>>, at: NodeId, names: &Bindings) -> NodeId {
+        let end = self.value(expr, at, names, None);
+        if let Some(expr) = expr {
+            super::record_evaluation(&mut self.cfg, end, expr);
+        }
+        end
     }
 
     fn fresh(&mut self, name: &str) -> String {

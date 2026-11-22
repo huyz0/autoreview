@@ -33,6 +33,7 @@ impl Flow<'_> {
             }
             "try_statement" | "try_expression" => self.protected(cfg, node, current),
             "throw_statement" | "throw_expression" => {
+                super::record_evaluation(cfg, current, node);
                 let stmt = Stmt::Throw {
                     exception: handlers::throw_type(node, self.source),
                     implicit: false,
@@ -40,6 +41,7 @@ impl Flow<'_> {
                 cfg.terminate(current, stmt, line(node))
             }
             "defer_statement" => {
+                super::record_evaluation(cfg, current, node);
                 if let Some(stmt) = self.deferred(node) {
                     cfg.emit(current, stmt, line(node));
                 }
@@ -59,8 +61,11 @@ impl Flow<'_> {
 
     fn ordinary_statement(&self, cfg: &mut Cfg<Stmt>, node: Node<'_>, current: NodeId) -> NodeId {
         let current = self.exceptional_edge(cfg, node, current);
-        if matches!(node.kind(), "if_statement" | "if_expression") {
+        let conditional = matches!(node.kind(), "if_statement" | "if_expression");
+        if conditional {
             cfg.nodes[current].condition = keyed_syntax::condition(node, self.source);
+        } else {
+            super::record_evaluation(cfg, current, node);
         }
         self.lower_return_value(cfg, node, current);
         let start = cfg.nodes[current].stmts.len();
@@ -71,6 +76,10 @@ impl Flow<'_> {
             }
             None => (self.ordinary)(cfg, node, self.source, current),
         };
+        // Go emits an optional initializer in the test's node.
+        if let Some(test) = conditional.then(|| node.child_by_field_name("condition")).flatten() {
+            super::record_evaluation(cfg, current, test);
+        }
         cfg.nodes[current].record_statement_lines(start, line(node));
         for write in keyed_syntax::writes(node, self.source) {
             cfg.emit(end, Stmt::Rebind(write), line(node));
@@ -241,6 +250,7 @@ pub(crate) fn supports_try(node: Node<'_>) -> bool {
 pub(super) fn expression_body(cfg: &mut Cfg<Stmt>, expr: Node<'_>, source: &[u8], at: NodeId) {
     let at =
         throwing_call(expr, source).map_or(at, |call| cfg.fork_exception(at, call, line(expr)));
+    super::record_evaluation(cfg, at, expr);
     if let Some(call) = direct_call(expr, source) {
         cfg.emit(at, call, line(expr));
     }

@@ -5,10 +5,14 @@ use tree_sitter::Node;
 use crate::cfg::IdentityOperand;
 use crate::lower::site::{children, identifier, operand};
 
+mod local_values;
+use local_values::LocalValues;
+
 #[derive(Default)]
 pub(super) struct Bindings<'src> {
     declarations: HashMap<&'src str, Option<Binding<'src>>>,
     writes: HashSet<&'src str>,
+    local_values: LocalValues<'src>,
 }
 
 struct Binding<'src> {
@@ -32,8 +36,8 @@ impl<'src> Bindings<'src> {
         self.declarations.contains_key(name) && self.resolve(name, start).is_none()
     }
 
-    pub(super) fn visit(&mut self, node: Node<'_>, source: &'src [u8], modeled_write: bool) {
-        self.record_declarations(node, source);
+    pub(super) fn visit(&mut self, node: Node<'_>, source: &'src [u8], modeled_write: bool, track_results: bool) {
+        self.record_declarations(node, source, track_results);
         if !modeled_write {
             if let Some(target) = write_target(node, source) {
                 self.writes.extend(names_in(target, source));
@@ -43,6 +47,10 @@ impl<'src> Bindings<'src> {
 
     pub(super) fn can_read(&self, name: &str) -> bool {
         self.declarations.get(name).is_some_and(Option::is_some) && !self.writes.contains(name)
+    }
+
+    pub(super) fn local_value(&self, name: &str, at: usize, defining: bool) -> Option<usize> {
+        self.local_values.resolve(name, at, defining)
     }
 
     pub(super) fn resolve<'a>(
@@ -85,7 +93,7 @@ impl<'src> Bindings<'src> {
         }
     }
 
-    fn record_declarations(&mut self, node: Node<'_>, source: &'src [u8]) {
+    fn record_declarations(&mut self, node: Node<'_>, source: &'src [u8], track_results: bool) {
         let targets = if declares_iteration(node) {
             crate::lower::keyed_flow::loops::iterator_bindings(node)
         } else {
@@ -98,25 +106,25 @@ impl<'src> Bindings<'src> {
             );
         let init = initializer(node);
         for target in targets {
+            if track_results {
+                self.local_values.record(node, target, source);
+            }
             let simple = single_target && simple_target(target).is_some();
-            let alias = simple
-                .then_some(init)
-                .flatten()
-                .and_then(|value| direct_alias(value, source));
-            let visible_at = init.map_or(target.end_byte(), |value| value.end_byte());
-            let uncertain = !simple || (alias.is_some() && conditional_var(node));
-            for name in names_in(target, source) {
-                let binding = Binding {
-                    visible_at,
-                    alias: alias.clone(),
-                };
-                self.declarations
-                    .entry(name)
-                    .and_modify(|slot| *slot = None)
-                    .or_insert(Some(binding));
-                if uncertain {
-                    self.writes.insert(name);
-                }
+            self.record_identity(node, target, init, simple, source);
+        }
+    }
+
+    fn record_identity(
+        &mut self, node: Node<'_>, target: Node<'_>, init: Option<Node<'_>>, simple: bool, source: &'src [u8],
+    ) {
+        let alias = init.filter(|_| simple).and_then(|value| direct_alias(value, source));
+        let visible_at = init.map_or(target.end_byte(), |value| value.end_byte());
+        let uncertain = !simple || (alias.is_some() && conditional_var(node));
+        for name in names_in(target, source) {
+            let binding = Binding { visible_at, alias: alias.clone() };
+            self.declarations.entry(name).and_modify(|slot| *slot = None).or_insert(Some(binding));
+            if uncertain {
+                self.writes.insert(name);
             }
         }
     }
@@ -138,6 +146,7 @@ fn declaration(node: Node<'_>) -> Vec<Node<'_>> {
         "let_declaration" | "required_parameter" | "optional_parameter" => {
             node.child_by_field_name("pattern")
         }
+        "arrow_function" => node.child_by_field_name("parameter"),
         "short_var_declaration" => node.child_by_field_name("left"),
         "parameter" | "variable_declaration" => node
             .child_by_field_name("pattern")
@@ -273,7 +282,11 @@ fn write_target<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> 
 }
 
 fn names_in<'src>(node: Node<'_>, source: &'src [u8]) -> Vec<&'src str> {
-    let mut names = Vec::new();
+    identifiers_in(node).into_iter().filter_map(|node| node.utf8_text(source).ok()).collect()
+}
+
+fn identifiers_in(node: Node<'_>) -> Vec<Node<'_>> {
+    let mut identifiers = Vec::new();
     let mut nodes = vec![node];
     while let Some(node) = nodes.pop() {
         if identifier(node)
@@ -282,10 +295,10 @@ fn names_in<'src>(node: Node<'_>, source: &'src [u8]) -> Vec<&'src str> {
                 "shorthand_property_identifier_pattern" | "shorthand_field_identifier"
             )
         {
-            names.extend(node.utf8_text(source).ok());
+            identifiers.push(node);
         } else {
             nodes.extend(children(node));
         }
     }
-    names
+    identifiers
 }
