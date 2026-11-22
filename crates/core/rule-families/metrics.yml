@@ -1,0 +1,124 @@
+micrometer-high-cardinality-tag:
+  category: performance
+  severity: warning
+  semantic: true
+  message: >-
+    This Micrometer tag looks like an unbounded identifier. Each distinct tag
+    combination can register a new meter. Keep metric tags bounded and put
+    per-request identifiers in traces or logs.
+  metadata:
+    subcategory: [observability.metric-cardinality]
+    references:
+      - https://docs.micrometer.io/micrometer/reference/concepts/high-cardinality-tags-detector.html
+  rule:
+    all:
+      - pattern: $METER.builder($$$ARGS).tag($KEY, $VALUE)
+      - inside:
+          kind: program
+          has:
+            pattern: import io.micrometer.core.instrument.$METER;
+          stopBy: end
+  constraints:
+    METER: &micrometer_instruments
+      regex: '^(Counter|Timer|DistributionSummary)$'
+    KEY:
+      regex: >-
+        (?i)^(?:"|')(?:user[_.-]?id|request[_.-]?id|trace[_.-]?id|span[_.-]?id|session[_.-]?id|email|uuid)(?:"|')$
+  languages:
+    Java: {}
+    Kotlin:
+      rule:
+        all:
+          - pattern:
+              context: 'fun f() { val meter = $METER.builder($$$ARGS).tag($KEY, $VALUE) }'
+              selector: call_expression
+          - inside:
+              kind: source_file
+              has:
+                pattern:
+                  context: 'import io.micrometer.core.instrument.$METER'
+                  selector: import_header
+                stopBy: end
+              stopBy: end
+      constraints:
+        METER: *micrometer_instruments
+        KEY:
+          regex: >-
+            (?i)^"(?:user[_.-]?id|request[_.-]?id|trace[_.-]?id|span[_.-]?id|session[_.-]?id|email|uuid)"$
+
+prom-client-high-cardinality-label:
+  category: performance
+  severity: warning
+  semantic: true
+  message: >-
+    This Prometheus label looks like an unbounded identifier. Each distinct label
+    combination creates a time series. Keep metric labels bounded and put
+    per-request identifiers in traces or logs.
+  metadata:
+    subcategory: [observability.metric-cardinality]
+    references:
+      - https://prometheus.io/docs/practices/naming/#labels
+  rule:
+    all:
+      - kind: new_expression
+      - has:
+          field: constructor
+          pattern: $CLIENT.$METER
+      - inside:
+          kind: program
+          has:
+            any:
+              - pattern: import * as $CLIENT from 'prom-client';
+              - pattern: import $CLIENT from 'prom-client';
+              - pattern: const $CLIENT = require('prom-client');
+              - pattern: import * as $CLIENT from '@prometheus-io/client';
+            stopBy: end
+          stopBy: end
+      - has:
+          field: arguments
+          has:
+            kind: object
+            has:
+              kind: pair
+              has:
+                field: key
+                regex: '^labelNames$'
+              all:
+                - has:
+                    field: value
+                    has:
+                      kind: string
+                      regex: >-
+                        (?i)^(?:"|')(?:user[_.-]?id|request[_.-]?id|trace[_.-]?id|span[_.-]?id|session[_.-]?id|email|uuid)(?:"|')$
+                      stopBy: end
+  constraints:
+    METER:
+      regex: '^(Counter|Gauge|Histogram|Summary)$'
+  languages:
+    JavaScript:
+      id: js-prom-client-high-cardinality-label
+    TypeScript:
+      id: ts-prom-client-high-cardinality-label
+    Go:
+      id: go-prometheus-high-cardinality-label
+      rule:
+        all:
+          - pattern: prometheus.$METER($OPTIONS, $LABELS)
+          - inside:
+              kind: source_file
+              has:
+                kind: import_spec
+                regex: '^"github\.com/prometheus/client_golang/prometheus"$'
+                stopBy: end
+              stopBy: end
+      constraints:
+        METER:
+          regex: '^New(Counter|Gauge|Histogram|Summary)Vec$'
+        LABELS:
+          all:
+            - kind: composite_literal
+            - has:
+                kind: interpreted_string_literal
+                regex: >-
+                  (?i)^(?:"|')(?:user[_.-]?id|request[_.-]?id|trace[_.-]?id|span[_.-]?id|session[_.-]?id|email|uuid)(?:"|')$
+                stopBy: end

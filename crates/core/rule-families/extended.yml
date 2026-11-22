@@ -1,0 +1,328 @@
+discarded-property-check:
+  category: correctness
+  severity: warning
+  message: fast-check check() returns a result. Inspect its failed flag or use assert() so a failing property can fail the test.
+  metadata:
+    references: ["https://fast-check.dev/docs/core-blocks/runners/#check"]
+    subcategory: [testing.property-execution]
+  rule:
+    pattern: $FC.check($$$ARGS)
+    inside: {kind: expression_statement}
+    all:
+      - inside:
+          kind: program
+          stopBy: end
+          has:
+            any:
+              - pattern: import $FC from 'fast-check'
+              - pattern: import * as $FC from 'fast-check'
+  languages: {JavaScript: {}, TypeScript: {}}
+
+jest-async-to-throw:
+  category: correctness
+  severity: warning
+  message: This async callback returns a promise. Await a rejects matcher to check its rejection.
+  metadata:
+    references: ["https://jestjs.io/docs/expect#rejects"]
+    subcategory: [testing.assertions]
+  rule:
+    pattern: expect($CALLBACK).toThrow($$$ARGS)
+    inside: &known_named_import
+      kind: program
+      stopBy: end
+      has:
+        kind: import_statement
+        all:
+          - has: {field: source, pattern: $MODULE}
+          - has: {kind: import_specifier, pattern: $API, stopBy: end}
+  constraints:
+    MODULE: {regex: '^["'']@jest/globals["'']$'}
+    API: {regex: '^expect$'}
+    CALLBACK:
+      regex: '^async(?:\s|\()'
+  languages: {JavaScript: {}, TypeScript: {}}
+
+week-year-with-calendar-date:
+  category: correctness
+  severity: warning
+  message: This formatter uses a week-based year with a calendar month and day. Use uuuu-MM-dd to format a calendar date.
+  metadata:
+    references: ["https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/time/format/DateTimeFormatter.html#patterns"]
+    subcategory: [time.calendar-formatting]
+  languages:
+    Java:
+      rule:
+        any:
+          - pattern: java.time.format.DateTimeFormatter.ofPattern("YYYY-MM-dd", $$$REST)
+          - pattern: java.time.format.DateTimeFormatter.ofPattern("YYYY-MM-dd")
+          - all:
+              - any:
+                  - pattern: DateTimeFormatter.ofPattern("YYYY-MM-dd", $$$REST)
+                  - pattern: DateTimeFormatter.ofPattern("YYYY-MM-dd")
+              - inside:
+                  kind: program
+                  stopBy: end
+                  has: {pattern: import java.time.format.DateTimeFormatter;}
+    Kotlin:
+      rule:
+        any:
+          - pattern:
+              context: 'fun sample() { java.time.format.DateTimeFormatter.ofPattern("YYYY-MM-dd") }'
+              selector: call_expression
+          - all:
+              - pattern:
+                  context: 'fun sample() { DateTimeFormatter.ofPattern("YYYY-MM-dd") }'
+                  selector: call_expression
+              - inside:
+                  kind: source_file
+                  stopBy: end
+                  has:
+                    kind: import_header
+                    stopBy: end
+                    regex: '^import\s+java\.time\.format\.DateTimeFormatter\s*;?$'
+
+unstable-jsx-key:
+  category: correctness
+  severity: warning
+  message: This JSX key changes each time the element renders. Use a stable identity from the item.
+  metadata:
+    references: ["https://react.dev/learn/rendering-lists#rules-of-keys"]
+    subcategory: [frontend.render-identity]
+  rule:
+    pattern:
+      context: 'const view = <div key={Math.random()} />'
+      selector: jsx_attribute
+  languages: {JavaScript: {}, Tsx: {}}
+
+concurrent-write-file:
+  category: correctness
+  severity: warning
+  semantic: true
+  message: These Node writeFile calls can write to the same file concurrently. Await each write or give each operation a distinct target.
+  metadata:
+    references: ["https://nodejs.org/api/fs.html#fspromiseswritefilefile-data-options"]
+    subcategory: [io.concurrent-writes]
+  rule:
+    pattern: Promise.all([$FS.writeFile($PATH, $$$FIRST), $FS.writeFile($PATH, $$$SECOND)])
+    inside:
+      kind: program
+      stopBy: end
+      has:
+        any:
+          - pattern: import * as $FS from 'node:fs/promises'
+          - pattern: import * as $FS from 'fs/promises'
+  constraints:
+    PATH: {kind: string}
+  languages: {JavaScript: {}, TypeScript: {}}
+
+jsx-button-without-keyboard:
+  category: correctness
+  severity: warning
+  semantic: true
+  message: This non-native button handles clicks without keyboard activation. Prefer a native button or handle Enter and Space.
+  metadata:
+    references: ["https://www.w3.org/WAI/ARIA/apg/patterns/button/"]
+    subcategory: [accessibility.keyboard]
+  rule:
+    any:
+      - kind: jsx_opening_element
+      - kind: jsx_self_closing_element
+    all:
+      - has: {field: name, regex: '^(div|span|li|p|section)$'}
+      - has:
+          pattern:
+            context: 'const view = <div role="button" />'
+            selector: jsx_attribute
+      - has:
+          kind: jsx_attribute
+          has: {kind: property_identifier, regex: '^onClick$'}
+      - not:
+          has:
+            any:
+              - kind: jsx_expression
+              - kind: jsx_attribute
+                has: {kind: property_identifier, regex: '^onKey(Down|Up|Press)$'}
+  languages: {JavaScript: {}, Tsx: {}}
+
+otel-http-duration-unit:
+  category: correctness
+  severity: warning
+  message: The OpenTelemetry HTTP request duration metric uses seconds. Convert the recorded value and declare the unit as s.
+  metadata:
+    references: ["https://opentelemetry.io/docs/specs/semconv/http/http-metrics/"]
+    subcategory: [observability.metric-units]
+  rule:
+    pattern: const $HISTOGRAM = $METER.createHistogram($NAME, $OPTIONS)
+    follows:
+      pattern: const $METER = metrics.getMeter($$$ARGS)
+      stopBy: end
+    inside: *known_named_import
+  constraints:
+    <<: &known_otel_http_metric
+      MODULE: {regex: '^["'']@opentelemetry/api["'']$'}
+      API: {regex: '^metrics$'}
+      NAME: {regex: '^["'']http\.(client|server)\.request\.duration["'']$'}
+    OPTIONS: &wrong_duration_unit
+      has:
+        kind: pair
+        all:
+          - has: {field: key, regex: '^unit$|^["'']unit["'']$'}
+          - has:
+              field: value
+              kind: string
+              not: {regex: '^["'']s["'']$'}
+  languages: {JavaScript: {}, TypeScript: {}}
+
+otel-http-duration-recorded-milliseconds:
+  category: correctness
+  severity: warning
+  semantic: true
+  message: This records elapsed milliseconds on an OpenTelemetry HTTP request duration histogram. Convert the elapsed value to seconds before recording it.
+  metadata:
+    references: ["https://opentelemetry.io/docs/specs/semconv/http/http-metrics/"]
+    subcategory: [observability.metric-units]
+  rule:
+    any:
+      - pattern: $HISTOGRAM.record($VALUE)
+      - pattern: $HISTOGRAM.record($VALUE, $$$ATTRIBUTES)
+    all:
+      - inside:
+          kind: expression_statement
+          follows:
+            any:
+              - pattern: const $START = performance.now()
+              - pattern: const $START = Date.now()
+            stopBy: end
+      - inside:
+          kind: expression_statement
+          follows:
+            pattern: const $HISTOGRAM = $METER.createHistogram($NAME, $$$OPTIONS)
+            all:
+              - follows:
+                  pattern: const $METER = metrics.getMeter($$$ARGS)
+                  stopBy: end
+              - not:
+                  has:
+                    kind: object
+                    all: [*wrong_duration_unit]
+                    stopBy: end
+            stopBy: end
+    inside: *known_named_import
+  constraints:
+    <<: *known_otel_http_metric
+    VALUE:
+      any:
+        - pattern: performance.now() - $START
+        - pattern: Date.now() - $START
+  languages: {JavaScript: {}, TypeScript: {}}
+
+node-writable-ignored-backpressure:
+  category: performance
+  severity: warning
+  semantic: true
+  message: This loop keeps writing without checking the stream's backpressure signal. Pause when write returns false and resume after drain, or use a pipeline.
+  metadata:
+    references: ["https://nodejs.org/api/stream.html#writablewritechunk-encoding-callback"]
+    subcategory: [reliability.backpressure]
+  rule:
+    pattern: $STREAM.write($$$ARGS)
+    all:
+      - inside:
+          kind: expression_statement
+          not:
+            precedes:
+              pattern: await once($STREAM, 'drain')
+      - inside:
+          kind: for_in_statement
+          stopBy:
+            any:
+              - kind: arrow_function
+              - kind: function_expression
+              - kind: function_declaration
+          follows:
+            pattern: const $STREAM = createWriteStream($$$OPTIONS)
+      - inside: *known_named_import
+  constraints:
+    MODULE: {regex: '^["''](?:node:)?fs["'']$'}
+    API: {regex: '^createWriteStream$'}
+    STREAM: {kind: identifier}
+  languages: {JavaScript: {}, TypeScript: {}}
+
+http-client-disabled-timeout:
+  category: correctness
+  severity: warning
+  message: This client explicitly disables its timeout and Get supplies no request context. Set a client timeout or use a request with a deadline.
+  metadata:
+    references: ["https://pkg.go.dev/net/http#Client"]
+    subcategory: [reliability.deadlines]
+  rule:
+    pattern: return $CLIENT.Get($URL)
+    follows:
+      pattern: '$CLIENT := &http.Client{Timeout: 0}'
+    inside: &net_http_import
+      kind: source_file
+      stopBy: end
+      has: {kind: import_spec, regex: '^"net/http"$', stopBy: end}
+  languages: {Go: {}}
+
+http-retry-without-budget:
+  category: correctness
+  severity: warning
+  semantic: true
+  message: This retry loop keeps issuing remote requests until one succeeds. Bound attempts or use an overall deadline and delay retries.
+  metadata:
+    references: ["https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/"]
+    subcategory: [reliability.retries]
+  rule: &http_retry_until_success
+    pattern: |
+      for {
+        $RESPONSE, $ERR := http.$METHOD($$$ARGS)
+        if $ERR == nil {
+          return $RESPONSE, nil
+        }
+      }
+    inside: *net_http_import
+  constraints:
+    METHOD: {regex: '^(Get|Head)$'}
+  languages: {Go: {}}
+
+http-retry-replays-post:
+  category: correctness
+  severity: info
+  semantic: true
+  message: An HTTP POST can have succeeded before the client receives an error. Bound retries and use server-supported idempotency for operations that must happen once.
+  metadata:
+    references: ["https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/"]
+    subcategory: [reliability.retries]
+  rule: *http_retry_until_success
+  constraints:
+    METHOD: {regex: '^Post$'}
+  languages: {Go: {}}
+
+http-shutdown-with-canceled-context:
+  category: correctness
+  severity: warning
+  message: This context is already canceled when Shutdown starts. Give graceful shutdown its own timeout so it can wait for active requests.
+  metadata:
+    references: ["https://pkg.go.dev/net/http#Server.Shutdown"]
+    subcategory: [reliability.shutdown]
+  rule:
+    pattern: return $SERVER.Shutdown($CTX)
+    follows:
+      kind: expression_statement
+      has: {pattern: <-$CTX.Done()}
+    all:
+      - inside: *net_http_import
+      - inside:
+          kind: function_declaration
+          stopBy:
+            any:
+              - kind: func_literal
+              - kind: function_declaration
+          has:
+            field: parameters
+            has:
+              pattern:
+                context: 'func f($SERVER *http.Server) {}'
+                selector: parameter_declaration
+  languages: {Go: {}}

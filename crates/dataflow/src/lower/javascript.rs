@@ -63,7 +63,7 @@ fn call_arg_identifiers(call: Node, source: &[u8]) -> Vec<String> {
 /// field is present too under TypeScript but not read here). Only the
 /// single-declarator case is modeled, same precision-over-generality
 /// tradeoff as the other lowering modules.
-fn lower_var_decl(node: Node, source: &[u8]) -> Stmt {
+fn lower_var_decl(node: Node, source: &[u8], keyed: bool) -> Stmt {
     let fallback = || Stmt::Other(text(node, source).to_string());
     let mut cursor = node.walk();
     let Some(declarator) = node.named_children(&mut cursor).find(|n| n.kind() == "variable_declarator") else { return fallback() };
@@ -71,16 +71,16 @@ fn lower_var_decl(node: Node, source: &[u8]) -> Stmt {
     let lhs = text(name_node, source).to_string();
 
     let Some(value) = declarator.child_by_field_name("value") else { return fallback() };
-    if value.kind() == "call_expression" {
-        if let Some(name) = call_target_name(value, source) {
-            return super::site::named(name, call_arg_identifiers(value, source), Some(lhs), value, source);
+    if let Some(call) = initializer_call(value, keyed) {
+        if let Some(name) = call_target_name(call, source) {
+            return super::site::named(name, call_arg_identifiers(call, source), Some(lhs), call, source);
         }
     }
     Stmt::Assign { lhs, rhs: classify_rhs(value, source) }
 }
 
 /// Lowers `x = expr;` (`expression_statement -> assignment_expression`).
-fn lower_assignment_expression(node: Node, source: &[u8]) -> Stmt {
+fn lower_assignment_expression(node: Node, source: &[u8], keyed: bool) -> Stmt {
     let (Some(left), Some(right)) = (node.child_by_field_name("left"), node.child_by_field_name("right")) else {
         return Stmt::Other(text(node, source).to_string());
     };
@@ -88,12 +88,23 @@ fn lower_assignment_expression(node: Node, source: &[u8]) -> Stmt {
         return Stmt::Other(text(node, source).to_string());
     }
     let lhs = text(left, source).to_string();
-    if right.kind() == "call_expression" {
-        if let Some(name) = call_target_name(right, source) {
-            return super::site::named(name, call_arg_identifiers(right, source), Some(lhs), right, source);
+    if let Some(call) = initializer_call(right, keyed) {
+        if let Some(name) = call_target_name(call, source) {
+            return super::site::named(name, call_arg_identifiers(call, source), Some(lhs), call, source);
         }
     }
     Stmt::Assign { lhs, rhs: classify_rhs(right, source) }
+}
+
+fn initializer_call(value: Node<'_>, keyed: bool) -> Option<Node<'_>> {
+    let mut expression = value;
+    if keyed {
+        expression = super::keyed_syntax::expression_value(expression)?;
+        while matches!(expression.kind(), "as_expression" | "satisfies_expression" | "non_null_expression") {
+            expression = super::keyed_syntax::expression_value(expression.named_child(0)?)?;
+        }
+    }
+    (expression.kind() == "call_expression").then_some(expression)
 }
 
 /// Lowers one function body into a `Cfg`. `fn_node` must be a
@@ -116,14 +127,14 @@ fn lower_statement(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: Node
 fn lower_statement_inner(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {
     match stmt.kind() {
         "variable_declaration" | "lexical_declaration" => {
-            cfg.nodes[current].stmts.push(lower_var_decl(stmt, source));
+            cfg.nodes[current].stmts.push(lower_var_decl(stmt, source, cfg.keyed_flow.is_some()));
             current
         }
         "expression_statement" => {
             if let Some(inner) = stmt.named_child(0) {
                 match inner.kind() {
                     "assignment_expression" => {
-                        cfg.nodes[current].stmts.push(lower_assignment_expression(inner, source));
+                        cfg.nodes[current].stmts.push(lower_assignment_expression(inner, source, cfg.keyed_flow.is_some()));
                         return current;
                     }
                     // A bare call statement (`stmt.executeUpdate(sql);`, no
@@ -166,6 +177,7 @@ fn lower_statement_inner(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current
 fn lower_if(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {
     if let Some(cond) = stmt.child_by_field_name("condition") {
         cfg.nodes[current].stmts.push(Stmt::Other(format!("if {}", text(cond, source))));
+        cfg.nodes[current].condition_span = Some(cond.byte_range());
     }
 
     let true_start = cfg.push_node(stmt.start_position().row as u32 + 1);
@@ -176,26 +188,27 @@ fn lower_if(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> 
         None => true_start,
     };
 
-    let false_end = if let Some(alt) = stmt.child_by_field_name("alternative") {
-        let false_start = cfg.push_node(stmt.start_position().row as u32 + 1);
-        cfg.edges.push((current, false_start, EdgeKind::False));
-        match alt.named_child(0) {
-            Some(inner) if inner.kind() == "statement_block" => lower_block(cfg, inner, source, false_start),
-            Some(inner) if inner.kind() == "if_statement" => lower_if(cfg, inner, source, false_start),
-            _ => false_start,
-        }
-    } else {
-        current
-    };
+    let false_end = stmt.child_by_field_name("alternative")
+        .map(|alt| lower_alternative(cfg, alt, source, current));
 
     let join = cfg.push_node(stmt.end_position().row as u32 + 1);
     cfg.edges.push((true_end, join, EdgeKind::Fallthrough));
-    if false_end != current || stmt.child_by_field_name("alternative").is_some() {
-        cfg.edges.push((false_end, join, EdgeKind::Fallthrough));
-    } else {
-        cfg.edges.push((current, join, EdgeKind::False));
-    }
+    cfg.edges.push(match false_end {
+        Some(end) => (end, join, EdgeKind::Fallthrough),
+        None => (current, join, EdgeKind::False),
+    });
     join
+}
+
+fn lower_alternative(cfg: &mut Cfg<Stmt>, alternative: Node, source: &[u8], current: NodeId) -> NodeId {
+    let if_statement = alternative.parent().unwrap_or(alternative);
+    let start = cfg.push_node(if_statement.start_position().row as u32 + 1);
+    cfg.edges.push((current, start, EdgeKind::False));
+    match alternative.named_child(0) {
+        Some(inner) if inner.kind() == "statement_block" => lower_block(cfg, inner, source, start),
+        Some(inner) => lower_statement(cfg, inner, source, start),
+        None => start,
+    }
 }
 
 /// Shared lowering for `for`/`while` — both have a `body` field and the

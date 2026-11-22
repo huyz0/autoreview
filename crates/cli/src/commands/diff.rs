@@ -24,6 +24,7 @@ pub struct DiffCommandOptions {
     pub head_ref: String,
     pub tier: Option<Tier>,
     pub aspects: Option<Vec<String>>,
+    pub subcategories: Option<Vec<String>>,
     pub max_usd: Option<f64>,
     pub incremental: bool,
     pub static_only: bool,
@@ -48,9 +49,26 @@ impl ReviewRun<'_> {
             .aspects
             .as_ref()
             .is_none_or(|aspects| aspects.contains(&finding.category))
+            && self.matches_subcategory(finding.meta.as_ref())
             && self
                 .changed_lines
                 .is_none_or(|lines| lines.contains_finding(finding))
+    }
+
+    fn matches_subcategory(
+        &self,
+        metadata: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    ) -> bool {
+        self.options.subcategories.as_ref().is_none_or(|selected| {
+            metadata
+                .and_then(|fields| fields.get("subcategory"))
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|labels| {
+                    labels.iter().filter_map(serde_json::Value::as_str).any(|label| {
+                        selected.iter().any(|value| super::rule_catalog::subcategory_matches(label, value))
+                    })
+                })
+        })
     }
 }
 
@@ -137,7 +155,7 @@ fn load_registered_packs(repo: &Path) -> Vec<ResolvedRulePack> {
 }
 
 fn run_static_analyzers(run: &ReviewRun<'_>) -> (Vec<Finding>, StaticFindings) {
-    let (findings, warnings) = super::static_review::collect(
+    let (mut findings, mut warnings) = super::static_review::collect(
         super::static_review::ReviewInput {
             repo_root: &run.options.repo_root,
             source_root: run.source_root,
@@ -145,10 +163,12 @@ fn run_static_analyzers(run: &ReviewRun<'_>) -> (Vec<Finding>, StaticFindings) {
             aspects: run.options.aspects.as_deref(),
             audit_rust_deps: run.options.audit_rust_deps,
             tier4_go: run.config.symindex.tier4_go,
+            artifact_checks: &run.config.artifact_checks,
         },
         run.changed_files,
         run.packs,
     );
+    append_protobuf_findings(run, &mut findings, &mut warnings);
     let shadow: HashSet<_> = run
         .packs
         .iter()
@@ -188,6 +208,24 @@ fn run_static_analyzers(run: &ReviewRun<'_>) -> (Vec<Finding>, StaticFindings) {
             warnings,
         },
     )
+}
+
+fn append_protobuf_findings(run: &ReviewRun<'_>, findings: &mut Vec<AgentFinding>, warnings: &mut Vec<String>) {
+    let globs = &run.config.artifact_checks.protobuf_compatibility;
+    if globs.is_empty() || run.options.aspects.as_ref().is_some_and(|aspects| !aspects.iter().any(|aspect| aspect == "correctness")) {
+        return;
+    }
+    let result = super::revision::compare_protobuf(
+        &run.options.repo_root, run.source_root, &run.facts.base_ref, &run.facts.head_ref, globs,
+    );
+    match result {
+        Ok(compatibility) => findings.extend(compatibility),
+        Err(error) => {
+            let warning = format!("Protobuf compatibility policy failed: {error}");
+            println!("  [warn] {warning}");
+            warnings.push(warning);
+        }
+    }
 }
 
 /// Watch both resolved commits so edits with identical diff statistics
@@ -344,6 +382,7 @@ mod watch_tests {
             head_ref: "HEAD".to_string(),
             tier: None,
             aspects: None,
+            subcategories: None,
             max_usd: None,
             incremental: false,
             static_only: true,

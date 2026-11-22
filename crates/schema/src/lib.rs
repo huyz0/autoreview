@@ -1,4 +1,5 @@
 pub mod architecture;
+pub mod artifact_config;
 pub mod auth_config;
 pub mod config;
 pub mod finding;

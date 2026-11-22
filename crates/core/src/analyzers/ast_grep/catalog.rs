@@ -126,11 +126,45 @@ pub struct RuleDefinition {
     pub yaml: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleCatalogEntry {
+    pub id: String,
+    pub kind: String,
+    pub category: String,
+    pub subcategories: Vec<String>,
+}
+
+pub fn list_builtin_rules() -> Vec<RuleCatalogEntry> {
+    use super::super::{artifact_policy, framework_checks, rust_review};
+
+    let mut catalog = Vec::new();
+    walk_rule_files(&rule_roots(&[]), &mut |meta| {
+        catalog.push(RuleCatalogEntry {
+            id: meta.id.clone(),
+            kind: meta.kind.clone(),
+            category: meta.category.clone(),
+            subcategories: meta.metadata.as_ref().map(|fields| fields.subcategory.clone()).unwrap_or_default(),
+        });
+    });
+    catalog.extend(framework_checks::catalog_entries());
+    catalog.extend(rust_review::rules().map(|rule| RuleCatalogEntry {
+        id: rule.id.into(), kind: "rust".into(), category: rule.category.into(),
+        subcategories: rule.subcategories().iter().map(|label| (*label).into()).collect(),
+    }));
+    catalog.extend(artifact_policy::rules().map(artifact_policy::Rule::entry));
+    catalog.sort_by(|left, right| left.id.cmp(&right.id));
+    catalog
+}
+
 pub fn find_rule_definition(
     rule_id: &str,
     registered_packs: &[ResolvedRulePack],
 ) -> Option<RuleDefinition> {
     if let Some(definition) = super::super::framework_checks::definition(rule_id) {
+        return Some(definition);
+    }
+    if let Some(definition) = super::super::artifact_policy::rules().find(|rule| rule.id == rule_id).and_then(super::super::artifact_policy::Rule::definition) {
         return Some(definition);
     }
     for root in rule_roots(registered_packs) {

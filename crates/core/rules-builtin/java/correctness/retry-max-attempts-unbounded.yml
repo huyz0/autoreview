@@ -5,6 +5,7 @@ severity: warning
 message: >-
   This Resilience4j retry budget allows billions of attempts. Set a small bound that fits the caller's deadline and the downstream service's capacity.
 metadata:
+  subcategory: [reliability.retries]
   references:
     - "https://resilience4j.readme.io/docs/retry"
 rule:

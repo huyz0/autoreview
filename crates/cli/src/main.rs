@@ -88,6 +88,9 @@ struct DiffArgs {
     tier: Option<String>,
     #[arg(long)]
     aspects: Option<String>,
+    /// Limit findings to the given subcategory labels
+    #[arg(long, value_delimiter = ',')]
+    subcategories: Option<Vec<String>>,
     #[arg(long = "max-usd")]
     max_usd: Option<f64>,
     /// Suppress findings whose fingerprint was already reported in the most recent prior run on this repo
@@ -186,6 +189,13 @@ enum HistoryAction {
 
 #[derive(Subcommand)]
 enum RulesAction {
+    /// List built-in rules and their category and subcategory labels
+    List {
+        #[arg(long, value_delimiter = ',')]
+        subcategories: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Mine recurring agent findings into rule candidates. With
     /// --from-comments, mines recurring human PR review comments via `gh`
     /// instead (opt-in — see mineFromComments in .autoreview/config.yaml).
@@ -369,6 +379,7 @@ fn run_review(repo: std::path::PathBuf, args: DiffArgs) -> anyhow::Result<()> {
     run_diff_or_watch(DiffCommandOptions {
         repo_root: repo, base_ref: args.base, head_ref: args.head, tier,
         aspects: args.aspects.map(|value| value.split(',').map(|item| item.trim().to_string()).collect()),
+        subcategories: args.subcategories,
         max_usd: args.max_usd, incremental: args.incremental, static_only: args.static_only,
         changed_lines: args.changed_lines, audit_rust_deps: args.audit_rust_deps, backend,
     }, args.watch, args.watch_interval)
@@ -410,6 +421,7 @@ fn run_mining(repo: &std::path::Path, sources: &[(bool, MineSource)]) -> anyhow:
 
 fn run_rules(repo: &std::path::Path, action: RulesAction) -> anyhow::Result<()> {
     match action {
+        RulesAction::List { subcategories, json } => commands::rule_catalog::list_builtin(&subcategories, json)?,
         RulesAction::Mine { from_comments, from_code, from_bugfix_commits, from_suppressions, from_bitbucket_comments, from_linter_config, from_llm_patterns } =>
             run_mining(repo, &[(from_comments, run_rules_mine_comments), (from_code, run_rules_mine_code),
                 (from_bugfix_commits, run_rules_mine_bugfix_commits), (from_suppressions, run_rules_mine_suppressions),

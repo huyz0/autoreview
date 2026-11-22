@@ -7,6 +7,7 @@ use super::{children, class_members, descendants, Java};
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     id: "java-spring-unpaged-repository-endpoint",
     category: "performance",
+    subcategories: &["persistence.query-efficiency"],
     title: "GET endpoint returns an explicitly unpaged repository read",
     message: "The endpoint sends an unpaged request to findAll and returns its result. Use a bounded page or slice so the amount read and returned does not grow with the table.",
     reference: "https://docs.spring.io/spring-data/commons/reference/repositories/query-methods-details.html#repositories.special-parameters",

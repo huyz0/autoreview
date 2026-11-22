@@ -4,6 +4,7 @@ category: security
 severity: warning
 message: "`http.ListenAndServe`/`ListenAndServeTLS` always use Go's zero-value default `http.Server`, which has no read/write/idle timeouts — a slow or malicious client can hold a connection open indefinitely (Slowloris-style resource exhaustion). Construct an `&http.Server{...}` with explicit `ReadTimeout`/`WriteTimeout`/`IdleTimeout` and call `.ListenAndServe()` on that instead."
 metadata:
+  subcategory: [reliability.deadlines]
   cwe: ["CWE-400"]
   owasp: ["A05:2021"]
   confidence: HIGH

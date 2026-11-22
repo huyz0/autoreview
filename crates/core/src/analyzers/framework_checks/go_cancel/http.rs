@@ -7,6 +7,7 @@ use super::package::{local_names, File};
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     id: "go-http-handler-discards-request-context",
     category: "correctness",
+    subcategories: &["reliability.deadlines"],
     title: "Outbound HTTP request loses the incoming request context",
     message: "This handler constructs an outbound request with a fresh context. Use the incoming request's context or derive a deadline from it so cancellations reach the outbound call.",
     reference: "https://pkg.go.dev/net/http#NewRequestWithContext",

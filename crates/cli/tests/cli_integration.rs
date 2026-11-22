@@ -504,6 +504,359 @@ fn static_review_uses_the_requested_commit_and_handles_renames_from_a_subdirecto
 }
 
 #[test]
+fn diff_subcategories_intersect_with_aspects() {
+    if !ast_grep_available() {
+        return;
+    }
+    let repo = init_repo(&[("property.js", "import * as fc from 'fast-check';\n")]);
+    repo.commit(
+        &[("property.js", "import * as fc from 'fast-check';\nfc.check(fc.property(fc.nat(), n => n < 100));\n")],
+        "add discarded property check",
+    );
+    for (aspect, expected) in [("correctness", true), ("performance", false)] {
+        let output = Command::cargo_bin("autoreview").unwrap()
+            .current_dir(repo.path())
+            .args(["diff", "--base", "HEAD~1", "--static-only", "--aspects", aspect,
+                "--subcategories", "frontend,testing"])
+            .assert().success().get_output().stdout.clone();
+        let path = report_path_from_stdout(&String::from_utf8(output).unwrap());
+        let report: autoreview_schema::ReviewReport = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(report.findings.iter().any(|finding| {
+            finding.source.rule_id.as_deref() == Some("javascript-discarded-property-check")
+        }), expected, "{aspect}");
+    }
+}
+
+#[test]
+fn rules_list_filters_builtin_rule_kinds_by_subcategory() {
+    let repo = init_repo(&[("README.md", "rules\n")]);
+    let output = Command::cargo_bin("autoreview").unwrap()
+        .current_dir(repo.path())
+        .args(["rules", "list", "--subcategories", "reliability,build,persistence.data-integrity,observability.metric-cardinality", "--json"])
+        .assert().success().get_output().stdout.clone();
+    let rules: Vec<serde_json::Value> = serde_json::from_slice(&output).unwrap();
+    for (id, kind) in [
+        ("go-discarded-context-cancel", "pattern"),
+        ("go-context-cancel-on-all-paths", "framework"),
+        ("github-actions-mutable-reference", "artifact"),
+        ("java-spring-transaction-self-invocation", "framework"),
+        ("rust-sqlx-pool-write-during-transaction", "rust"),
+        ("ts-prom-client-high-cardinality-label", "pattern"),
+    ] {
+        assert!(rules.iter().any(|rule| rule["id"] == id && rule["kind"] == kind), "{id}");
+    }
+    assert!(rules.iter().all(|rule| rule["subcategory"].is_null()
+        && rule["subcategories"].as_array().unwrap().iter().any(|label| {
+            label.as_str().is_some_and(|label| label.starts_with("reliability.")
+                || label.starts_with("build.")
+                || matches!(label, "persistence.data-integrity" | "observability.metric-cardinality"))
+        })));
+}
+
+#[test]
+fn fetch_body_lifecycle_uses_the_same_rule_id_in_tsx_reports() {
+    let path = "src/Widget.tsx";
+    let before = r#"
+export async function Widget() {
+    const response = await fetch('/widget');
+    await response.text();
+    return <div />;
+}
+"#;
+    let after = before.replace("    return <div />;", "    const alias = response;\n    await alias.json();\n    return <div />;");
+    let repo = init_repo(&[(path, before)]);
+    repo.commit(&[(path, &after)], "read the same body through an alias");
+    let report = scoped_static_diff(repo.path(), "protocol.response-lifecycle");
+    assert_eq!(report.findings.len(), 1);
+    let found = &report.findings[0];
+    assert_eq!(found.source.rule_id.as_deref(), Some("typescript-fetch-response-body-read-twice"));
+    assert_eq!(found.location.snippet, "alias.json()");
+    assert_eq!(found.related_locations.as_ref().unwrap()[0].snippet, "response.text()");
+}
+
+#[test]
+fn outbox_policy_pairs_only_configured_operations_on_a_reachable_path() {
+    let source_path = "src/orders.tsx";
+    let source = r#"
+import * as storage from './storage';
+import { send as publish } from './broker';
+import { enqueue } from './outbox';
+
+export async function direct(values: Order) {
+    const result = await storage.db.orders.update(values);
+    if (result) await publish('orders.updated', result);
+    return <section />;
+}
+export const reversed = async (values: Order) => {
+    await publish('orders.updated', values);
+    let result;
+    result = await storage.db.orders.update(values);
+    return result;
+};
+export async function atomic(values: Order) {
+    await storage.db.orders.update(values);
+    await enqueue('orders.updated', values);
+}
+export async function unrelated(values: Order) {
+    await storage.db.orders.update(values);
+    await publish('metrics.updated', values);
+}
+export async function either(shouldWrite: boolean, values: Order) {
+    if (shouldWrite) {
+        await storage.db.orders.update(values);
+    } else {
+        await publish('orders.updated', values);
+    }
+}
+export async function stopped(values: Order) {
+    await storage.db.orders.update(values);
+    return values;
+    await publish('orders.updated', values);
+}
+export async function shadowed(publish: Sender, values: Order) {
+    await storage.db.orders.update(values);
+    await publish('orders.updated', values);
+}
+"#;
+    let repo = init_repo(&[(source_path, "// orders operation\n"), ("examples/orders.tsx", "")]);
+    repo.commit(&[(source_path, source), ("examples/orders.tsx", source)], "add order operations");
+    assert!(scoped_static_diff(repo.path(), "messaging.atomic-publication").findings.is_empty());
+
+    write_artifact_config(repo.path(), r#"
+artifactChecks:
+  outboxOperations:
+    - paths: ['src/*.tsx']
+      databaseWrite:
+        module: ./storage
+        export: db
+        members: [orders, update]
+      brokerPublish:
+        module: ./broker
+        export: send
+        firstArgument: orders.updated
+"#);
+    let report = scoped_static_diff(repo.path(), "messaging.atomic-publication");
+    let expected = [(8, 7), (12, 14)];
+    assert_eq!(report.findings.len(), expected.len(), "{:#?}", report.findings);
+    for (finding, (publish, write)) in report.findings.iter().zip(expected) {
+        assert_eq!(finding.source.rule_id.as_deref(), Some("outbox-direct-database-and-broker-write"));
+        assert_eq!(finding.location.path, source_path);
+        assert_eq!(finding.location.range.start_line, publish);
+        let evidence = &finding.related_locations.as_ref().unwrap()[0];
+        assert_eq!(evidence.path, source_path);
+        assert_eq!(evidence.range.start_line, write);
+    }
+}
+
+#[test]
+fn tsx_metric_units_report_one_finding_for_each_distinct_mismatch() {
+    if !ast_grep_available() {
+        return;
+    }
+    let path = "instrumentation.tsx";
+    let source = r#"import { metrics } from '@opentelemetry/api';
+const meter = metrics.getMeter('service');
+const duration = meter.createHistogram('http.server.request.duration', { unit: 's' });
+const legacy = meter.createHistogram('http.client.request.duration', { unit: 'ms' });
+const started = performance.now();
+duration.record(performance.now() - started);
+duration.record((performance.now() - started) / 1000);
+legacy.record(performance.now() - started);
+"#;
+    let repo = init_repo(&[(path, "// instrumentation\n")]);
+    repo.commit(&[(path, source)], "add metric recordings");
+    let report = scoped_static_diff(repo.path(), "observability.metric-units");
+    let mut actual: Vec<_> = report.findings.iter().map(|finding| (
+        finding.location.range.start_line,
+        finding.source.rule_id.as_deref().unwrap(),
+    )).collect();
+    actual.sort_unstable();
+    assert_eq!(actual, [
+        (4, "typescript-otel-http-duration-unit"),
+        (6, "typescript-otel-http-duration-recorded-milliseconds"),
+    ]);
+}
+
+fn scoped_static_diff(repo: &std::path::Path, subcategory: &str) -> autoreview_schema::ReviewReport {
+    let output = Command::cargo_bin("autoreview").unwrap()
+        .current_dir(repo)
+        .args(["diff", "--base", "HEAD~1", "--static-only", "--changed-lines", "--subcategories", subcategory])
+        .assert().success().get_output().stdout.clone();
+    let report_path = report_path_from_stdout(&String::from_utf8(output).unwrap());
+    serde_json::from_slice(&std::fs::read(report_path).unwrap()).unwrap()
+}
+
+fn write_artifact_config(root: &std::path::Path, yaml: &str) {
+    let directory = root.join(".autoreview");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("config.yaml"), yaml).unwrap();
+}
+
+#[test]
+fn icu_catalog_policy_reports_missing_arguments_and_nested_select_other() {
+    let base = "locales/en.json";
+    let translation = "locales/fr.json";
+    let source = r#"{
+  "inbox": {"message": "{count, plural, one{{user} sent one} other{{user} sent #}}"},
+  "usage": "Type '{example}' for {name}"
+}"#;
+    let good_translation = r#"{
+  "inbox": {"message": "{count, plural, one{{user} a envoyé un message} many{{user} en a envoyé #} other{{user} en a envoyé #}}"},
+  "usage": "Saisir '{exemple}' pour {name}"
+}"#;
+    let lost = r#"{
+  "inbox": {"message": "{count, plural, one{{sender, select, team{Équipe}}} other{Livré #}}"},
+  "usage": "Saisir '{exemple}' pour {name}"
+}"#;
+    let repo = init_repo(&[(base, source), (translation, good_translation)]);
+    repo.commit(&[(translation, lost)], "drop placeholders from translation");
+    write_artifact_config(repo.path(),
+        "artifactChecks:\n  localeCatalogs:\n    - reference: locales/en.json\n      translations: [locales/fr.json]\n");
+    let report = scoped_static_diff(repo.path(), "internationalization");
+    assert_eq!(report.findings.len(), 2);
+    for finding in report.findings {
+        assert_eq!(finding.location.path, translation);
+        assert_eq!(finding.location.range.start_line, 2);
+        match finding.source.rule_id.as_deref() {
+            Some("icu-translation-missing-other-branch") => assert!(finding.message.contains("sender")),
+            Some("icu-translation-drops-placeholder") => {
+                assert!(finding.message.contains("user"));
+                assert_eq!(finding.related_locations.unwrap()[0].path, base);
+            }
+            other => panic!("unexpected rule {other:?}"),
+        }
+    }
+    let updated_reference = source.replace("{user} sent #", "{user} sent # to {team}");
+    repo.commit(&[(base, &updated_reference)], "add a reference placeholder");
+    let report = scoped_static_diff(repo.path(), "internationalization");
+    assert_eq!(report.findings.len(), 1);
+    let finding = &report.findings[0];
+    assert_eq!(finding.source.rule_id.as_deref(), Some("icu-translation-drops-placeholder"));
+    assert!(finding.message.contains("team"));
+    assert_eq!(finding.location.path, translation);
+    assert_eq!(finding.related_locations.as_ref().unwrap()[0].path, base);
+}
+
+#[test]
+fn postgres_policy_tracks_changed_sql_and_transaction_sidecars() {
+    let sql = "migration/V001.sql";
+    let sidecar = "migration/V001.sql.conf";
+    let statement = "/* keep */\ncreate UNIQUE index\nconcurrently idx on orders (created_at);\n";
+    let repo = init_repo(&[
+        (sql, statement),
+        (sidecar, "executeInTransaction=false\n"),
+        ("migration/V003.sql.conf", "executeInTransaction=false\n"),
+        ("other/V002.sql", "SELECT 1;\n"),
+    ]);
+    repo.commit(&[
+        (sidecar, "# overrides\nexecuteInTransaction=true\n"),
+        ("other/V002.sql", "CREATE INDEX CONCURRENTLY idx ON table_name (column_name);\n"),
+        ("migration/V003.sql", "CREATE INDEX CONCURRENTLY idx3 ON orders (created_at);\n"),
+    ], "change the migration wrapping policy");
+    for enabled in [false, true] {
+        if enabled {
+            write_artifact_config(repo.path(),
+                "artifactChecks:\n  transactionalPostgresMigrations: ['migration/*.sql']\n");
+        }
+        let report = scoped_static_diff(repo.path(), "deployment.migrations");
+        let findings: Vec<_> = report.findings.iter()
+            .filter(|finding| finding.source.rule_id.as_deref() == Some("postgres-concurrent-index-in-transaction"))
+            .collect();
+        if enabled {
+            assert_eq!(findings.len(), 1);
+            assert_eq!(findings[0].location.path, sql);
+            assert_eq!(findings[0].location.range.start_line, 2);
+            assert_eq!(findings[0].related_locations.as_ref().unwrap()[0].path, sidecar);
+        } else {
+            assert!(findings.is_empty());
+        }
+    }
+}
+
+#[test]
+fn protobuf_policy_tracks_schema_compatibility_in_the_git_diff() {
+    use autoreview_schema::Side;
+
+    let path = "schemas/message.proto";
+    let previous = r#"
+syntax = "proto3";
+package example;
+message Envelope {
+  message Item {
+    string legacy = 1;
+    string remove_me = 2;
+    repeated int32 values = 3;
+    string safely_removed = 4;
+    reserved 40 to 49;
+  }
+}
+"#;
+    let current = r#"
+syntax = "proto3";
+package example;
+message Envelope {
+  message Item {
+    string replacement = 1;
+    int32 values = 3;
+    reserved 4, 41 to 49;
+    string added = 5 [(example.hint) = "{; }"];
+    string reused_reservation = 40;
+  }
+}
+"#;
+    let repo = init_repo(&[(path, previous), ("unconfigured.proto", previous)]);
+    repo.commit(&[(path, current), ("unconfigured.proto", current)], "change message fields");
+
+    for enabled in [false, true] {
+        if enabled {
+            write_artifact_config(repo.path(),
+                "artifactChecks:\n  protobufCompatibility: ['schemas/*.proto']\n");
+        }
+        let report = scoped_static_diff(repo.path(), "compatibility");
+        let expected = [
+            ("protobuf-field-tag-reused", 6, Side::New),
+            ("protobuf-incompatible-field-change", 7, Side::New),
+            ("protobuf-field-tag-reused", 10, Side::New),
+            ("protobuf-removed-field-tag-not-reserved", 7, Side::Old),
+        ];
+        assert_eq!(report.findings.len(), if enabled { expected.len() } else { 0 });
+        for finding in report.findings {
+            assert_eq!(finding.location.path, path);
+            assert!(finding.message.contains("example.Envelope.Item"));
+            assert!(expected.iter().any(|(rule, line, side)| {
+                finding.source.rule_id.as_deref() == Some(rule)
+                    && finding.location.range.start_line == *line
+                    && finding.location.side == *side
+            }), "{finding:?}");
+        }
+    }
+}
+
+#[test]
+fn workflow_pinning_policy_is_opt_in_and_points_to_the_changed_steps() {
+    let workflow = ".github/workflows/checks.yml";
+    let baseline = "jobs:\n  test:\n    steps: []\n";
+    let changed = "jobs:\n  test:\n    steps:\n      - uses: vendor/action@v2\n      - uses: other/task@0123456789abcdef0123456789abcdef01234567\n      - uses: './.github/actions/local'\n      - run: echo vendor/action@v2\n  reusable:\n    uses: vendor/project/.github/workflows/run.yml@main\n";
+    let repo = init_repo(&[(workflow, baseline)]);
+    repo.commit(&[(workflow, changed)], "add external actions");
+    for enabled in [false, true] {
+        if enabled {
+            write_artifact_config(repo.path(),
+                "artifactChecks:\n  immutableGithubActionRefs: true\n");
+        }
+        let report = scoped_static_diff(repo.path(), "build.dependency-integrity");
+        let lines: Vec<_> = report.findings.iter()
+            .filter(|finding| finding.source.rule_id.as_deref() == Some("github-actions-mutable-reference"))
+            .map(|finding| finding.location.range.start_line).collect();
+        if enabled {
+            assert_eq!(lines, [4, 9]);
+        } else {
+            assert!(lines.is_empty());
+        }
+    }
+}
+
+#[test]
 fn rules_packs_refresh_reports_a_freshly_cloned_git_pack() {
     let remote = tempfile::tempdir().unwrap();
     run_git(remote.path(), &["init", "-q"]);

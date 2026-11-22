@@ -1,5 +1,14 @@
+mod fetch;
 mod go_cancel;
 mod java;
+mod jest;
+pub(super) mod outbox;
+mod prisma;
+mod rabbitmq;
+mod react;
+mod web;
+
+pub use outbox::run_outbox_policy;
 
 use std::path::Path;
 
@@ -8,30 +17,47 @@ use autoreview_schema::{
 };
 use tree_sitter::{Node, Parser, Tree};
 
-use super::ast_grep::RuleDefinition;
+use super::ast_grep::{RuleCatalogEntry, RuleDefinition};
 
-fn rules() -> [&'static Rule; 8] {
+fn rules() -> impl Iterator<Item = &'static Rule> {
     [
         &go_cancel::RULE,
         &go_cancel::SPAN_RULE,
+        &go_cancel::TRACE_PARENT_RULE,
+        &go_cancel::TRANSACTION_RULE,
         &go_cancel::HTTP_RULE,
         &java::SPRING_RULE,
         &java::HIBERNATE_RULE,
         &java::OTEL_RULE,
         &java::CONSTRUCTOR_RULE,
+        &java::EXECUTOR_SHUTDOWN_RULE,
         &java::PAGINATION_RULE,
-    ]
+        &jest::RULE,
+        &react::INTERVAL_RULE,
+        &prisma::RULE,
+        &rabbitmq::RULE,
+    ].into_iter().chain(fetch::RULES)
 }
 
 pub(super) fn semantic_ids() -> impl Iterator<Item = String> {
-    rules().into_iter().map(|rule| rule.id.to_owned())
+    rules().map(|rule| rule.id.to_owned())
+}
+
+pub(super) fn catalog_entries() -> impl Iterator<Item = RuleCatalogEntry> {
+    rules().map(|rule| RuleCatalogEntry {
+        id: rule.id.into(),
+        kind: "framework".into(),
+        category: rule.category.into(),
+        subcategories: rule.subcategories.iter().map(|label| (*label).into()).collect(),
+    })
 }
 
 pub(super) fn definition(id: &str) -> Option<RuleDefinition> {
-    let rule = rules().into_iter().find(|rule| rule.id == id)?;
+    let rule = rules().find(|rule| rule.id == id)?;
     let metadata = serde_json::json!({
         "id": rule.id, "kind": "framework", "category": rule.category, "semantic": true,
         "message": rule.message, "references": [rule.reference],
+        "metadata": rule.metadata(),
     });
     Some(RuleDefinition {
         id: rule.id.into(),
@@ -46,18 +72,31 @@ pub(super) fn definition(id: &str) -> Option<RuleDefinition> {
 pub fn run_framework_checks(root: &Path, changed: &[String]) -> Vec<AgentFinding> {
     let mut findings = go_cancel::run(root, changed);
     findings.extend(java::run(root, changed));
+    findings.extend(web::run(root, changed, |path, source, file| {
+        let mut web_findings = react::inspect(path, source, file);
+        web_findings.extend(prisma::inspect(path, source, file));
+        web_findings.extend(rabbitmq::inspect(path, source, file));
+        web_findings.extend(jest::inspect(root, path, source, file));
+        web_findings.extend(fetch::inspect(path, source, file));
+        web_findings
+    }));
     findings
 }
 
 struct Rule {
     id: &'static str,
     category: &'static str,
+    subcategories: &'static [&'static str],
     title: &'static str,
     message: &'static str,
     reference: &'static str,
 }
 
 impl Rule {
+    fn metadata(&self) -> std::collections::HashMap<String, serde_json::Value> {
+        super::artifact_policy::rule_metadata(self.reference, self.subcategories)
+    }
+
     fn finding(&self, anchor: Location, related: Vec<Location>) -> AgentFinding {
         AgentFinding {
             source: FindingSource {
@@ -76,10 +115,7 @@ impl Rule {
             related_locations: (!related.is_empty()).then_some(related),
             suggestion: None,
             tags: None,
-            meta: Some(std::collections::HashMap::from([(
-                "references".into(),
-                serde_json::json!([self.reference]),
-            )])),
+            meta: Some(self.metadata()),
             suggested_patch: None,
         }
     }

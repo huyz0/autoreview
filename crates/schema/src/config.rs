@@ -1,3 +1,5 @@
+pub use crate::artifact_config::*;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -505,6 +507,8 @@ impl Default for MineFromCommentsConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoreviewConfig {
+    #[serde(default)]
+    pub artifact_checks: ArtifactChecksConfig,
     #[serde(default)]
     pub triage: TriageConfig,
     #[serde(default)]

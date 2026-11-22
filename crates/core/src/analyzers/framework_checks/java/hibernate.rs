@@ -12,6 +12,7 @@ pub(super) use mapping::index;
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     id: "java-hibernate-implicit-n-plus-one",
     category: "performance",
+    subcategories: &["persistence.query-efficiency"],
     title: "Lazy collection initialized for every query result",
     message: "This loop materializes a mapped lazy collection on each entity from a typed query. Hibernate may issue one extra select per result. Check the generated SQL and consider a fetch join or an entity graph for this association.",
     reference: "https://docs.hibernate.org/stable/core/userguide/html_single/#hql-explicit-fetch-joins",
