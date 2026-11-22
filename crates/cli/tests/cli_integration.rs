@@ -636,6 +636,47 @@ class Caller {
 }
 
 #[test]
+fn api_contract_rules_replay_on_bad_and_fixed_commits() {
+    const FIXTURES: [(&str, &str, &str, &str, u32); 3] = [
+        (
+            "go-os-rename-discarded-error", "rename/move.go",
+            include_str!("../../core/tests/fixtures/rules/go-os-rename-discarded-error/positive.go"),
+            include_str!("../../core/tests/fixtures/rules/go-os-rename-discarded-error/negative.go"),
+            6,
+        ),
+        (
+            "go-gzip-writer-unclosed", "gzip/archive.go",
+            include_str!("../../core/tests/fixtures/rules/go-gzip-writer-unclosed/positive.go"),
+            include_str!("../../core/tests/fixtures/rules/go-gzip-writer-unclosed/negative.go"),
+            15,
+        ),
+        (
+            "java-completable-future-unobserved", "Main.java",
+            include_str!("../../core/tests/fixtures/rules/java-completable-future-unobserved/positive.java"),
+            include_str!("../../core/tests/fixtures/rules/java-completable-future-unobserved/negative.java"),
+            7,
+        ),
+    ];
+    let bad_files = FIXTURES.map(|(_, path, bad, _, _)| (path, bad));
+    let repo = init_repo(&bad_files);
+    let before = current_commit(repo.path());
+    let fix_files = FIXTURES.map(|(_, path, _, fixed, _)| (path, fixed));
+    repo.commit(&fix_files, "Satisfy API contracts");
+    let after = current_commit(repo.path());
+    let cases: Vec<_> = FIXTURES.iter().map(|(id, path, _, _, line)| serde_json::json!({
+        "name": id,
+        "rule": { "tool": "autoreview-dataflow", "id": id },
+        "before": { "commit": before, "path": path, "lines": [line] },
+        "after": { "commit": after, "path": path, "lines": [] }
+    })).collect();
+    std::fs::write(repo.path().join("contracts.yaml"), serde_json::json!({ "cases": cases }).to_string()).unwrap();
+    Command::cargo_bin("autoreview").unwrap()
+        .current_dir(repo.path())
+        .args(["rules", "replay", "--suite", "contracts.yaml"])
+        .assert().success();
+}
+
+#[test]
 fn diff_subcategories_intersect_with_aspects() {
     if !ast_grep_available() {
         return;

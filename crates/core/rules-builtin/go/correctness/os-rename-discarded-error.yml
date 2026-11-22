@@ -1,0 +1,13 @@
+id: go-os-rename-discarded-error
+language: Go
+category: correctness
+severity: warning
+kind: call-sequence
+message: "Check or propagate the error returned by os.Rename so callers can react when the file was not moved."
+metadata:
+  subcategory: [correctness.error-handling]
+  references: ["https://pkg.go.dev/os#Rename"]
+contract:
+  mode: must-use
+  import: os
+  methods: [Rename]

@@ -153,6 +153,12 @@ impl<'graph> State<'graph> {
         returned
     }
 
+    pub(super) fn transfer_returned_handle(&mut self) {
+        if let Some(handle) = &self.returned {
+            self.remove(&Entry::handle(handle.clone()));
+        }
+    }
+
     fn record_generations(&mut self, unit: usize, site: usize, more: u8) {
         let count = self.allocations.entry((unit, site)).or_default();
         *count = (*count + more).min(2);
@@ -236,7 +242,7 @@ impl<'graph> State<'graph> {
     }
 
     pub(super) fn remove(&mut self, entry: &Entry) {
-        if !older(&entry.collection) && !older(&entry.key) {
+        if !older(&entry.collection) && !entry.key.as_ref().is_some_and(older) {
             self.pending.remove(entry);
         }
     }
@@ -303,7 +309,9 @@ impl<'graph> State<'graph> {
 
 fn advance_entry(entry: &mut Entry, unit: usize, site: usize) {
     advance(&mut entry.collection, unit, site);
-    advance(&mut entry.key, unit, site);
+    if let Some(key) = &mut entry.key {
+        advance(key, unit, site);
+    }
 }
 
 fn advance(value: &mut IdentityOperand, unit: usize, site: usize) {

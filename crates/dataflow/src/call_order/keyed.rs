@@ -8,6 +8,7 @@ use super::identity::{Entry, Values};
 use super::plan::Plan;
 use super::{CallOrderHit, CallOrderSpec, EntryHit};
 
+mod contracts;
 mod helpers;
 mod program;
 mod state;
@@ -63,7 +64,7 @@ pub fn check_keyed_units(
         .frames
         .iter()
         .filter_map(|frame| frame.plan.as_ref())
-        .any(|plan| plan.syntax.has_registration(&spec.after))
+        .any(Plan::has_registration)
     {
         return Vec::new();
     }
@@ -108,7 +109,10 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
         let root = &self.program.frames[frame];
         let check_exits = root.plan.as_ref()?.spec.check_before_return;
         for exit in self.paths(frame, root.graph, State::default())? {
-            for state in self.unwind(frame, exit.state)? {
+            for mut state in self.unwind(frame, exit.state)? {
+                if root.plan.as_ref()?.spec.contract.is_some() {
+                    state.transfer_returned_handle();
+                }
                 if check_exits {
                     for (entry, &registration) in &state.pending {
                         self.record_hit(

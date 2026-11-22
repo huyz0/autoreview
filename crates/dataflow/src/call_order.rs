@@ -3,6 +3,8 @@
 //! and eligible same-file helper calls.
 
 mod bindings;
+mod contract;
+pub use contract::{ContractLanguage, ContractMode, ResultContract};
 mod identity;
 mod plan;
 mod keyed;
@@ -34,6 +36,13 @@ pub struct CallOrderSpec {
     /// with) `before`.
     pub check_before_return: bool,
     pub identity: Option<EntryIdentity>,
+    pub contract: Option<ResultContract>,
+}
+
+impl CallOrderSpec {
+    pub fn uses_path_engine(&self) -> bool {
+        self.identity.is_some() || self.contract.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +103,7 @@ pub struct CallOrderHit {
 
 /// Runs the original function-wide obligation check.
 pub fn check(spec: &CallOrderSpec, cfg: &Cfg<Stmt>) -> Vec<CallOrderHit> {
-    if spec.identity.is_some() {
+    if spec.uses_path_engine() {
         return Vec::new();
     }
     let out_facts = solver::solve(cfg, |_id, node: &CfgNode<Stmt>, in_fact: &Pending| {
@@ -134,6 +143,7 @@ mod tests {
             before: vec![NamePattern::suffix("parse")],
             check_before_return: false,
             identity: None,
+            contract: None,
         }
     }
 
@@ -145,6 +155,7 @@ mod tests {
             before: vec![],
             check_before_return: true,
             identity: None,
+            contract: None,
         }
     }
 

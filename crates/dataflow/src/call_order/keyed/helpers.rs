@@ -60,7 +60,13 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
         }
 
         let plan = self.program.frames[frame].plan.as_ref()?;
+        if let Some(site) = site {
+            if self.apply_contract_source(frame, name, site, state, location)? {
+                return Some(None);
+            }
+        }
         let call = plan.call(name, site, &state.values)?;
+        self.allow_opaque_transfer(frame, name, site, &call, state);
         if let Some(entry) = call.entry {
             if let Some(&registration) = state.pending.get(&entry).filter(|_| call.trigger) {
                 self.record_hit(name, frame, location, &entry, registration);

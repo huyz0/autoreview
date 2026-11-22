@@ -1,0 +1,16 @@
+id: go-gzip-writer-unclosed
+language: Go
+category: correctness
+severity: warning
+kind: call-sequence
+message: "Close the gzip writer before releasing ownership. Close flushes unwritten data and writes the gzip footer."
+metadata:
+  subcategory: [reliability.resource-lifecycle]
+  references: ["https://pkg.go.dev/compress/gzip#Writer.Close"]
+contract:
+  mode: must-complete
+  import: compress/gzip
+  methods: [NewWriter]
+  borrows: [Write, Flush]
+unless:
+  - call: Close
