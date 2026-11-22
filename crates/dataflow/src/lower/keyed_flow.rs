@@ -61,14 +61,9 @@ impl Flow<'_> {
 
     fn ordinary_statement(&self, cfg: &mut Cfg<Stmt>, node: Node<'_>, current: NodeId) -> NodeId {
         let current = self.exceptional_edge(cfg, node, current);
-        if matches!(node.kind(), "if_statement" | "if_expression") {
+        let conditional = matches!(node.kind(), "if_statement" | "if_expression");
+        if conditional {
             cfg.nodes[current].condition = keyed_syntax::condition(node, self.source);
-            // Go evaluates an optional initializer before the test.
-            if node.child_by_field_name("initializer").is_none() {
-                if let Some(test) = node.child_by_field_name("condition") {
-                    super::record_evaluation(cfg, current, test);
-                }
-            }
         } else {
             super::record_evaluation(cfg, current, node);
         }
@@ -81,6 +76,10 @@ impl Flow<'_> {
             }
             None => (self.ordinary)(cfg, node, self.source, current),
         };
+        // Go emits an optional initializer in the test's node.
+        if let Some(test) = conditional.then(|| node.child_by_field_name("condition")).flatten() {
+            super::record_evaluation(cfg, current, test);
+        }
         cfg.nodes[current].record_statement_lines(start, line(node));
         for write in keyed_syntax::writes(node, self.source) {
             cfg.emit(end, Stmt::Rebind(write), line(node));

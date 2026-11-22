@@ -2,6 +2,7 @@
 //! reached it, so later assignments to the same local cannot satisfy it.
 
 mod effects;
+mod references;
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 

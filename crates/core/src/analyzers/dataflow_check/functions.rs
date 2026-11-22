@@ -16,6 +16,13 @@ pub(super) fn function_declarations(tree: &Tree) -> Vec<Node<'_>> {
     descendants_of_kinds(tree, &["function_declaration"])
 }
 
+pub(super) fn web_result_functions(tree: &Tree) -> Vec<Node<'_>> {
+    descendants_of_kinds(tree, &["arrow_function", "function_expression", "method_definition"])
+        .into_iter()
+        .filter(|node| node.child_by_field_name("body").is_some_and(|body| body.kind() == "statement_block"))
+        .collect()
+}
+
 pub(super) fn rust_functions(tree: &Tree) -> Vec<Node<'_>> {
     descendants_of_kinds(tree, &["function_item"])
         .into_iter()

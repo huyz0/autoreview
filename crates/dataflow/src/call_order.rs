@@ -44,6 +44,10 @@ impl CallOrderSpec {
     pub fn uses_path_engine(&self) -> bool {
         self.identity.is_some() || self.contract.is_some()
     }
+
+    pub fn tracks_result_use(&self) -> bool {
+        self.contract.as_ref().is_some_and(|contract| contract.mode == ContractMode::MustUse)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

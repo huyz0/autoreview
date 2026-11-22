@@ -110,24 +110,21 @@ impl<'src> Bindings<'src> {
                 self.local_values.record(node, target, source);
             }
             let simple = single_target && simple_target(target).is_some();
-            let alias = simple
-                .then_some(init)
-                .flatten()
-                .and_then(|value| direct_alias(value, source));
-            let visible_at = init.map_or(target.end_byte(), |value| value.end_byte());
-            let uncertain = !simple || (alias.is_some() && conditional_var(node));
-            for name in names_in(target, source) {
-                let binding = Binding {
-                    visible_at,
-                    alias: alias.clone(),
-                };
-                self.declarations
-                    .entry(name)
-                    .and_modify(|slot| *slot = None)
-                    .or_insert(Some(binding));
-                if uncertain {
-                    self.writes.insert(name);
-                }
+            self.record_identity(node, target, init, simple, source);
+        }
+    }
+
+    fn record_identity(
+        &mut self, node: Node<'_>, target: Node<'_>, init: Option<Node<'_>>, simple: bool, source: &'src [u8],
+    ) {
+        let alias = init.filter(|_| simple).and_then(|value| direct_alias(value, source));
+        let visible_at = init.map_or(target.end_byte(), |value| value.end_byte());
+        let uncertain = !simple || (alias.is_some() && conditional_var(node));
+        for name in names_in(target, source) {
+            let binding = Binding { visible_at, alias: alias.clone() };
+            self.declarations.entry(name).and_modify(|slot| *slot = None).or_insert(Some(binding));
+            if uncertain {
+                self.writes.insert(name);
             }
         }
     }

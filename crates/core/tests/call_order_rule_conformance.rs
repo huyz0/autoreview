@@ -157,10 +157,8 @@ fn every_call_order_rule_declares_a_category() {
     }
 }
 
-#[test]
-fn assigned_results_are_used_only_by_reachable_reads_of_the_original_value() {
-    let cases = [
-        ("move.go", "go-os-rename-discarded-error", r#"package storage
+const ASSIGNED_RESULT_CASES: [(&str, &str, &str); 4] = [
+    ("move.go", "go-os-rename-discarded-error", r#"package storage
 import "os"
 func overwritten(from, to string) error {
     var err, alias = os.Rename(from, to), error(nil) // unused result
@@ -190,7 +188,7 @@ func blank(from, to string) {
     _ = err
 }
 "#),
-        ("Main.kt", "kotlin-discarded-run-catching-result", r#"import kotlin.runCatching
+    ("Main.kt", "kotlin-discarded-run-catching-result", r#"import kotlin.runCatching
 fun parse(s: String, active: Boolean): Int {
     val result = runCatching { s.toInt() }
     if (active) return result.getOrThrow()
@@ -206,7 +204,7 @@ fun overwrite(s: String): Int {
     return parsed.getOrThrow()
 }
 "#),
-        ("lib.rs", "rust-discarded-remove-file-result", r#"use std::fs::remove_file;
+    ("lib.rs", "rust-discarded-remove-file-result", r#"use std::fs::remove_file;
 fn overwrite(path: &str, spare: &str, refresh: bool) -> std::io::Result<()> {
     let mut removed = remove_file(path); // unused result
     if refresh {
@@ -235,7 +233,7 @@ fn forward(path: &str) -> std::io::Result<()> {
     outcome
 }
 "#),
-        ("Page.tsx", "typescript-node-fs-discarded-promise", r#"import { rename } from 'node:fs/promises';
+    ("Page.tsx", "typescript-node-fs-discarded-promise", r#"import { rename } from 'node:fs/promises';
 export async function Page(from: string, to: string) {
     const result = rename(from, to); // unused result
     return <main><result /></main>;
@@ -252,9 +250,16 @@ export function Schedule(from: string, to: string) {
 const preview = rename => {
     const pending = rename('fake', 'never');
 };
+export const Tile = (from: string, to: string) => {
+    const pending = rename(from, to); // unused result
+    return <aside />;
+};
 "#),
-    ];
-    for (path, rule, source) in cases {
+];
+
+#[test]
+fn assigned_results_are_used_only_by_reachable_reads_of_the_original_value() {
+    for (path, rule, source) in ASSIGNED_RESULT_CASES {
         let repo = write_single_file(path, source);
         let findings = run_dataflow_check(repo.path(), &[path.into()], &[]);
         let mut matches: Vec<_> = findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some(rule))

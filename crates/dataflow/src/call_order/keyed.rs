@@ -6,7 +6,7 @@ use crate::cfg::{CallSite, CallTarget, Cfg, EdgeKind, IdentityOperand, NodeId, S
 
 use super::identity::{Entry, Values};
 use super::plan::Plan;
-use super::{CallOrderHit, CallOrderSpec, ContractMode, EntryHit};
+use super::{CallOrderHit, CallOrderSpec, EntryHit};
 
 mod contracts;
 mod helpers;
@@ -59,7 +59,7 @@ pub fn check_keyed_units(
     spec: &CallOrderSpec,
     units: &[KeyedUnit<'_, '_, '_>],
 ) -> Vec<CallOrderHit> {
-    if spec.contract.as_ref().is_some_and(|contract| contract.mode == ContractMode::MustUse) {
+    if spec.tracks_result_use() {
         return super::result_use::check_units(spec, units);
     }
     let program = Program::new(spec, units);

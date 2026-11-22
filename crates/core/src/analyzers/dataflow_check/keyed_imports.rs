@@ -9,6 +9,7 @@ use tree_sitter::Node;
 use super::cache::{ParseCache, ParsedFile, SummaryCaches};
 use super::dispatch::profile;
 use super::dsl::call_order_finding;
+use super::functions::web_result_functions;
 use super::{call_order_rules::CallOrderRuleDef, AgentFinding};
 
 mod go;
@@ -84,23 +85,26 @@ fn run_sources(
         .values()
         .map(|file| {
             let (extract, _) = profile(file.language);
-            extract(&file.parsed.1)
-                .into_iter()
-                .map(|node| {
-                    (
-                        node,
-                        lower::keyed_variant(file.language, file.parsed.0.as_bytes(), node),
-                    )
-                })
-                .collect::<Vec<_>>()
+            let mut nodes = extract(&file.parsed.1);
+            let ordinary = nodes.len();
+            if matches!(file.language, Language::JavaScript | Language::TypeScript | Language::Tsx)
+                && rules.iter().any(|(rule, language)| rule.spec.tracks_result_use() && file.language.matches_rule_language(*language))
+            {
+                nodes.extend(web_result_functions(&file.parsed.1));
+            }
+            let graphs = nodes.into_iter()
+                .map(|node| (node, lower::keyed_variant(file.language, file.parsed.0.as_bytes(), node)))
+                .collect::<Vec<_>>();
+            (ordinary, graphs)
         })
         .collect();
-    let functions: Vec<Vec<_>> = lowered
+    let functions: Vec<_> = lowered
         .iter()
-        .map(|file| {
-            file.iter()
+        .map(|(ordinary, file)| {
+            let functions = file.iter()
                 .map(|(node, graph)| KeyedFunction { node: *node, graph })
-                .collect()
+                .collect::<Vec<_>>();
+            (*ordinary, functions)
         })
         .collect();
     let mut findings = Vec::new();
@@ -108,10 +112,10 @@ fn run_sources(
         let units: Vec<_> = sources
             .iter()
             .zip(&functions)
-            .map(|((path, file), functions)| KeyedUnit {
+            .map(|((path, file), (ordinary, functions))| KeyedUnit {
                 path,
                 source: file.parsed.0.as_bytes(),
-                functions,
+                functions: if rule.spec.tracks_result_use() { functions } else { &functions[..*ordinary] },
                 imports: &file.imports,
                 entry: entries.contains(path) && file.language.matches_rule_language(declared),
             })

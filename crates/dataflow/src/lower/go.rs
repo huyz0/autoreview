@@ -421,9 +421,6 @@ fn lower_if(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> 
     // the nil-guard case below — recorded as `Other` text on the branch
     // point for line-number/debug fidelity regardless.
     let nil_guard = stmt.child_by_field_name("condition").and_then(|cond| {
-        if stmt.child_by_field_name("initializer").is_some() {
-            super::record_evaluation(cfg, current, cond);
-        }
         cfg.nodes[current].stmts.push(Stmt::Other(format!("if {}", text(cond, source))));
         recognize_nil_guard(cond, source)
     });

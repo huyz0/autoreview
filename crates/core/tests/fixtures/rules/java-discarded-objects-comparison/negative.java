@@ -1,8 +1,6 @@
-import java.util.Objects;
-
-class Label {
-    boolean matches(Object current, Object expected, Object backup) {
-        boolean matches = Objects.equals(current, expected);
-        return matches || current == backup;
+class Metadata {
+    static String format(String[] actual, String[] expected) {
+        var matches = java.util.Objects.deepEquals(actual, expected);
+        return matches ? "unchanged" : "updated";
     }
 }
