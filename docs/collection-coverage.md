@@ -67,11 +67,11 @@ can show what still owns an old allocation.
 - Listener registration and removal depend on identity. A fresh inline
   function cannot remove the previously registered handler. Pending-request
   maps have a similar requirement for the original collection and key.
-  The current call-order DSL tracks a pending flag per function. Extending
-  it to verify balance needs collection and key identity, control flow,
-  and an explicit cleanup contract. Bounded caches, ownership transfer,
-  expiration, and append-only storage must remain valid.
-  [DOM listener removal](https://dom.spec.whatwg.org/#dom-eventtarget-removeeventlistener)
+  A scoped call-sequence rule can use `identity` to track the collection and
+  key separately at branch joins and exits. Use it where the function owns
+  cleanup for the registered entry. Caches, transferred ownership,
+  expiration, and append-only storage have different lifetime contracts.
+  [Keyed call-sequence DSL](../.claude/skills/authoring-rules/reference/rule-dsl.md#track-a-collection-entry) · [DOM listener removal](https://dom.spec.whatwg.org/#dom-eventtarget-removeeventlistener)
 
 ## Cache limits and expiration
 

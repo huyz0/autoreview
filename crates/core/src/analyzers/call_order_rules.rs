@@ -1,15 +1,8 @@
-//! Loads `kind: call-sequence` rule files out of the same `rules-builtin/`
-//! tree `ast_grep.rs`/`taint_rules.rs` load from — see those modules' own
-//! docs for why one directory serves multiple execution backends. This
-//! backend runs `autoreview_dataflow::call_order`, the "did an `after`
-//! call happen without an intervening `unless` call before a `before`
-//! call or a `return`" primitive — see that module's own doc comment for
-//! exactly what gap this closes (XXE, unreleased locks) that the taint
-//! engine's data-flow model structurally can't express.
+//! Loads function-wide and keyed call-sequence rules from builtin and registered packs.
 
 use serde::Deserialize;
 
-use autoreview_dataflow::call_order::CallOrderSpec;
+use autoreview_dataflow::call_order::{CallOrderSpec, CollectionSelector, EntryIdentity};
 use autoreview_dataflow::taint::NamePattern;
 use autoreview_schema::Severity;
 
@@ -50,6 +43,27 @@ impl PatternYaml {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IdentityYaml {
+    #[serde(default)]
+    receiver: bool,
+    collection_argument: Option<usize>,
+    key_argument: usize,
+}
+
+impl IdentityYaml {
+    fn into_selector(self) -> anyhow::Result<EntryIdentity> {
+        let collection = match (self.receiver, self.collection_argument) {
+            (true, None) => CollectionSelector::Receiver,
+            (false, Some(index)) if index != self.key_argument => CollectionSelector::Argument(index),
+            (false, Some(_)) => anyhow::bail!("identity collectionArgument and keyArgument must select different arguments"),
+            _ => anyhow::bail!("identity needs exactly one of receiver: true or collectionArgument"),
+        };
+        Ok(EntryIdentity { collection, key_argument: self.key_argument })
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct CallOrderRuleYaml {
     #[serde(flatten)]
     common: RuleMeta,
@@ -67,6 +81,7 @@ struct CallOrderRuleYaml {
     before: Vec<PatternYaml>,
     #[serde(default, rename = "checkBeforeReturn")]
     check_before_return: bool,
+    identity: Option<IdentityYaml>,
 }
 
 pub type CallOrderRuleDef = super::dataflow_check::DataflowRuleDef<CallOrderSpec>;
@@ -87,10 +102,28 @@ fn parse_call_order_rule(contents: &str) -> Option<CallOrderRuleDef> {
         category: yaml.common.category,
         severity: severity_from_str(&yaml.severity),
         message: yaml.message,
-        spec: CallOrderSpec { rule_id: yaml.common.id, after, unless, before, check_before_return: yaml.check_before_return },
+        spec: CallOrderSpec {
+            rule_id: yaml.common.id,
+            after,
+            unless,
+            before,
+            check_before_return: yaml.check_before_return,
+            identity: yaml.identity.map(IdentityYaml::into_selector).transpose().ok()?,
+        },
         pack_id: None,
         metadata: yaml.common.metadata,
     })
+}
+
+/// Uses the runtime identity schema when validating a rule pack.
+pub fn validate_identity(contents: &str) -> anyhow::Result<()> {
+    #[derive(Deserialize)]
+    struct IdentityBlock {
+        identity: Option<IdentityYaml>,
+    }
+    let block: IdentityBlock = serde_yaml::from_str(contents)?;
+    block.identity.map(IdentityYaml::into_selector).transpose()?;
+    Ok(())
 }
 
 /// Every `kind: call-sequence` rule declared in `rules-builtin/` plus any
@@ -153,6 +186,32 @@ checkBeforeReturn: true
         let def = parse_call_order_rule(yaml).unwrap();
         assert!(def.spec.check_before_return);
         assert!(def.spec.before.is_empty());
+    }
+
+    #[test]
+    fn validates_identity_selectors_consistently_with_rule_loading() {
+        let rule = "id: sample\nkind: call-sequence\ncategory: correctness\n";
+        let valid = [
+            ("{receiver: true, keyArgument: 0}", CollectionSelector::Receiver, 0),
+            ("{collectionArgument: 0, keyArgument: 2}", CollectionSelector::Argument(0), 2),
+        ];
+        for (identity, collection, key_argument) in valid {
+            let contents = format!("{rule}identity: {identity}\n");
+            assert!(validate_identity(&contents).is_ok());
+            assert_eq!(parse_call_order_rule(&contents).unwrap().spec.identity, Some(EntryIdentity { collection, key_argument }));
+        }
+        for identity in [
+            "{receiver: true, collectionArgument: 0, keyArgument: 1}",
+            "{collectionArgument: 1, keyArgument: 1}",
+            "{keyArgument: 0}",
+            "{receiver: true}",
+            "{receiver: true, keyArgument: -1}",
+            "{receiver: true, keyArgument: 0, unknown: true}",
+        ] {
+            let contents = format!("{rule}identity: {identity}\n");
+            assert!(validate_identity(&contents).is_err(), "{identity}");
+            assert!(parse_call_order_rule(&contents).is_none(), "{identity}");
+        }
     }
 
     #[test]

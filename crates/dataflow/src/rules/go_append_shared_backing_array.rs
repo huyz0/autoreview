@@ -95,7 +95,7 @@ fn apply(facts: &Facts, stmt: &Stmt) -> Facts {
 }
 
 fn is_self_append(stmt: &Stmt) -> Option<&str> {
-    if let Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(v) } = stmt {
+    if let Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(v), .. } = stmt {
         if name == "append" && args.iter().any(|a| a == v) {
             return Some(v.as_str());
         }

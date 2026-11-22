@@ -37,6 +37,21 @@ pub enum CallTarget {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IdentityOperand {
+    Binding(String),
+    String(String),
+    Integer(String),
+}
+
+/// Positional operands are separate from the flattened arguments used for taint.
+#[derive(Debug, Clone)]
+pub struct CallSite {
+    pub start: usize,
+    pub receiver: Option<String>,
+    pub arguments: Vec<Option<IdentityOperand>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardOp {
     Equal,
@@ -58,7 +73,7 @@ pub enum ClosureKind {
 pub enum Stmt {
     Assign { lhs: VarId, rhs: RhsShape },
     Return { value: Option<VarId> },
-    Call { target: CallTarget, args: Vec<VarId>, assigned_to: Option<VarId> },
+    Call { target: CallTarget, args: Vec<VarId>, assigned_to: Option<VarId>, site: Option<Box<CallSite>> },
     Guard { var: VarId, op: GuardOp, against: GuardAgainst },
     ClosureCapture { captured: Vec<VarId>, kind: ClosureKind },
     /// Marks the point where `vars` come into scope as a range-loop's own

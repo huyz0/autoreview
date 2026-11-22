@@ -35,7 +35,7 @@ fn classify_rhs(node: Node, source: &[u8]) -> RhsShape {
 /// (`recv.method(...)`, grammar shape `call_expression -> function: member_
 /// expression -> object/property`) lowers to `"recv.method"`, matching Go's
 /// own qualified-selector convention.
-fn call_target_name(call: Node, source: &[u8]) -> Option<String> {
+pub(super) fn call_target_name(call: Node, source: &[u8]) -> Option<String> {
     let func = call.child_by_field_name("function")?;
     match func.kind() {
         "identifier" => Some(text(func, source).to_string()),
@@ -73,7 +73,7 @@ fn lower_var_decl(node: Node, source: &[u8]) -> Stmt {
     let Some(value) = declarator.child_by_field_name("value") else { return fallback() };
     if value.kind() == "call_expression" {
         if let Some(name) = call_target_name(value, source) {
-            return Stmt::Call { target: crate::cfg::CallTarget::Named(name), args: call_arg_identifiers(value, source), assigned_to: Some(lhs) };
+            return Stmt::Call { target: crate::cfg::CallTarget::Named(name), args: call_arg_identifiers(value, source), assigned_to: Some(lhs), site: super::site::capture(value, source) };
         }
     }
     Stmt::Assign { lhs, rhs: classify_rhs(value, source) }
@@ -90,7 +90,7 @@ fn lower_assignment_expression(node: Node, source: &[u8]) -> Stmt {
     let lhs = text(left, source).to_string();
     if right.kind() == "call_expression" {
         if let Some(name) = call_target_name(right, source) {
-            return Stmt::Call { target: crate::cfg::CallTarget::Named(name), args: call_arg_identifiers(right, source), assigned_to: Some(lhs) };
+            return Stmt::Call { target: crate::cfg::CallTarget::Named(name), args: call_arg_identifiers(right, source), assigned_to: Some(lhs), site: super::site::capture(right, source) };
         }
     }
     Stmt::Assign { lhs, rhs: classify_rhs(right, source) }
@@ -144,7 +144,7 @@ fn lower_statement_inner(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current
                     // which only inspects `Stmt::Call` nodes.
                     "call_expression" => {
                         if let Some(name) = call_target_name(inner, source) {
-                            cfg.nodes[current].stmts.push(Stmt::Call { target: crate::cfg::CallTarget::Named(name), args: call_arg_identifiers(inner, source), assigned_to: None });
+                            cfg.nodes[current].stmts.push(Stmt::Call { target: crate::cfg::CallTarget::Named(name), args: call_arg_identifiers(inner, source), assigned_to: None, site: super::site::capture(inner, source) });
                             return current;
                         }
                     }
@@ -286,7 +286,7 @@ mod tests {
         assert!(
             cfg.nodes
                 .iter()
-                .any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(a) } if name == "req.query" && a == "q" && args.contains(&"sql".to_string())))),
+                .any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(a), .. } if name == "req.query" && a == "q" && args.contains(&"sql".to_string())))),
             "got: {:#?}",
             cfg.nodes
         );
@@ -298,7 +298,7 @@ mod tests {
         assert!(
             cfg.nodes
                 .iter()
-                .any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: None } if name == "stmt.execute" && args.contains(&"sql".to_string())))),
+                .any(|n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: None, .. } if name == "stmt.execute" && args.contains(&"sql".to_string())))),
             "got: {:#?}",
             cfg.nodes
         );
