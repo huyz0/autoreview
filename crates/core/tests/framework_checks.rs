@@ -331,6 +331,16 @@ class Service {
     assert!(scan(&[("Service.java", &woven)], &["Service.java"]).is_empty());
 }
 
+fn cross_file_evidence(findings: &[autoreview_schema::AgentFinding]) -> Vec<(&str, &str)> {
+    findings
+        .iter()
+        .map(|finding| {
+            let target = &finding.related_locations.as_ref().unwrap()[0];
+            (finding.location.snippet.as_str(), target.path.as_str())
+        })
+        .collect()
+}
+
 #[test]
 fn constructor_resolves_inherited_protected_methods_and_interface_defaults() {
     let base = r#"package parents;
@@ -370,17 +380,8 @@ public class Child extends Parent implements Contract {
         ],
         &["app/Child.java"],
     );
-    let evidence: Vec<_> = found
-        .iter()
-        .map(|item| {
-            (
-                item.location.snippet.as_str(),
-                item.related_locations.as_ref().unwrap()[0].path.as_str(),
-            )
-        })
-        .collect();
     assert_eq!(
-        evidence,
+        cross_file_evidence(&found),
         [
             ("prepare(task)", "parents/Parent.java"),
             ("check()", "parents/Contract.java")
@@ -433,17 +434,8 @@ class Worker extends BaseService implements TaskApi {
         ],
         &["application/Worker.java"],
     );
-    let evidence: Vec<_> = found
-        .iter()
-        .map(|item| {
-            (
-                item.location.snippet.as_str(),
-                item.related_locations.as_ref().unwrap()[0].path.as_str(),
-            )
-        })
-        .collect();
     assert_eq!(
-        evidence,
+        cross_file_evidence(&found),
         [
             ("this.save(value)", "model/BaseService.java"),
             ("super.save(value)", "model/BaseService.java"),

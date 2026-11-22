@@ -39,9 +39,7 @@ impl<'a> Lookup<'a> {
             owner,
             member_types: Members::load(hierarchy, owner, &owner.package),
             super_types: owner
-                .superclass
-                .as_deref()
-                .and_then(|parent| hierarchy.named(owner, parent))
+                .direct_superclass(hierarchy)
                 .map(|parent| Members::load(hierarchy, parent, &owner.package)),
         }
     }
@@ -216,7 +214,7 @@ impl Hierarchy {
         if closer.name == farther.name {
             return false;
         }
-        (!closer.is_interface && farther.is_interface)
+        closer.takes_precedence_over(farther)
             || Members::load(self, closer, &closer.package)
                 .types
                 .iter()
@@ -261,7 +259,7 @@ impl Hierarchy {
             if owner.transaction.is_some() {
                 return owner.transaction.as_ref();
             }
-            owner = self.named(owner, owner.superclass.as_deref()?)?;
+            owner = owner.direct_superclass(self)?;
         }
         None
     }

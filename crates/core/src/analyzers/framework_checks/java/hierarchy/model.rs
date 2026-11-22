@@ -16,9 +16,8 @@ pub(in crate::analyzers::framework_checks::java) const TX: &str =
 #[derive(Default)]
 pub(in crate::analyzers::framework_checks::java) struct Hierarchy {
     // A duplicate source declaration has no unique owner.
-    names: HashMap<String, Option<usize>>,
+    names: HashMap<String, Option<(String, usize)>>,
     declarations: HashMap<String, HashMap<usize, Type>>,
-    indexed: Vec<(String, usize)>,
     aspectj_paths: HashSet<String>,
 }
 
@@ -90,20 +89,16 @@ impl Hierarchy {
             {
                 self.aspectj_paths.insert(java.path.into());
             }
-            if let Some(owner) = Type::parse(java, declaration) {
-                let start = declaration.start_byte();
-                if let Some(name) = type_key(java, declaration) {
-                    self.names
-                        .entry(name)
-                        .and_modify(|entry| *entry = None)
-                        .or_insert(Some(self.indexed.len()));
-                    self.indexed.push((java.path.into(), start));
-                }
-                self.declarations
-                    .entry(java.path.into())
-                    .or_default()
-                    .insert(start, owner);
-            }
+            let owner = Type::parse(java, declaration);
+            let start = declaration.start_byte();
+            self.names
+                .entry(owner.name.clone())
+                .and_modify(|entry| *entry = None)
+                .or_insert_with(|| Some((java.path.into(), start)));
+            self.declarations
+                .entry(java.path.into())
+                .or_default()
+                .insert(start, owner);
         }
     }
 
@@ -118,8 +113,7 @@ impl Hierarchy {
     }
 
     pub fn named(&self, owner: &Type, name: &str) -> Option<&Type> {
-        let index = (*self.names.get(&self.canonical(owner, name)?)?)?;
-        let (path, start) = self.indexed.get(index)?;
+        let (path, start) = self.names.get(&self.canonical(owner, name)?)?.as_ref()?;
         self.declarations.get(path)?.get(start)
     }
 
@@ -138,17 +132,16 @@ impl Hierarchy {
     }
 
     fn source_name(&self, owner: &Type, raw: &str) -> Option<String> {
-        let member = qualified(&owner.name, raw);
-        let same_package = qualified(&owner.package, raw);
-        for name in [member, same_package, raw.to_owned()] {
+        for name in owner.local_names(raw) {
             if self.names.contains_key(&name) {
                 return Some(name);
             }
         }
+        if raw.contains('.') && self.names.contains_key(raw) {
+            return Some(raw.into());
+        }
         let mut found = owner
-            .wildcards
-            .iter()
-            .map(|package| qualified(package, raw))
+            .wildcard_names(raw)
             .filter(|name| self.names.contains_key(name));
         let name = found.next()?;
         found.next().is_none().then_some(name)
@@ -175,9 +168,27 @@ fn standard_type(raw: &str) -> Option<String> {
 }
 
 impl Type {
-    fn parse(java: &Java<'_>, declaration: Node<'_>) -> Option<Self> {
+    fn local_names(&self, raw: &str) -> [String; 2] {
+        [qualified(&self.name, raw), qualified(&self.package, raw)]
+    }
+
+    fn wildcard_names<'a>(&'a self, raw: &'a str) -> impl Iterator<Item = String> + 'a {
+        self.wildcards
+            .iter()
+            .map(move |package| qualified(package, raw))
+    }
+
+    pub fn direct_superclass<'a>(&self, hierarchy: &'a Hierarchy) -> Option<&'a Type> {
+        hierarchy.named(self, self.superclass.as_deref()?)
+    }
+
+    pub fn takes_precedence_over(&self, other: &Type) -> bool {
+        !self.is_interface && other.is_interface
+    }
+
+    fn parse(java: &Java<'_>, declaration: Node<'_>) -> Self {
         let is_interface = declaration.kind() == "interface_declaration";
-        Some(Self {
+        Self {
             name: type_key(java, declaration)
                 .unwrap_or_else(|| format!("{}@{}", java.path, declaration.start_byte())),
             package: java.package.to_owned(),
@@ -204,7 +215,7 @@ impl Type {
                 .filter_map(|node| Method::parse(java, node, is_interface))
                 .collect(),
             transaction: transaction(java, declaration),
-        })
+        }
     }
 }
 
