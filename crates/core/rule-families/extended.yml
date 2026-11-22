@@ -112,3 +112,32 @@ concurrent-write-file:
   constraints:
     PATH: {kind: string}
   languages: {JavaScript: {}, TypeScript: {}}
+
+jsx-button-without-keyboard:
+  category: correctness
+  severity: warning
+  semantic: true
+  message: This non-native button handles clicks without keyboard activation. Prefer a native button or handle Enter and Space.
+  metadata:
+    references: ["https://www.w3.org/WAI/ARIA/apg/patterns/button/"]
+    subcategory: [accessibility.keyboard]
+  rule:
+    any:
+      - kind: jsx_opening_element
+      - kind: jsx_self_closing_element
+    all:
+      - has: {field: name, regex: '^(div|span|li|p|section)$'}
+      - has:
+          pattern:
+            context: 'const view = <div role="button" />'
+            selector: jsx_attribute
+      - has:
+          kind: jsx_attribute
+          has: {kind: property_identifier, regex: '^onClick$'}
+      - not:
+          has:
+            any:
+              - kind: jsx_expression
+              - kind: jsx_attribute
+                has: {kind: property_identifier, regex: '^onKey(Down|Up|Press)$'}
+  languages: {JavaScript: {}, Tsx: {}}
