@@ -88,6 +88,9 @@ struct DiffArgs {
     tier: Option<String>,
     #[arg(long)]
     aspects: Option<String>,
+    /// Limit findings to the given subcategory labels
+    #[arg(long, value_delimiter = ',')]
+    subcategories: Option<Vec<String>>,
     #[arg(long = "max-usd")]
     max_usd: Option<f64>,
     /// Suppress findings whose fingerprint was already reported in the most recent prior run on this repo
@@ -369,6 +372,7 @@ fn run_review(repo: std::path::PathBuf, args: DiffArgs) -> anyhow::Result<()> {
     run_diff_or_watch(DiffCommandOptions {
         repo_root: repo, base_ref: args.base, head_ref: args.head, tier,
         aspects: args.aspects.map(|value| value.split(',').map(|item| item.trim().to_string()).collect()),
+        subcategories: args.subcategories,
         max_usd: args.max_usd, incremental: args.incremental, static_only: args.static_only,
         changed_lines: args.changed_lines, audit_rust_deps: args.audit_rust_deps, backend,
     }, args.watch, args.watch_interval)

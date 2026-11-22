@@ -4,11 +4,10 @@ use std::path::Path;
 
 use serde_yaml::{Mapping, Value};
 
-const FAMILY_SOURCE: &str = "rule-families/loops.yml";
+const FAMILY_SOURCES: &[&str] = &["rule-families/loops.yml", "rule-families/extended.yml"];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=rules-builtin");
-    println!("cargo:rerun-if-changed={FAMILY_SOURCE}");
 
     let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"))
         .join("compiled-rules");
@@ -18,7 +17,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(error) => return Err(error.into()),
     }
     copy_rule_tree(Path::new("rules-builtin"), &output)?;
-    compile_families(&output)?;
+    for source in FAMILY_SOURCES {
+        println!("cargo:rerun-if-changed={source}");
+        compile_families(source, &output)?;
+    }
     Ok(())
 }
 
@@ -36,8 +38,8 @@ fn copy_rule_tree(source: &Path, output: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn compile_families(output: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let mut families: Value = serde_yaml::from_str(&fs::read_to_string(FAMILY_SOURCE)?)?;
+fn compile_families(source: &str, output: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let mut families: Value = serde_yaml::from_str(&fs::read_to_string(source)?)?;
     families.apply_merge()?;
     let families = families.as_mapping().expect("rule families must be a YAML mapping");
     for (name, family) in families {
@@ -67,15 +69,17 @@ fn write_variant(
         "Kotlin" => "kotlin",
         "JavaScript" => "javascript",
         "TypeScript" => "typescript",
+        "Tsx" => "typescript",
         "Rust" => "rust",
         _ => return Err(format!("unsupported language {language} in {name}").into()),
     };
-    let id = format!("{directory}-{name}");
+    let id = format!("{}-{name}", language.to_ascii_lowercase());
     rule.insert("id".into(), id.into());
     rule.insert("language".into(), language.into());
     let category = rule.get("category").and_then(Value::as_str).expect("rule variant requires a category");
     assert!(safe_component(name) && safe_component(category), "invalid rule path for {name}");
-    let output = output.join(directory).join(category).join(format!("{name}.yml"));
+    let filename = if language == "Tsx" { format!("tsx-{name}") } else { name.into() };
+    let output = output.join(directory).join(category).join(format!("{filename}.yml"));
     fs::create_dir_all(output.parent().expect("rule output has a directory"))?;
     let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&output)?;
     file.write_all(serde_yaml::to_string(&rule)?.as_bytes())?;

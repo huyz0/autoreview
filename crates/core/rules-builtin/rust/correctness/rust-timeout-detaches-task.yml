@@ -7,6 +7,7 @@ message: >-
   On expiry this timeout drops the owned join handle. The spawned task can
   continue running. Keep the handle if the caller needs to cancel or join the task.
 metadata:
+  subcategory: [reliability.cancellation]
   confidence: HIGH
   references:
     - https://docs.rs/tokio/latest/tokio/time/fn.timeout.html

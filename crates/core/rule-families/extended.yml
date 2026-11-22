@@ -1,0 +1,114 @@
+discarded-property-check:
+  category: correctness
+  severity: warning
+  message: fast-check check() returns a result. Inspect its failed flag or use assert() so a failing property can fail the test.
+  metadata:
+    references: ["https://fast-check.dev/docs/core-blocks/runners/#check"]
+    subcategory: [testing.property-execution]
+  rule:
+    pattern: $FC.check($$$ARGS)
+    inside: {kind: expression_statement}
+    all:
+      - inside:
+          kind: program
+          stopBy: end
+          has:
+            any:
+              - pattern: import $FC from 'fast-check'
+              - pattern: import * as $FC from 'fast-check'
+  languages: {JavaScript: {}, TypeScript: {}}
+
+jest-async-to-throw:
+  category: correctness
+  severity: warning
+  message: This async callback returns a promise. Await a rejects matcher to check its rejection.
+  metadata:
+    references: ["https://jestjs.io/docs/expect#rejects"]
+    subcategory: [testing.assertions]
+  rule:
+    pattern: expect($CALLBACK).toThrow($$$ARGS)
+    inside:
+      kind: program
+      stopBy: end
+      has:
+        kind: import_statement
+        all:
+          - has: {field: source, regex: '^["'']@jest/globals["'']$'}
+          - has: {kind: import_specifier, regex: '^expect$', stopBy: end}
+  constraints:
+    CALLBACK:
+      regex: '^async(?:\s|\()'
+  languages: {JavaScript: {}, TypeScript: {}}
+
+week-year-with-calendar-date:
+  category: correctness
+  severity: warning
+  message: This formatter uses a week-based year with a calendar month and day. Use uuuu-MM-dd to format a calendar date.
+  metadata:
+    references: ["https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/time/format/DateTimeFormatter.html#patterns"]
+    subcategory: [time.calendar-formatting]
+  languages:
+    Java:
+      rule:
+        any:
+          - pattern: java.time.format.DateTimeFormatter.ofPattern("YYYY-MM-dd", $$$REST)
+          - pattern: java.time.format.DateTimeFormatter.ofPattern("YYYY-MM-dd")
+          - all:
+              - any:
+                  - pattern: DateTimeFormatter.ofPattern("YYYY-MM-dd", $$$REST)
+                  - pattern: DateTimeFormatter.ofPattern("YYYY-MM-dd")
+              - inside:
+                  kind: program
+                  stopBy: end
+                  has: {pattern: import java.time.format.DateTimeFormatter;}
+    Kotlin:
+      rule:
+        any:
+          - pattern:
+              context: 'fun sample() { java.time.format.DateTimeFormatter.ofPattern("YYYY-MM-dd") }'
+              selector: call_expression
+          - all:
+              - pattern:
+                  context: 'fun sample() { DateTimeFormatter.ofPattern("YYYY-MM-dd") }'
+                  selector: call_expression
+              - inside:
+                  kind: source_file
+                  stopBy: end
+                  has:
+                    kind: import_header
+                    stopBy: end
+                    regex: '^import\s+java\.time\.format\.DateTimeFormatter\s*;?$'
+
+unstable-jsx-key:
+  category: correctness
+  severity: warning
+  message: This JSX key changes each time the element renders. Use a stable identity from the item.
+  metadata:
+    references: ["https://react.dev/learn/rendering-lists#rules-of-keys"]
+    subcategory: [frontend.render-identity]
+  rule:
+    pattern:
+      context: 'const view = <div key={Math.random()} />'
+      selector: jsx_attribute
+  languages: {JavaScript: {}, Tsx: {}}
+
+concurrent-write-file:
+  category: correctness
+  severity: warning
+  semantic: true
+  message: These Node writeFile calls can write to the same file concurrently. Await each write or give each operation a distinct target.
+  metadata:
+    references: ["https://nodejs.org/api/fs.html#fspromiseswritefilefile-data-options"]
+    subcategory: [io.concurrent-writes]
+  rule:
+    pattern: Promise.all([$FS.writeFile($PATH, $$$FIRST), $FS.writeFile($PATH, $$$SECOND)])
+    inside:
+      kind: program
+      stopBy: end
+      has:
+        any:
+          - pattern: import * as $FS from 'node:fs/promises'
+          - pattern: import * as $FS from 'fs/promises'
+  constraints:
+    PATH: {kind: string}
+  languages: {JavaScript: {}, TypeScript: {}}

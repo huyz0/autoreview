@@ -130,7 +130,7 @@ pub(super) fn review(
     };
     let agent_findings = specialists::run_specialists(&model, &static_findings, &mut costs);
     let mut findings = static_findings;
-    findings.extend(agent_findings);
+    findings.extend(agent_findings.into_iter().filter(|finding| run.matches_subcategory(finding.meta.as_ref())));
     let (findings, suppressed) = judges::verify_findings(&model, findings, &mut costs);
     let criteria = judges::verify_spec(&model, &mut costs);
     ModelReview {

@@ -504,6 +504,30 @@ fn static_review_uses_the_requested_commit_and_handles_renames_from_a_subdirecto
 }
 
 #[test]
+fn diff_subcategories_intersect_with_aspects() {
+    if !ast_grep_available() {
+        return;
+    }
+    let repo = init_repo(&[("property.js", "import * as fc from 'fast-check';\n")]);
+    repo.commit(
+        &[("property.js", "import * as fc from 'fast-check';\nfc.check(fc.property(fc.nat(), n => n < 100));\n")],
+        "add discarded property check",
+    );
+    for (aspect, expected) in [("correctness", true), ("performance", false)] {
+        let output = Command::cargo_bin("autoreview").unwrap()
+            .current_dir(repo.path())
+            .args(["diff", "--base", "HEAD~1", "--static-only", "--aspects", aspect,
+                "--subcategories", "frontend,testing"])
+            .assert().success().get_output().stdout.clone();
+        let path = report_path_from_stdout(&String::from_utf8(output).unwrap());
+        let report: autoreview_schema::ReviewReport = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(report.findings.iter().any(|finding| {
+            finding.source.rule_id.as_deref() == Some("javascript-discarded-property-check")
+        }), expected, "{aspect}");
+    }
+}
+
+#[test]
 fn rules_packs_refresh_reports_a_freshly_cloned_git_pack() {
     let remote = tempfile::tempdir().unwrap();
     run_git(remote.path(), &["init", "-q"]);

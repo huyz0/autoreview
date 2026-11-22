@@ -24,6 +24,7 @@ pub struct DiffCommandOptions {
     pub head_ref: String,
     pub tier: Option<Tier>,
     pub aspects: Option<Vec<String>>,
+    pub subcategories: Option<Vec<String>>,
     pub max_usd: Option<f64>,
     pub incremental: bool,
     pub static_only: bool,
@@ -48,9 +49,28 @@ impl ReviewRun<'_> {
             .aspects
             .as_ref()
             .is_none_or(|aspects| aspects.contains(&finding.category))
+            && self.matches_subcategory(finding.meta.as_ref())
             && self
                 .changed_lines
                 .is_none_or(|lines| lines.contains_finding(finding))
+    }
+
+    fn matches_subcategory(
+        &self,
+        metadata: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    ) -> bool {
+        self.options.subcategories.as_ref().is_none_or(|selected| {
+            metadata
+                .and_then(|fields| fields.get("subcategory"))
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|labels| {
+                    labels.iter().filter_map(serde_json::Value::as_str).any(|label| {
+                        selected.iter().map(|value| value.trim()).any(|value| {
+                            label == value || label.strip_prefix(value).is_some_and(|suffix| suffix.starts_with('.'))
+                        })
+                    })
+                })
+        })
     }
 }
 
@@ -344,6 +364,7 @@ mod watch_tests {
             head_ref: "HEAD".to_string(),
             tier: None,
             aspects: None,
+            subcategories: None,
             max_usd: None,
             incremental: false,
             static_only: true,
