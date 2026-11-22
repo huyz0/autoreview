@@ -74,28 +74,31 @@ impl<'src> Syntax<'src> {
             if unsupported_flow(node, source) {
                 return None;
             }
-            if matches!(node.kind(), "method_invocation" | "call_expression" | "new_expression") {
-                if let Some(name) = name(node, source) {
-                    syntax.calls.push((node.start_byte(), name));
-                }
+            syntax.record_calls_and_guards(node, source);
+            if let Some(name) = local_callable(node, function, source) {
+                syntax.local_callables.insert(name);
             }
-            if node != function && matches!(node.kind(), "function_item" | "function_declaration") {
-                if let Some(name) = node.child_by_field_name("name").and_then(|part| part.utf8_text(source).ok()) {
-                    syntax.local_callables.insert(name);
-                }
-            }
-            syntax
-                .bindings
-                .visit(node, source, writes.contains(&node.start_byte()));
-            if matches!(node.kind(), "if_statement" | "if_expression") {
-                if let Some((name, _)) = crate::lower::keyed_syntax::condition(node, source) {
-                    *syntax.guards.entry(name).or_default() += 1;
-                }
-            }
+            syntax.bindings.visit(node, source, writes.contains(&node.start_byte()));
             nodes.extend(children(node));
         }
         syntax.bindings.record_borrowed_writes();
         Some(syntax)
+    }
+
+    fn record_calls_and_guards(&mut self, node: Node<'_>, source: &[u8]) {
+        match node.kind() {
+            "method_invocation" | "call_expression" | "new_expression" => {
+                if let Some(name) = name(node, source) {
+                    self.calls.push((node.start_byte(), name));
+                }
+            }
+            "if_statement" | "if_expression" => {
+                if let Some((name, _)) = crate::lower::keyed_syntax::condition(node, source) {
+                    *self.guards.entry(name).or_default() += 1;
+                }
+            }
+            _ => {}
+        }
     }
 
     pub(super) fn resolve(
@@ -231,6 +234,13 @@ impl EntryIdentity {
         let key = site.arguments.get(self.key_argument)?.as_ref()?;
         Some((collection.as_str(), key))
     }
+}
+
+fn local_callable<'src>(node: Node<'_>, function: Node<'_>, source: &'src [u8]) -> Option<&'src str> {
+    if node == function || !matches!(node.kind(), "function_item" | "function_declaration") {
+        return None;
+    }
+    node.child_by_field_name("name")?.utf8_text(source).ok()
 }
 
 fn binding_name(value: &IdentityOperand) -> Option<&str> {

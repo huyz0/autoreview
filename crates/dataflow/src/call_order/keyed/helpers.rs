@@ -66,7 +66,7 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
             }
         }
         let call = plan.call(name, site, &state.values)?;
-        self.allow_opaque_transfer(frame, name, site, &call, state);
+        self.allow_opaque_transfer(frame, name, site, state);
         if let Some(entry) = call.entry {
             if let Some(&registration) = state.pending.get(&entry).filter(|_| call.trigger) {
                 self.record_hit(name, frame, location, &entry, registration);
