@@ -303,7 +303,10 @@ pub fn function_name(fn_node: Node, source: &[u8]) -> Option<String> {
 /// Lowers one function/method body into a `Cfg`. `fn_node` must be a
 /// `function_declaration` or `method_declaration` with a `body` field.
 pub fn lower_function(source: &[u8], fn_node: Node) -> Cfg<Stmt> {
-    let mut cfg: Cfg<Stmt> = Cfg::new_empty();
+    lower_with_cfg(Cfg::new_empty(), source, fn_node)
+}
+
+pub(super) fn lower_with_cfg(mut cfg: Cfg<Stmt>, source: &[u8], fn_node: Node) -> Cfg<Stmt> {
     let entry = cfg.push_node(fn_node.start_position().row as u32 + 1);
     let exit = cfg.push_node(fn_node.end_position().row as u32 + 1);
     cfg.entry = entry;

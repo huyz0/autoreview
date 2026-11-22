@@ -73,6 +73,8 @@ pub enum ClosureKind {
 pub enum Stmt {
     Assign { lhs: VarId, rhs: RhsShape },
     Return { value: Option<VarId> },
+    Throw,
+    DeferredCall { target: String, site: Option<Box<CallSite>> },
     Call { target: CallTarget, args: Vec<VarId>, assigned_to: Option<VarId>, site: Option<Box<CallSite>> },
     Guard { var: VarId, op: GuardOp, against: GuardAgainst },
     ClosureCapture { captured: Vec<VarId>, kind: ClosureKind },
@@ -131,6 +133,8 @@ pub struct Cfg<S> {
     pub exit: NodeId,
     pub nodes: Vec<CfgNode<S>>,
     pub edges: Vec<(NodeId, NodeId, EdgeKind)>,
+    // Remaining copies of finally blocks for distinct exit paths.
+    pub(crate) keyed_flow: Option<usize>,
 }
 
 impl<S> Cfg<S> {
@@ -153,7 +157,7 @@ impl<S> Cfg<S> {
     }
 
     pub fn new_empty() -> Self {
-        Cfg { entry: 0, exit: 0, nodes: Vec::new(), edges: Vec::new() }
+        Cfg { entry: 0, exit: 0, nodes: Vec::new(), edges: Vec::new(), keyed_flow: None }
     }
 }
 

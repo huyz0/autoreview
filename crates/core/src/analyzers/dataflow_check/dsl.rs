@@ -5,7 +5,7 @@ use super::{
     call_order_rules, make_finding, rule_meta, AgentFinding, Cfg, Node, Severity, Stmt,
     SummarySource,
 };
-use autoreview_dataflow::{call_order, taint};
+use autoreview_dataflow::{call_order, lower, taint};
 use autoreview_langsupport::Language;
 use autoreview_schema::{Location, LocationRange, Side};
 
@@ -148,16 +148,16 @@ pub(super) fn run_call_order_rules(
     }
 
     let mut findings = Vec::new();
-    let check_go_defers =
-        language == Language::Go && rules.iter().any(|rule| rule.spec.check_before_return);
-    let functions: Vec<_> = lowered
-        .iter()
-        .map(|(node, cfg)| (*node, cfg, check_go_defers && contains_go_defer(*node)))
-        .collect();
-    for rule in rules {
-        for &(node, cfg, deferred_cleanup) in &functions {
+    let check_go_defers = language == Language::Go
+        && rules.iter().any(|rule| rule.spec.identity.is_none() && rule.spec.check_before_return);
+    let check_keyed = rules.iter().any(|rule| rule.spec.identity.is_some());
+    let source = file.content.as_bytes();
+    for (node, cfg) in lowered {
+        let deferred_cleanup = check_go_defers && contains_go_defer(*node);
+        let keyed = check_keyed.then(|| lower::keyed_variant(language, source, *node)).flatten();
+        for rule in &rules {
             let hits = if rule.spec.identity.is_some() {
-                call_order::check_keyed(&rule.spec, cfg, node, file.content.as_bytes())
+                call_order::check_keyed(&rule.spec, keyed.as_ref().unwrap_or(cfg), *node, source)
             } else {
                 call_sequence_hits(cfg, &rule.spec, deferred_cleanup)
             };

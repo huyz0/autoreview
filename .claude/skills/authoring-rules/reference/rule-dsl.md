@@ -213,8 +213,8 @@ before:
 Use `identity` when a function must remove the same entry it registered.
 At a branch join, an entry stays pending if any incoming path leaves it
 registered. `before` checks the entry used by the trigger call.
-`checkBeforeReturn` checks all pending entries at explicit returns and
-when execution reaches the end of the function.
+`checkBeforeReturn` checks pending entries when the function returns,
+throws explicitly, or reaches the end of its body.
 
 ```yaml
 id: pending-request-cleanup
@@ -243,15 +243,29 @@ The message can include `{collection}`, `{key}`, and `{trigger_call}`.
 A finding links to the registration line.
 
 Use a scoped rule for an explicit cleanup contract, such as a pending
-request registry. The engine identifies collections by stable local or
-parameter names and keys by stable names or simple string and decimal
-integer literals. Computed keys, fields, alias resolution, and writes or
-shadowing of relevant bindings fall outside the analysis. A potentially
-matching cleanup that the engine cannot model suppresses the check for
-that function. Keyed checks skip loops, try/finally, switches and match
-expressions, and Go defer. A pair represents membership, so repeated
-registration of the same pair still takes one removal. Native collection
-writes such as Go map indexing are outside this call-based DSL.
+request registry. Collections use stable local or parameter names. Keys
+can also use simple string or decimal integer literals. Direct aliases,
+including chains of aliases from simple initializers, keep the original
+identity. For example, `const alias = pending` allows `alias.remove(key)`
+to satisfy the rule above. A receiver pattern can match the name at the
+call site or the original binding name.
+
+In Java, Kotlin, JavaScript, TypeScript, and TSX, a `finally` block runs
+before execution continues past its `try` or leaves it by a return or
+explicit throw. In Go, a direct `defer pending.Remove(key)` or
+`defer remove(pending, key)` schedules cleanup for the pair on that path.
+A scheduled removal counts at return or fallthrough. A `before` call
+earlier in the function still sees the entry as pending.
+
+Computed keys, fields, reassignments, and shadowed bindings fall outside
+the supported identity analysis. The checker skips functions with
+unsupported flow such as catch handlers, try-with-resources, loops,
+switches, or match expressions. Implicit exceptions and Go panic routes
+are outside the model. A potentially matching cleanup the engine cannot
+model, such as a call inside a deferred closure, suppresses the check for
+that function. A pair represents membership, so repeated registration of
+the same pair still takes one removal. Native collection writes such as
+Go map indexing are outside this call-based DSL.
 
 ## `semantic: true`
 

@@ -131,7 +131,7 @@ fn argument(node: Node<'_>) -> Option<Node<'_>> {
     }
 }
 
-fn operand(node: Node<'_>, source: &[u8]) -> Option<IdentityOperand> {
+pub(crate) fn operand(node: Node<'_>, source: &[u8]) -> Option<IdentityOperand> {
     let spelling = node.utf8_text(source).ok()?;
     if node.kind() == "reference_expression"
         && !children(node).any(|child| child.kind() == "mutable_specifier")

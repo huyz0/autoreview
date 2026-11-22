@@ -16,7 +16,7 @@ fn findings(
         format!(
             "id: pending-entry\nkind: call-sequence\nlanguage: {language}\ncategory: correctness\nseverity: warning\n\
              message: 'Clean up {{collection}} and {{key}} before {{trigger_call}}'\n\
-             after: [{{call: register}}]\nunless: [{{call: remove}}]\nbefore: [{{call: finish}}]\n\
+             after: [{{call: register}}, {{callRegex: '^root[.]add$'}}]\nunless: [{{call: remove}}, {{callRegex: '^root[.]drop$'}}]\nbefore: [{{call: finish}}]\n\
              checkBeforeReturn: {check_returns}\nidentity: {identity}\n"
         ),
     ).unwrap();
@@ -189,4 +189,240 @@ fn rust_question_mark_checks_the_early_return() {
     let hits = findings("Rust", "lib.rs", source, RECEIVER, true);
     assert_eq!(hits.len(), 1, "{hits:#?}");
     assert_eq!(hits[0].location.range.start_line, 3);
+}
+
+#[test]
+fn alias_chains_match_receiver_scoped_rules_and_literal_keys() {
+    let source = r#"function pending(root, other, ready) {
+    const shared = root;
+    const alias = shared;
+    const key = "pending";
+    alias.add(key);
+    if (ready) {
+        shared.drop("pending");
+    } else {
+        other.remove(key);
+    }
+    return;
+}"#;
+    let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(
+        hits[0].message,
+        "Clean up root and \"pending\" before return"
+    );
+    let clean = source.replace("other.remove(key)", "alias.drop(key)");
+    assert!(findings("JavaScript", "worker.js", &clean, RECEIVER, true).is_empty());
+}
+
+#[test]
+fn positional_aliases_keep_the_collection_and_key_distinct() {
+    let source = r#"function pending(root, other, first, second) {
+    const collection = root;
+    const key = first;
+    register(collection, value(), key);
+    remove(other, value(), key);
+    remove(collection, value(), second);
+    return;
+}"#;
+    let hits = findings("TypeScript", "worker.ts", source, ARGUMENT, true);
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(hits[0].message, "Clean up root and first before return");
+    let clean = source.replace(
+        "remove(collection, value(), second)",
+        "remove(root, value(), first)",
+    );
+    assert!(findings("TypeScript", "worker.ts", &clean, ARGUMENT, true).is_empty());
+}
+
+#[test]
+fn rust_reborrowing_a_collection_keeps_its_identity() {
+    let source = r#"fn pending(key: &str) {
+    let mut root = Registry::new();
+    root.register(key);
+    let alias = &mut root;
+    alias.remove(&key);
+}"#;
+    assert!(findings("Rust", "lib.rs", source, RECEIVER, true).is_empty());
+    let wrong = source.replace("alias.remove(&key)", "alias.remove(&\"other\")");
+    let hits = findings("Rust", "lib.rs", &wrong, RECEIVER, true);
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(hits[0].message, "Clean up root and key before return");
+}
+
+#[test]
+fn finally_runs_before_return_throw_and_fallthrough() {
+    let source = r#"function pending(root, key, ready, failed) {
+    const alias = root;
+    root.register(key);
+    try {
+        if (ready) return;
+        if (failed) throw new Error();
+    } finally {
+        alias.remove(key);
+    }
+}"#;
+    assert!(findings("JavaScript", "worker.js", source, RECEIVER, true).is_empty());
+    let wrong = source.replace("alias.remove(key)", "alias.remove(\"other\")");
+    let hits = findings("JavaScript", "worker.js", &wrong, RECEIVER, true);
+    let mut exits: Vec<_> = hits
+        .iter()
+        .map(|hit| hit.location.range.start_line)
+        .collect();
+    exits.sort_unstable();
+    assert_eq!(exits, [5, 6, 10], "{hits:#?}");
+}
+
+#[test]
+fn nested_finally_preserves_the_original_exit_path() {
+    let source = r#"function pending(root, key, ready) {
+    root.register(key);
+    try {
+        try {
+            if (ready) return;
+        } finally {
+            tick();
+        }
+        root.remove(key);
+    } finally {
+        if (!ready) root.remove("other");
+    }
+}"#;
+    let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(hits[0].location.range.start_line, 5);
+}
+
+#[test]
+fn an_exit_in_finally_replaces_the_earlier_return() {
+    let source = r#"function pending(root, key) {
+    root.register(key);
+    try {
+        return;
+    } finally {
+        root.remove("other");
+        throw new Error();
+    }
+}"#;
+    let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(hits[0].location.range.start_line, 7);
+    assert_eq!(hits[0].message, "Clean up root and key before throw");
+}
+
+#[test]
+fn jvm_finally_handles_aliases_and_unbraced_returns() {
+    let cases = [
+        ("Java", "Worker.java", "class Worker {\nvoid pending(Registry root, String key, boolean ready) {\nvar alias = root;\nroot.register(key);\ntry { if (ready) return; }\nfinally { alias.remove(key); }\n}}", "alias.remove(key)", "alias.remove(\"other\")"),
+        ("Kotlin", "Worker.kt", "fun pending(root: Registry, key: String, ready: Boolean) {\nval alias = root\nroot.register(key)\ntry { if (ready) return }\nfinally { alias.remove(key) }\n}", "alias.remove(key)", "alias.remove(\"other\")"),
+    ];
+    for (language, file, code, cleanup, wrong) in cases {
+        assert!(
+            findings(language, file, code, RECEIVER, true).is_empty(),
+            "{language}"
+        );
+        let hits = findings(
+            language,
+            file,
+            &code.replace(cleanup, wrong),
+            RECEIVER,
+            true,
+        );
+        let mut lines: Vec<_> = hits
+            .iter()
+            .map(|hit| hit.location.range.start_line)
+            .collect();
+        lines.sort_unstable();
+        let expected = if language == "Java" { [5, 7] } else { [4, 6] };
+        assert_eq!(lines, expected, "{language}: {hits:#?}");
+    }
+}
+
+#[test]
+fn go_defer_is_branch_local_and_leaves_before_checks_active() {
+    let source = r#"package worker
+func pending(root *Registry, key string, ready bool) {
+    alias := root
+    saved := key
+    root.register(key)
+    if ready {
+        defer alias.remove(saved)
+        root.finish(key)
+    } else {
+        root.remove(key)
+    }
+    return
+}"#;
+    let hits = findings("Go", "worker.go", source, RECEIVER, true);
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(hits[0].location.range.start_line, 8);
+    let source = source.replace("alias := root", "var alias = root");
+    let partial = source.replace("root.remove(key)", "root.remove(\"wrong\")");
+    let hits = findings("Go", "worker.go", &partial, RECEIVER, true);
+    assert_eq!(hits.len(), 2, "{hits:#?}");
+    assert!(hits.iter().any(|hit| hit.location.range.start_line == 12));
+}
+
+#[test]
+fn go_defer_before_registration_covers_only_the_paths_where_it_was_armed() {
+    let source = r#"package worker
+func pending(root, other *Registry, key, wrong string, ready bool) {
+    if ready {
+        defer root.remove(key)
+        root.register(key)
+    } else {
+        defer other.remove(key)
+        defer root.remove(wrong)
+    }
+}"#;
+    assert!(findings("Go", "worker.go", source, RECEIVER, true).is_empty());
+    let bad = source.replace(
+        "defer root.remove(wrong)",
+        "root.register(key)\n        defer root.remove(wrong)",
+    );
+    let hits = findings("Go", "worker.go", &bad, RECEIVER, true);
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(hits[0].message, "Clean up root and key before fallthrough");
+    assert_eq!(
+        hits[0].related_locations.as_ref().unwrap()[0]
+            .range
+            .start_line,
+        8
+    );
+}
+
+#[test]
+fn go_deferred_closure_with_a_matching_call_stays_conservative() {
+    let source = r#"package worker
+func pending(root *Registry, key string) {
+    root.register(key)
+    defer func() { root.remove(key) }()
+}"#;
+    assert!(findings("Go", "worker.go", source, RECEIVER, true).is_empty());
+}
+
+#[test]
+fn a_reassigned_alias_is_uncertain_even_with_a_receiver_scoped_regex() {
+    let source = r#"function pending(root, other, key) {
+    let alias = root;
+    root.add(key);
+    alias.drop(key);
+    alias = other;
+}"#;
+    assert!(findings("JavaScript", "worker.js", source, RECEIVER, true).is_empty());
+}
+
+#[test]
+fn a_finalizer_that_cleans_only_one_branch_leaves_the_other_pending() {
+    let source = r#"function pending(root, key, clean) {
+    root.register(key);
+    try {
+        return;
+    } finally {
+        if (clean) root.remove(key);
+    }
+}"#;
+    let hits = findings("TypeScript", "worker.tsx", source, RECEIVER, true);
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(hits[0].location.range.start_line, 4);
 }
