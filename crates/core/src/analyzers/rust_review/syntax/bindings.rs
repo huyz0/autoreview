@@ -14,7 +14,7 @@ impl<'tree, 'text> Source<'tree, 'text> {
             .filter(|binding| binding.kind() == "let_declaration")
     }
 
-    pub(in crate::analyzers::rust_review) fn declaration(
+    pub(in crate::analyzers) fn declaration(
         &self,
         name: Node<'tree>,
     ) -> Option<Node<'tree>> {

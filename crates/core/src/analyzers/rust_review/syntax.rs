@@ -4,6 +4,7 @@ use tree_sitter::Node;
 
 mod bindings;
 mod indexing;
+mod string_types;
 use bindings::visible_local;
 
 pub(in crate::analyzers) fn children(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {

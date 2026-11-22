@@ -1,3 +1,4 @@
+mod discarded_strings;
 mod fetch;
 mod go_cancel;
 mod java;
@@ -36,7 +37,7 @@ fn rules() -> impl Iterator<Item = &'static Rule> {
         &react::INTERVAL_RULE,
         &prisma::RULE,
         &rabbitmq::RULE,
-    ].into_iter().chain(fetch::RULES)
+    ].into_iter().chain(fetch::RULES).chain(discarded_strings::RULES)
 }
 
 pub(super) fn semantic_ids() -> impl Iterator<Item = String> {
@@ -72,6 +73,7 @@ pub(super) fn definition(id: &str) -> Option<RuleDefinition> {
 pub fn run_framework_checks(root: &Path, changed: &[String]) -> Vec<AgentFinding> {
     let mut findings = go_cancel::run(root, changed);
     findings.extend(java::run(root, changed));
+    findings.extend(discarded_strings::run(root, changed));
     findings.extend(web::run(root, changed, |path, source, file| {
         let mut web_findings = react::inspect(path, source, file);
         web_findings.extend(prisma::inspect(path, source, file));
@@ -136,6 +138,31 @@ fn location(path: &str, node: Node<'_>, source: &str) -> Location {
 
 fn text<'s>(node: Node<'_>, source: &'s str) -> &'s str {
     node.utf8_text(source.as_bytes()).unwrap_or("")
+}
+
+fn run_sources(
+    root: &Path,
+    paths: &[String],
+    accepts: impl Fn(autoreview_langsupport::Language) -> bool,
+    check: impl Fn(&str, &str, Node<'_>, autoreview_langsupport::Language) -> Vec<AgentFinding>,
+) -> Vec<AgentFinding> {
+    let Ok(root) = root.canonicalize() else { return Vec::new() };
+    let mut findings = Vec::new();
+    for path in paths {
+        let absolute = root.join(path);
+        let Some(language) = autoreview_langsupport::language_for_path(&absolute).filter(|language| accepts(*language))
+        else {
+            continue;
+        };
+        let Some(mut parser) = autoreview_langsupport::parser_for(language) else { continue };
+        let Some(resolved) = absolute.canonicalize().ok().filter(|file| file.starts_with(&root)) else { continue };
+        if !absolute.symlink_metadata().is_ok_and(|meta| meta.is_file()) {
+            continue;
+        }
+        let Some((source, tree)) = parse_source(&mut parser, &resolved) else { continue };
+        findings.extend(check(path, &source, tree.root_node(), language));
+    }
+    findings
 }
 
 fn parse_source(parser: &mut Parser, path: &Path) -> Option<(String, Tree)> {

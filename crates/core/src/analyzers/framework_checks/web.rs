@@ -4,11 +4,11 @@ pub(super) use bindings::BindingScopes;
 
 use std::path::Path;
 
-use autoreview_langsupport::{language_for_path, parser_for, Language};
+use autoreview_langsupport::Language;
 use autoreview_schema::AgentFinding;
 use tree_sitter::Node;
 
-use super::{children, descendants, parse_source, text};
+use super::{children, descendants, text};
 
 pub(super) fn imports_from<'t, 's>(
     root: Node<'t>, source: &'s str, module: &'s str,
@@ -35,24 +35,8 @@ pub(super) fn named_imports<'t, 's>(
 pub(super) fn run(
     root: &Path, paths: &[String], check: impl Fn(&str, &str, Node<'_>) -> Vec<AgentFinding>,
 ) -> Vec<AgentFinding> {
-    let Ok(root) = root.canonicalize() else { return Vec::new() };
-    let mut findings = Vec::new();
-    for path in paths {
-        let absolute = root.join(path);
-        let Some(language @ (Language::JavaScript | Language::TypeScript | Language::Tsx)) =
-            language_for_path(&absolute)
-        else {
-            continue;
-        };
-        let Some(mut parser) = parser_for(language) else { continue };
-        let Some(resolved) = absolute.canonicalize().ok().filter(|file| file.starts_with(&root)) else { continue };
-        if !absolute.symlink_metadata().is_ok_and(|meta| meta.is_file()) {
-            continue;
-        }
-        let Some((source, tree)) = parse_source(&mut parser, &resolved) else { continue };
-        findings.extend(check(path, &source, tree.root_node()));
-    }
-    findings
+    super::run_sources(root, paths, |language| matches!(language, Language::JavaScript | Language::TypeScript | Language::Tsx),
+        |path, source, root, _| check(path, source, root))
 }
 
 pub(super) fn first_argument(call: Node<'_>) -> Option<Node<'_>> {
