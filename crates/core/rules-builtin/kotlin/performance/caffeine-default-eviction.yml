@@ -1,0 +1,29 @@
+id: kotlin-caffeine-default-eviction
+language: Kotlin
+category: performance
+severity: info
+semantic: true
+message: >-
+  This Caffeine builder supplies no eviction policy. Add a size or weight bound, expiration, or reference-based eviction if the cache can receive an unbounded set of keys.
+metadata:
+  references:
+    - "https://github.com/ben-manes/caffeine/wiki/Eviction"
+rule:
+  all:
+    - any:
+        - pattern:
+            context: 'fun sample() { Caffeine.newBuilder().$BUILD($$$ARGS) }'
+            selector: call_expression
+        - pattern:
+            context: 'fun sample() { Caffeine.newBuilder().$BUILD<$KEY, $VALUE>($$$ARGS) }'
+            selector: call_expression
+    - inside:
+        kind: source_file
+        stopBy: end
+        has:
+          kind: import_header
+          regex: '^import\s+com\.github\.benmanes\.caffeine\.cache\.Caffeine\s*;?$'
+          stopBy: end
+constraints:
+  BUILD:
+    regex: '^(build|buildAsync)$'

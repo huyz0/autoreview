@@ -1,0 +1,26 @@
+id: go-cache-default-no-expiration
+language: Go
+category: performance
+severity: info
+semantic: true
+message: >-
+  This go-cache instance disables default expiration. Entries can survive for the lifetime of the cache unless each insertion sets its own TTL or a caller explicitly deletes it.
+metadata:
+  references:
+    - "https://pkg.go.dev/github.com/patrickmn/go-cache#New"
+rule:
+  all:
+    - kind: call_expression
+    - has:
+        field: function
+        regex: '^cache\.(New|NewFrom)$'
+    - has:
+        field: arguments
+        regex: '^\(\s*(cache\.(NoExpiration|DefaultExpiration)|0|-\s*[0-9][0-9_]*)\s*,'
+    - inside:
+        kind: source_file
+        stopBy: end
+        has:
+          kind: import_spec
+          stopBy: end
+          regex: '^"github\.com/patrickmn/go-cache"$'

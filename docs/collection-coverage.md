@@ -73,6 +73,21 @@ can show what still owns an old allocation.
   expiration, and append-only storage must remain valid.
   [DOM listener removal](https://dom.spec.whatwg.org/#dom-eventtarget-removeeventlistener)
 
+## Cache limits and expiration
+
+An entry count or weight limit controls cache growth during a burst. An
+expiration policy controls how long individual entries remain useful.
+Cleanup scheduling determines when expired entries leave memory. A cache
+with fixed keys or explicit ownership may intentionally keep each entry for
+its full lifetime.
+
+| Cache API | Rule coverage | Relevant configuration |
+|---|---|---|
+| Go `patrickmn/go-cache` | `go-cache-default-no-expiration` detects a constructor with a non-positive literal or a named no-expiration default. Individual writes can still supply a TTL. | Set a default TTL and cleanup interval when entries should expire and be reclaimed without explicit deletion. [go-cache constructor](https://pkg.go.dev/github.com/patrickmn/go-cache#New) |
+| Java and Kotlin Caffeine | The `caffeine-default-eviction` rules cover direct `newBuilder().build()` and supported variants without an eviction policy. | Choose size, weight, expiration, or reference-based eviction according to the workload. [Caffeine eviction](https://github.com/ben-manes/caffeine/wiki/Eviction) |
+| JavaScript, TypeScript, TSX `lru-cache` | The `lru-cache-ttl-without-purge` rules detect an inline TTL with no size bound or explicit pruning. Dynamic options need configuration analysis. | Set `max` or `maxSize`, or enable `ttlAutopurge` when a TTL-only cache is intentional. TTL-only pruning does not set a maximum size during bursts. [lru-cache documentation](https://isaacs.github.io/node-lru-cache/) |
+| Rust Moka | `rust-moka-default-eviction` checks direct default builders for the synchronous and asynchronous caches. | Use `max_capacity` and a weigher where values have unequal cost. Add expiration when entries need it. [Moka cache documentation](https://docs.rs/moka/latest/moka/sync/struct.Cache.html) |
+
 For a hot-path change, measure elapsed time and allocated bytes using realistic
 input sizes, predicate selectivity, and terminal operations. For an apparent
 leak, inspect retained objects after the operation that should release them,
