@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 
-use autoreview_dataflow::call_order::{CallOrderSpec, CollectionSelector, EntryIdentity};
+use autoreview_dataflow::call_order::{CallOrderSpec, CollectionSelector, ContractLanguage, ContractMode, EntryIdentity, ResultContract};
 use autoreview_dataflow::taint::NamePattern;
 use autoreview_schema::Severity;
 
@@ -64,6 +64,42 @@ impl IdentityYaml {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ContractModeYaml {
+    MustUse,
+    MustComplete,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContractYaml {
+    mode: ContractModeYaml,
+    import: String,
+    methods: Vec<String>,
+    #[serde(default)]
+    borrows: Vec<String>,
+}
+
+impl ContractYaml {
+    fn resolve(self, language: &str) -> anyhow::Result<ResultContract> {
+        let language = match language {
+            "Go" => ContractLanguage::Go,
+            "Java" => ContractLanguage::Java,
+            _ => anyhow::bail!("call-sequence contracts currently support Go and Java"),
+        };
+        let mode = match self.mode {
+            ContractModeYaml::MustUse => ContractMode::MustUse,
+            ContractModeYaml::MustComplete => ContractMode::MustComplete,
+        };
+        anyhow::ensure!(!self.import.trim().is_empty(), "contract import must name the package or class");
+        anyhow::ensure!(!self.methods.is_empty() && self.methods.iter().chain(&self.borrows).all(|name| {
+            !name.is_empty() && name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        }), "contract methods and borrows must contain literal method names");
+        Ok(ResultContract { mode, language, import: self.import, methods: self.methods, borrows: self.borrows })
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct CallOrderRuleYaml {
     #[serde(flatten)]
     common: RuleMeta,
@@ -82,6 +118,7 @@ struct CallOrderRuleYaml {
     #[serde(default, rename = "checkBeforeReturn")]
     check_before_return: bool,
     identity: Option<IdentityYaml>,
+    contract: Option<ContractYaml>,
 }
 
 pub type CallOrderRuleDef = super::dataflow_check::DataflowRuleDef<CallOrderSpec>;
@@ -92,9 +129,16 @@ fn parse_call_order_rule(contents: &str) -> Option<CallOrderRuleDef> {
         return None;
     }
 
-    let after: Vec<NamePattern> = yaml.after.into_iter().filter_map(|p| p.into_name_pattern().ok()).collect();
-    let unless: Vec<NamePattern> = yaml.unless.into_iter().filter_map(|p| p.into_name_pattern().ok()).collect();
-    let before: Vec<NamePattern> = yaml.before.into_iter().filter_map(|p| p.into_name_pattern().ok()).collect();
+    let yaml = validate_shape(yaml).ok()?;
+    let check_before_return = yaml.contract.as_ref().is_some_and(|contract| matches!(contract.mode, ContractModeYaml::MustComplete))
+        || yaml.check_before_return;
+    let contract = yaml.contract.map(|contract| contract.resolve(&yaml.language)).transpose().ok()?;
+    let patterns = |values: Vec<PatternYaml>| -> Option<Vec<NamePattern>> {
+        values.into_iter().map(|entry| entry.into_name_pattern().ok()).collect()
+    };
+    let after = patterns(yaml.after)?;
+    let unless = patterns(yaml.unless)?;
+    let before = patterns(yaml.before)?;
 
     Some(CallOrderRuleDef {
         id: yaml.common.id.clone(),
@@ -107,22 +151,43 @@ fn parse_call_order_rule(contents: &str) -> Option<CallOrderRuleDef> {
             after,
             unless,
             before,
-            check_before_return: yaml.check_before_return,
+            check_before_return,
             identity: yaml.identity.map(IdentityYaml::into_selector).transpose().ok()?,
+            contract,
         },
         pack_id: None,
         metadata: yaml.common.metadata,
     })
 }
 
-/// Uses the runtime identity schema when validating a rule pack.
-pub fn validate_identity(contents: &str) -> anyhow::Result<()> {
-    #[derive(Deserialize)]
-    struct IdentityBlock {
-        identity: Option<IdentityYaml>,
+fn validate_shape(yaml: CallOrderRuleYaml) -> anyhow::Result<CallOrderRuleYaml> {
+    if let Some(contract) = &yaml.contract {
+        anyhow::ensure!(yaml.identity.is_none() && yaml.after.is_empty() && yaml.before.is_empty() && !yaml.check_before_return,
+            "contract replaces identity, after, before, and checkBeforeReturn");
+        match contract.mode {
+            ContractModeYaml::MustUse => anyhow::ensure!(yaml.unless.is_empty() && contract.borrows.is_empty(),
+                "must-use does not take unless or borrows"),
+            ContractModeYaml::MustComplete => anyhow::ensure!(!yaml.unless.is_empty(),
+                "must-complete requires an unless list of completion methods"),
+        }
+    } else {
+        anyhow::ensure!(!yaml.after.is_empty(), "call-sequence requires a nonempty after list");
+        anyhow::ensure!(!yaml.unless.is_empty(), "call-sequence requires a nonempty unless list");
     }
-    let block: IdentityBlock = serde_yaml::from_str(contents)?;
-    block.identity.map(IdentityYaml::into_selector).transpose()?;
+    Ok(yaml)
+}
+
+pub fn validate_call_sequence(contents: &str) -> anyhow::Result<()> {
+    let rule = validate_shape(serde_yaml::from_str(contents)?)?;
+    if let Some(identity) = rule.identity {
+        identity.into_selector()?;
+    }
+    if let Some(contract) = rule.contract {
+        contract.resolve(&rule.language)?;
+    }
+    for pattern in rule.after.into_iter().chain(rule.unless).chain(rule.before) {
+        pattern.into_name_pattern()?;
+    }
     Ok(())
 }
 
@@ -190,14 +255,14 @@ checkBeforeReturn: true
 
     #[test]
     fn validates_identity_selectors_consistently_with_rule_loading() {
-        let rule = "id: sample\nkind: call-sequence\ncategory: correctness\n";
+        let rule = "id: sample\nkind: call-sequence\ncategory: correctness\nafter: [{call: add}]\nunless: [{call: remove}]\n";
         let valid = [
             ("{receiver: true, keyArgument: 0}", CollectionSelector::Receiver, 0),
             ("{collectionArgument: 0, keyArgument: 2}", CollectionSelector::Argument(0), 2),
         ];
         for (identity, collection, key_argument) in valid {
             let contents = format!("{rule}identity: {identity}\n");
-            assert!(validate_identity(&contents).is_ok());
+            assert!(validate_call_sequence(&contents).is_ok());
             assert_eq!(parse_call_order_rule(&contents).unwrap().spec.identity, Some(EntryIdentity { collection, key_argument }));
         }
         for identity in [
@@ -209,9 +274,25 @@ checkBeforeReturn: true
             "{receiver: true, keyArgument: 0, unknown: true}",
         ] {
             let contents = format!("{rule}identity: {identity}\n");
-            assert!(validate_identity(&contents).is_err(), "{identity}");
+            assert!(validate_call_sequence(&contents).is_err(), "{identity}");
             assert!(parse_call_order_rule(&contents).is_none(), "{identity}");
         }
+    }
+
+    #[test]
+    fn validates_contract_mode_and_completion_methods() {
+        let required = "id: demo\nkind: call-sequence\nlanguage: Go\ncategory: correctness\n";
+        let source = "  import: os\n  methods: [Rename]\n";
+        let check = |mode, extensions| {
+            let data = format!("{required}contract:\n  mode: {mode}\n{source}{extensions}");
+            assert_eq!(validate_call_sequence(&data).is_ok(), parse_call_order_rule(&data).is_some());
+            validate_call_sequence(&data).is_ok()
+        };
+        assert!(check("must-use", ""));
+        assert!(!check("must-use", "unless: [{call: Close}]\n"));
+        assert!(!check("must-complete", ""));
+        assert!(check("must-complete", "unless: [{call: Close}]\n"));
+        assert!(!check("must-complete", "unless: [{callRegex: '['}]\n"));
     }
 
     #[test]

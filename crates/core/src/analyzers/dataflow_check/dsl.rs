@@ -118,7 +118,7 @@ fn render_call_order_message(
 ) -> String {
     let message = template.replace("{trigger_call}", &hit.trigger_call);
     match &hit.entry {
-        Some(entry) => message.replace("{collection}", &entry.collection).replace("{key}", &entry.key),
+        Some(entry) => message.replace("{collection}", &entry.collection).replace("{key}", &entry.key).replace("{handle}", &entry.collection),
         None => message,
     }
 }
@@ -131,7 +131,7 @@ pub(super) fn run_call_order_rules(
     lowered: &[(Node, Cfg<Stmt>)],
     rules: &[call_order_rules::CallOrderRuleDef],
 ) -> Vec<AgentFinding> {
-    let rules = rules.iter().filter(|rule| rule.spec.identity.is_none() &&
+    let rules = rules.iter().filter(|rule| !rule.spec.uses_path_engine() &&
         Language::from_rule_name(&rule.language)
             .is_some_and(|declared| language.matches_rule_language(declared)));
     let mut findings = Vec::new();
@@ -152,6 +152,10 @@ pub(super) fn call_order_finding(
     hit: &autoreview_dataflow::call_order::CallOrderHit,
 ) -> AgentFinding {
     let title = match &hit.entry {
+        Some(entry) if rule.spec.contract.is_some() => format!(
+            "`{}` leaves the `{}` handle incomplete", hit.trigger_call, entry.collection
+        ),
+        None if rule.spec.contract.is_some() => format!("Discarded result of `{}`", hit.trigger_call),
         Some(entry) => format!(
             "`{}` reached with key `{}` still pending in `{}` (registered at line {})",
             hit.trigger_call, entry.key, entry.collection, entry.registration_line

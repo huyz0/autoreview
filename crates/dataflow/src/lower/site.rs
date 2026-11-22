@@ -32,10 +32,26 @@ pub(crate) fn capture(call: Node<'_>, source: &[u8]) -> Option<Box<CallSite>> {
     Some(Box::new(CallSite {
         start: call.start_byte(),
         end: call.end_byte(),
+        discarded: result_is_discarded(call, source),
         receiver,
         arguments,
         local: local_call(call),
     }))
+}
+
+fn result_is_discarded(call: Node<'_>, source: &[u8]) -> bool {
+    let Some(parent) = call.parent() else { return false };
+    match parent.kind() {
+        "expression_statement" => true,
+        "expression_list" => {
+            let Some(assignment) = parent.parent().filter(|node| node.kind() == "assignment_statement") else {
+                return false;
+            };
+            children(parent).count() == 1 && assignment.child_by_field_name("left")
+                .is_some_and(|lhs| lhs.utf8_text(source) == Ok("_"))
+        }
+        _ => false,
+    }
 }
 
 fn local_call(call: Node<'_>) -> bool {

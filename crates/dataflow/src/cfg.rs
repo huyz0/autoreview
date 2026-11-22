@@ -53,6 +53,7 @@ pub enum IdentityOperand {
 pub struct CallSite {
     pub start: usize,
     pub end: usize,
+    pub discarded: bool,
     pub receiver: Option<String>,
     pub arguments: Vec<Option<IdentityOperand>>,
     pub(crate) local: bool,

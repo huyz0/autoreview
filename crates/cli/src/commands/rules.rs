@@ -756,13 +756,6 @@ struct MinimalThresholdRule {
     threshold: serde_yaml::Value,
 }
 
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct MinimalCallSequenceRule {
-    after: Vec<serde_yaml::Value>,
-    unless: Vec<serde_yaml::Value>,
-}
-
 /// Structurally checks one rule file matches the shape its own declared
 /// `kind:` needs to actually load at runtime — deliberately checking the
 /// *minimum* required keys (the same ones each real loader in
@@ -791,16 +784,7 @@ pub(super) fn validate_rule_file(contents: &str) -> anyhow::Result<(String, Stri
                 anyhow::bail!("kind: pattern rule is missing a `rule:` block — ast-grep will reject it at scan time");
             }
         }
-        "call-sequence" => {
-            autoreview_core::analyzers::call_order_rules::validate_identity(contents)?;
-            let rule: MinimalCallSequenceRule = serde_yaml::from_str(contents).map_err(|err| anyhow::anyhow!("kind: call-sequence rule is missing a valid `after:`/`unless:` list: {err}"))?;
-            if rule.after.is_empty() {
-                anyhow::bail!("kind: call-sequence rule's `after:` list is empty — nothing would ever start the check");
-            }
-            if rule.unless.is_empty() {
-                anyhow::bail!("kind: call-sequence rule's `unless:` list is empty — nothing would ever clear the check, so every `after` site would always fire");
-            }
-        }
+        "call-sequence" => autoreview_core::analyzers::call_order_rules::validate_call_sequence(contents)?,
         other => anyhow::bail!("unknown `kind: {other}` — expected pattern, taint, threshold, or call-sequence"),
     }
     Ok((id_only.id, meta.kind))

@@ -56,6 +56,7 @@ fn walk(dir: &Path, out: &mut Vec<RuleMeta>) {
 
 fn extension_for_language(language: &str) -> &'static str {
     match language {
+        "Go" => "go",
         "Java" => "java",
         "Kotlin" => "kt",
         other => panic!("call_order_rule_conformance doesn't know the fixture extension for language {other:?} — add it to extension_for_language"),
@@ -64,6 +65,7 @@ fn extension_for_language(language: &str) -> &'static str {
 
 fn scan_filename_for_language(language: &str) -> &'static str {
     match language {
+        "Go" => "main.go",
         "Java" => "Main.java",
         "Kotlin" => "Main.kt",
         other => panic!("call_order_rule_conformance doesn't know the scan filename for language {other:?} — add it to scan_filename_for_language"),
@@ -116,6 +118,58 @@ fn every_call_order_rule_fires_on_its_positive_fixture_and_stays_silent_on_its_n
     }
 
     assert!(failures.is_empty(), "call-sequence rule conformance failures ({} rule(s) checked):\n{}", rules.len(), failures.join("\n"));
+}
+
+#[test]
+fn completion_requires_the_same_returned_handle_across_files() {
+    let factory = r#"package archive
+
+import (
+    "compress/gzip"
+    "io"
+)
+
+func Create(out io.Writer) *gzip.Writer {
+    return gzip.NewWriter(out)
+}
+
+func Finish(writer *gzip.Writer) {
+    writer.Close()
+}
+"#;
+    let caller = r#"package jobs
+
+import (
+    "compress/gzip"
+    "example.com/project/archive"
+    "io"
+)
+
+func Write(out io.Writer, other *gzip.Writer) {
+    original := archive.Create(out)
+    alias := original
+    defer archive.Finish(other)
+    alias.Write([]byte("payload"))
+}
+"#;
+    let root = tempfile::tempdir().unwrap();
+    let archive = root.path().join("archive");
+    std::fs::create_dir(&archive).unwrap();
+    std::fs::write(root.path().join("go.mod"), "module example.com/project\n\ngo 1.22\n").unwrap();
+    std::fs::write(archive.join("writer.go"), factory).unwrap();
+    let path = root.path().join("jobs.go");
+    std::fs::write(&path, caller).unwrap();
+    let scan = || run_dataflow_check(root.path(), &["jobs.go".into()], &[]).into_iter()
+        .filter(|hit| hit.source.rule_id.as_deref() == Some("go-gzip-writer-unclosed"))
+        .collect::<Vec<_>>();
+    let findings = scan();
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let related = findings[0].related_locations.as_ref().unwrap();
+    assert_eq!(related[0].path, "archive/writer.go");
+    assert!(related[0].snippet.contains("gzip.NewWriter"));
+
+    std::fs::write(path, caller.replace("Finish(other)", "Finish(alias)")).unwrap();
+    assert!(scan().is_empty());
 }
 
 #[test]

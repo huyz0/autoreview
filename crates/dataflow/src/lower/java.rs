@@ -78,7 +78,7 @@ fn call_arg_identifiers(call: Node, source: &[u8]) -> Vec<String> {
 pub(super) fn method_invocation_target_name(call: Node, source: &[u8]) -> Option<String> {
     let name = call.child_by_field_name("name")?;
     match call.child_by_field_name("object") {
-        Some(obj) if obj.kind() == "identifier" => Some(format!("{}.{}", text(obj, source), text(name, source))),
+        Some(obj) if matches!(obj.kind(), "identifier" | "field_access") => Some(format!("{}.{}", text(obj, source), text(name, source))),
         _ => Some(text(name, source).to_string()),
     }
 }
@@ -186,7 +186,7 @@ fn lower_return_statement(cfg: &mut Cfg<Stmt>, stmt: Node<'_>, source: &[u8], cu
     let value = expression
         .filter(|node| node.kind() == "identifier")
         .map(|node| text(node, source).to_owned());
-    if let Some(call) = expression.filter(|node| node.kind() == "method_invocation") {
+    if let Some(call) = expression.filter(|node| cfg.keyed_flow.is_none() && node.kind() == "method_invocation") {
         lower_return_call(cfg, current, call, source, None);
     }
     cfg.nodes[current].return_start = Some(stmt.start_byte());

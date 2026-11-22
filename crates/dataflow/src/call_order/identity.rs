@@ -15,10 +15,14 @@ use super::{CollectionSelector, EntryIdentity};
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Entry {
     pub collection: IdentityOperand,
-    pub key: IdentityOperand,
+    pub key: Option<IdentityOperand>,
 }
 
 impl Entry {
+    pub(super) fn handle(collection: IdentityOperand) -> Self {
+        Self { collection, key: None }
+    }
+
     pub(super) fn display_collection(&self) -> String {
         binding_name(&self.collection)
             .unwrap_or_default()
@@ -26,7 +30,8 @@ impl Entry {
     }
 
     pub(super) fn display_key(&self) -> String {
-        match &self.key {
+        let Some(key) = &self.key else { return String::new() };
+        match key {
             IdentityOperand::Binding(name)
             | IdentityOperand::Integer(name)
             | IdentityOperand::Fresh { name, .. }
@@ -135,6 +140,10 @@ impl<'src> Syntax<'src> {
             })
     }
 
+    pub(super) fn any_call(&self, predicate: impl Fn(&str) -> bool) -> bool {
+        self.calls.iter().any(|(_, name)| predicate(name))
+    }
+
     pub(super) fn has_registration(&self, candidates: &[NamePattern]) -> bool {
         self.calls.iter().any(|(_, name)| {
             matches_any(candidates, name)
@@ -184,7 +193,7 @@ impl<'src> Syntax<'src> {
         let collection = self.resolve(values, collection, site.start)?;
         binding_name(&collection)?;
         let key = self.value(values, key, site.start)?;
-        Some(Entry { collection, key })
+        Some(Entry { collection, key: Some(key) })
     }
 
     pub(super) fn value(

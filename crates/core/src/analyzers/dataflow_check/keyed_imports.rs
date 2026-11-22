@@ -46,8 +46,8 @@ pub(super) fn run(
     let rules: Vec<_> = rules
         .iter()
         .filter_map(|rule| {
-            rule.spec.identity?;
-            Some((rule, Language::from_rule_name(&rule.language)?))
+            let declared = Language::from_rule_name(&rule.language)?;
+            rule.spec.uses_path_engine().then_some((rule, declared))
         })
         .collect();
     if rules.is_empty() {

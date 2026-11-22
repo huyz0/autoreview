@@ -294,6 +294,55 @@ A pair represents membership, so repeated registration of the same pair
 still takes one removal. Native collection writes such as Go map indexing
 are outside this call-based DSL.
 
+### Require a result or finish an owned handle
+
+A `contract` block selects known APIs by their Go import path or Java
+class. It replaces `after`, `before`, `identity`, and
+`checkBeforeReturn`. This mode uses the same control-flow and helper
+analysis as keyed cleanup.
+
+```yaml
+id: go-gzip-writer-unclosed
+language: Go
+category: correctness
+severity: warning
+kind: call-sequence
+message: "Close the gzip writer to write its footer."
+contract:
+  mode: must-complete
+  import: compress/gzip
+  methods: [NewWriter]
+  borrows: [Write, Flush]
+unless:
+  - call: Close
+```
+
+`must-complete` opens an obligation on the value returned by an acquisition.
+Aliases and resolved helpers carry that same obligation. An `unless` call
+completes it only when called on that handle. A direct return from the analyzed
+owner transfers the obligation to its caller. At an exit with a pending
+obligation, the finding links to the acquisition. The optional `borrows`
+list names receiver methods known to leave ownership with the caller.
+Unmodeled calls that receive the handle may transfer ownership. The analyzer
+skips callables with field, indexed, or channel writes it cannot model. Use this mode
+when the acquisition returns one handle directly and a completion call
+satisfies its contract.
+
+Use `mode: must-use` for APIs such as `os.Rename` whose result carries an
+error. This mode requires `import` and a nonempty `methods` list. It checks
+bare call statements and Go's explicit `_ = call()` form. Returning the
+result or assigning it to a named binding uses it for this rule. Tracking
+a named result until it is checked is a separate analysis. Omit `unless`
+and `borrows` for this mode.
+
+Go matches explicit imports and package aliases. For imports without an
+alias it uses the final segment of the package path. Java matches explicit
+class imports and fully qualified calls in supported top-level types.
+The resolver checks local bindings that shadow the qualifier. Dot imports,
+Java static imports, wildcard imports, and external type hierarchies are
+outside this contract resolver. The same control-flow limits as keyed
+cleanup apply.
+
 ## `semantic: true`
 
 Independent of `kind` — marks a rule as syntactically precise but
@@ -337,7 +386,7 @@ this (nothing more, nothing you need to guess):
 - `kind: pattern` (or omitted): a `rule:` block is present.
 - `kind: taint`: a `sinks:` list is present (non-empty).
 - `kind: threshold`: `metric:` and `threshold:` are both present.
-- `kind: call-sequence`: `after:` and `unless:` are both present and
+- `kind: call-sequence` without a contract: `after:` and `unless:` are both present and
   non-empty (`before:`/`checkBeforeReturn` aren't checked up front — at
   least one of them still needs to be set for the rule to ever actually
   fire, but that's on you to get right, same as picking a real `metric:`
