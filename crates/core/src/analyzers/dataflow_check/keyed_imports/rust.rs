@@ -1,9 +1,4 @@
-use std::path::{Path, PathBuf};
-
-use autoreview_dataflow::call_order::KeyedImport;
-use tree_sitter::Node;
-
-use super::{children, text, ImportSource, Resolver};
+use super::{children, text, ImportSource, KeyedImport, Node, Path, PathBuf, Resolver};
 
 impl ImportSource<'_> {
     pub(super) fn rust(&self) -> Vec<KeyedImport> {
