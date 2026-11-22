@@ -17,12 +17,41 @@ pub mod javascript;
 pub mod kotlin;
 pub mod rust;
 pub(crate) mod site;
+pub(crate) mod keyed_flow;
 
+use autoreview_langsupport::Language;
 use tree_sitter::Node;
 
-use crate::cfg::{Cfg, NodeId, Stmt};
+use crate::cfg::{Cfg, EdgeKind, NodeId, Stmt};
+
+/// Lower control flow used exclusively by keyed call-sequence rules. Use
+/// the ordinary graph when the function has no deferred or finally path.
+pub fn keyed_variant(language: Language, source: &[u8], node: Node<'_>) -> Option<Cfg<Stmt>> {
+    let lower: StatementLowerer = match language {
+        Language::Go => go::lower_block,
+        Language::Java => java::lower_block,
+        Language::Kotlin => kotlin::lower_block,
+        Language::JavaScript | Language::TypeScript | Language::Tsx => javascript::lower_block,
+        _ => return None,
+    };
+    keyed_flow::needed(node).then(|| {
+        let mut cfg = Cfg::new_empty();
+        cfg.keyed_flow = Some(keyed_flow::EXIT_PATH_LIMIT);
+        let body = if language == Language::Kotlin { kotlin::function_body(node) } else { node.child_by_field_name("body") };
+        function(cfg, source, node, body, lower)
+    })
+}
 
 type StatementLowerer = fn(&mut Cfg<Stmt>, Node<'_>, &[u8], NodeId) -> NodeId;
+
+fn function(mut cfg: Cfg<Stmt>, source: &[u8], node: Node<'_>, body: Option<Node<'_>>, lower_body: StatementLowerer) -> Cfg<Stmt> {
+    let entry = cfg.push_node(node.start_position().row as u32 + 1);
+    cfg.entry = entry;
+    cfg.exit = cfg.push_node(node.end_position().row as u32 + 1);
+    let end = body.map_or(entry, |block| lower_body(&mut cfg, block, source, entry));
+    cfg.edges.push((end, cfg.exit, EdgeKind::Fallthrough));
+    cfg
+}
 
 fn lower_block(cfg: &mut Cfg<Stmt>, block: Node<'_>, source: &[u8], mut current: NodeId, lower: StatementLowerer) -> NodeId {
     let mut cursor = block.walk();
@@ -34,7 +63,11 @@ fn lower_block(cfg: &mut Cfg<Stmt>, block: Node<'_>, source: &[u8], mut current:
 
 fn lower_statement(cfg: &mut Cfg<Stmt>, stmt: Node<'_>, source: &[u8], current: NodeId, lower: StatementLowerer) -> NodeId {
     let start = cfg.nodes[current].stmts.len();
-    let next = lower(cfg, stmt, source, current);
+    let next = if cfg.keyed_flow.is_some() {
+        keyed_flow::lower(cfg, stmt, source, current, lower)
+    } else {
+        lower(cfg, stmt, source, current)
+    };
     cfg.nodes[current].record_statement_lines(start, stmt.start_position().row as u32 + 1);
     next
 }

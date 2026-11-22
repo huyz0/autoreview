@@ -99,25 +99,13 @@ fn lower_assignment_expression(node: Node, source: &[u8]) -> Stmt {
 /// Lowers one function body into a `Cfg`. `fn_node` must be a
 /// `function_declaration` with a `body` field (a `statement_block`).
 pub fn lower_function(source: &[u8], fn_node: Node) -> Cfg<Stmt> {
-    let mut cfg: Cfg<Stmt> = Cfg::new_empty();
-    let entry = cfg.push_node(fn_node.start_position().row as u32 + 1);
-    let exit = cfg.push_node(fn_node.end_position().row as u32 + 1);
-    cfg.entry = entry;
-    cfg.exit = exit;
-
-    let Some(body) = fn_node.child_by_field_name("body") else {
-        cfg.edges.push((entry, exit, EdgeKind::Fallthrough));
-        return cfg;
-    };
-
-    let end = lower_block(&mut cfg, body, source, entry);
-    cfg.edges.push((end, exit, EdgeKind::Fallthrough));
-    cfg
+    super::function(Cfg::new_empty(), source, fn_node, fn_node.child_by_field_name("body"), lower_block)
 }
+
 
 /// Lowers a `statement_block`'s statements — direct named children, no
 /// wrapper the way Go's `block -> statement_list` has one.
-fn lower_block(cfg: &mut Cfg<Stmt>, block: Node, source: &[u8], current: NodeId) -> NodeId {
+pub(super) fn lower_block(cfg: &mut Cfg<Stmt>, block: Node, source: &[u8], current: NodeId) -> NodeId {
     super::lower_block(cfg, block, source, current, lower_statement_inner)
 }
 

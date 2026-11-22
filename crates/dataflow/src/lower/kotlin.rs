@@ -110,20 +110,15 @@ fn lower_property_declaration(node: Node, source: &[u8]) -> Stmt {
 /// Lowers one function body into a `Cfg`. `fn_node` must be a
 /// `function_declaration` with a `function_body` child.
 pub fn lower_function(source: &[u8], fn_node: Node) -> Cfg<Stmt> {
-    let mut cfg: Cfg<Stmt> = Cfg::new_empty();
-    let entry = cfg.push_node(fn_node.start_position().row as u32 + 1);
-    let exit = cfg.push_node(fn_node.end_position().row as u32 + 1);
-    cfg.entry = entry;
-    cfg.exit = exit;
-
-    // A single-expression function body (`fun f() = expr`) has no
-    // `block` child at all — not modeled, falls through untouched.
-    let end = first_child_of_kind(fn_node, "function_body").and_then(|body| first_child_of_kind(body, "block")).map(|block| lower_block(&mut cfg, block, source, entry)).unwrap_or(entry);
-    cfg.edges.push((end, exit, EdgeKind::Fallthrough));
-    cfg
+    super::function(Cfg::new_empty(), source, fn_node, function_body(fn_node), lower_block)
 }
 
-fn lower_block(cfg: &mut Cfg<Stmt>, block: Node, source: &[u8], current: NodeId) -> NodeId {
+pub(super) fn function_body(node: Node<'_>) -> Option<Node<'_>> {
+    first_child_of_kind(node, "function_body").and_then(|body| first_child_of_kind(body, "block"))
+}
+
+
+pub(super) fn lower_block(cfg: &mut Cfg<Stmt>, block: Node, source: &[u8], current: NodeId) -> NodeId {
     super::lower_block(cfg, block, source, current, lower_statement_inner)
 }
 
@@ -201,31 +196,53 @@ fn lower_if(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> 
     cfg.nodes[current].stmts.push(Stmt::Other(format!("if {}", text(stmt, source))));
     let null_guard = stmt.child_by_field_name("condition").and_then(|cond| recognize_null_guard(cond, source));
 
-    let branches = children_of_kind(stmt, "block");
+    let [consequence, alternative] = if_branches(stmt);
 
     let true_start = cfg.push_node(stmt.start_position().row as u32 + 1);
     cfg.edges.push((current, true_start, EdgeKind::True));
     if let Some((var, op)) = &null_guard {
         cfg.nodes[true_start].stmts.push(Stmt::Guard { var: var.clone(), op: *op, against: crate::cfg::GuardAgainst::Nil });
     }
-    let true_end = if let Some(consequence) = branches.first() { lower_block(cfg, *consequence, source, true_start) } else { true_start };
+    let true_end = consequence.map_or(true_start, |branch| lower_branch(cfg, branch, source, true_start));
 
-    let false_end = if let Some(alternative) = branches.get(1) {
+    let false_end = if let Some(alternative) = alternative {
         let false_start = cfg.push_node(stmt.start_position().row as u32 + 1);
         cfg.edges.push((current, false_start, EdgeKind::False));
-        lower_block(cfg, *alternative, source, false_start)
+        lower_branch(cfg, alternative, source, false_start)
     } else {
         current
     };
 
     let join = cfg.push_node(stmt.end_position().row as u32 + 1);
     cfg.edges.push((true_end, join, EdgeKind::Fallthrough));
-    if branches.len() > 1 {
+    if alternative.is_some() {
         cfg.edges.push((false_end, join, EdgeKind::Fallthrough));
     } else {
         cfg.edges.push((current, join, EdgeKind::False));
     }
     join
+}
+
+fn if_branches(stmt: Node<'_>) -> [Option<Node<'_>>; 2] {
+    let condition = stmt.child_by_field_name("condition");
+    let mut branches = [None, None];
+    let mut index = 0;
+    for child in stmt.children(&mut stmt.walk()) {
+        if child.kind() == "else" {
+            index = 1;
+        } else if child.is_named() && Some(child) != condition && !child.is_extra() {
+            branches[index] = Some(child);
+        }
+    }
+    branches
+}
+
+fn lower_branch(cfg: &mut Cfg<Stmt>, branch: Node, source: &[u8], entry: NodeId) -> NodeId {
+    if branch.kind() == "block" {
+        lower_block(cfg, branch, source, entry)
+    } else {
+        super::lower_statement(cfg, branch, source, entry, lower_statement_inner)
+    }
 }
 
 fn lower_loop(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {

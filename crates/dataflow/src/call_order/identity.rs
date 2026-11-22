@@ -1,11 +1,15 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use tree_sitter::Node;
 
 use crate::cfg::{CallSite, IdentityOperand};
-use crate::lower::site::{children, identifier, name};
+use crate::lower::{
+    keyed_flow,
+    site::{children, name},
+};
 use crate::taint::NamePattern;
 
+use super::bindings::Bindings;
 use super::{CollectionSelector, EntryIdentity};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -27,8 +31,7 @@ impl Entry {
 /// different values of a rebound name or assuming a cleanup was lowered.
 #[derive(Default)]
 pub(super) struct Syntax<'src> {
-    declarations: HashMap<&'src str, usize>,
-    writes: HashSet<&'src str>,
+    bindings: Bindings<'src>,
     calls: Vec<(usize, String)>,
 }
 
@@ -40,169 +43,104 @@ impl<'src> Syntax<'src> {
             if unsupported_flow(node) {
                 return None;
             }
-            syntax.visit(node, source);
+            if matches!(node.kind(), "method_invocation" | "call_expression") {
+                if let Some(name) = name(node, source) {
+                    syntax.calls.push((node.start_byte(), name));
+                }
+            }
+            syntax.bindings.visit(node, source);
             nodes.extend(children(node));
         }
+        syntax.bindings.record_borrowed_writes();
         Some(syntax)
+    }
+
+    pub(super) fn matches(&self, patterns: &[NamePattern], name: &str, start: usize) -> bool {
+        matches_any(patterns, name) || self.resolved_receiver_match(patterns, name, start)
+    }
+
+    fn resolved_receiver_match(&self, patterns: &[NamePattern], name: &str, start: usize) -> bool {
+        name.split_once('.').is_some_and(|(receiver, member)| {
+            matches!(self.bindings.resolve(receiver, start), Some(IdentityOperand::Binding(root))
+                if root != receiver && matches_receiver(patterns, &root, member))
+        })
     }
 
     pub(super) fn models_cleanup(&self, cleanup: &[NamePattern], modeled: &HashSet<usize>) -> bool {
         self.calls.iter().all(|(start, name)| {
-            modeled.contains(start) || !cleanup.iter().any(|pattern| pattern.matches(name))
+            modeled.contains(start) || !self.may_match_cleanup(cleanup, name, *start)
+        })
+    }
+
+    fn may_match_cleanup(&self, cleanup: &[NamePattern], name: &str, start: usize) -> bool {
+        if self.matches(cleanup, name, start) {
+            return true;
+        }
+        // An ambiguous alias might have referred to a scoped collection at
+        // this call. It cannot discharge a proven obligation.
+        name.split_once('.').is_some_and(|(receiver, member)| {
+            self.bindings.is_uncertain(receiver, start)
+                && self
+                    .bindings
+                    .names()
+                    .any(|binding| matches_receiver(cleanup, binding, member))
         })
     }
 
     pub(super) fn entry(&self, selector: EntryIdentity, site: &CallSite) -> Option<Entry> {
-        let collection = match selector.collection {
+        let (collection, key) = selector.operands(site)?;
+        let IdentityOperand::Binding(collection) = self.bindings.resolve(collection, site.start)?
+        else {
+            return None;
+        };
+        let key = match key {
+            IdentityOperand::Binding(name) => self.bindings.resolve(name, site.start)?,
+            literal => literal.clone(),
+        };
+        Some(Entry { collection, key })
+    }
+}
+
+impl EntryIdentity {
+    fn operands(self, site: &CallSite) -> Option<(&str, &IdentityOperand)> {
+        let collection = match self.collection {
             CollectionSelector::Receiver => site.receiver.as_ref()?,
             CollectionSelector::Argument(index) => match site.arguments.get(index)?.as_ref()? {
                 IdentityOperand::Binding(name) => name,
                 _ => return None,
             },
         };
-        let key = site.arguments.get(selector.key_argument)?.as_ref()?;
-        if !self.stable(collection)
-            || matches!(key, IdentityOperand::Binding(name) if !self.stable(name))
-        {
-            return None;
-        }
-        Some(Entry {
-            collection: collection.clone(),
-            key: key.clone(),
-        })
-    }
-
-    fn stable(&self, name: &str) -> bool {
-        self.declarations.get(name) == Some(&1) && !self.writes.contains(name)
-    }
-
-    fn visit(&mut self, node: Node<'_>, source: &'src [u8]) {
-        if matches!(node.kind(), "method_invocation" | "call_expression") {
-            if let Some(name) = name(node, source) {
-                self.calls.push((node.start_byte(), name));
-            }
-        }
-        if let Some(target) = declaration(node) {
-            for name in names_in(target, source) {
-                *self.declarations.entry(name).or_default() += 1;
-            }
-            // A direct copy can alias the original binding.
-            if let Some(value) = initializer(node).filter(|node| identifier(*node)) {
-                self.writes.extend(names_in(value, source));
-                self.writes.extend(names_in(target, source));
-            }
-        }
-        if let Some(target) = write_target(node, source) {
-            self.writes.extend(names_in(target, source));
-        }
+        let key = site.arguments.get(self.key_argument)?.as_ref()?;
+        Some((collection.as_str(), key))
     }
 }
 
-fn declaration(node: Node<'_>) -> Option<Node<'_>> {
-    match node.kind() {
-        "variable_declarator" | "formal_parameter" | "catch_formal_parameter" | "var_spec" => {
-            node.child_by_field_name("name")
-        }
-        "parameter_declaration" | "variadic_parameter_declaration" => {
-            node.child_by_field_name("name")
-        }
-        "let_declaration" | "required_parameter" | "optional_parameter" => {
-            node.child_by_field_name("pattern")
-        }
-        "short_var_declaration" => node.child_by_field_name("left"),
-        "parameter" | "variable_declaration" => node
-            .child_by_field_name("pattern")
-            .or_else(|| children(node).find(|node| identifier(*node))),
-        _ if identifier(node)
-            && node
-                .parent()
-                .is_some_and(|parent| parent.kind() == "formal_parameters") =>
-        {
-            Some(node)
-        }
-        _ => None,
-    }
+fn matches_any(patterns: &[NamePattern], name: &str) -> bool {
+    patterns.iter().any(|pattern| pattern.matches(name))
 }
 
-fn initializer(node: Node<'_>) -> Option<Node<'_>> {
-    match node.kind() {
-        "short_var_declaration" => node.child_by_field_name("right")?.named_child(0),
-        "variable_declaration"
-            if node
-                .parent()
-                .is_some_and(|parent| parent.kind() == "property_declaration") =>
-        {
-            children(node.parent()?)
-                .last()
-                .filter(|value| *value != node)
-        }
-        "variable_declarator" | "let_declaration" | "var_spec" => node.child_by_field_name("value"),
-        _ => None,
-    }
-}
-
-fn write_target<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
-    match node.kind() {
-        "assignment"
-        | "assignment_expression"
-        | "augmented_assignment_expression"
-        | "compound_assignment_expr"
-        | "assignment_statement"
-        | "range_clause" => node
-            .child_by_field_name("left")
-            .or_else(|| node.named_child(0)),
-        "update_expression" | "inc_statement" | "dec_statement" | "enhanced_for_statement" => node
-            .child_by_field_name("name")
-            .or_else(|| node.named_child(0)),
-        "unary_expression" if node.utf8_text(source).ok()?.starts_with('&') => {
-            node.child_by_field_name("operand")
-        }
-        "reference_expression"
-            if children(node).any(|child| child.kind() == "mutable_specifier") =>
-        {
-            node.child_by_field_name("value")
-        }
-        "prefix_expression" | "postfix_expression"
-            if ["++", "--"].iter().any(|op| {
-                node.utf8_text(source)
-                    .is_ok_and(|text| text.starts_with(op) || text.ends_with(op))
-            }) =>
-        {
-            node.named_child(0)
-        }
-        _ => None,
-    }
-}
-
-fn names_in<'src>(node: Node<'_>, source: &'src [u8]) -> Vec<&'src str> {
-    let mut names = Vec::new();
-    let mut nodes = vec![node];
-    while let Some(node) = nodes.pop() {
-        if identifier(node)
-            || matches!(
-                node.kind(),
-                "shorthand_property_identifier_pattern" | "shorthand_field_identifier"
-            )
-        {
-            names.extend(node.utf8_text(source).ok());
-        } else {
-            nodes.extend(children(node));
-        }
-    }
-    names
+fn matches_receiver(patterns: &[NamePattern], receiver: &str, member: &str) -> bool {
+    matches_any(patterns, &format!("{receiver}.{member}"))
 }
 
 fn unsupported_flow(node: Node<'_>) -> bool {
     // Rust's postfix `?` and Kotlin's `try` share a node kind.
     if node.kind() == "try_expression" {
-        return node.child(0).is_some_and(|first| first.kind() == "try");
+        if !node.child(0).is_some_and(|first| first.kind() == "try") {
+            return false;
+        }
+        return keyed_flow::blocks(node).is_none()
+            || !node.parent().is_some_and(|parent| parent.kind() == "block");
+    }
+    if node.kind() == "try_statement" {
+        return keyed_flow::blocks(node).is_none();
     }
     matches!(
         node.kind(),
-        "try_statement"
-            | "try_with_resources_statement"
-            | "throw_statement"
-            | "throw_expression"
+        "try_with_resources_statement"
+            | "catch_clause"
+            | "catch_block"
+            | "labeled_statement"
             | "switch_statement"
             | "switch_expression"
             | "expression_switch_statement"
@@ -211,7 +149,6 @@ fn unsupported_flow(node: Node<'_>) -> bool {
             | "when_expression"
             | "match_expression"
             | "goto_statement"
-            | "defer_statement"
             | "go_statement"
             | "for_statement"
             | "for_in_statement"

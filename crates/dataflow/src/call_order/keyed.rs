@@ -2,58 +2,91 @@ use std::collections::{BTreeMap, HashSet};
 
 use tree_sitter::Node;
 
-use crate::cfg::{CallTarget, Cfg, NodeId, Stmt};
+use crate::cfg::{Cfg, NodeId, Stmt};
 use crate::lattice::Lattice;
 use crate::solver;
 
-use super::identity::{Entry, Syntax};
-use super::{CallOrderHit, CallOrderSpec, EntryHit, EntryIdentity};
+use super::identity::Entry;
+use super::plan::{prepare, Effect, Step};
+use super::{CallOrderHit, CallOrderSpec, EntryHit};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Pending<K>(BTreeMap<K, u32>);
+#[derive(Clone, PartialEq, Eq)]
+struct Pending(BTreeMap<Entry, Status>);
 
-impl<K: Clone + Ord> Lattice for Pending<K> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Status {
+    // Each field records whether a path with the corresponding state
+    // reaches this point. Keep pending and pending-without-defer separate.
+    unarmed: bool,
+    live: Option<u32>,
+    uncovered: Option<u32>,
+}
+
+impl Status {
+    const ENTRY: Self = Self {
+        unarmed: true,
+        live: None,
+        uncovered: None,
+    };
+
+    fn join(self, other: Self) -> Self {
+        Self {
+            unarmed: self.unarmed || other.unarmed,
+            live: self.live.into_iter().chain(other.live).min(),
+            uncovered: self.uncovered.into_iter().chain(other.uncovered).min(),
+        }
+    }
+}
+
+impl Lattice for Pending {
     fn bottom() -> Self {
         Self(BTreeMap::new())
     }
 
     fn join(&self, other: &Self) -> Self {
         let mut joined = self.clone();
-        for (entry, &line) in &other.0 {
+        for (entry, &status) in &other.0 {
             joined
                 .0
                 .entry(entry.clone())
-                .and_modify(|first| *first = (*first).min(line))
-                .or_insert(line);
+                .and_modify(|current| *current = current.join(status))
+                .or_insert(status);
         }
         joined
     }
 }
 
-#[derive(Default)]
-struct Step {
-    register: Option<Entry>,
-    remove: Option<Entry>,
-    trigger: Option<(Entry, String)>,
-    returns: bool,
-}
-
 impl Step {
-    fn trigger_hit(&self, pending: &Pending<Entry>, id: NodeId, line: u32) -> Option<CallOrderHit> {
+    fn trigger_hit(&self, pending: &Pending, id: NodeId, line: u32) -> Option<CallOrderHit> {
         let (entry, call) = self.trigger.as_ref()?;
-        let &registration = pending.0.get(entry)?;
+        let registration = pending.0.get(entry)?.live?;
         Some(hit(call, id, line, entry, registration))
     }
 
-    fn apply(&self, pending: &mut Pending<Entry>, line: u32) {
-        if self.returns {
+    fn apply(&self, pending: &mut Pending, line: u32) {
+        if self.exit.is_some() {
             pending.0.clear();
         }
-        if let Some(entry) = &self.remove {
-            pending.0.remove(entry);
-        }
-        if let Some(entry) = &self.register {
-            pending.0.insert(entry.clone(), line);
+        match &self.effect {
+            Some(Effect::Remove(entry)) => {
+                if let Some(status) = pending.0.get_mut(entry) {
+                    status.live = None;
+                    status.uncovered = None;
+                }
+            }
+            Some(Effect::Register(entry)) => {
+                if let Some(status) = pending.0.get_mut(entry) {
+                    status.live = Some(line);
+                    status.uncovered = status.unarmed.then_some(line);
+                }
+            }
+            Some(Effect::Defer(entry)) => {
+                if let Some(status) = pending.0.get_mut(entry) {
+                    status.unarmed = false;
+                    status.uncovered = None;
+                }
+            }
+            None => {}
         }
     }
 }
@@ -68,9 +101,26 @@ pub fn check_keyed(
     let Some(steps) = prepare(spec, cfg, function, source) else {
         return Vec::new();
     };
+    let initial = Pending(
+        steps
+            .iter()
+            .flatten()
+            .filter_map(|step| match &step.effect {
+                Some(Effect::Register(entry)) => Some((entry.clone(), Status::ENTRY)),
+                _ => None,
+            })
+            .collect(),
+    );
+    if initial.0.is_empty() {
+        return Vec::new();
+    }
     let reachable = Reachable::from_entry(cfg);
-    let out = solver::solve(cfg, |id, node, pending: &Pending<Entry>| {
-        let mut pending = pending.clone();
+    let out = solver::solve(cfg, |id, node, incoming: &Pending| {
+        let mut pending = if id == cfg.entry {
+            initial.clone()
+        } else {
+            incoming.clone()
+        };
         if reachable.contains(id) {
             for (index, step) in steps[id].iter().enumerate() {
                 step.apply(&mut pending, node.statement_line(index));
@@ -78,72 +128,13 @@ pub fn check_keyed(
         }
         pending
     });
-    collect_hits(spec.check_before_return, cfg, &steps, &reachable, &out)
-}
-
-fn prepare(
-    spec: &CallOrderSpec,
-    cfg: &Cfg<Stmt>,
-    function: Node<'_>,
-    source: &[u8],
-) -> Option<Vec<Vec<Step>>> {
-    let selector = spec.identity?;
-    if !cfg.nodes.iter().flat_map(|node| &node.stmts).any(|stmt| {
-        matches!(
-            stmt,
-            Stmt::Call { target: CallTarget::Named(name), site: Some(_), .. }
-                if spec.after.iter().any(|pattern| pattern.matches(name))
-        )
-    }) {
-        return None;
+    Analysis {
+        cfg,
+        out: &out,
+        initial: &initial,
+        check_exits: spec.check_before_return,
     }
-    let syntax = Syntax::scan(function, source)?;
-    let mut modeled = HashSet::new();
-    let steps = cfg
-        .nodes
-        .iter()
-        .map(|node| {
-            node.stmts
-                .iter()
-                .map(|stmt| step(spec, selector, &syntax, stmt, &mut modeled))
-                .collect::<Option<Vec<_>>>()
-        })
-        .collect::<Option<Vec<_>>>()?;
-    syntax
-        .models_cleanup(&spec.unless, &modeled)
-        .then_some(steps)
-}
-
-fn step(
-    spec: &CallOrderSpec,
-    selector: EntryIdentity,
-    syntax: &Syntax<'_>,
-    stmt: &Stmt,
-    modeled: &mut HashSet<usize>,
-) -> Option<Step> {
-    let mut step = Step {
-        returns: matches!(stmt, Stmt::Return { .. }),
-        ..Step::default()
-    };
-    let Stmt::Call {
-        target: CallTarget::Named(name),
-        site,
-        ..
-    } = stmt
-    else {
-        return Some(step);
-    };
-    let entry = || syntax.entry(selector, site.as_ref()?);
-    if spec.unless.iter().any(|pattern| pattern.matches(name)) {
-        step.remove = Some(entry()?);
-        modeled.insert(site.as_ref()?.start);
-    } else if spec.after.iter().any(|pattern| pattern.matches(name)) {
-        step.register = entry();
-    }
-    if spec.before.iter().any(|pattern| pattern.matches(name)) {
-        step.trigger = entry().map(|entry| (entry, name.clone()));
-    }
-    Some(step)
+    .collect(&steps, &reachable)
 }
 
 struct Reachable(HashSet<NodeId>);
@@ -165,50 +156,68 @@ impl Reachable {
     }
 }
 
-fn collect_hits(
-    check_returns: bool,
-    cfg: &Cfg<Stmt>,
-    steps: &[Vec<Step>],
-    reachable: &Reachable,
-    out: &[Pending<Entry>],
-) -> Vec<CallOrderHit> {
-    let mut hits = Vec::new();
-    for (id, node) in cfg
-        .nodes
-        .iter()
-        .enumerate()
-        .filter(|(id, _)| reachable.contains(*id))
-    {
-        let mut pending = cfg
-            .predecessors(id)
+struct Analysis<'a> {
+    cfg: &'a Cfg<Stmt>,
+    out: &'a [Pending],
+    initial: &'a Pending,
+    check_exits: bool,
+}
+
+impl Analysis<'_> {
+    fn collect(&self, steps: &[Vec<Step>], reachable: &Reachable) -> Vec<CallOrderHit> {
+        let mut hits = Vec::new();
+        for (id, steps) in steps
             .iter()
-            .fold(Pending::bottom(), |facts, &pred| facts.join(&out[pred]));
-        for (index, step) in steps[id].iter().enumerate() {
-            let line = node.statement_line(index);
+            .enumerate()
+            .filter(|(id, _)| reachable.contains(*id))
+        {
+            self.collect_node(id, steps, &mut hits);
+        }
+        if self.check_exits {
+            let exit = self.cfg.exit;
+            let line = self.cfg.nodes[exit].source_line;
+            hits.extend(exit_hits("fallthrough", exit, line, &self.out[exit]));
+        }
+        let mut seen = HashSet::new();
+        hits.retain(|hit| {
+            seen.insert((hit.source_line, hit.trigger_call.clone(), hit.entry.clone()))
+        });
+        hits
+    }
+
+    fn collect_node(&self, id: NodeId, steps: &[Step], hits: &mut Vec<CallOrderHit>) {
+        let mut pending = self.incoming(id);
+        for (index, step) in steps.iter().enumerate() {
+            let line = self.cfg.nodes[id].statement_line(index);
             hits.extend(step.trigger_hit(&pending, id, line));
-            if step.returns && check_returns {
-                hits.extend(exit_hits("return", id, line, &pending));
+            if let Some(exit) = step.exit.filter(|_| self.check_exits) {
+                hits.extend(exit_hits(exit, id, line, &pending));
             }
             step.apply(&mut pending, line);
         }
     }
-    if check_returns {
-        let line = cfg.nodes[cfg.exit].source_line;
-        hits.extend(exit_hits("fallthrough", cfg.exit, line, &out[cfg.exit]));
+
+    fn incoming(&self, id: NodeId) -> Pending {
+        if id == self.cfg.entry {
+            return self.initial.clone();
+        }
+        self.cfg
+            .predecessors(id)
+            .into_iter()
+            .fold(Pending::bottom(), |facts, pred| facts.join(&self.out[pred]))
     }
-    hits
 }
 
 fn exit_hits<'a>(
     call: &'a str,
     id: NodeId,
     line: u32,
-    pending: &'a Pending<Entry>,
+    pending: &'a Pending,
 ) -> impl Iterator<Item = CallOrderHit> + 'a {
     pending
         .0
         .iter()
-        .map(move |(entry, &registration)| hit(call, id, line, entry, registration))
+        .filter_map(move |(entry, status)| Some(hit(call, id, line, entry, status.uncovered?)))
 }
 
 fn hit(

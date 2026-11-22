@@ -2,7 +2,9 @@
 //! Rules may track one pending flag or a separate obligation per collection
 //! and key. Keyed rules use stable source bindings and simple literals.
 
+mod bindings;
 mod identity;
+mod plan;
 mod keyed;
 
 pub use keyed::check_keyed;
@@ -46,7 +48,7 @@ pub struct EntryIdentity {
     pub key_argument: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EntryHit {
     pub collection: String,
     pub key: String,
