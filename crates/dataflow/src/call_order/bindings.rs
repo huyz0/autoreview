@@ -86,7 +86,11 @@ impl<'src> Bindings<'src> {
     }
 
     fn record_declarations(&mut self, node: Node<'_>, source: &'src [u8]) {
-        let targets = declaration(node);
+        let targets = if declares_iteration(node) {
+            crate::lower::keyed_flow::loops::iterator_bindings(node)
+        } else {
+            declaration(node)
+        };
         let single_target = targets.len() == 1 || declares_iteration(node)
             || matches!(
                 node.kind(),
@@ -119,10 +123,6 @@ impl<'src> Bindings<'src> {
 }
 
 fn declaration(node: Node<'_>) -> Vec<Node<'_>> {
-    let iteration = crate::lower::keyed_flow::loops::iterator_bindings(node);
-    if !iteration.is_empty() && declares_iteration(node) {
-        return iteration;
-    }
     if matches!(
         node.kind(),
         "parameter_declaration" | "variadic_parameter_declaration" | "var_spec"

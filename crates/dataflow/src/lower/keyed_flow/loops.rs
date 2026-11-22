@@ -94,24 +94,36 @@ impl Flow<'_> {
             return head;
         };
         let branch = self.exceptional_edge(cfg, test, head);
+        if let Some(call) = super::direct_call(
+            keyed_syntax::expression_value(test).unwrap_or(test),
+            self.source,
+        ) {
+            cfg.emit(branch, call, line(test));
+        }
         cfg.nodes[branch].condition = keyed_syntax::condition_value(test, self.source);
         cfg.nodes[branch].loop_condition = true;
         branch
     }
 
     pub(super) fn loop_jump(&self, cfg: &mut Cfg<Stmt>, node: Node<'_>, current: NodeId) -> NodeId {
-        if let Some(&(again, after, boundary)) = cfg.loop_targets.last() {
-            let target = if jump_kind(node, self.source) == Some(true) {
-                after
-            } else {
-                again
-            };
-            if boundary != cfg.exit {
-                return cfg.terminate(current, Stmt::LoopJump { target, boundary }, line(node));
+        cfg.route_loop_jump(
+            current,
+            line(node),
+            jump_kind(node, self.source) == Some(true),
+        )
+    }
+}
+
+impl Cfg<Stmt> {
+    fn route_loop_jump(&mut self, current: NodeId, line: u32, breaks: bool) -> NodeId {
+        if let Some(&(again, after, boundary)) = self.loop_targets.last() {
+            let target = if breaks { after } else { again };
+            if boundary != self.exit {
+                return self.terminate(current, Stmt::LoopJump { target, boundary }, line);
             }
-            cfg.edges.push((current, target, EdgeKind::Fallthrough));
+            self.edges.push((current, target, EdgeKind::Fallthrough));
         }
-        cfg.push_node(line(node))
+        self.push_node(line)
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::cfg::{CfgNode, Stmt};
 
-use super::{hit, CallSite, Deferred, Engine, NodeId, State, Values};
+use super::{hit, CallSite, Deferred, Engine, State, StatementLocation, Values};
 
 type Outcomes<'graph> = Vec<(bool, State<'graph>)>;
 
@@ -31,8 +31,7 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
         name: &str,
         site: Option<&CallSite>,
         state: &mut State<'graph>,
-        id: NodeId,
-        line: u32,
+        location: StatementLocation,
     ) -> Option<Option<Vec<State<'graph>>>> {
         if state
             .executed_call
@@ -54,9 +53,15 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
         let call = plan.call(name, site, &state.values)?;
         if let Some(entry) = call.entry {
             if let Some(&registration) = state.pending.get(&entry).filter(|_| call.trigger) {
-                self.hits.push(hit(name, id, line, &entry, registration));
+                self.hits.push(hit(
+                    name,
+                    location.node,
+                    location.line,
+                    &entry,
+                    registration,
+                ));
             }
-            state.update(entry, call.registered, call.removed, line);
+            state.update(entry, call.registered, call.removed, location.line);
         }
         Some(None)
     }

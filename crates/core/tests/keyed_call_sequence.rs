@@ -225,7 +225,7 @@ fn alias_chains_match_receiver_scoped_rules_and_literal_keys() {
     let hit = one(&hits);
     assert_eq!(hit.message, "Clean up root and \"pending\" before return");
     let clean = source.replace("other.remove(key)", "alias.drop(key)");
-    assert!(findings("JavaScript", "worker.js", &clean, RECEIVER, true).is_empty());
+    assert_clean_js(&clean);
     let rebound = source
         .replace("const alias = shared;", "let alias = shared;")
         .replace("other.remove(key);", "alias.drop(key); alias = other;");
@@ -488,7 +488,7 @@ fn a_new_collection_does_not_share_the_previous_values_identity() {
         "    root = new Map();",
         "    saved.remove(key);\n    root = new Map();",
     );
-    assert!(findings("JavaScript", "worker.js", &clean, RECEIVER, true).is_empty());
+    assert_clean_js(&clean);
 }
 
 #[test]
@@ -700,10 +700,7 @@ function pending(root, key) {
     assert!(findings("TypeScript", "worker.ts", source, RECEIVER, true).is_empty());
     let wrong = source.replace("root.remove(key)", "root.remove(\"wrong\")");
     let hits = findings("TypeScript", "worker.ts", &wrong, RECEIVER, true);
-    assert_eq!(
-        one(&hits).message,
-        "Clean up root and key before fallthrough"
-    );
+    assert_key_pending_on_fallthrough(&hits);
 }
 
 #[test]
@@ -719,10 +716,7 @@ func pending(root, spare *Registry, key string) {
     assert!(findings("Go", "worker.go", source, RECEIVER, true).is_empty());
     let wrong = source.replace("defer cleanup(root, key)", "defer cleanup(spare, key)");
     let hits = findings("Go", "worker.go", &wrong, RECEIVER, true);
-    assert_eq!(
-        one(&hits).message,
-        "Clean up root and key before fallthrough"
-    );
+    assert_key_pending_on_fallthrough(&hits);
 }
 
 #[test]
@@ -780,15 +774,12 @@ fn cleanup_in_a_later_iteration_does_not_clear_an_earlier_key() {
     }
 }"#;
     let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
-    assert_eq!(
-        one(&hits).message,
-        "Clean up root and key before fallthrough"
-    );
+    assert_key_pending_on_fallthrough(&hits);
     let clean = source.replace(
         "if (skip) continue;",
         "if (skip) { root.remove(key); continue; }",
     );
-    assert!(findings("JavaScript", "worker.js", &clean, RECEIVER, true).is_empty());
+    assert_clean_js(&clean);
 }
 
 #[test]
@@ -802,10 +793,7 @@ fn loop_back_edges_keep_the_previous_key_distinct_from_the_current_key() {
     }
 }"#;
     let hits = findings("TypeScript", "worker.ts", source, RECEIVER, true);
-    assert_eq!(
-        one(&hits).message,
-        "Clean up root and key before fallthrough"
-    );
+    assert_key_pending_on_fallthrough(&hits);
     let clean = source.replace(
         "previous = key;\n    }",
         "previous = key;\n    }\n    root.remove(previous);",
@@ -823,15 +811,12 @@ fn break_and_do_while_keep_reachable_exits_only() {
     } while (false);
 }"#;
     let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
-    assert_eq!(
-        one(&hits).message,
-        "Clean up root and key before fallthrough"
-    );
+    assert_key_pending_on_fallthrough(&hits);
     let clean = source.replace(
         "break;\n        root.remove(key);",
         "root.remove(key);\n        break;",
     );
-    assert!(findings("JavaScript", "worker.js", &clean, RECEIVER, true).is_empty());
+    assert_clean_js(&clean);
 }
 
 #[test]
@@ -870,10 +855,7 @@ fn loop_jumps_run_finally_before_leaving_or_repeating_the_iteration() {
     assert!(findings("JavaScript", "worker.js", source, RECEIVER, true).is_empty());
     let wrong = source.replace("root.remove(key)", "root.remove(\"wrong\")");
     let hits = findings("JavaScript", "worker.js", &wrong, RECEIVER, true);
-    assert_eq!(
-        one(&hits).message,
-        "Clean up root and key before fallthrough"
-    );
+    assert_key_pending_on_fallthrough(&hits);
 }
 
 #[test]
@@ -907,4 +889,18 @@ fn ordinary_for_updates_keep_current_and_previous_counters_distinct() {
     let wrong = source.replace("root.remove(i)", "root.remove(0)");
     let hits = findings("JavaScript", "worker.js", &wrong, RECEIVER, true);
     assert_eq!(one(&hits).message, "Clean up root and i before fallthrough");
+}
+
+#[track_caller]
+fn assert_key_pending_on_fallthrough(hits: &[AgentFinding]) {
+    assert_eq!(
+        one(hits).message,
+        "Clean up root and key before fallthrough"
+    );
+}
+
+#[track_caller]
+fn assert_clean_js(source: &str) {
+    let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
+    assert!(hits.is_empty(), "{hits:#?}");
 }

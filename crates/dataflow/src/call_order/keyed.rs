@@ -73,6 +73,11 @@ struct Engine<'program, 'spec, 'src, 'graph> {
     hits: Vec<CallOrderHit>,
 }
 
+struct StatementLocation {
+    node: NodeId,
+    line: u32,
+}
+
 struct Exit<'graph> {
     state: State<'graph>,
     trigger: &'static str,
@@ -197,9 +202,13 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
                 site,
                 ..
             } => {
-                if let Some(outcomes) =
-                    self.apply_call(frame, name, site.as_deref(), &mut state, id, line)?
-                {
+                if let Some(outcomes) = self.apply_call(
+                    frame,
+                    name,
+                    site.as_deref(),
+                    &mut state,
+                    StatementLocation { node: id, line },
+                )? {
                     return Some(outcomes);
                 }
             }

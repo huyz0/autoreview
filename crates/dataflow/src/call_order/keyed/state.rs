@@ -159,18 +159,26 @@ impl<'graph> State<'graph> {
             return Some(());
         };
         let truth = arm == *positive;
-        if matches!(name.as_str(), "true" | "false") {
-            return ((name == "true") == truth).then_some(());
-        }
-        let Some(value) = plan.syntax.resolve(&self.values, name, usize::MAX) else {
-            return Some(());
+        let value = match name.as_str() {
+            "true" => Some(IdentityOperand::Boolean(true)),
+            "false" => Some(IdentityOperand::Boolean(false)),
+            _ => plan.syntax.resolve(&self.values, name, usize::MAX),
         };
-        if let IdentityOperand::Boolean(value) = value {
-            return (value == truth).then_some(());
+        match value {
+            Some(IdentityOperand::Boolean(value)) => (value == truth).then_some(()),
+            Some(value) if !node.loop_condition => {
+                self.record_condition(value, truth, plan.syntax.repeated_guard(name))
+            }
+            _ => Some(()),
         }
-        if node.loop_condition {
-            return Some(());
-        }
+    }
+
+    fn record_condition(
+        &mut self,
+        value: IdentityOperand,
+        truth: bool,
+        remember: bool,
+    ) -> Option<()> {
         if self
             .conditions
             .get(&value)
@@ -178,7 +186,7 @@ impl<'graph> State<'graph> {
         {
             return None;
         }
-        if plan.syntax.repeated_guard(name) {
+        if remember {
             self.conditions.insert(value, truth);
         }
         Some(())

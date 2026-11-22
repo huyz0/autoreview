@@ -227,14 +227,11 @@ fn matches_receiver(patterns: &[NamePattern], receiver: &str, member: &str) -> b
 }
 
 fn unsupported_flow(node: Node<'_>, source: &[u8]) -> bool {
-    if crate::lower::keyed_flow::loops::jump_kind(node, source).is_some() {
-        return false;
-    }
     if matches!(
         node.kind(),
         "break_statement" | "continue_statement" | "label"
     ) {
-        return true;
+        return crate::lower::keyed_flow::loops::jump_kind(node, source).is_none();
     }
 
     // Rust's postfix `?` and Kotlin's `try` share a node kind.
