@@ -27,7 +27,7 @@ func paused(done <-chan struct{}, wait func()) {
 			return
 		default:
 		}
-		blockUntilDone()
+		wait()
 	}
 }
 
