@@ -7,7 +7,7 @@ mod identity;
 mod plan;
 mod keyed;
 
-pub use keyed::{check_keyed, check_keyed_file, KeyedFunction};
+pub use keyed::{check_keyed, check_keyed_file, check_keyed_units, KeyedFunction, KeyedImport, KeyedUnit};
 
 use crate::cfg::{Cfg, CfgNode, NodeId, Stmt};
 use crate::lattice::Lattice;
@@ -53,6 +53,7 @@ pub struct EntryHit {
     pub collection: String,
     pub key: String,
     pub registration_line: u32,
+    pub registration_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +88,7 @@ pub struct CallOrderHit {
     pub trigger_call: String,
     pub node: NodeId,
     pub source_line: u32,
+    pub path: Option<String>,
     pub entry: Option<EntryHit>,
 }
 
@@ -106,10 +108,10 @@ pub fn check(spec: &CallOrderSpec, cfg: &Cfg<Stmt>) -> Vec<CallOrderHit> {
         for (index, stmt) in node.stmts.iter().enumerate() {
             match stmt {
                 Stmt::Call { target: crate::cfg::CallTarget::Named(name), .. } if pending && spec.before.iter().any(|p| p.matches(name)) => {
-                    hits.push(CallOrderHit { trigger_call: name.clone(), node: node_id, source_line: node.statement_line(index), entry: None });
+                    hits.push(CallOrderHit { trigger_call: name.clone(), node: node_id, source_line: node.statement_line(index), entry: None, path: None });
                 }
                 Stmt::Return { .. } if pending && spec.check_before_return => {
-                    hits.push(CallOrderHit { trigger_call: "return".to_string(), node: node_id, source_line: node.statement_line(index), entry: None });
+                    hits.push(CallOrderHit { trigger_call: "return".to_string(), node: node_id, source_line: node.statement_line(index), entry: None, path: None });
                 }
                 _ => {}
             }

@@ -40,8 +40,9 @@ pub enum CallTarget {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IdentityOperand {
     Binding(String),
-    Fresh { name: String, start: usize, age: u8 },
-    Scoped { name: String, owner: usize },
+    Fresh { name: String, start: usize, age: u8, unit: usize },
+    Scoped { name: String, owner: usize, unit: usize },
+    CallResult { start: usize, fallback: bool },
     String(String),
     Integer(String),
     Boolean(bool),
@@ -91,6 +92,7 @@ pub struct BindingWrite {
 pub enum Stmt {
     Assign { lhs: VarId, rhs: RhsShape },
     Return { value: Option<VarId> },
+    ReturnIdentity(Option<IdentityOperand>),
     Throw { exception: Option<String>, implicit: bool },
     Rebind(BindingWrite),
     LoopJump { target: NodeId, boundary: NodeId },

@@ -5,7 +5,7 @@ use super::{
     call_order_rules, make_finding, rule_meta, AgentFinding, Cfg, Node, Severity, Stmt,
     SummarySource,
 };
-use autoreview_dataflow::{call_order, lower, taint};
+use autoreview_dataflow::taint;
 use autoreview_langsupport::Language;
 use autoreview_schema::{Location, LocationRange, Side};
 
@@ -123,57 +123,31 @@ fn render_call_order_message(
     }
 }
 
-/// Runs every `kind: call-sequence` rule (see
-/// `autoreview_dataflow::call_order`'s own module docs for what this
-/// engine models and why it's a separate primitive from taint) whose
-/// `language` matches, against one file's already-lowered functions.
-/// Keyed rules follow eligible calls between functions in the same file.
+/// Runs the function-wide call-sequence rules. Keyed rules are dispatched
+/// separately so their repository-local call graph can span source files.
 pub(super) fn run_call_order_rules(
     file: &SummarySource,
     language: Language,
     lowered: &[(Node, Cfg<Stmt>)],
     rules: &[call_order_rules::CallOrderRuleDef],
 ) -> Vec<AgentFinding> {
-    let rules: Vec<_> = rules
-        .iter()
-        .filter(|rule| {
-            Language::from_rule_name(&rule.language)
-                .is_some_and(|declared| language.matches_rule_language(declared))
-        })
-        .collect();
-    if rules.is_empty() {
-        return Vec::new();
-    }
-
+    let rules = rules.iter().filter(|rule| rule.spec.identity.is_none() &&
+        Language::from_rule_name(&rule.language)
+            .is_some_and(|declared| language.matches_rule_language(declared)));
     let mut findings = Vec::new();
-    let check_go_defers = language == Language::Go
-        && rules.iter().any(|rule| rule.spec.identity.is_none() && rule.spec.check_before_return);
-    let check_keyed = rules.iter().any(|rule| rule.spec.identity.is_some());
-    let source = file.content.as_bytes();
-    let functions: Vec<_> = lowered.iter().map(|(node, cfg)| {
-        let deferred_cleanup = check_go_defers && contains_go_defer(*node);
-        let keyed = check_keyed.then(|| lower::keyed_variant(language, source, *node));
-        (*node, cfg, keyed, deferred_cleanup)
-    }).collect();
-    let keyed: Vec<_> = functions.iter().filter_map(|(node, _, graph, _)| {
-        Some(call_order::KeyedFunction { node: *node, graph: graph.as_ref()? })
-    }).collect();
-    for rule in &rules {
-        if rule.spec.identity.is_some() {
-            let hits = call_order::check_keyed_file(&rule.spec, &keyed, source);
-            findings.extend(hits.iter().map(|hit| call_order_finding(file, rule, hit)));
-        } else {
-            for (_, cfg, _, deferred_cleanup) in &functions {
-                let hits = call_sequence_hits(cfg, &rule.spec, *deferred_cleanup);
-                findings.extend(hits.iter().map(|hit| call_order_finding(file, rule, hit)));
-            }
+    for rule in rules {
+        for (node, cfg) in lowered {
+            let deferred = language == Language::Go && rule.spec.check_before_return && contains_go_defer(*node);
+            let hits = call_sequence_hits(cfg, &rule.spec, deferred);
+            findings.extend(hits.iter().map(|hit| call_order_finding(file.path, Some(file.content), rule, hit)));
         }
     }
     findings
 }
 
-fn call_order_finding(
-    file: &SummarySource,
+pub(super) fn call_order_finding(
+    path: &str,
+    registration_source: Option<&str>,
     rule: &call_order_rules::CallOrderRuleDef,
     hit: &autoreview_dataflow::call_order::CallOrderHit,
 ) -> AgentFinding {
@@ -188,16 +162,16 @@ fn call_order_finding(
         ),
     };
     let mut finding = rule.finding(
-        file.path,
+        hit.path.as_deref().unwrap_or(path),
         hit.source_line,
         title,
         render_call_order_message(&rule.message, hit),
     );
     if let Some(entry) = &hit.entry {
         finding.related_locations = Some(vec![Location {
-            path: file.path.to_owned(),
+            path: entry.registration_path.as_deref().unwrap_or(path).to_owned(),
             range: LocationRange { start_line: entry.registration_line, ..Default::default() },
-            snippet: file.content.lines().nth(entry.registration_line.saturating_sub(1) as usize).unwrap_or_default().trim().to_owned(),
+            snippet: registration_source.and_then(|source| source.lines().nth(entry.registration_line.saturating_sub(1) as usize)).unwrap_or_default().trim().to_owned(),
             side: Side::New,
         }]);
     }

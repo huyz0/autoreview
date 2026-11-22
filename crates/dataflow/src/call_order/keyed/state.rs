@@ -49,53 +49,155 @@ impl Eq for Deferred<'_> {}
 #[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct State<'graph> {
     pub(super) values: Values,
-    pub(super) pending: BTreeMap<Entry, u32>,
+    pub(super) pending: BTreeMap<Entry, Registration>,
     pub(super) deferred: Vec<Deferred<'graph>>,
     conditions: BTreeMap<IdentityOperand, bool>,
     pub(super) executed_call: Option<usize>,
+    pub(super) result: Option<(usize, Option<IdentityOperand>)>,
+    pub(super) returned: Option<IdentityOperand>,
+    allocations: Allocations,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct Registration {
+    pub(super) unit: usize,
+    pub(super) line: u32,
+}
+
+type Allocations = BTreeMap<(usize, usize), u8>;
+
+pub(super) struct Suspended<'graph> {
+    values: Values,
+    deferred: Vec<Deferred<'graph>>,
+    executed_call: Option<usize>,
+    result: Option<(usize, Option<IdentityOperand>)>,
+    returned: Option<IdentityOperand>,
+    allocations: Allocations,
 }
 
 impl<'graph> State<'graph> {
     pub(super) fn rebind(&mut self, plan: &Plan<'_, '_>, write: &BindingWrite) {
-        if let Some(IdentityOperand::Fresh { start, .. }) = &write.value {
-            self.age(*start);
-        }
-        let value = write
-            .value
-            .as_ref()
-            .and_then(|value| plan.syntax.value(&self.values, value, write.start));
+        let value = match &write.value {
+            Some(IdentityOperand::CallResult {
+                start,
+                fallback: true,
+            }) if self.result.as_ref().is_none_or(|(site, _)| site != start) => return,
+            Some(operand) => self.materialize(plan, operand, write.start),
+            None => None,
+        };
         self.values.insert(write.name.clone(), value);
+    }
+
+    pub(super) fn materialize(
+        &mut self,
+        plan: &Plan<'_, '_>,
+        operand: &IdentityOperand,
+        location: usize,
+    ) -> Option<IdentityOperand> {
+        if let IdentityOperand::Fresh {
+            start, name, age, ..
+        } = operand
+        {
+            let unit = plan.syntax.unit;
+            self.age(unit, *start);
+            return Some(IdentityOperand::Fresh {
+                name: name.clone(),
+                start: *start,
+                age: *age,
+                unit,
+            });
+        }
+        self.operand(plan, operand, location)
+    }
+
+    pub(super) fn operand(
+        &self,
+        plan: &Plan<'_, '_>,
+        value: &IdentityOperand,
+        location: usize,
+    ) -> Option<IdentityOperand> {
+        if let IdentityOperand::CallResult { start, .. } = value {
+            return self
+                .result
+                .as_ref()
+                .filter(|(site, _)| site == start)
+                .and_then(|(_, value)| value.clone());
+        }
+        plan.syntax.value(&self.values, value, location)
+    }
+
+    pub(super) fn suspend(&mut self, parameters: Values) -> Suspended<'graph> {
+        Suspended {
+            values: std::mem::replace(&mut self.values, parameters),
+            deferred: std::mem::take(&mut self.deferred),
+            executed_call: self.executed_call.take(),
+            result: self.result.take(),
+            returned: self.returned.take(),
+            allocations: std::mem::take(&mut self.allocations),
+        }
+    }
+
+    pub(super) fn restore(&mut self, caller: &Suspended<'graph>) -> Option<IdentityOperand> {
+        let returned = std::mem::replace(&mut self.returned, caller.returned.clone());
+        let allocations = std::mem::replace(&mut self.allocations, caller.allocations.clone());
+        self.values = caller.values.clone();
+        self.deferred = caller.deferred.clone();
+        self.executed_call = caller.executed_call;
+        self.result = caller.result.clone();
+        for ((unit, site), count) in allocations {
+            self.record_generations(unit, site, count);
+            for _ in 0..count {
+                self.age_captures(unit, site);
+            }
+        }
+        returned
+    }
+
+    fn record_generations(&mut self, unit: usize, site: usize, more: u8) {
+        let count = self.allocations.entry((unit, site)).or_default();
+        *count = (*count + more).min(2);
     }
 
     // Two most recent values stay distinct. Older iterations form a
     // summary that a single removal cannot discharge.
-    fn age(&mut self, site: usize) {
-        for value in self.values.values_mut().flatten() {
-            advance(value, site);
-        }
+    fn age(&mut self, unit: usize, site: usize) {
+        self.record_generations(unit, site, 1);
+        self.age_captures(unit, site);
         let mut pending = BTreeMap::new();
         for (mut entry, line) in std::mem::take(&mut self.pending) {
-            advance_entry(&mut entry, site);
+            advance_entry(&mut entry, unit, site);
             pending
                 .entry(entry)
-                .and_modify(|previous: &mut u32| *previous = (*previous).min(line))
+                .and_modify(|previous: &mut Registration| *previous = (*previous).min(line))
                 .or_insert(line);
         }
         self.pending = pending;
+        self.conditions.retain(|value, _| !matches!(value, IdentityOperand::Fresh { start, unit: owner, .. } if *start == site && *owner == unit));
+    }
+
+    fn age_captures(&mut self, unit: usize, site: usize) {
+        for value in self
+            .values
+            .values_mut()
+            .flatten()
+            .chain(self.returned.iter_mut())
+        {
+            advance(value, unit, site);
+        }
+        if let Some((_, Some(value))) = &mut self.result {
+            advance(value, unit, site);
+        }
         for action in &mut self.deferred {
             match action {
-                Deferred::Remove(entry) => advance_entry(entry, site),
+                Deferred::Remove(entry) => advance_entry(entry, unit, site),
                 Deferred::Helper(_, values) => {
                     for value in values.values_mut().flatten() {
-                        advance(value, site);
+                        advance(value, unit, site);
                     }
                 }
                 Deferred::Block(_) => {}
             }
         }
-        self.conditions.retain(
-            |value, _| !matches!(value, IdentityOperand::Fresh { start, .. } if *start == site),
-        );
     }
 
     pub(super) fn schedule(&mut self, action: Deferred<'graph>) -> Option<()> {
@@ -119,11 +221,17 @@ impl<'graph> State<'graph> {
         Some(())
     }
 
-    pub(super) fn update(&mut self, entry: Entry, registered: bool, removed: bool, line: u32) {
+    pub(super) fn update(
+        &mut self,
+        entry: Entry,
+        registered: bool,
+        removed: bool,
+        registration: Registration,
+    ) {
         if removed {
             self.remove(&entry);
         } else if registered {
-            self.pending.insert(entry, line);
+            self.pending.insert(entry, registration);
         }
     }
 
@@ -193,14 +301,20 @@ impl<'graph> State<'graph> {
     }
 }
 
-fn advance_entry(entry: &mut Entry, site: usize) {
-    advance(&mut entry.collection, site);
-    advance(&mut entry.key, site);
+fn advance_entry(entry: &mut Entry, unit: usize, site: usize) {
+    advance(&mut entry.collection, unit, site);
+    advance(&mut entry.key, unit, site);
 }
 
-fn advance(value: &mut IdentityOperand, site: usize) {
-    if let IdentityOperand::Fresh { start, age, .. } = value {
-        if *start == site {
+fn advance(value: &mut IdentityOperand, unit: usize, site: usize) {
+    if let IdentityOperand::Fresh {
+        start,
+        age,
+        unit: owner,
+        ..
+    } = value
+    {
+        if *start == site && *owner == unit {
             *age = (*age + 1).min(2);
         }
     }

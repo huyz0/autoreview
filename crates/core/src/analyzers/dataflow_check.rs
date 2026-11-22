@@ -44,6 +44,7 @@ mod cache;
 mod dispatch;
 mod dsl;
 mod functions;
+mod keyed_imports;
 mod go_practices;
 mod source;
 

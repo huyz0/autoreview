@@ -178,6 +178,7 @@ fn counter_step(node: Node<'_>, source: &[u8]) -> Option<BindingWrite> {
             name: name.clone(),
             start: node.start_byte(),
             age: 0,
+            unit: 0,
         }),
         name,
     })
@@ -288,6 +289,7 @@ pub(crate) fn iteration_writes(node: Node<'_>, source: &[u8]) -> Vec<BindingWrit
                     name: name.to_owned(),
                     start: var.start_byte(),
                     age: 0,
+                    unit: 0,
                 }),
             })
         })

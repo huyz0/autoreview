@@ -33,6 +33,7 @@ impl Entry {
             | IdentityOperand::Scoped { name, .. } => name.clone(),
             IdentityOperand::String(value) => format!("{value:?}"),
             IdentityOperand::Boolean(value) => value.to_string(),
+            IdentityOperand::CallResult { .. } => String::new(),
         }
     }
 }
@@ -47,6 +48,7 @@ pub(super) struct Syntax<'src> {
     calls: Vec<(usize, String)>,
     guards: HashMap<String, usize>,
     owner: usize,
+    pub(super) unit: usize,
 }
 
 impl<'src> Syntax<'src> {
@@ -54,9 +56,11 @@ impl<'src> Syntax<'src> {
         function: Node<'_>,
         source: &'src [u8],
         writes: &HashSet<usize>,
+        unit: usize,
     ) -> Option<Self> {
         let mut syntax = Self {
             owner: function.start_byte(),
+            unit,
             ..Self::default()
         };
         let mut nodes = vec![function];
@@ -99,6 +103,7 @@ impl<'src> Syntax<'src> {
                 IdentityOperand::Binding(name) => Some(IdentityOperand::Scoped {
                     name,
                     owner: self.owner,
+                    unit: self.unit,
                 }),
                 literal => Some(literal),
             })

@@ -113,6 +113,11 @@ pub fn lower_function(source: &[u8], fn_node: Node) -> Cfg<Stmt> {
     super::function(Cfg::new_empty(), source, fn_node, function_body(fn_node), lower_block)
 }
 
+pub(super) fn expression_body(node: Node<'_>) -> Option<Node<'_>> {
+    let body = first_child_of_kind(node, "function_body")?;
+    body.named_child(0).filter(|node| node.kind() != "block")
+}
+
 pub(super) fn function_body(node: Node<'_>) -> Option<Node<'_>> {
     first_child_of_kind(node, "function_body").and_then(|body| first_child_of_kind(body, "block"))
 }

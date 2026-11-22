@@ -29,11 +29,12 @@ pub(super) fn run(
             java_kotlin_packages: Default::default(),
         },
     };
-    let findings = paths
+    let mut findings: Vec<_> = paths
         .iter()
         .filter_map(|path| review.check_file(path))
         .flatten()
         .collect();
+    findings.extend(super::keyed_imports::run(root, paths, &review.call_sequences, &review.caches));
     persistent.save();
     findings
 }
@@ -98,7 +99,7 @@ fn language_checks(
 type Extract = fn(&tree_sitter::Tree) -> Vec<Node<'_>>;
 type Lower = fn(&[u8], Node<'_>) -> Cfg<Stmt>;
 
-fn profile(language: Language) -> (Extract, Lower) {
+pub(super) fn profile(language: Language) -> (Extract, Lower) {
     match language {
         Language::Go => (go_functions, lower::go::lower_function),
         Language::Java => (java_functions, lower::java::lower_function),
