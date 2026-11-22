@@ -78,9 +78,7 @@ pub fn dedupe_fuzzy(findings: Vec<Finding>, line_window: u32, title_threshold: f
 
     'outer: for finding in sorted {
         for existing in kept.iter_mut() {
-            let same_file = existing.location.path == finding.location.path;
-            let near_line = (existing.location.range.start_line as i64 - finding.location.range.start_line as i64).unsigned_abs() as u32 <= line_window;
-            if same_file && near_line && title_similarity(&existing.title, &finding.title) >= title_threshold {
+            if fuzzy_match(existing, &finding, line_window, title_threshold) {
                 if finding.confidence > existing.confidence {
                     let dropped = std::mem::replace(existing, finding);
                     suppressed.push(SuppressedFinding { finding: dropped, reason: SuppressedReason::Duplicate });
@@ -94,6 +92,22 @@ pub fn dedupe_fuzzy(findings: Vec<Finding>, line_window: u32, title_threshold: f
     }
 
     DedupeResult { findings: kept, suppressed }
+}
+
+fn fuzzy_match(existing: &Finding, finding: &Finding, line_window: u32, title_threshold: f64) -> bool {
+    if same_analyzer_rule(existing, finding) || existing.location.path != finding.location.path {
+        return false;
+    }
+    let distance = existing.location.range.start_line.abs_diff(finding.location.range.start_line);
+    distance <= line_window && title_similarity(&existing.title, &finding.title) >= title_threshold
+}
+
+fn same_analyzer_rule(left: &Finding, right: &Finding) -> bool {
+    left.source.kind == autoreview_schema::FindingSourceKind::Analyzer
+        && right.source.kind == left.source.kind
+        && right.source.tool == left.source.tool
+        && left.source.rule_id.is_some()
+        && right.source.rule_id == left.source.rule_id
 }
 
 #[cfg(test)]

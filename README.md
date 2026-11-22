@@ -153,6 +153,13 @@ to keep deterministic findings whose primary or related location overlaps
 added or modified lines. By default, deterministic checks report across touched
 files, including findings whose locations are outside the changed hunks.
 
+The Java nullability regression check can also report a dereference in an
+unchanged caller file when a repository-local static helper gains a direct
+null return. The report links the caller, its helper call, and the changed
+helper. The initial check resolves class-qualified calls with a unique
+signature, follows local aliases and null guards, and recognizes selected
+instance methods on strings and repository-local types.
+
 To check Rust dependencies in changed `Cargo.lock` files, pass
 `--audit-rust-deps`. Install [cargo-audit](https://github.com/rustsec/rustsec/tree/main/cargo-audit)
 and populate its local RustSec database before running the review. Autoreview

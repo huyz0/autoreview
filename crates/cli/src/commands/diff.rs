@@ -169,6 +169,7 @@ fn run_static_analyzers(run: &ReviewRun<'_>) -> (Vec<Finding>, StaticFindings) {
         run.packs,
     );
     append_protobuf_findings(run, &mut findings, &mut warnings);
+    append_java_nullability_findings(run, &mut findings, &mut warnings);
     let shadow: HashSet<_> = run
         .packs
         .iter()
@@ -218,10 +219,29 @@ fn append_protobuf_findings(run: &ReviewRun<'_>, findings: &mut Vec<AgentFinding
     let result = super::revision::compare_protobuf(
         &run.options.repo_root, run.source_root, &run.facts.base_ref, &run.facts.head_ref, globs,
     );
+    append_comparison("Protobuf compatibility policy", result, findings, warnings);
+}
+
+fn append_java_nullability_findings(run: &ReviewRun<'_>, findings: &mut Vec<AgentFinding>, warnings: &mut Vec<String>) {
+    if run.options.aspects.as_ref().is_some_and(|aspects| !aspects.iter().any(|aspect| aspect == "correctness")) {
+        return;
+    }
+    let result = super::revision::compare_java_nullability(
+        &run.options.repo_root, run.source_root, &run.facts.base_ref, &run.facts.head_ref, run.changed_files,
+    );
+    append_comparison("Java nullability comparison", result, findings, warnings);
+}
+
+fn append_comparison(
+    label: &str,
+    result: anyhow::Result<Vec<AgentFinding>>,
+    findings: &mut Vec<AgentFinding>,
+    warnings: &mut Vec<String>,
+) {
     match result {
-        Ok(compatibility) => findings.extend(compatibility),
+        Ok(detected) => findings.extend(detected),
         Err(error) => {
-            let warning = format!("Protobuf compatibility policy failed: {error}");
+            let warning = format!("{label} failed: {error}");
             println!("  [warn] {warning}");
             warnings.push(warning);
         }

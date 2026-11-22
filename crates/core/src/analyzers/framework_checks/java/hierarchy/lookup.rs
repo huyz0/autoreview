@@ -1,3 +1,5 @@
+mod qualified;
+
 use std::collections::HashSet;
 
 use tree_sitter::Node;

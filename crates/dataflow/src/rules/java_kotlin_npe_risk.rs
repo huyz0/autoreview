@@ -50,118 +50,141 @@
 //! two-pass design already generalizes to it without further schema
 //! changes once that's worth building.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::cfg::{CallTarget, Cfg, CfgNode, GuardAgainst, GuardOp, NodeId, RhsShape, Stmt};
+use crate::cfg::{CallSite, CallTarget, Cfg, CfgNode, GuardAgainst, GuardOp, NodeId, RhsShape, Stmt};
 use crate::lattice::Lattice;
 use crate::solver;
 
-#[derive(Debug, Clone, PartialEq)]
-struct NilFacts(HashMap<String, bool>);
+#[derive(Debug, Clone, Default, PartialEq)]
+struct NilFacts {
+    possible: HashSet<String>,
+    // The intersection of bindings that hold the selected call's result.
+    // None is the lattice bottom, or a scan with no selected source.
+    source_aliases: Option<HashSet<String>>,
+}
 
 impl Lattice for NilFacts {
     fn bottom() -> Self {
-        NilFacts(HashMap::new())
+        Self::default()
     }
+
     fn join(&self, other: &Self) -> Self {
-        let mut out = self.0.clone();
-        for (k, v) in &other.0 {
-            let entry = out.entry(k.clone()).or_insert(false);
-            *entry = *entry || *v;
-        }
-        NilFacts(out)
+        let source_aliases = match (&self.source_aliases, &other.source_aliases) {
+            (Some(left), Some(right)) => Some(left.intersection(right).cloned().collect()),
+            (left, right) => left.as_ref().or(right.as_ref()).cloned(),
+        };
+        Self { possible: self.possible.union(&other.possible).cloned().collect(), source_aliases }
     }
 }
 
-/// `resolve_call` semantics: `None` (pass 1, summary computation — calls
-/// are always an unknown/not-nil boundary) or `Some(&summaries)` (pass 2,
-/// resolve one hop against already-computed summaries) — same convention
-/// as Go's `go_typed_nil_interface_return::apply`.
-fn apply(facts: &NilFacts, stmt: &Stmt, summaries: Option<&HashMap<String, bool>>) -> NilFacts {
-    let mut out = facts.0.clone();
+impl NilFacts {
+    fn bind(&mut self, name: &str, possible: bool, aliases_source: bool) {
+        set_membership(&mut self.possible, name, possible);
+        if let Some(aliases) = &mut self.source_aliases {
+            set_membership(aliases, name, aliases_source);
+        }
+    }
+
+    fn is_source_alias(&self, name: &str) -> bool {
+        self.source_aliases.as_ref().is_some_and(|aliases| aliases.contains(name))
+    }
+}
+
+fn set_membership(names: &mut HashSet<String>, name: &str, included: bool) {
+    if included {
+        names.insert(name.to_owned());
+    } else {
+        names.remove(name);
+    }
+}
+
+type ResolveCall<'a> = dyn Fn(&str, Option<&CallSite>) -> bool + 'a;
+
+struct NullSources<'a> {
+    call: &'a ResolveCall<'a>,
+    include_literals: bool,
+}
+
+fn apply(facts: &NilFacts, stmt: &Stmt, sources: &NullSources<'_>) -> NilFacts {
+    let mut out = facts.clone();
     match stmt {
-        Stmt::Assign { lhs, rhs: RhsShape::NilLiteral } => {
-            out.insert(lhs.clone(), true);
+        Stmt::Assign { lhs, rhs } => {
+            let (possible, aliases_source) = match rhs {
+                RhsShape::NilLiteral => (sources.include_literals, false),
+                RhsShape::Var(var) => (facts.possible.contains(var), facts.is_source_alias(var)),
+                _ => (false, false),
+            };
+            out.bind(lhs, possible, aliases_source);
         }
-        Stmt::Assign { lhs, rhs: RhsShape::Var(v) } => {
-            let val = out.get(v).copied().unwrap_or(false);
-            out.insert(lhs.clone(), val);
+        Stmt::Call { target: CallTarget::Named(name), assigned_to: Some(var), site, .. } => {
+            let risky = (sources.call)(name, site.as_deref());
+            out.bind(var, risky, risky);
         }
-        Stmt::Assign { lhs, .. } => {
-            out.insert(lhs.clone(), false);
-        }
-        Stmt::Call { target: CallTarget::Named(name), assigned_to: Some(v), .. } => {
-            let risky = summaries.and_then(|s| s.get(name)).copied().unwrap_or(false);
-            out.insert(v.clone(), risky);
-        }
-        Stmt::Call { assigned_to: Some(v), .. } => {
-            out.insert(v.clone(), false);
-        }
+        Stmt::Call { assigned_to: Some(var), .. } => out.bind(var, false, false),
         Stmt::Guard { var, op: GuardOp::NotEqual, against: GuardAgainst::Nil } => {
-            out.insert(var.clone(), false);
+            if facts.is_source_alias(var) {
+                out.possible.clear();
+            } else {
+                out.possible.remove(var);
+            }
         }
-        Stmt::Guard { var, op: GuardOp::Equal, against: GuardAgainst::Nil } => {
-            out.insert(var.clone(), true);
+        Stmt::Guard { var, op: GuardOp::Equal, against: GuardAgainst::Nil } if sources.include_literals => {
+            out.possible.insert(var.clone());
         }
         _ => {}
     }
-    NilFacts(out)
+    out
 }
 
-fn solve(cfg: &Cfg<Stmt>, summaries: Option<&HashMap<String, bool>>) -> Vec<NilFacts> {
-    solver::solve(cfg, |_id, node: &CfgNode<Stmt>, in_fact: &NilFacts| node.stmts.iter().fold(in_fact.clone(), |acc, stmt| apply(&acc, stmt, summaries)))
+fn solve(cfg: &Cfg<Stmt>, sources: &NullSources<'_>, reachable: &[bool]) -> Vec<NilFacts> {
+    solver::solve(cfg, |id, node: &CfgNode<Stmt>, in_fact: &NilFacts| {
+        if !reachable[id] {
+            return NilFacts::bottom();
+        }
+        let mut facts = in_fact.clone();
+        if id == cfg.entry && !sources.include_literals {
+            facts.source_aliases = Some(HashSet::new());
+        }
+        node.stmts.iter().fold(facts, |acc, stmt| apply(&acc, stmt, sources))
+    })
 }
 
-/// Every `(node, stmt_index, var)` at which a `Return { value: Some(var) }`
-/// is reached with `var` currently tracked as nil-possible — the summary
-/// question, identical in shape to Go's own return-walk.
-fn walk_nil_returns(cfg: &Cfg<Stmt>, summaries: Option<&HashMap<String, bool>>) -> Vec<(NodeId, usize, String)> {
-    let out_facts = solve(cfg, summaries);
-    let mut hits = Vec::new();
-    for (node_id, node) in cfg.nodes.iter().enumerate() {
-        let preds = cfg.predecessors(node_id);
-        let mut facts = preds.iter().fold(NilFacts::bottom(), |acc, &p| acc.join(&out_facts[p]));
-        for (stmt_idx, stmt) in node.stmts.iter().enumerate() {
-            if let Stmt::Return { value: Some(v) } = stmt {
-                if facts.0.get(v).copied().unwrap_or(false) {
-                    hits.push((node_id, stmt_idx, v.clone()));
-                }
-            }
-            facts = apply(&facts, stmt, summaries);
+fn visit_statements(
+    cfg: &Cfg<Stmt>,
+    sources: &NullSources<'_>,
+    mut visit: impl FnMut(NodeId, usize, &Stmt, &NilFacts),
+) {
+    let reachable = cfg.reachable();
+    let out_facts = solve(cfg, sources, &reachable);
+    for (id, node) in cfg.nodes.iter().enumerate().filter(|(id, _)| reachable[*id]) {
+        let mut facts = cfg.predecessors(id).iter().fold(NilFacts::bottom(), |acc, &p| acc.join(&out_facts[p]));
+        for (index, stmt) in node.stmts.iter().enumerate() {
+            visit(id, index, stmt, &facts);
+            facts = apply(&facts, stmt, sources);
         }
     }
-    hits
 }
 
-/// Every `(node, stmt_index, receiver_var, qualified_call_name)` at which a
-/// method call's receiver (the part of a `CallTarget::Named("recv.method")`
-/// before the first `.`) is currently nil-tracked when the call executes —
-/// the check question. A bare, unqualified call name (no `.`) has no
-/// receiver to check and is skipped. `null_safe_methods` excludes method
-/// names that are never actually risky on a null receiver in this
-/// language — Kotlin's stdlib defines `Any?.toString()` as a null-safe
-/// extension (`this?.toString() ?: "null"`), so it resolves and returns
-/// `"null"` rather than throwing even when the receiver is null, unlike
-/// every other method call on a nullable receiver (which either throws or,
-/// more commonly, doesn't compile without a `?.`/`!!` first). Java has no
-/// such exception — always pass an empty slice for Java.
-fn walk_risky_dereferences(cfg: &Cfg<Stmt>, summaries: Option<&HashMap<String, bool>>, null_safe_methods: &[&str]) -> Vec<(NodeId, usize, String, String)> {
-    let out_facts = solve(cfg, summaries);
+fn risky_use(
+    stmt: &Stmt, facts: &NilFacts, null_safe_methods: &[&str], node: NodeId, source_line: u32,
+) -> Option<NpeRiskHit> {
+    let Stmt::Call { target: CallTarget::Named(name), site, .. } = stmt else { return None };
+    let (receiver, method) = name.split_once('.')?;
+    (facts.possible.contains(receiver) && !null_safe_methods.contains(&method)).then(|| NpeRiskHit {
+        var: receiver.to_owned(),
+        call_name: name.clone(),
+        node,
+        source_line,
+        use_span: site.as_ref().map(|site| (site.start, site.end)),
+    })
+}
+
+fn walk_risky_dereferences(cfg: &Cfg<Stmt>, sources: &NullSources<'_>, null_safe_methods: &[&str]) -> Vec<NpeRiskHit> {
     let mut hits = Vec::new();
-    for (node_id, node) in cfg.nodes.iter().enumerate() {
-        let preds = cfg.predecessors(node_id);
-        let mut facts = preds.iter().fold(NilFacts::bottom(), |acc, &p| acc.join(&out_facts[p]));
-        for (stmt_idx, stmt) in node.stmts.iter().enumerate() {
-            if let Stmt::Call { target: CallTarget::Named(name), .. } = stmt {
-                if let Some((receiver, method)) = name.split_once('.') {
-                    if !null_safe_methods.contains(&method) && facts.0.get(receiver).copied().unwrap_or(false) {
-                        hits.push((node_id, stmt_idx, receiver.to_string(), name.clone()));
-                    }
-                }
-            }
-            facts = apply(&facts, stmt, summaries);
-        }
-    }
+    visit_statements(cfg, sources, |node, index, stmt, facts| {
+        hits.extend(risky_use(stmt, facts, null_safe_methods, node, cfg.nodes[node].statement_line(index)));
+    });
     hits
 }
 
@@ -169,7 +192,14 @@ fn walk_risky_dereferences(cfg: &Cfg<Stmt>, summaries: Option<&HashMap<String, b
 /// tracked as possibly null? Used to summarize helper functions for pass
 /// 2's interprocedural lookup.
 pub fn compute_summary(cfg: &Cfg<Stmt>) -> bool {
-    !walk_nil_returns(cfg, None).is_empty()
+    let mut nullable = false;
+    let sources = NullSources { call: &|_, _| false, include_literals: true };
+    visit_statements(cfg, &sources, |_, _, stmt, facts| {
+        if let Stmt::Return { value: Some(var) } = stmt {
+            nullable |= facts.possible.contains(var);
+        }
+    });
+    nullable
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,16 +208,27 @@ pub struct NpeRiskHit {
     pub call_name: String,
     pub node: NodeId,
     pub source_line: u32,
+    pub use_span: Option<(usize, usize)>,
 }
 
 /// Pass 2: the real check, using `summaries` (from [`compute_summary`] over
 /// every other function this pass resolved) to catch a variable assigned
 /// from a risky call and then dereferenced, not just an explicit `null`
 /// literal dereferenced directly. Pass `null_safe_methods` per
-/// `walk_risky_dereferences`'s own docs — empty for Java, `&["toString"]`
-/// for Kotlin.
+/// empty for Java or `&["toString"]` for Kotlin, where the nullable receiver
+/// extension returns the literal string "null".
 pub fn check(cfg: &Cfg<Stmt>, summaries: &HashMap<String, bool>, null_safe_methods: &[&str]) -> Vec<NpeRiskHit> {
-    walk_risky_dereferences(cfg, Some(summaries), null_safe_methods).into_iter().map(|(node, _stmt_idx, var, call_name)| NpeRiskHit { var, call_name, node, source_line: cfg.nodes[node].source_line }).collect()
+    let call = |name: &str, _: Option<&CallSite>| summaries.get(name).copied().unwrap_or(false);
+    walk_risky_dereferences(cfg, &NullSources { call: &call, include_literals: true }, null_safe_methods)
+}
+
+/// Follows null only from the resolved call site. Other nullable values
+/// must not make a changed callee look responsible for the dereference.
+/// Its call site must execute at most once on a path so all tracked aliases
+/// refer to the same result.
+pub fn check_call_source(cfg: &Cfg<Stmt>, span: (usize, usize)) -> Vec<NpeRiskHit> {
+    let call = |_: &str, site: Option<&CallSite>| site.is_some_and(|site| (site.start, site.end) == span);
+    walk_risky_dereferences(cfg, &NullSources { call: &call, include_literals: false }, &[])
 }
 
 #[cfg(test)]
