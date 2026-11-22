@@ -10,8 +10,18 @@ use crate::cfg::{Cfg, EdgeKind, NodeId, Stmt};
 use values::unwrap_value;
 
 pub fn lower_function(source: &[u8], function: Node<'_>) -> Cfg<Stmt> {
+    lower_function_with(Cfg::new_empty(), source, function)
+}
+
+pub(super) fn lower_keyed(source: &[u8], function: Node<'_>) -> Cfg<Stmt> {
+    let mut cfg = Cfg::new_empty();
+    cfg.keyed_flow = Some(super::keyed_flow::EXIT_PATH_LIMIT);
+    lower_function_with(cfg, source, function)
+}
+
+fn lower_function_with(cfg: Cfg<Stmt>, source: &[u8], function: Node<'_>) -> Cfg<Stmt> {
     let mut lower = Lower {
-        cfg: Cfg::new_empty(),
+        cfg,
         source,
         serial: 0,
         loops: Vec::new(),
@@ -99,7 +109,9 @@ impl Lower<'_> {
                 let target = expr
                     .child_by_field_name("left")
                     .and_then(|n| self.variable(n, names));
-                Some(self.value(expr.child_by_field_name("right"), at, names, target))
+                let end = self.value(expr.child_by_field_name("right"), at, names, target);
+                self.keyed_write(expr, end);
+                Some(end)
             }
             _ => Some(self.value(Some(expr), at, names, None)),
         }
@@ -112,10 +124,19 @@ impl Lower<'_> {
             .map(|n| self.text(n).to_owned());
         let target = name.as_ref().map(|name| self.fresh(name));
         let at = self.value(stmt.child_by_field_name("value"), at, names, target.clone());
+        self.keyed_write(stmt, at);
         if let Some((name, target)) = name.zip(target) {
             names.insert(name, target);
         }
         at
+    }
+
+    fn keyed_write(&mut self, node: Node<'_>, at: NodeId) {
+        if self.cfg.keyed_flow.is_some() {
+            for write in super::keyed_syntax::writes(node, self.source) {
+                self.emit(at, line(node), Stmt::Rebind(write));
+            }
+        }
     }
 
     fn jump(&mut self, stmt: Node<'_>, at: NodeId, names: &Bindings) {

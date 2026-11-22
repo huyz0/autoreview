@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use tree_sitter::Node;
 
@@ -14,29 +14,45 @@ use super::{CollectionSelector, EntryIdentity};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Entry {
-    pub collection: String,
+    pub collection: IdentityOperand,
     pub key: IdentityOperand,
 }
 
 impl Entry {
+    pub(super) fn display_collection(&self) -> String {
+        binding_name(&self.collection)
+            .unwrap_or_default()
+            .to_owned()
+    }
+
     pub(super) fn display_key(&self) -> String {
         match &self.key {
-            IdentityOperand::Binding(name) | IdentityOperand::Integer(name) => name.clone(),
+            IdentityOperand::Binding(name)
+            | IdentityOperand::Integer(name)
+            | IdentityOperand::Fresh { name, .. } => name.clone(),
             IdentityOperand::String(value) => format!("{value:?}"),
+            IdentityOperand::Boolean(value) => value.to_string(),
         }
     }
 }
 
-/// The CFG stores the operand spellings. Syntax guards against equating
-/// different values of a rebound name or assuming a cleanup was lowered.
+pub(super) type Values = BTreeMap<String, Option<IdentityOperand>>;
+
+/// Syntax tracks declaration scope and guard names. Values are read from
+/// the current path, with lexical resolution for untouched bindings.
 #[derive(Default)]
 pub(super) struct Syntax<'src> {
     bindings: Bindings<'src>,
     calls: Vec<(usize, String)>,
+    guards: HashMap<String, usize>,
 }
 
 impl<'src> Syntax<'src> {
-    pub(super) fn scan(function: Node<'_>, source: &'src [u8]) -> Option<Self> {
+    pub(super) fn scan(
+        function: Node<'_>,
+        source: &'src [u8],
+        writes: &HashSet<usize>,
+    ) -> Option<Self> {
         let mut syntax = Self::default();
         let mut nodes = vec![function];
         while let Some(node) = nodes.pop() {
@@ -48,38 +64,78 @@ impl<'src> Syntax<'src> {
                     syntax.calls.push((node.start_byte(), name));
                 }
             }
-            syntax.bindings.visit(node, source);
+            syntax
+                .bindings
+                .visit(node, source, writes.contains(&node.start_byte()));
+            if matches!(node.kind(), "if_statement" | "if_expression") {
+                if let Some((name, _)) = crate::lower::keyed_syntax::condition(node, source) {
+                    *syntax.guards.entry(name).or_default() += 1;
+                }
+            }
             nodes.extend(children(node));
         }
         syntax.bindings.record_borrowed_writes();
         Some(syntax)
     }
 
-    pub(super) fn matches(&self, patterns: &[NamePattern], name: &str, start: usize) -> bool {
-        matches_any(patterns, name) || self.resolved_receiver_match(patterns, name, start)
+    pub(super) fn resolve(
+        &self,
+        values: &Values,
+        name: &str,
+        start: usize,
+    ) -> Option<IdentityOperand> {
+        if !self.bindings.can_read(name) {
+            return None;
+        }
+        values
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| self.bindings.resolve(name, start))
     }
 
-    fn resolved_receiver_match(&self, patterns: &[NamePattern], name: &str, start: usize) -> bool {
-        name.split_once('.').is_some_and(|(receiver, member)| {
-            matches!(self.bindings.resolve(receiver, start), Some(IdentityOperand::Binding(root))
-                if root != receiver && matches_receiver(patterns, &root, member))
-        })
+    pub(super) fn repeated_guard(&self, name: &str) -> bool {
+        self.guards.get(name).is_some_and(|count| *count > 1)
+    }
+
+    pub(super) fn matches(
+        &self,
+        patterns: &[NamePattern],
+        name: &str,
+        start: usize,
+        values: &Values,
+    ) -> bool {
+        matches_any(patterns, name)
+            || name.split_once('.').is_some_and(|(receiver, member)| {
+                self.resolve(values, receiver, start)
+                    .as_ref()
+                    .and_then(binding_name)
+                    .is_some_and(|root| {
+                        root != receiver && matches_receiver(patterns, root, member)
+                    })
+            })
     }
 
     pub(super) fn models_cleanup(&self, cleanup: &[NamePattern], modeled: &HashSet<usize>) -> bool {
+        let values = Values::new();
         self.calls.iter().all(|(start, name)| {
-            modeled.contains(start) || !self.may_match_cleanup(cleanup, name, *start)
+            modeled.contains(start) || !self.may_match_cleanup(cleanup, name, *start, &values)
         })
     }
 
-    fn may_match_cleanup(&self, cleanup: &[NamePattern], name: &str, start: usize) -> bool {
-        if self.matches(cleanup, name, start) {
+    pub(super) fn may_match_cleanup(
+        &self,
+        cleanup: &[NamePattern],
+        name: &str,
+        start: usize,
+        values: &Values,
+    ) -> bool {
+        if self.matches(cleanup, name, start, values) {
             return true;
         }
-        // An ambiguous alias might have referred to a scoped collection at
-        // this call. It cannot discharge a proven obligation.
+        // Unresolved receivers may refer to a scoped collection.
         name.split_once('.').is_some_and(|(receiver, member)| {
-            self.bindings.is_uncertain(receiver, start)
+            (self.bindings.is_uncertain(receiver, start)
+                || matches!(values.get(receiver), Some(None)))
                 && self
                     .bindings
                     .names()
@@ -87,17 +143,29 @@ impl<'src> Syntax<'src> {
         })
     }
 
-    pub(super) fn entry(&self, selector: EntryIdentity, site: &CallSite) -> Option<Entry> {
+    pub(super) fn entry(
+        &self,
+        selector: EntryIdentity,
+        site: &CallSite,
+        values: &Values,
+    ) -> Option<Entry> {
         let (collection, key) = selector.operands(site)?;
-        let IdentityOperand::Binding(collection) = self.bindings.resolve(collection, site.start)?
-        else {
-            return None;
-        };
-        let key = match key {
-            IdentityOperand::Binding(name) => self.bindings.resolve(name, site.start)?,
-            literal => literal.clone(),
-        };
+        let collection = self.resolve(values, collection, site.start)?;
+        binding_name(&collection)?;
+        let key = self.value(values, key, site.start)?;
         Some(Entry { collection, key })
+    }
+
+    pub(super) fn value(
+        &self,
+        values: &Values,
+        operand: &IdentityOperand,
+        start: usize,
+    ) -> Option<IdentityOperand> {
+        match operand {
+            IdentityOperand::Binding(name) => self.resolve(values, name, start),
+            literal => Some(literal.clone()),
+        }
     }
 }
 
@@ -115,6 +183,13 @@ impl EntryIdentity {
     }
 }
 
+fn binding_name(value: &IdentityOperand) -> Option<&str> {
+    match value {
+        IdentityOperand::Binding(name) | IdentityOperand::Fresh { name, .. } => Some(name),
+        _ => None,
+    }
+}
+
 fn matches_any(patterns: &[NamePattern], name: &str) -> bool {
     patterns.iter().any(|pattern| pattern.matches(name))
 }
@@ -129,17 +204,15 @@ fn unsupported_flow(node: Node<'_>) -> bool {
         if !node.child(0).is_some_and(|first| first.kind() == "try") {
             return false;
         }
-        return keyed_flow::blocks(node).is_none()
+        return !keyed_flow::supports_try(node)
             || !node.parent().is_some_and(|parent| parent.kind() == "block");
     }
     if node.kind() == "try_statement" {
-        return keyed_flow::blocks(node).is_none();
+        return !keyed_flow::supports_try(node);
     }
     matches!(
         node.kind(),
         "try_with_resources_statement"
-            | "catch_clause"
-            | "catch_block"
             | "labeled_statement"
             | "switch_statement"
             | "switch_expression"

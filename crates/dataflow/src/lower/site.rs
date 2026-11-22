@@ -138,6 +138,12 @@ pub(crate) fn operand(node: Node<'_>, source: &[u8]) -> Option<IdentityOperand> 
     {
         return operand(node.child_by_field_name("value")?, source);
     }
+    if matches!(spelling, "true" | "false") {
+        return Some(IdentityOperand::Boolean(spelling == "true"));
+    }
+    if node.kind() == "parenthesized_expression" {
+        return operand(node.named_child(0)?, source);
+    }
     if identifier(node) {
         return Some(IdentityOperand::Binding(spelling.into()));
     }

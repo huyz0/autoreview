@@ -118,7 +118,6 @@ fn before_checks_only_the_trigger_collection_and_key() {
 #[test]
 fn uncertain_identity_or_cleanup_leaves_no_finding() {
     for body in [
-        "registry.register(key); key = replacement; registry.remove(key);",
         "registry.register(key); { const key = newKey(); registry.remove(key); }",
         "registry.register(key); { const { key } = other; registry.remove(key); }",
         "registry.register(key); const alias = registry; alias.remove(key);",
@@ -285,7 +284,7 @@ fn nested_finally_preserves_the_original_exit_path() {
         try {
             if (ready) return;
         } finally {
-            tick();
+            const note = "finished";
         }
         root.remove(key);
     } finally {
@@ -409,9 +408,9 @@ func pending(root *Registry, key string, ready bool) {
     assert_eq!(hits.len(), 1, "{hits:#?}");
     assert_eq!(hits[0].message, "Clean up root and key before fallthrough");
     let conditional = source.replace("root.remove(key)", "if ready { root.remove(key) }");
-    for clean_or_uncertain in [source, &conditional] {
-        assert!(findings("Go", "worker.go", clean_or_uncertain, RECEIVER, true).is_empty());
-    }
+    assert!(findings("Go", "worker.go", source, RECEIVER, true).is_empty());
+    let hits = findings("Go", "worker.go", &conditional, RECEIVER, true);
+    assert_eq!(hits.len(), 1, "{hits:#?}");
 }
 
 #[test]
@@ -427,4 +426,208 @@ fn a_finalizer_that_cleans_only_one_branch_leaves_the_other_pending() {
     let hits = findings("TypeScript", "worker.tsx", source, RECEIVER, true);
     assert_eq!(hits.len(), 1, "{hits:#?}");
     assert_eq!(hits[0].location.range.start_line, 4);
+}
+
+#[test]
+fn reassignment_tracks_the_collection_and_key_together() {
+    let source = r#"function pending(root, other, first, second, flip) {
+    let collection = root;
+    let key = first;
+    if (flip) {
+        collection = other;
+        key = second;
+        other.register(second);
+    } else {
+        root.register(first);
+    }
+    collection.remove(key);
+    return;
+}"#;
+    assert!(findings("JavaScript", "worker.js", source, RECEIVER, true).is_empty());
+    let wrong = source.replace("collection = other;", "collection = root;");
+    let hits = findings("JavaScript", "worker.js", &wrong, RECEIVER, true);
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(hits[0].message, "Clean up other and second before return");
+}
+
+#[test]
+fn reassigning_a_binding_preserves_the_identity_copied_before_it() {
+    let source = r#"function pending(root, other, key) {
+    const saved = root;
+    const original = key;
+    root.register(key);
+    root = other;
+    key = "different";
+    saved.remove(original);
+    return;
+}"#;
+    assert!(findings("JavaScript", "worker.js", source, RECEIVER, true).is_empty());
+    let wrong = source.replace("saved.remove(original)", "root.remove(key)");
+    let hits = findings("JavaScript", "worker.js", &wrong, RECEIVER, true);
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(hits[0].message, "Clean up root and key before return");
+}
+
+#[test]
+fn a_new_collection_does_not_share_the_previous_values_identity() {
+    let source = r#"function pending(root, key) {
+    const saved = root;
+    root.register(key);
+    root = new Map();
+    root.remove(key);
+    return;
+}"#;
+    let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
+    assert!(
+        hits.iter().any(|hit| hit.location.range.start_line == 6),
+        "{hits:#?}"
+    );
+    let clean = source.replace(
+        "    root = new Map();",
+        "    saved.remove(key);\n    root = new Map();",
+    );
+    assert!(findings("JavaScript", "worker.js", &clean, RECEIVER, true).is_empty());
+}
+
+#[test]
+fn rust_reassignment_of_a_key_keeps_the_old_obligation() {
+    let source = r#"fn pending(root: &mut Registry, mut key: &str) {
+    let saved = key;
+    root.register(key);
+    key = "different";
+    root.remove(&key);
+}"#;
+    let hits = findings("Rust", "lib.rs", source, RECEIVER, true);
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(hits[0].message, "Clean up root and key before return");
+    let clean = source.replace("remove(&key)", "remove(&saved)");
+    assert!(findings("Rust", "lib.rs", &clean, RECEIVER, true).is_empty());
+}
+
+#[test]
+fn opaque_calls_can_leave_through_catch_before_normal_cleanup() {
+    let source = r#"async function pending(root, key) {
+    root.register(key);
+    try {
+        await work();
+    } catch (failure) {
+        root.remove(key);
+        return;
+    }
+    await root.remove(key);
+}"#;
+    assert!(findings("TypeScript", "worker.ts", source, RECEIVER, true).is_empty());
+    let wrong = source.replace(
+        "        root.remove(key);",
+        "        root.remove(\"other\");",
+    );
+    let hits = findings("TypeScript", "worker.ts", &wrong, RECEIVER, true);
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(hits[0].location.range.start_line, 7);
+}
+
+#[test]
+fn finally_cleans_an_implicit_exception_without_hiding_wrong_pairs() {
+    let source = r#"function pending(root, key) {
+    root.register(key);
+    try {
+        work();
+    } catch (failure) {
+        throw failure;
+    } finally {
+        root.remove(key);
+    }
+}"#;
+    assert!(findings("JavaScript", "worker.js", source, RECEIVER, true).is_empty());
+    let missing = source.replace("root.remove(key);", "const ignored = true;");
+    let hits = findings("JavaScript", "worker.js", &missing, RECEIVER, true);
+    let mut lines: Vec<_> = hits
+        .iter()
+        .map(|hit| hit.location.range.start_line)
+        .collect();
+    lines.sort_unstable();
+    assert_eq!(lines, [6, 10], "{hits:#?}");
+}
+
+#[test]
+fn implicit_throw_does_not_run_later_normal_cleanup() {
+    let source = r#"function pending(root, key) {
+    root.register(key);
+    work();
+    root.remove(key);
+}"#;
+    let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(
+        hits[0].message,
+        "Clean up root and key before implicit throw"
+    );
+    assert_eq!(hits[0].location.range.start_line, 3);
+}
+
+#[test]
+fn typed_catches_route_known_exceptions_and_run_finally_after_handlers() {
+    let cases = [
+        ("Java", "Worker.java", "class Worker { void pending(Registry root, String key) {\nroot.register(key);\ntry { throw new BadException(); }\ncatch (BadException e) { root.remove(key); }\nfinally { root.finish(key); }\n}}"),
+        ("Kotlin", "Worker.kt", "fun pending(root: Registry, key: String) {\nroot.register(key)\ntry { throw BadException() } catch (e: BadException) { root.remove(key) } finally { root.finish(key) }\n}"),
+    ];
+    for (language, path, code) in cases {
+        assert!(
+            findings(language, path, code, RECEIVER, true).is_empty(),
+            "{language}"
+        );
+        let wrong = code.replace("remove(key)", "remove(\"other\")");
+        let hits = findings(language, path, &wrong, RECEIVER, true);
+        assert_eq!(hits.len(), 2, "{language}: {hits:#?}");
+        assert!(
+            hits.iter().any(|hit| hit.message.ends_with("root.finish")),
+            "{language}: {hits:#?}"
+        );
+    }
+}
+
+#[test]
+fn go_direct_defer_copies_arguments_and_closures_read_them_at_exit() {
+    let source = r#"package worker
+func pending(root *Registry, first, second string) {
+    key := first
+    root.register(first)
+    defer root.remove(key)
+    key = second
+}"#;
+    assert!(findings("Go", "worker.go", source, RECEIVER, true).is_empty());
+    let closure = source.replace(
+        "defer root.remove(key)",
+        "defer func() { root.remove(key) }()",
+    );
+    let hits = findings("Go", "worker.go", &closure, RECEIVER, true);
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(
+        hits[0].message,
+        "Clean up root and first before fallthrough"
+    );
+}
+
+#[test]
+fn go_conditional_defer_respects_branch_guards_and_lifo_order() {
+    let source = r#"package worker
+func pending(root *Registry, first, second string, ready bool) {
+    if !ready { return }
+    root.register(first)
+    key := second
+    defer func() {
+        if ready {
+            root.remove(key)
+        }
+    }()
+    defer func() { key = first }()
+}"#;
+    assert!(findings("Go", "worker.go", source, RECEIVER, true).is_empty());
+    let wrong = source.replace("key = first", "key = second");
+    let hits = findings("Go", "worker.go", &wrong, RECEIVER, true);
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(
+        hits[0].message,
+        "Clean up root and first before fallthrough"
+    );
 }

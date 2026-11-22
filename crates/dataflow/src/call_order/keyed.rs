@@ -1,238 +1,222 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use tree_sitter::Node;
 
-use crate::cfg::{Cfg, NodeId, Stmt};
-use crate::lattice::Lattice;
-use crate::solver;
+use crate::cfg::{CallTarget, Cfg, EdgeKind, IdentityOperand, NodeId, Stmt};
 
-use super::identity::Entry;
-use super::plan::{prepare, Effect, Step};
+use super::identity::{Entry, Values};
+use super::plan::Plan;
 use super::{CallOrderHit, CallOrderSpec, EntryHit};
 
-#[derive(Clone, PartialEq, Eq)]
-struct Pending(BTreeMap<Entry, Status>);
+mod state;
+use state::{Deferred, State};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Status {
-    // Each field records whether a path with the corresponding state
-    // reaches this point. Keep pending and pending-without-defer separate.
-    unarmed: bool,
-    live: Option<u32>,
-    uncovered: Option<u32>,
-}
+const PATH_BUDGET: usize = 16_384;
 
-impl Status {
-    const ENTRY: Self = Self {
-        unarmed: true,
-        live: None,
-        uncovered: None,
-    };
-
-    fn join(self, other: Self) -> Self {
-        Self {
-            unarmed: self.unarmed || other.unarmed,
-            live: self.live.into_iter().chain(other.live).min(),
-            uncovered: self.uncovered.into_iter().chain(other.uncovered).min(),
-        }
-    }
-}
-
-impl Lattice for Pending {
-    fn bottom() -> Self {
-        Self(BTreeMap::new())
-    }
-
-    fn join(&self, other: &Self) -> Self {
-        let mut joined = self.clone();
-        for (entry, &status) in &other.0 {
-            joined
-                .0
-                .entry(entry.clone())
-                .and_modify(|current| *current = current.join(status))
-                .or_insert(status);
-        }
-        joined
-    }
-}
-
-impl Step {
-    fn trigger_hit(&self, pending: &Pending, id: NodeId, line: u32) -> Option<CallOrderHit> {
-        let (entry, call) = self.trigger.as_ref()?;
-        let registration = pending.0.get(entry)?.live?;
-        Some(hit(call, id, line, entry, registration))
-    }
-
-    fn apply(&self, pending: &mut Pending, line: u32) {
-        if self.exit.is_some() {
-            pending.0.clear();
-        }
-        match &self.effect {
-            Some(Effect::Remove(entry)) => {
-                if let Some(status) = pending.0.get_mut(entry) {
-                    status.live = None;
-                    status.uncovered = None;
-                }
-            }
-            Some(Effect::Register(entry)) => {
-                if let Some(status) = pending.0.get_mut(entry) {
-                    status.live = Some(line);
-                    status.uncovered = status.unarmed.then_some(line);
-                }
-            }
-            Some(Effect::Defer(entry)) => {
-                if let Some(status) = pending.0.get_mut(entry) {
-                    status.unarmed = false;
-                    status.uncovered = None;
-                }
-            }
-            None => {}
-        }
-    }
-}
-
-/// Runs a keyed rule on the source function and its lowered CFG.
+/// Check each distinct abstract state so a branch cannot borrow a
+/// collection, key, or deferred cleanup from another branch.
 pub fn check_keyed(
     spec: &CallOrderSpec,
     cfg: &Cfg<Stmt>,
     function: Node<'_>,
     source: &[u8],
 ) -> Vec<CallOrderHit> {
-    let Some(steps) = prepare(spec, cfg, function, source) else {
+    let Some(plan) = Plan::new(spec, cfg, function, source) else {
         return Vec::new();
     };
-    let initial = Pending(
-        steps
-            .iter()
-            .flatten()
-            .filter_map(|step| match &step.effect {
-                Some(Effect::Register(entry)) => Some((entry.clone(), Status::ENTRY)),
-                _ => None,
-            })
-            .collect(),
-    );
-    if initial.0.is_empty() {
-        return Vec::new();
-    }
-    let reachable = Reachable::from_entry(cfg);
-    let out = solver::solve(cfg, |id, node, incoming: &Pending| {
-        let mut pending = if id == cfg.entry {
-            initial.clone()
-        } else {
-            incoming.clone()
-        };
-        if reachable.contains(id) {
-            for (index, step) in steps[id].iter().enumerate() {
-                step.apply(&mut pending, node.statement_line(index));
+    let mut engine = Engine {
+        plan,
+        remaining: PATH_BUDGET,
+        hits: Vec::new(),
+    };
+    engine.check(cfg).unwrap_or_default()
+}
+
+struct Engine<'a, 'src> {
+    plan: Plan<'a, 'src>,
+    remaining: usize,
+    hits: Vec<CallOrderHit>,
+}
+
+struct Exit<'graph> {
+    state: State<'graph>,
+    trigger: &'static str,
+    node: NodeId,
+    line: u32,
+}
+
+impl Engine<'_, '_> {
+    fn check(&mut self, cfg: &Cfg<Stmt>) -> Option<Vec<CallOrderHit>> {
+        for exit in self.paths(cfg, State::default())? {
+            for state in self.unwind(exit.state)? {
+                if self.plan.spec.check_before_return {
+                    self.hits
+                        .extend(state.pending.iter().map(|(entry, &registration)| {
+                            hit(exit.trigger, exit.node, exit.line, entry, registration)
+                        }));
+                }
             }
         }
-        pending
-    });
-    Analysis {
-        cfg,
-        out: &out,
-        initial: &initial,
-        check_exits: spec.check_before_return,
-    }
-    .collect(&steps, &reachable)
-}
-
-struct Reachable(HashSet<NodeId>);
-
-impl Reachable {
-    fn from_entry(cfg: &Cfg<Stmt>) -> Self {
+        self.hits.sort_by(|left, right| {
+            (left.node, left.source_line, &left.trigger_call, &left.entry).cmp(&(
+                right.node,
+                right.source_line,
+                &right.trigger_call,
+                &right.entry,
+            ))
+        });
         let mut seen = HashSet::new();
-        let mut work = vec![cfg.entry];
-        while let Some(node) = work.pop() {
-            if seen.insert(node) {
-                work.extend(cfg.successors(node));
-            }
-        }
-        Self(seen)
-    }
-
-    fn contains(&self, node: NodeId) -> bool {
-        self.0.contains(&node)
-    }
-}
-
-struct Analysis<'a> {
-    cfg: &'a Cfg<Stmt>,
-    out: &'a [Pending],
-    initial: &'a Pending,
-    check_exits: bool,
-}
-
-impl Analysis<'_> {
-    fn collect(&self, steps: &[Vec<Step>], reachable: &Reachable) -> Vec<CallOrderHit> {
-        let mut hits = Vec::new();
-        for (id, steps) in steps
-            .iter()
-            .enumerate()
-            .filter(|(id, _)| reachable.contains(*id))
-        {
-            self.collect_node(id, steps, &mut hits);
-        }
-        if self.check_exits {
-            let exit = self.cfg.exit;
-            let line = self.cfg.nodes[exit].source_line;
-            hits.extend(exit_hits("fallthrough", exit, line, &self.out[exit]));
-        }
-        let mut seen = HashSet::new();
-        hits.retain(|hit| {
+        self.hits.retain(|hit| {
             seen.insert((hit.source_line, hit.trigger_call.clone(), hit.entry.clone()))
         });
-        hits
+        Some(std::mem::take(&mut self.hits))
     }
 
-    fn collect_node(&self, id: NodeId, steps: &[Step], hits: &mut Vec<CallOrderHit>) {
-        let mut pending = self.incoming(id);
-        for (index, step) in steps.iter().enumerate() {
-            let line = self.cfg.nodes[id].statement_line(index);
-            hits.extend(step.trigger_hit(&pending, id, line));
-            if let Some(exit) = step.exit.filter(|_| self.check_exits) {
-                hits.extend(exit_hits(exit, id, line, &pending));
+    fn paths<'graph>(
+        &mut self,
+        cfg: &'graph Cfg<Stmt>,
+        state: State<'graph>,
+    ) -> Option<Vec<Exit<'graph>>> {
+        let outgoing = outgoing_edges(cfg);
+        let mut work = VecDeque::from([(cfg.entry, state)]);
+        let mut seen = BTreeSet::new();
+        let mut exits = Vec::new();
+        while let Some((id, mut state)) = work.pop_front() {
+            if !seen.insert((id, state.clone())) {
+                continue;
             }
-            step.apply(&mut pending, line);
+            self.remaining = self.remaining.checked_sub(1)?;
+            if let Some((trigger, line)) = self.visit(cfg, id, &mut state)? {
+                exits.push(Exit {
+                    state,
+                    trigger,
+                    node: id,
+                    line,
+                });
+                continue;
+            }
+            for &(to, edge) in &outgoing[id] {
+                if let Some(successor) = state.branch(&self.plan, &cfg.nodes[id], edge) {
+                    work.push_back((to, successor));
+                }
+            }
         }
+        Some(exits)
     }
 
-    fn incoming(&self, id: NodeId) -> Pending {
-        if id == self.cfg.entry {
-            return self.initial.clone();
+    fn visit<'graph>(
+        &mut self,
+        cfg: &'graph Cfg<Stmt>,
+        id: NodeId,
+        state: &mut State<'graph>,
+    ) -> Option<Option<(&'static str, u32)>> {
+        let node = &cfg.nodes[id];
+        for (index, stmt) in node.stmts.iter().enumerate() {
+            let line = node.statement_line(index);
+            if let Some(trigger) = exit_kind(stmt) {
+                return Some(Some((trigger, line)));
+            }
+            self.apply(stmt, state, id, line)?;
         }
-        self.cfg
-            .predecessors(id)
-            .into_iter()
-            .fold(Pending::bottom(), |facts, pred| facts.join(&self.out[pred]))
+        Some((id == cfg.exit).then_some(("fallthrough", node.source_line)))
+    }
+
+    fn apply<'graph>(
+        &mut self,
+        stmt: &'graph Stmt,
+        state: &mut State<'graph>,
+        id: NodeId,
+        line: u32,
+    ) -> Option<()> {
+        match stmt {
+            Stmt::Rebind(write) => state.rebind(&self.plan, write),
+            Stmt::DeferredBlock(body) => state.deferred.push(Deferred::Block(body)),
+            Stmt::DeferredCall { target, site } => {
+                let call = self.plan.call(target, site.as_deref(), &state.values)?;
+                if call.registered || call.trigger {
+                    return None;
+                }
+                if let Some(entry) = call.entry.filter(|_| call.removed) {
+                    state.deferred.push(Deferred::Remove(entry));
+                }
+            }
+            Stmt::Call {
+                target: CallTarget::Named(name),
+                site,
+                ..
+            } => {
+                let call = self.plan.call(name, site.as_deref(), &state.values)?;
+                if let Some(entry) = call.entry {
+                    if let Some(&registration) = state.pending.get(&entry).filter(|_| call.trigger)
+                    {
+                        self.hits.push(hit(name, id, line, &entry, registration));
+                    }
+                    state.update(entry, call.registered, call.removed, line);
+                }
+            }
+            _ => {}
+        }
+        Some(())
+    }
+
+    fn unwind<'graph>(&mut self, mut state: State<'graph>) -> Option<Vec<State<'graph>>> {
+        let deferred = std::mem::take(&mut state.deferred);
+        let mut outcomes = vec![state];
+        for action in deferred.into_iter().rev() {
+            let mut next = BTreeSet::new();
+            for state in outcomes {
+                next.extend(self.deferred(action.clone(), state)?);
+            }
+            outcomes = next.into_iter().collect();
+        }
+        Some(outcomes)
+    }
+
+    fn deferred<'graph>(
+        &mut self,
+        action: Deferred<'graph>,
+        mut state: State<'graph>,
+    ) -> Option<Vec<State<'graph>>> {
+        match action {
+            Deferred::Remove(entry) => {
+                state.pending.remove(&entry);
+                Some(vec![state])
+            }
+            Deferred::Block(cfg) => {
+                let mut outcomes = Vec::new();
+                for exit in self.paths(cfg, state)? {
+                    outcomes.extend(self.unwind(exit.state)?);
+                }
+                Some(outcomes)
+            }
+        }
     }
 }
 
-fn exit_hits<'a>(
-    call: &'a str,
-    id: NodeId,
-    line: u32,
-    pending: &'a Pending,
-) -> impl Iterator<Item = CallOrderHit> + 'a {
-    pending
-        .0
-        .iter()
-        .filter_map(move |(entry, status)| Some(hit(call, id, line, entry, status.uncovered?)))
+fn outgoing_edges(cfg: &Cfg<Stmt>) -> Vec<Vec<(NodeId, EdgeKind)>> {
+    let mut outgoing = vec![Vec::new(); cfg.nodes.len()];
+    for &(from, to, kind) in &cfg.edges {
+        outgoing[from].push((to, kind));
+    }
+    outgoing
 }
 
-fn hit(
-    call: &str,
-    node: NodeId,
-    source_line: u32,
-    entry: &Entry,
-    registration_line: u32,
-) -> CallOrderHit {
+fn exit_kind(stmt: &Stmt) -> Option<&'static str> {
+    match stmt {
+        Stmt::Return { .. } => Some("return"),
+        Stmt::Throw { implicit: true, .. } => Some("implicit throw"),
+        Stmt::Throw { .. } => Some("throw"),
+        _ => None,
+    }
+}
+
+fn hit(call: &str, node: NodeId, line: u32, entry: &Entry, registration_line: u32) -> CallOrderHit {
     CallOrderHit {
         trigger_call: call.to_owned(),
         node,
-        source_line,
+        source_line: line,
         entry: Some(EntryHit {
-            collection: entry.collection.clone(),
+            collection: entry.display_collection(),
             key: entry.display_key(),
             registration_line,
         }),

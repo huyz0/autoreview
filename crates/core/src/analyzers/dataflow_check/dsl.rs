@@ -154,7 +154,7 @@ pub(super) fn run_call_order_rules(
     let source = file.content.as_bytes();
     let functions: Vec<_> = lowered.iter().map(|(node, cfg)| {
         let deferred_cleanup = check_go_defers && contains_go_defer(*node);
-        let keyed = check_keyed.then(|| lower::keyed_variant(language, source, *node)).flatten();
+        let keyed = check_keyed.then(|| lower::keyed_variant(language, source, *node));
         (*node, cfg, keyed, deferred_cleanup)
     }).collect();
     for rule in &rules {
