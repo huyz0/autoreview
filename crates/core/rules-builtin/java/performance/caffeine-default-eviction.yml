@@ -1,0 +1,32 @@
+id: java-caffeine-default-eviction
+language: Java
+category: performance
+severity: info
+semantic: true
+message: >-
+  This Caffeine builder supplies no eviction policy. Add a size or weight bound, expiration, or reference-based eviction if the cache can receive an unbounded set of keys.
+metadata:
+  references:
+    - "https://github.com/ben-manes/caffeine/wiki/Eviction"
+rule:
+  any:
+    - all:
+        - pattern: $BUILDER.newBuilder().$BUILD($$$ARGS)
+        - matches: caffeine-owner
+    - all:
+        - pattern: $BUILDER.newBuilder().recordStats().$BUILD($$$ARGS)
+        - matches: caffeine-owner
+utils:
+  caffeine-owner:
+    any:
+      - regex: '^com\.github\.benmanes\.caffeine\.cache\.Caffeine\s*\.'
+      - inside:
+          kind: program
+          stopBy: end
+          has:
+            pattern: import com.github.benmanes.caffeine.cache.Caffeine;
+constraints:
+  BUILDER:
+    regex: '^(com\.github\.benmanes\.caffeine\.cache\.)?Caffeine$'
+  BUILD:
+    regex: '^(build|buildAsync)$'

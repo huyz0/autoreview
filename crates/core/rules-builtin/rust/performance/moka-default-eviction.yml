@@ -1,0 +1,22 @@
+id: rust-moka-default-eviction
+language: Rust
+category: performance
+severity: info
+semantic: true
+message: >-
+  This Moka builder has no capacity limit or expiration policy. Set max_capacity or an expiration policy when entry retention must be bounded.
+metadata:
+  references:
+    - "https://docs.rs/moka/latest/moka/sync/struct.Cache.html"
+rule:
+  any:
+    - pattern: moka::sync::Cache::builder().build()
+    - pattern: moka::future::Cache::builder().build()
+    - all:
+        - pattern: Cache::builder().build()
+        - inside:
+            kind: source_file
+            has:
+              stopBy: end
+              regex: '^use\s+moka::(sync|future)::Cache\s*;$'
+            stopBy: end

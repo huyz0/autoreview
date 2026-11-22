@@ -1,0 +1,53 @@
+id: ts-lru-cache-ttl-without-purge
+language: TypeScript
+category: performance
+severity: info
+semantic: true
+message: >-
+  This lru-cache uses a TTL without a size bound or proactive pruning. Expired entries can accumulate if they are never fetched again. Set max or maxSize, or enable ttlAutopurge if a TTL-only cache is intentional.
+metadata:
+  references:
+    - "https://isaacs.github.io/node-lru-cache/"
+rule:
+  kind: new_expression
+  all:
+    - has:
+        field: constructor
+        regex: '^LRUCache$'
+    - has:
+        field: arguments
+        has:
+          kind: object
+          all:
+            - has:
+                kind: pair
+                has:
+                  field: key
+                  regex: '^ttl$'
+            - not:
+                has:
+                  any:
+                    - kind: spread_element
+                    - kind: shorthand_property_identifier
+                    - kind: method_definition
+                    - kind: pair
+                      has:
+                        field: key
+                        any:
+                          - kind: computed_property_name
+                          - regex: '^["'']?(max|maxSize)["'']?$'
+                    - kind: pair
+                      all:
+                        - has:
+                            field: key
+                            regex: '^["'']?ttlAutopurge["'']?$'
+                        - not:
+                            has:
+                              field: value
+                              kind: 'false'
+    - inside:
+        kind: program
+        stopBy: end
+        has:
+          kind: import_statement
+          regex: '^import\s*\{\s*LRUCache\s*\}\s*from\s*["'']lru-cache["'']'

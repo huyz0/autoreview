@@ -8,16 +8,29 @@ metadata:
   cwe: ["CWE-252"]
   confidence: MEDIUM
 rule:
-  any:
-    - pattern:
-        context: "func f() { $DB.Find($$$ARGS) }"
-        selector: expression_statement
-    - pattern:
-        context: "func f() { $DB.Create($$$ARGS) }"
-        selector: expression_statement
-    - pattern:
-        context: "func f() { $DB.Save($$$ARGS) }"
-        selector: expression_statement
-    - pattern:
-        context: "func f() { $DB.Delete($$$ARGS) }"
-        selector: expression_statement
+  all:
+    - any:
+        - pattern:
+            context: "func f() { $DB.Find($$$ARGS) }"
+            selector: expression_statement
+        - pattern:
+            context: "func f() { $DB.Create($$$ARGS) }"
+            selector: expression_statement
+        - pattern:
+            context: "func f() { $DB.Save($$$ARGS) }"
+            selector: expression_statement
+        - pattern:
+            context: "func f() { $DB.Delete($$$ARGS) }"
+            selector: expression_statement
+    - not:
+        all:
+          - pattern:
+              context: "func f() { slices.Delete($$$ARGS) }"
+              selector: expression_statement
+          - inside:
+              kind: source_file
+              stopBy: end
+              has:
+                kind: import_spec
+                stopBy: end
+                regex: '^"slices"$'
