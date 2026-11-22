@@ -27,15 +27,17 @@ jest-async-to-throw:
     subcategory: [testing.assertions]
   rule:
     pattern: expect($CALLBACK).toThrow($$$ARGS)
-    inside:
+    inside: &known_named_import
       kind: program
       stopBy: end
       has:
         kind: import_statement
         all:
-          - has: {field: source, regex: '^["'']@jest/globals["'']$'}
-          - has: {kind: import_specifier, regex: '^expect$', stopBy: end}
+          - has: {field: source, pattern: $MODULE}
+          - has: {kind: import_specifier, pattern: $API, stopBy: end}
   constraints:
+    MODULE: {regex: '^["'']@jest/globals["'']$'}
+    API: {regex: '^expect$'}
     CALLBACK:
       regex: '^async(?:\s|\()'
   languages: {JavaScript: {}, TypeScript: {}}
@@ -206,15 +208,10 @@ otel-http-duration-unit:
     pattern: const $HISTOGRAM = $METER.createHistogram($NAME, $OPTIONS)
     follows:
       pattern: const $METER = metrics.getMeter($$$ARGS)
-    inside:
-      kind: program
-      stopBy: end
-      has:
-        kind: import_statement
-        all:
-          - has: {field: source, regex: '^["'']@opentelemetry/api["'']$'}
-          - has: {kind: import_specifier, regex: '^metrics$', stopBy: end}
+    inside: *known_named_import
   constraints:
+    MODULE: {regex: '^["'']@opentelemetry/api["'']$'}
+    API: {regex: '^metrics$'}
     NAME: {regex: '^["'']http\.(client|server)\.request\.duration["'']$'}
     OPTIONS:
       has:
@@ -249,14 +246,9 @@ node-writable-ignored-backpressure:
               - kind: function_declaration
           follows:
             pattern: const $STREAM = createWriteStream($$$OPTIONS)
-      - inside:
-          kind: program
-          stopBy: end
-          has:
-            kind: import_statement
-            all:
-              - has: {field: source, regex: '^["''](?:node:)?fs["'']$'}
-              - has: {kind: import_specifier, regex: '^createWriteStream$', stopBy: end}
+      - inside: *known_named_import
   constraints:
+    MODULE: {regex: '^["''](?:node:)?fs["'']$'}
+    API: {regex: '^createWriteStream$'}
     STREAM: {kind: identifier}
   languages: {JavaScript: {}, TypeScript: {}}

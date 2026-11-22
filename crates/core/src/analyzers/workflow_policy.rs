@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use autoreview_schema::{
-    AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side,
-};
+use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 use serde_yaml::Value;
 
 use super::ast_grep::{RuleCatalogEntry, RuleDefinition};

@@ -10,6 +10,7 @@ pub mod history;
 pub mod revision;
 pub(crate) mod replay;
 pub(crate) mod rule_draft;
+pub(crate) mod rule_catalog;
 pub mod rules;
 pub mod skills;
 pub mod skills_bench;

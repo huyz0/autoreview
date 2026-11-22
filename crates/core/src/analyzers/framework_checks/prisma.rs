@@ -1,10 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
-use autoreview_schema::AgentFinding;
-use tree_sitter::Node;
-
-use super::{children, descendants, location, text, Rule};
+use super::{children, descendants, location, text, AgentFinding, Node, Path, Rule};
 use super::web::{self, binding_nodes, field_text, first_argument, is_function};
 
 pub(super) const RULE: Rule = Rule {

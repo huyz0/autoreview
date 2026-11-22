@@ -65,7 +65,7 @@ impl ReviewRun<'_> {
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|labels| {
                     labels.iter().filter_map(serde_json::Value::as_str).any(|label| {
-                        selected.iter().any(|value| super::rules::subcategory_matches(label, value))
+                        selected.iter().any(|value| super::rule_catalog::subcategory_matches(label, value))
                     })
                 })
         })
