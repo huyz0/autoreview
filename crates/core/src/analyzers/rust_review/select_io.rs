@@ -16,29 +16,38 @@ pub(super) const RULE: RustReviewRule = RustReviewRule {
 };
 
 pub(super) fn check<'t>(review: &mut Review<'t, '_>, node: Node<'t>) {
-    if node.kind() != "macro_invocation" {
-        return;
-    }
+    let Some(tree) = select_tokens(&review.source, node) else { return };
     let Some(loop_node) = containing_loop(node) else { return };
-    let Some(mac) = node.child_by_field_name("macro") else { return };
-    if review.source.external_path(mac).as_deref() != Some("tokio::select") {
-        return;
+    for method in read_exact_arms(&review.source, tree) {
+        review.report_related(&RULE, method, &[loop_node]);
     }
-    let Some(tree) = children(node).find(|child| child.kind() == "token_tree") else { return };
+}
+
+fn select_tokens<'t>(source: &Source<'t, '_>, node: Node<'t>) -> Option<Node<'t>> {
+    if node.kind() != "macro_invocation" {
+        return None;
+    }
+    let mac = node.child_by_field_name("macro")?;
+    if source.external_path(mac).as_deref() != Some("tokio::select") {
+        return None;
+    }
+    children(node).find(|child| child.kind() == "token_tree")
+}
+
+fn read_exact_arms<'t>(source: &Source<'t, '_>, tree: Node<'t>) -> Vec<Node<'t>> {
     let mut cursor = tree.walk();
     let tokens: Vec<_> = tree.children(&mut cursor).filter(|child| !is_comment(*child)).collect();
     if tokens.iter().filter(|token| token.kind() == "=>").count() < 2 {
-        return;
+        return Vec::new();
     }
-    for arm in tokens.windows(6) {
-        let [equals, reader, dot, method, arguments, arrow] = arm else { continue };
-        if equals.kind() == "=" && reader.kind() == "identifier" && dot.kind() == "."
-            && review.source.text(*method) == "read_exact" && arguments.kind() == "token_tree"
-            && arrow.kind() == "=>" && known_reader(&review.source, *reader)
-        {
-            review.report_related(&RULE, *method, &[loop_node]);
-        }
-    }
+    tokens.windows(6).filter_map(|arm| read_exact_arm(source, arm)).collect()
+}
+
+fn read_exact_arm<'t>(source: &Source<'t, '_>, arm: &[Node<'t>]) -> Option<Node<'t>> {
+    let [equals, reader, dot, method, arguments, arrow] = arm else { return None };
+    (equals.kind() == "=" && reader.kind() == "identifier" && dot.kind() == "."
+        && source.text(*method) == "read_exact" && arguments.kind() == "token_tree"
+        && arrow.kind() == "=>" && known_reader(source, *reader)).then_some(*method)
 }
 
 fn containing_loop(node: Node<'_>) -> Option<Node<'_>> {

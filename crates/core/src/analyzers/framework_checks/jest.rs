@@ -85,25 +85,25 @@ fn restoring_hook(test: Node<'_>, source: &str, hook: &str, jest: &str) -> bool 
 
 fn config_owns_restoration(repo: &Path, test: &Path) -> bool {
     let Ok(repo) = repo.canonicalize() else { return true };
-    for directory in test.parent().into_iter().flat_map(Path::ancestors) {
-        let json = directory.join("jest.config.json");
-        if let Some(source) = read_snapshot_file(&repo, &json) {
-            return serde_json::from_str(&source).map_or(true, |config| configured_restoration(&config));
-        }
-        if ["jest.config.js", "jest.config.cjs", "jest.config.mjs", "jest.config.ts", "jest.config.cts", "jest.config.mts"]
-            .into_iter().any(|name| repo.join(directory.join(name)).is_file())
-        {
-            // Dynamic configuration may enable restoration. Review never executes it.
-            return true;
-        }
-        if let Some(source) = read_snapshot_file(&repo, &directory.join("package.json")) {
-            let Ok(package) = serde_json::from_str::<serde_json::Value>(&source) else { return true };
-            if let Some(config) = package.get("jest") {
-                return configured_restoration(config);
-            }
-        }
+    test.parent().into_iter().flat_map(Path::ancestors)
+        .find_map(|directory| restoration_at(&repo, directory)).unwrap_or(false)
+}
+
+fn restoration_at(repo: &Path, directory: &Path) -> Option<bool> {
+    if let Some(source) = read_snapshot_file(repo, &directory.join("jest.config.json")) {
+        return Some(serde_json::from_str(&source).map_or(true, |config| configured_restoration(&config)));
     }
-    false
+    if ["jest.config.js", "jest.config.cjs", "jest.config.mjs", "jest.config.ts", "jest.config.cts", "jest.config.mts"]
+        .into_iter().any(|name| repo.join(directory.join(name)).is_file())
+    {
+        // Dynamic configuration may enable restoration. Review never executes it.
+        return Some(true);
+    }
+    let source = read_snapshot_file(repo, &directory.join("package.json"))?;
+    match serde_json::from_str::<serde_json::Value>(&source) {
+        Ok(package) => package.get("jest").map(configured_restoration),
+        Err(_) => Some(true),
+    }
 }
 
 fn configured_restoration(config: &serde_json::Value) -> bool {

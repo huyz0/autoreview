@@ -25,20 +25,42 @@ pub(super) fn inspect(path: &str, source: &str, root: Node<'_>) -> Vec<AgentFind
             continue;
         }
         let Some((message, body)) = consumer(consume, source) else { continue };
-        for attempt in descendants(body).filter(|node| node.kind() == "try_statement" && in_callback(*node, body)) {
-            let Some(processing) = attempt.child_by_field_name("body").filter(|block| may_fail(*block)) else { continue };
-            let Some(finally) = attempt.child_by_field_name("finalizer").and_then(|clause| clause.child_by_field_name("body")) else { continue };
-            for ack in children(finally).filter_map(|statement| statement.named_child(0)) {
-                if member_call(ack, source) == Some((channel, "ack"))
-                    && first_argument(ack).is_some_and(|argument| argument.kind() == "identifier" && text(argument, source) == message)
-                    && !descendants(body).flat_map(binding_nodes).any(|node| matches!(text(node, source), name if name == message || name == channel))
-                {
-                    findings.push(RULE.finding(location(path, ack, source), vec![location(path, processing, source)]));
-                }
-            }
-        }
+        findings.extend(consumer_acks(body, source, channel, message).into_iter().map(|(ack, processing)| {
+            RULE.finding(location(path, ack, source), vec![location(path, processing, source)])
+        }));
     }
     findings
+}
+
+fn consumer_acks<'t>(
+    body: Node<'t>, source: &str, channel: &str, message: &str,
+) -> Vec<(Node<'t>, Node<'t>)> {
+    if descendants(body).flat_map(binding_nodes).any(|node| {
+        let name = text(node, source);
+        name == message || name == channel
+    }) {
+        return Vec::new();
+    }
+    descendants(body).filter(|node| node.kind() == "try_statement" && in_callback(*node, body))
+        .filter_map(processing_and_finally)
+        .flat_map(|(processing, finally)| {
+            children(finally).filter_map(|statement| statement.named_child(0))
+                .filter(|&ack| acknowledges(ack, source, channel, message))
+                .map(move |ack| (ack, processing))
+        }).collect()
+}
+
+fn processing_and_finally(attempt: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    let processing = attempt.child_by_field_name("body").filter(|block| may_fail(*block))?;
+    let finally = attempt.child_by_field_name("finalizer")?.child_by_field_name("body")?;
+    Some((processing, finally))
+}
+
+fn acknowledges(ack: Node<'_>, source: &str, channel: &str, message: &str) -> bool {
+    member_call(ack, source) == Some((channel, "ack"))
+        && first_argument(ack).is_some_and(|argument| {
+            argument.kind() == "identifier" && text(argument, source) == message
+        })
 }
 
 fn imported_modules<'s>(root: Node<'_>, source: &'s str) -> HashSet<&'s str> {

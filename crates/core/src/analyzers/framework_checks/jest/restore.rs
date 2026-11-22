@@ -56,36 +56,47 @@ impl<'s> Check<'s> {
 
     fn step(&self, step: Node<'_>, aliases: &mut HashSet<&'s str>) -> Option<Open> {
         match step.kind() {
-            "comment" | "empty_statement" => {}
+            "comment" | "empty_statement" => Some(Self::falls_through()),
             "return_statement" | "throw_statement" => {
                 let restores = step.named_child(0).is_some_and(|value| self.restores(value, aliases));
-                return Some(Open { falls_through: false, exits: !restores });
+                Some(Open { falls_through: false, exits: !restores })
             }
-            "statement_block" => return self.block(children(step), aliases.clone()),
-            "if_statement" => {
-                let yes = self.step(step.child_by_field_name("consequence")?, &mut aliases.clone())?;
-                let no = match step.child_by_field_name("alternative") {
-                    Some(clause) => self.step(clause.named_child(0)?, &mut aliases.clone())?,
-                    None => Open { falls_through: true, exits: false },
-                };
-                return Some(yes.branch(no));
-            }
-            "try_statement" => return self.try_step(step, aliases),
+            "statement_block" => self.block(children(step), aliases.clone()),
+            "if_statement" => self.branch(step, aliases),
+            "try_statement" => self.try_step(step, aliases),
             "expression_statement" if step.named_child(0).is_some_and(|value| self.restores(value, aliases)) => {
-                return Some(Open::default());
+                Some(Open::default())
             }
             "lexical_declaration" if const_binding(step, self.source).is_some() => {
                 let (name, value) = const_binding(step, self.source)?;
-                if aliases.contains(text(value, self.source)) {
-                    aliases.insert(name);
-                } else {
-                    aliases.remove(name);
-                    self.opaque(value, aliases)?;
-                }
+                self.bind_alias(name, value, aliases)?;
+                Some(Self::falls_through())
             }
-            _ => self.opaque(step, aliases)?,
+            _ => self.opaque(step, aliases).map(|()| Self::falls_through()),
         }
-        Some(Open { falls_through: true, exits: false })
+    }
+
+    fn branch(&self, step: Node<'_>, aliases: &HashSet<&'s str>) -> Option<Open> {
+        let yes = self.step(step.child_by_field_name("consequence")?, &mut aliases.clone())?;
+        let no = match step.child_by_field_name("alternative") {
+            Some(clause) => self.step(clause.named_child(0)?, &mut aliases.clone())?,
+            None => Self::falls_through(),
+        };
+        Some(yes.branch(no))
+    }
+
+    fn bind_alias(&self, name: &'s str, value: Node<'_>, aliases: &mut HashSet<&'s str>) -> Option<()> {
+        if aliases.contains(text(value, self.source)) {
+            aliases.insert(name);
+            Some(())
+        } else {
+            aliases.remove(name);
+            self.opaque(value, aliases)
+        }
+    }
+
+    fn falls_through() -> Open {
+        Open { falls_through: true, exits: false }
     }
 
     fn try_step(&self, node: Node<'_>, aliases: &HashSet<&'s str>) -> Option<Open> {

@@ -79,29 +79,37 @@ impl<'s, 't> Check<'s, 't> {
             if states.is_empty() || states.len() > 24 {
                 return Vec::new();
             }
-            // The caller restores only names introduced by this block. Plain
-            // assignments to an outer variable still affect that variable.
-            for name in short_names(node, self.source) {
-                outer.entry(name).or_insert_with(|| {
-                    states.iter().map(|state| state.values.get(name).copied()).collect::<Vec<_>>()
-                });
-            }
-            let previous_count = states.len();
-            let mut origins = Vec::new();
-            states = states.into_iter().enumerate().flat_map(|(index, state)| {
-                let next = self.statement(node, state);
-                origins.extend(std::iter::repeat_n(index, next.len()));
-                next
-            }).collect();
-            if origins.len() != previous_count || origins.iter().copied().ne(0..previous_count) {
-                for values in outer.values_mut() {
-                    *values = origins.iter().map(|index| values[*index]).collect();
-                }
-            }
+            states = self.advance_block(node, states, &mut outer);
         }
         for (index, state) in states.iter_mut().enumerate() {
             for (&name, values) in &outer {
                 set(&mut state.values, name, values[index]);
+            }
+        }
+        states
+    }
+
+    fn advance_block(
+        &mut self, node: Node<'t>, states: Vec<State<'s, 't>>,
+        outer: &mut HashMap<&'s str, Vec<Option<Value>>>,
+    ) -> Vec<State<'s, 't>> {
+        // Restore only names introduced inside the block. Plain assignments
+        // can still update an outer variable.
+        for name in short_names(node, self.source) {
+            outer.entry(name).or_insert_with(|| {
+                states.iter().map(|state| state.values.get(name).copied()).collect()
+            });
+        }
+        let previous_count = states.len();
+        let mut origins = Vec::new();
+        let states = states.into_iter().enumerate().flat_map(|(index, state)| {
+            let next = self.statement(node, state);
+            origins.extend(std::iter::repeat_n(index, next.len()));
+            next
+        }).collect();
+        if origins.len() != previous_count || origins.iter().copied().ne(0..previous_count) {
+            for values in outer.values_mut() {
+                *values = origins.iter().map(|index| values[*index]).collect();
             }
         }
         states
