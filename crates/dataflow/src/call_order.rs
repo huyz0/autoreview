@@ -1,13 +1,13 @@
-//! Checks call obligations within one function's control-flow graph.
-//! Rules may track one pending flag or a separate obligation per collection
-//! and key. Keyed rules use stable source bindings and simple literals.
+//! Checks call obligations using control-flow graphs.
+//! Keyed rules track collection and key values through branches, loops,
+//! and eligible same-file helper calls.
 
 mod bindings;
 mod identity;
 mod plan;
 mod keyed;
 
-pub use keyed::check_keyed;
+pub use keyed::{check_keyed, check_keyed_file, KeyedFunction};
 
 use crate::cfg::{Cfg, CfgNode, NodeId, Stmt};
 use crate::lattice::Lattice;

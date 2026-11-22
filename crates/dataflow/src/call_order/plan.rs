@@ -28,13 +28,7 @@ impl<'a, 'src> Plan<'a, 'src> {
     ) -> Option<Self> {
         let mut sources = Sources::default();
         sources.collect(cfg)?;
-        if sources.calls.is_empty() {
-            return None;
-        }
         let syntax = Syntax::scan(function, source, &sources.writes)?;
-        if !syntax.has_registration(&spec.after) {
-            return None;
-        }
         syntax
             .models_cleanup(&spec.unless, &sources.calls)
             .then_some(Self {

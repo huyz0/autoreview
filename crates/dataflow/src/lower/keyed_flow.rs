@@ -1,10 +1,11 @@
 use tree_sitter::Node;
 
-use crate::cfg::{CallTarget, Cfg, EdgeKind, NodeId, Stmt};
+use crate::cfg::{CallTarget, Cfg, EdgeKind, NodeId, Stmt, ThrowingCall};
 
 use super::{keyed_syntax, line, site, StatementLowerer};
 
 mod handlers;
+pub(crate) mod loops;
 
 pub(super) const EXIT_PATH_LIMIT: usize = 128;
 
@@ -26,6 +27,10 @@ pub(super) struct Flow<'a> {
 impl Flow<'_> {
     fn statement(&self, cfg: &mut Cfg<Stmt>, node: Node<'_>, current: NodeId) -> NodeId {
         match node.kind() {
+            kind if loops::is_loop(kind) => self.lower_loop(cfg, node, current),
+            _ if loops::jump_kind(node, self.source).is_some() => {
+                self.loop_jump(cfg, node, current)
+            }
             "try_statement" | "try_expression" => self.protected(cfg, node, current),
             "throw_statement" | "throw_expression" => {
                 let stmt = Stmt::Throw {
@@ -57,8 +62,9 @@ impl Flow<'_> {
         if matches!(node.kind(), "if_statement" | "if_expression") {
             cfg.nodes[current].condition = keyed_syntax::condition(node, self.source);
         }
+        self.lower_return_value(cfg, node, current);
         let start = cfg.nodes[current].stmts.len();
-        let end = match awaited_call(node, self.source) {
+        let end = match positioned_call(node, self.source) {
             Some(call) => {
                 cfg.emit(current, call, line(node));
                 current
@@ -70,6 +76,16 @@ impl Flow<'_> {
             cfg.emit(end, Stmt::Rebind(write), line(node));
         }
         end
+    }
+
+    fn lower_return_value(&self, cfg: &mut Cfg<Stmt>, node: Node<'_>, current: NodeId) {
+        if matches!(node.kind(), "return_statement" | "return_expression") {
+            if let Some(call) =
+                keyed_syntax::expression(node).and_then(|expr| direct_call(expr, self.source))
+            {
+                cfg.emit(current, call, line(node));
+            }
+        }
     }
 
     fn exceptional_edge(&self, cfg: &mut Cfg<Stmt>, node: Node<'_>, current: NodeId) -> NodeId {
@@ -112,11 +128,21 @@ impl Flow<'_> {
     }
 }
 
-fn awaited_call(node: Node<'_>, source: &[u8]) -> Option<Stmt> {
-    if node.kind() != "expression_statement" || node.named_child(0)?.kind() != "await_expression" {
+fn positioned_call(node: Node<'_>, source: &[u8]) -> Option<Stmt> {
+    let call = match node.kind() {
+        "expression_statement" if node.named_child(0)?.kind() == "await_expression" => {
+            keyed_syntax::expression(node)?
+        }
+        "call_expression" | "method_invocation" => node,
+        _ => return None,
+    };
+    direct_call(call, source)
+}
+
+fn direct_call(call: Node<'_>, source: &[u8]) -> Option<Stmt> {
+    if !matches!(call.kind(), "call_expression" | "method_invocation") {
         return None;
     }
-    let call = keyed_syntax::expression(node).filter(|node| node.kind() == "call_expression")?;
     Some(Stmt::Call {
         target: CallTarget::Named(site::name(call, source)?),
         site: site::capture(call, source),
@@ -125,13 +151,17 @@ fn awaited_call(node: Node<'_>, source: &[u8]) -> Option<Stmt> {
     })
 }
 
-fn throwing_call(expr: Node<'_>, source: &[u8]) -> Option<(String, usize)> {
+fn throwing_call(expr: Node<'_>, source: &[u8]) -> Option<ThrowingCall> {
     let target = match expr.kind() {
         "method_invocation" | "call_expression" => site::name(expr, source).unwrap_or_default(),
         "new_expression" | "object_creation_expression" => String::new(),
         _ => return None,
     };
-    Some((target, expr.start_byte()))
+    Some(ThrowingCall {
+        name: target,
+        start: expr.start_byte(),
+        site: site::capture(expr, source),
+    })
 }
 
 pub(super) struct Exit {
@@ -140,7 +170,7 @@ pub(super) struct Exit {
 }
 
 impl Cfg<Stmt> {
-    fn fork_exception(&mut self, current: NodeId, call: (String, usize), line: u32) -> NodeId {
+    fn fork_exception(&mut self, current: NodeId, call: ThrowingCall, line: u32) -> NodeId {
         let next = self.push_node(line);
         let unwind = self.push_node(line);
         self.nodes[current].throwing_call = Some(call);
@@ -190,6 +220,12 @@ impl Cfg<Stmt> {
     }
 
     fn resume_exit(&mut self, from: NodeId, exit: Exit) {
+        if let Stmt::LoopJump { target, boundary } = exit.stmt {
+            if boundary == self.exit {
+                self.edges.push((from, target, EdgeKind::Fallthrough));
+                return;
+            }
+        }
         self.emit(from, exit.stmt, exit.line);
         self.edges.push((from, self.exit, EdgeKind::Fallthrough));
     }

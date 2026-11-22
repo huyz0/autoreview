@@ -40,7 +40,8 @@ pub enum CallTarget {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IdentityOperand {
     Binding(String),
-    Fresh { name: String, start: usize },
+    Fresh { name: String, start: usize, age: u8 },
+    Scoped { name: String, owner: usize },
     String(String),
     Integer(String),
     Boolean(bool),
@@ -52,6 +53,14 @@ pub struct CallSite {
     pub start: usize,
     pub receiver: Option<String>,
     pub arguments: Vec<Option<IdentityOperand>>,
+    pub(crate) local: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ThrowingCall {
+    pub(crate) name: String,
+    pub(crate) start: usize,
+    pub(crate) site: Option<Box<CallSite>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +93,7 @@ pub enum Stmt {
     Return { value: Option<VarId> },
     Throw { exception: Option<String>, implicit: bool },
     Rebind(BindingWrite),
+    LoopJump { target: NodeId, boundary: NodeId },
     DeferredBlock(Box<Cfg<Stmt>>),
     DeferredCall { target: String, site: Option<Box<CallSite>> },
     Call { target: CallTarget, args: Vec<VarId>, assigned_to: Option<VarId>, site: Option<Box<CallSite>> },
@@ -110,7 +120,8 @@ pub struct CfgNode<S> {
     pub source_line: u32,
     statement_lines: Vec<Option<u32>>,
     pub(crate) condition: Option<(String, bool)>,
-    pub(crate) throwing_call: Option<(String, usize)>,
+    pub(crate) throwing_call: Option<ThrowingCall>,
+    pub(crate) loop_condition: bool,
 }
 
 impl<S> CfgNode<S> {
@@ -150,6 +161,7 @@ pub struct Cfg<S> {
     // Remaining copies of finally blocks for distinct exit paths.
     pub(crate) keyed_flow: Option<usize>,
     pub(crate) keyed_exceptions: bool,
+    pub(crate) loop_targets: Vec<(NodeId, NodeId, NodeId)>,
 }
 
 impl<S> Cfg<S> {
@@ -167,7 +179,7 @@ impl<S> Cfg<S> {
     /// a fluent builder API, since the lowering passes' control flow is
     /// varied enough that a generic builder would just get in the way.
     pub fn push_node(&mut self, source_line: u32) -> NodeId {
-        self.nodes.push(CfgNode { stmts: Vec::new(), source_line, statement_lines: Vec::new(), condition: None, throwing_call: None });
+        self.nodes.push(CfgNode { stmts: Vec::new(), source_line, statement_lines: Vec::new(), condition: None, throwing_call: None, loop_condition: false });
         self.nodes.len() - 1
     }
 
@@ -179,7 +191,7 @@ impl<S> Cfg<S> {
     }
 
     pub fn new_empty() -> Self {
-        Cfg { entry: 0, exit: 0, nodes: Vec::new(), edges: Vec::new(), keyed_flow: None, keyed_exceptions: false }
+        Cfg { entry: 0, exit: 0, nodes: Vec::new(), edges: Vec::new(), keyed_flow: None, keyed_exceptions: false, loop_targets: Vec::new() }
     }
 }
 

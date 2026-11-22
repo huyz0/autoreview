@@ -651,3 +651,260 @@ fn jvm_reassignments_follow_mutable_local_aliases() {
 fn assert_key_pending_on_return(hits: &[AgentFinding]) {
     assert_eq!(one(hits).message, "Clean up root and key before return");
 }
+
+#[test]
+fn helper_chains_transfer_registration_and_remove_the_callers_pair() {
+    let source = r#"function begin(active, key) {
+    active.register(key);
+}
+function removeEntry(collection, key) {
+    collection.remove(key);
+}
+function finishEntry(active, key) {
+    removeEntry(active, key);
+}
+function pending(root, spare, first, second, ready) {
+    begin(root, first);
+    if (ready) {
+        finishEntry(root, first);
+    } else {
+        finishEntry(root, first);
+    }
+    return;
+}"#;
+    assert!(findings("JavaScript", "worker.js", source, RECEIVER, true).is_empty());
+    let wrong = source.replacen("finishEntry(root, first)", "finishEntry(spare, second)", 1);
+    let hits = findings("JavaScript", "worker.js", &wrong, RECEIVER, true);
+    assert_eq!(one(&hits).message, "Clean up root and first before return");
+    assert_eq!(
+        one(&hits).related_locations.as_ref().unwrap()[0]
+            .range
+            .start_line,
+        2
+    );
+}
+
+#[test]
+fn a_throwing_helper_carries_its_registration_into_the_callers_catch() {
+    let source = r#"function begin(active, key) {
+    active.register(key);
+    throw new Error();
+}
+function pending(root, key) {
+    try {
+        begin(root, key);
+    } catch (failure) {
+        root.remove(key);
+    }
+}"#;
+    assert!(findings("TypeScript", "worker.ts", source, RECEIVER, true).is_empty());
+    let wrong = source.replace("root.remove(key)", "root.remove(\"wrong\")");
+    let hits = findings("TypeScript", "worker.ts", &wrong, RECEIVER, true);
+    assert_eq!(
+        one(&hits).message,
+        "Clean up root and key before fallthrough"
+    );
+}
+
+#[test]
+fn a_caller_can_defer_a_local_helper_with_captured_arguments() {
+    let source = r#"package worker
+func cleanup(active *Registry, key string) {
+    active.remove(key)
+}
+func pending(root, spare *Registry, key string) {
+    root.register(key)
+    defer cleanup(root, key)
+}"#;
+    assert!(findings("Go", "worker.go", source, RECEIVER, true).is_empty());
+    let wrong = source.replace("defer cleanup(root, key)", "defer cleanup(spare, key)");
+    let hits = findings("Go", "worker.go", &wrong, RECEIVER, true);
+    assert_eq!(
+        one(&hits).message,
+        "Clean up root and key before fallthrough"
+    );
+}
+
+#[test]
+fn java_and_rust_resolve_direct_helpers_by_scope_and_arity() {
+    let cases = [
+        (
+            "Java",
+            "Worker.java",
+            r#"class Other {
+    void cleanup(Registry root, String key) { root.remove("wrong"); }
+}
+class Worker {
+    void cleanup(Registry active) { active.remove("unused"); }
+    void cleanup(Registry active, String key) { active.remove(key); }
+    void pending(Registry root, String key) {
+        root.register(key);
+        cleanup(root, key);
+    }
+}"#,
+        ),
+        (
+            "Rust",
+            "lib.rs",
+            r#"fn cleanup(active: &mut Registry, key: &str) { active.remove(&key); }
+fn pending(root: &mut Registry, key: &str) {
+    root.register(key);
+    cleanup(root, key);
+}"#,
+        ),
+    ];
+    for (language, path, source) in cases {
+        assert!(
+            findings(language, path, source, RECEIVER, true).is_empty(),
+            "{language}"
+        );
+        let wrong = source
+            .replace("active.remove(key)", "active.remove(\"wrong\")")
+            .replace("active.remove(&key)", "active.remove(\"wrong\")");
+        let hits = findings(language, path, &wrong, RECEIVER, true);
+        assert_eq!(
+            one(&hits).related_locations.as_ref().unwrap()[0].snippet,
+            "root.register(key);",
+            "{language}"
+        );
+    }
+}
+
+#[test]
+fn cleanup_in_a_later_iteration_does_not_clear_an_earlier_key() {
+    let source = r#"function pending(root, keys, skip) {
+    for (const key of keys) {
+        root.register(key);
+        if (skip) continue;
+        root.remove(key);
+    }
+}"#;
+    let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
+    assert_eq!(
+        one(&hits).message,
+        "Clean up root and key before fallthrough"
+    );
+    let clean = source.replace(
+        "if (skip) continue;",
+        "if (skip) { root.remove(key); continue; }",
+    );
+    assert!(findings("JavaScript", "worker.js", &clean, RECEIVER, true).is_empty());
+}
+
+#[test]
+fn loop_back_edges_keep_the_previous_key_distinct_from_the_current_key() {
+    let source = r#"function pending(root, keys, initial) {
+    let previous = initial;
+    for (const key of keys) {
+        root.register(key);
+        root.remove(previous);
+        previous = key;
+    }
+}"#;
+    let hits = findings("TypeScript", "worker.ts", source, RECEIVER, true);
+    assert_eq!(
+        one(&hits).message,
+        "Clean up root and key before fallthrough"
+    );
+    let clean = source.replace(
+        "previous = key;\n    }",
+        "previous = key;\n    }\n    root.remove(previous);",
+    );
+    assert!(findings("TypeScript", "worker.ts", &clean, RECEIVER, true).is_empty());
+}
+
+#[test]
+fn break_and_do_while_keep_reachable_exits_only() {
+    let source = r#"function pending(root, key) {
+    do {
+        root.register(key);
+        break;
+        root.remove(key);
+    } while (false);
+}"#;
+    let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
+    assert_eq!(
+        one(&hits).message,
+        "Clean up root and key before fallthrough"
+    );
+    let clean = source.replace(
+        "break;\n        root.remove(key);",
+        "root.remove(key);\n        break;",
+    );
+    assert!(findings("JavaScript", "worker.js", &clean, RECEIVER, true).is_empty());
+}
+
+#[test]
+fn iterator_keys_work_with_helpers_across_supported_languages() {
+    let cases = [
+        ("Go", "worker.go", "package worker\nfunc cleanup(active *Registry, key string) { active.remove(key) }\nfunc pending(root *Registry, keys []string) {\nfor _, key := range keys { root.register(key); cleanup(root, key) }\n}"),
+        ("Java", "Worker.java", "class Worker {\nvoid cleanup(Registry active, String key) { active.remove(key); }\nvoid pending(Registry root, String[] keys) {\nfor (String key : keys) { root.register(key); cleanup(root, key); }\n}}"),
+        ("Kotlin", "Worker.kt", "fun cleanup(active: Registry, key: String) { active.remove(key) }\nfun pending(root: Registry, keys: List<String>) {\nfor (key in keys) { root.register(key); cleanup(root, key) }\n}"),
+        ("Rust", "lib.rs", "fn cleanup(active: &mut Registry, key: &str) { active.remove(key); }\nfn pending(root: &mut Registry, keys: Vec<&str>) {\nfor key in keys { root.register(key); cleanup(root, key); }\n}"),
+    ];
+    for (language, path, source) in cases {
+        let hits = findings(language, path, source, RECEIVER, true);
+        assert!(hits.is_empty(), "{language}: {hits:#?}");
+        let wrong = source.replace("active.remove(key)", "active.remove(\"different\")");
+        let hits = findings(language, path, &wrong, RECEIVER, true);
+        assert!(
+            one(&hits).message.starts_with("Clean up root and key"),
+            "{language}"
+        );
+    }
+}
+
+#[test]
+fn loop_jumps_run_finally_before_leaving_or_repeating_the_iteration() {
+    let source = r#"function pending(root, keys, stop) {
+    for (const key of keys) {
+        root.register(key);
+        try {
+            if (stop) break;
+            continue;
+        } finally {
+            root.remove(key);
+        }
+    }
+}"#;
+    assert!(findings("JavaScript", "worker.js", source, RECEIVER, true).is_empty());
+    let wrong = source.replace("root.remove(key)", "root.remove(\"wrong\")");
+    let hits = findings("JavaScript", "worker.js", &wrong, RECEIVER, true);
+    assert_eq!(
+        one(&hits).message,
+        "Clean up root and key before fallthrough"
+    );
+}
+
+#[test]
+fn a_go_helper_used_as_a_return_value_runs_before_the_exit_check() {
+    let source = r#"package worker
+func cleanup(active *Registry, key string) error {
+    active.remove(key)
+    return nil
+}
+func pending(root *Registry, key string) error {
+    root.register(key)
+    return cleanup(root, key)
+}"#;
+    assert!(findings("Go", "worker.go", source, RECEIVER, true).is_empty());
+    let wrong = source.replace(
+        "return cleanup(root, key)",
+        "return cleanup(root, \"wrong\")",
+    );
+    assert_key_pending_on_return(&findings("Go", "worker.go", &wrong, RECEIVER, true));
+}
+
+#[test]
+fn ordinary_for_updates_keep_current_and_previous_counters_distinct() {
+    let source = r#"function pending(root, limit) {
+    for (let i = 0; i < limit; i++) {
+        root.register(i);
+        root.remove(i);
+    }
+}"#;
+    assert!(findings("JavaScript", "worker.js", source, RECEIVER, true).is_empty());
+    let wrong = source.replace("root.remove(i)", "root.remove(0)");
+    let hits = findings("JavaScript", "worker.js", &wrong, RECEIVER, true);
+    assert_eq!(one(&hits).message, "Clean up root and i before fallthrough");
+}

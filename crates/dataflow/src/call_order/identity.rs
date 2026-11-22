@@ -29,7 +29,8 @@ impl Entry {
         match &self.key {
             IdentityOperand::Binding(name)
             | IdentityOperand::Integer(name)
-            | IdentityOperand::Fresh { name, .. } => name.clone(),
+            | IdentityOperand::Fresh { name, .. }
+            | IdentityOperand::Scoped { name, .. } => name.clone(),
             IdentityOperand::String(value) => format!("{value:?}"),
             IdentityOperand::Boolean(value) => value.to_string(),
         }
@@ -45,6 +46,7 @@ pub(super) struct Syntax<'src> {
     bindings: Bindings<'src>,
     calls: Vec<(usize, String)>,
     guards: HashMap<String, usize>,
+    owner: usize,
 }
 
 impl<'src> Syntax<'src> {
@@ -53,10 +55,13 @@ impl<'src> Syntax<'src> {
         source: &'src [u8],
         writes: &HashSet<usize>,
     ) -> Option<Self> {
-        let mut syntax = Self::default();
+        let mut syntax = Self {
+            owner: function.start_byte(),
+            ..Self::default()
+        };
         let mut nodes = vec![function];
         while let Some(node) = nodes.pop() {
-            if unsupported_flow(node) {
+            if unsupported_flow(node, source) {
                 return None;
             }
             if matches!(node.kind(), "method_invocation" | "call_expression") {
@@ -90,7 +95,17 @@ impl<'src> Syntax<'src> {
         values
             .get(name)
             .cloned()
-            .unwrap_or_else(|| self.bindings.resolve(name, start))
+            .unwrap_or_else(|| match self.bindings.resolve(name, start)? {
+                IdentityOperand::Binding(name) => Some(IdentityOperand::Scoped {
+                    name,
+                    owner: self.owner,
+                }),
+                literal => Some(literal),
+            })
+    }
+
+    pub(super) fn taken_name(&self, name: &str) -> bool {
+        self.bindings.names().any(|binding| binding == name)
     }
 
     pub(super) fn repeated_guard(&self, name: &str) -> bool {
@@ -196,7 +211,9 @@ impl EntryIdentity {
 
 fn binding_name(value: &IdentityOperand) -> Option<&str> {
     match value {
-        IdentityOperand::Binding(name) | IdentityOperand::Fresh { name, .. } => Some(name),
+        IdentityOperand::Binding(name)
+        | IdentityOperand::Fresh { name, .. }
+        | IdentityOperand::Scoped { name, .. } => Some(name),
         _ => None,
     }
 }
@@ -209,7 +226,17 @@ fn matches_receiver(patterns: &[NamePattern], receiver: &str, member: &str) -> b
     matches_any(patterns, &format!("{receiver}.{member}"))
 }
 
-fn unsupported_flow(node: Node<'_>) -> bool {
+fn unsupported_flow(node: Node<'_>, source: &[u8]) -> bool {
+    if crate::lower::keyed_flow::loops::jump_kind(node, source).is_some() {
+        return false;
+    }
+    if matches!(
+        node.kind(),
+        "break_statement" | "continue_statement" | "label"
+    ) {
+        return true;
+    }
+
     // Rust's postfix `?` and Kotlin's `try` share a node kind.
     if node.kind() == "try_expression" {
         if !node.child(0).is_some_and(|first| first.kind() == "try") {
@@ -234,14 +261,5 @@ fn unsupported_flow(node: Node<'_>) -> bool {
             | "match_expression"
             | "goto_statement"
             | "go_statement"
-            | "for_statement"
-            | "for_in_statement"
-            | "enhanced_for_statement"
-            | "for_expression"
-            | "while_statement"
-            | "while_expression"
-            | "do_statement"
-            | "do_while_statement"
-            | "loop_expression"
     )
 }

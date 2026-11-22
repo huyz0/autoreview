@@ -68,6 +68,7 @@ fn write(node: Node<'_>, source: &[u8]) -> Option<BindingWrite> {
             Some(IdentityOperand::Fresh {
                 name: name.clone(),
                 start: value.start_byte(),
+                age: 0,
             })
         } else {
             binding_value(value, source)
@@ -86,7 +87,7 @@ fn write(node: Node<'_>, source: &[u8]) -> Option<BindingWrite> {
 pub(super) fn expression(node: Node<'_>) -> Option<Node<'_>> {
     match node.kind() {
         "expression_statement" | "return_statement" | "return_expression" => {
-            node.named_child(0).and_then(unpack)
+            node.named_child(0).and_then(simple).and_then(unpack)
         }
         "if_statement" | "if_expression" => node.child_by_field_name("condition").and_then(unpack),
         "assignment" | "assignment_expression" => {
@@ -114,8 +115,12 @@ fn unpack(mut node: Node<'_>) -> Option<Node<'_>> {
 }
 
 pub(crate) fn condition(node: Node<'_>, source: &[u8]) -> Option<(String, bool)> {
-    let test = unpack(node.child_by_field_name("condition")?)?;
-    if identifier(test) {
+    condition_value(node.child_by_field_name("condition")?, source)
+}
+
+pub(crate) fn condition_value(node: Node<'_>, source: &[u8]) -> Option<(String, bool)> {
+    let test = unpack(node)?;
+    if identifier(test) || matches!(test.kind(), "true" | "false" | "boolean_literal") {
         return Some((test.utf8_text(source).ok()?.to_owned(), true));
     }
     let text = test.utf8_text(source).ok()?;

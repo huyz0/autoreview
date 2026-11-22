@@ -147,6 +147,9 @@ impl Lower<'_> {
 
     fn branch(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
         let condition = self.value(expr.child_by_field_name("condition"), at, names, None);
+        if self.cfg.keyed_flow.is_some() {
+            self.cfg.nodes[condition].condition = super::keyed_syntax::condition(expr, self.source);
+        }
         let then = expr.child_by_field_name("consequence")?;
         let then_end = self.arm(then, condition, names, EdgeKind::True);
         let otherwise = expr
@@ -191,6 +194,10 @@ impl Lower<'_> {
         let iterable = self.value(expr.child_by_field_name("value"), at, names, None);
         self.edge(iterable, head, EdgeKind::Fallthrough);
         let condition = self.value(expr.child_by_field_name("condition"), head, names, None);
+        if self.cfg.keyed_flow.is_some() {
+            self.cfg.nodes[condition].condition = super::keyed_syntax::condition(expr, self.source);
+            self.cfg.nodes[condition].loop_condition = true;
+        }
         if expr.kind() != "loop_expression" {
             self.edge(condition, after, EdgeKind::False);
         }
@@ -200,11 +207,17 @@ impl Lower<'_> {
             let name = self.text(pattern).to_owned();
             body_names.insert(name.clone(), self.fresh(&name));
         }
-        if let Some(end) = expr
-            .child_by_field_name("body")
-            .and_then(|body| self.arm(body, condition, &body_names, EdgeKind::True))
-        {
-            self.edge(end, head, EdgeKind::Loop);
+        if let Some(body) = expr.child_by_field_name("body") {
+            let start = self.cfg.push_node(line(body));
+            self.edge(condition, start, EdgeKind::True);
+            if self.cfg.keyed_flow.is_some() {
+                for write in super::keyed_flow::loops::iteration_writes(expr, self.source) {
+                    self.cfg.emit(start, Stmt::Rebind(write), line(expr));
+                }
+            }
+            if let Some(end) = self.flow_expression(body, start, &body_names) {
+                self.edge(end, head, EdgeKind::Loop);
+            }
         }
         self.loops.pop();
         self.cfg

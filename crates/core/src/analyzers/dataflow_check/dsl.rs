@@ -127,9 +127,7 @@ fn render_call_order_message(
 /// `autoreview_dataflow::call_order`'s own module docs for what this
 /// engine models and why it's a separate primitive from taint) whose
 /// `language` matches, against one file's already-lowered functions.
-/// Purely intraprocedural — no summaries/caches involved, unlike
-/// `run_taint_rules`, since the obligation this models is meant to
-/// resolve within one function.
+/// Keyed rules follow eligible calls between functions in the same file.
 pub(super) fn run_call_order_rules(
     file: &SummarySource,
     language: Language,
@@ -157,14 +155,18 @@ pub(super) fn run_call_order_rules(
         let keyed = check_keyed.then(|| lower::keyed_variant(language, source, *node));
         (*node, cfg, keyed, deferred_cleanup)
     }).collect();
+    let keyed: Vec<_> = functions.iter().filter_map(|(node, _, graph, _)| {
+        Some(call_order::KeyedFunction { node: *node, graph: graph.as_ref()? })
+    }).collect();
     for rule in &rules {
-        for (node, cfg, keyed, deferred_cleanup) in &functions {
-            let hits = if rule.spec.identity.is_some() {
-                call_order::check_keyed(&rule.spec, keyed.as_ref().unwrap_or(cfg), *node, source)
-            } else {
-                call_sequence_hits(cfg, &rule.spec, *deferred_cleanup)
-            };
+        if rule.spec.identity.is_some() {
+            let hits = call_order::check_keyed_file(&rule.spec, &keyed, source);
             findings.extend(hits.iter().map(|hit| call_order_finding(file, rule, hit)));
+        } else {
+            for (_, cfg, _, deferred_cleanup) in &functions {
+                let hits = call_sequence_hits(cfg, &rule.spec, *deferred_cleanup);
+                findings.extend(hits.iter().map(|hit| call_order_finding(file, rule, hit)));
+            }
         }
     }
     findings

@@ -87,7 +87,7 @@ impl<'src> Bindings<'src> {
 
     fn record_declarations(&mut self, node: Node<'_>, source: &'src [u8]) {
         let targets = declaration(node);
-        let single_target = targets.len() == 1
+        let single_target = targets.len() == 1 || declares_iteration(node)
             || matches!(
                 node.kind(),
                 "parameter_declaration" | "variadic_parameter_declaration"
@@ -119,6 +119,10 @@ impl<'src> Bindings<'src> {
 }
 
 fn declaration(node: Node<'_>) -> Vec<Node<'_>> {
+    let iteration = crate::lower::keyed_flow::loops::iterator_bindings(node);
+    if !iteration.is_empty() && declares_iteration(node) {
+        return iteration;
+    }
     if matches!(
         node.kind(),
         "parameter_declaration" | "variadic_parameter_declaration" | "var_spec"
@@ -148,6 +152,16 @@ fn declaration(node: Node<'_>) -> Vec<Node<'_>> {
         _ => None,
     };
     target.into_iter().collect()
+}
+
+fn declares_iteration(node: Node<'_>) -> bool {
+    match node.kind() {
+        "range_clause" => node.children(&mut node.walk()).any(|part| part.kind() == ":="),
+        "for_in_statement" => node.child_by_field_name("kind").is_some(),
+        // Kotlin's variable_declaration already contributes its own binding.
+        "enhanced_for_statement" | "for_expression" => true,
+        _ => false,
+    }
 }
 
 fn initializer(node: Node<'_>) -> Option<Node<'_>> {
@@ -237,7 +251,7 @@ fn write_target<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> 
         | "range_clause" => node
             .child_by_field_name("left")
             .or_else(|| node.named_child(0)),
-        "update_expression" | "inc_statement" | "dec_statement" | "enhanced_for_statement" => node
+        "update_expression" | "inc_statement" | "dec_statement" => node
             .child_by_field_name("name")
             .or_else(|| node.named_child(0)),
         "unary_expression" if node.utf8_text(source).ok()?.starts_with('&') => {
