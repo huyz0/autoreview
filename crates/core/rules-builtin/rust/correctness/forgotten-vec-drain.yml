@@ -1,0 +1,15 @@
+id: rust-forgotten-vec-drain
+language: Rust
+category: correctness
+severity: warning
+message: >-
+  Forgetting a Vec drain can leak elements, including elements outside the drain range. Drop the drain or use a collection operation that preserves the intended elements.
+metadata:
+  references:
+    - "https://doc.rust-lang.org/std/vec/struct.Vec.html#method.drain"
+rule:
+  any:
+    - pattern: std::mem::forget(Vec::drain($VECTOR, $RANGE))
+    - pattern: std::mem::forget(std::vec::Vec::drain($VECTOR, $RANGE))
+    - pattern: core::mem::forget(Vec::drain($VECTOR, $RANGE))
+    - pattern: core::mem::forget(std::vec::Vec::drain($VECTOR, $RANGE))

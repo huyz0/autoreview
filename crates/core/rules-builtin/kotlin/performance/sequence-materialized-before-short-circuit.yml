@@ -1,0 +1,23 @@
+id: kotlin-sequence-materialized-before-short-circuit
+language: Kotlin
+category: performance
+severity: warning
+semantic: true
+message: >-
+  This sequence is converted to a list before an operation that can stop early. Move the terminal operation before toList() when the pipeline does not need to visit every element.
+metadata:
+  references:
+    - "https://kotlinlang.org/docs/sequences.html"
+rule:
+  any:
+    - pattern:
+        context: 'fun sample() { $SEQUENCE.toList().$TERMINAL($$$ARGS) }'
+        selector: call_expression
+    - pattern:
+        context: 'fun sample() { $SEQUENCE.toList().asSequence().$TERMINAL($$$ARGS) }'
+        selector: call_expression
+constraints:
+  SEQUENCE:
+    regex: '\.asSequence\s*\(|^sequenceOf\s*\('
+  TERMINAL:
+    regex: '^(first|firstOrNull|any|none|all)$'

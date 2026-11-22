@@ -1,0 +1,21 @@
+id: ts-inline-listener-removal
+language: TypeScript
+category: correctness
+severity: warning
+message: >-
+  removeEventListener receives a new callback object. Pass the original
+  callback used for registration so the event target can release it.
+metadata:
+  references:
+    - "https://dom.spec.whatwg.org/#dom-eventtarget-removeeventlistener"
+rule:
+  any:
+    - pattern: $TARGET.removeEventListener($EVENT, $CALLBACK)
+    - pattern: $TARGET.removeEventListener($EVENT, $CALLBACK, $OPTIONS)
+constraints:
+  TARGET:
+    regex: '^(window|document|globalThis\.window|globalThis\.document)$'
+  CALLBACK:
+    any:
+      - kind: arrow_function
+      - kind: function_expression

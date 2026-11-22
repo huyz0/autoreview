@@ -1,0 +1,16 @@
+id: kotlin-sorted-before-first
+language: Kotlin
+category: performance
+severity: warning
+semantic: true
+message: >-
+  Sorting the whole collection before reading its first element does more work
+  than a minimum scan. Consider minOrNull() if its comparison and empty-input
+  behavior match the intended result.
+metadata:
+  references:
+    - "https://kotlinlang.org/api/core/kotlin-stdlib/kotlin.collections/min-or-null.html"
+rule:
+  pattern:
+    context: 'fun sample() { $ITEMS.sorted().firstOrNull() }'
+    selector: call_expression

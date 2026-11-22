@@ -1,0 +1,32 @@
+id: go-discarded-slice-delete-result
+language: Go
+category: correctness
+severity: warning
+message: >-
+  This slice deletion mutates the backing array and returns the shortened slice. Use the returned slice so callers see the updated length.
+metadata:
+  references:
+    - "https://pkg.go.dev/slices#Delete"
+rule:
+  all:
+    - kind: call_expression
+    - has:
+        field: function
+        regex: '^slices\.(Delete|DeleteFunc|Compact|CompactFunc)$'
+    - any:
+        - inside:
+            kind: expression_statement
+        - inside:
+            kind: expression_list
+            inside:
+              kind: assignment_statement
+              has:
+                field: left
+                regex: '^_$'
+    - inside:
+        kind: source_file
+        stopBy: end
+        has:
+          kind: import_spec
+          stopBy: end
+          regex: '^"slices"$'

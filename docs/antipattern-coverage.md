@@ -4,6 +4,9 @@ Autoreview can report a concrete instance of a broad antipattern when it has eno
 
 A syntax rule can match a specific API sequence or local expression. Data flow is needed when a value or obligation crosses assignments and branches. Graph checks need resolved dependencies or an explicit architecture policy. Production behavior and design intent require evidence such as traces, query plans, or change history.
 
+See [collection performance and retention](collection-coverage.md) for
+allocation, collection lifetime, and mutation checks by language.
+
 ## Code design and complexity
 
 | Antipattern | Autoreview coverage | Feasible rule or evidence needed |

@@ -1,0 +1,47 @@
+id: kotlin-weak-map-value-retains-key
+language: Kotlin
+category: correctness
+severity: warning
+message: >-
+  This WeakHashMap stores its key as a strongly held value. A live map can
+  keep that key reachable and prevent automatic eviction. Store independent
+  metadata or a WeakReference to the value.
+metadata:
+  references:
+    - "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/WeakHashMap.html"
+rule:
+  all:
+    - pattern:
+        context: 'fun sample() { $MAP.put($KEY, $KEY) }'
+        selector: call_expression
+    - inside:
+        kind: statements
+        inside:
+          kind: function_body
+          inside:
+            kind: function_declaration
+            has:
+              kind: function_value_parameters
+              has:
+                kind: parameter
+                all:
+                  - has:
+                      kind: simple_identifier
+                      pattern: $MAP
+                  - has:
+                      kind: user_type
+                      regex: '^WeakHashMap\s*<'
+    - inside:
+        kind: source_file
+        stopBy: end
+        has:
+          kind: import_header
+          stopBy: end
+          regex: '^import\s+java\.util\.WeakHashMap\s*;?$'
+constraints:
+  MAP:
+    kind: simple_identifier
+  KEY:
+    kind: value_argument
+    has:
+      kind: simple_identifier

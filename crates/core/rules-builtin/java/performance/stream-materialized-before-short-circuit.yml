@@ -1,0 +1,27 @@
+id: java-stream-materialized-before-short-circuit
+language: Java
+category: performance
+severity: warning
+semantic: true
+message: >-
+  This stream is materialized before an operation that can stop early. Move the terminal operation before the temporary list when the pipeline does not need to visit every element.
+metadata:
+  references:
+    - "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/stream/package-summary.html"
+rule:
+  any:
+    - pattern: $STREAM.toList().stream().$TERMINAL($$$ARGS)
+    - pattern: $STREAM.collect(java.util.stream.Collectors.toList()).stream().$TERMINAL($$$ARGS)
+    - all:
+        - pattern: $STREAM.collect(Collectors.toList()).stream().$TERMINAL($$$ARGS)
+        - inside:
+            kind: program
+            stopBy: end
+            has:
+              pattern: import java.util.stream.Collectors;
+constraints:
+  STREAM:
+    kind: method_invocation
+    regex: '\.stream\s*\(|^((java\.util\.stream\.)?Stream)\.(of|iterate|generate)\s*\('
+  TERMINAL:
+    regex: '^(findFirst|findAny|anyMatch|noneMatch|allMatch)$'

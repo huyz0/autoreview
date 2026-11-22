@@ -1,0 +1,15 @@
+id: ts-filter-for-existence
+language: TypeScript
+category: performance
+severity: warning
+semantic: true
+message: >-
+  This filter builds an array just to test whether any element matches. Use some() or its negation when the predicate does not need to execute for every element.
+metadata:
+  references:
+    - "https://tc39.es/ecma262/multipage/indexed-collections.html#sec-array.prototype.some"
+rule:
+  any:
+    - pattern: $ITEMS.filter($$$ARGS).length > 0
+    - pattern: $ITEMS.filter($$$ARGS).length === 0
+    - pattern: $ITEMS.filter($$$ARGS).length !== 0

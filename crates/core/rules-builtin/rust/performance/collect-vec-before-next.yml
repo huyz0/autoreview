@@ -1,0 +1,14 @@
+id: rust-collect-vec-before-next
+language: Rust
+category: performance
+severity: warning
+semantic: true
+message: >-
+  This iterator builds a Vec before returning only its first item. Use next directly when the preceding operations do not need to run for every item.
+metadata:
+  references:
+    - "https://doc.rust-lang.org/book/ch13-02-iterators.html"
+rule:
+  any:
+    - pattern: $ITER.collect::<Vec<$_>>().into_iter().next()
+    - pattern: $ITER.collect::<std::vec::Vec<$_>>().into_iter().next()
