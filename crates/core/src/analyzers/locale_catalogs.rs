@@ -2,7 +2,7 @@ mod cursor;
 mod icu;
 mod json;
 
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use autoreview_schema::{AgentFinding, LocaleCatalogConfig, Location, Side};
 
@@ -34,15 +34,23 @@ pub(super) const MISSING_OTHER: Rule = Rule {
 };
 
 pub fn run_locale_catalog_policy(root: &Path, changed: &[String], catalogs: &[LocaleCatalogConfig]) -> Vec<AgentFinding> {
+    if catalogs.is_empty() {
+        return Vec::new();
+    }
     let Ok(root) = root.canonicalize() else { return Vec::new() };
+    let changed: HashSet<&str> = changed.iter().map(String::as_str).collect();
     let mut findings = Vec::new();
     for config in catalogs {
+        let reference_changed = changed.contains(config.reference.as_str());
+        let mut targets = config.translations.iter().filter(|target| {
+            *target != &config.reference && (reference_changed || changed.contains(target.as_str()))
+        }).peekable();
+        if targets.peek().is_none() {
+            continue;
+        }
         let Some(source) = read_snapshot_file(&root, Path::new(&config.reference)) else { continue };
         let Some(reference) = json::catalog(&source) else { continue };
-        for target in &config.translations {
-            if target == &config.reference || !(changed.contains(target) || changed.contains(&config.reference)) {
-                continue;
-            }
+        for target in targets {
             let Some(translation) = read_snapshot_file(&root, Path::new(target)) else { continue };
             findings.extend(compare(target, &translation, &config.reference, &source, &reference));
         }

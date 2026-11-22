@@ -726,6 +726,15 @@ fn icu_catalog_policy_reports_missing_arguments_and_nested_select_other() {
             other => panic!("unexpected rule {other:?}"),
         }
     }
+    let updated_reference = source.replace("{user} sent #", "{user} sent # to {team}");
+    repo.commit(&[(base, &updated_reference)], "add a reference placeholder");
+    let report = scoped_static_diff(repo.path(), "internationalization");
+    assert_eq!(report.findings.len(), 1);
+    let finding = &report.findings[0];
+    assert_eq!(finding.source.rule_id.as_deref(), Some("icu-translation-drops-placeholder"));
+    assert!(finding.message.contains("team"));
+    assert_eq!(finding.location.path, translation);
+    assert_eq!(finding.related_locations.as_ref().unwrap()[0].path, base);
 }
 
 #[test]
