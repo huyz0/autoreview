@@ -1,0 +1,12 @@
+template: |
+  class Sample {
+      int totalLength(String[] items) {
+          int total = 0;
+          for (int i = 0; @CASE@; i++) {
+              total += items[i].length();
+          }
+          return total;
+      }
+  }
+positive: "i <= items.length"
+negative: "i < items.length"

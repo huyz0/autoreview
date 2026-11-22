@@ -1,8 +1,0 @@
-package flow
-
-func estimate(n int) int {
-	if n <= 1 {
-		return n
-	}
-	return estimate(n-1) + estimate(0)
-}

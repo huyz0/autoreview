@@ -2,13 +2,8 @@ package flow
 
 import "slices"
 
-func f(items, allowed []string) {
-	for _, item := range items {
-		println(item)
-	}
-	if slices.Contains(allowed, "one") {
-		println("yes")
-	}
+func containsOne(allowed []string) bool {
+	return slices.Contains(allowed, "one")
 }
 
 func deferred(items, allowed []string) []func() bool {

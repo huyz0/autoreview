@@ -21,6 +21,13 @@ bodies and a two-branch recurrence with a Fibonacci-shaped base case and
 return expression. The direct rules match selected zero-argument and
 single-argument declarations. The recurrence rules are performance hints.
 
+The [loop rule families](../crates/core/rule-families/loops.yml) store shared
+metadata and matchers once. Each language variant can override a field.
+Cargo expands the families into the built-in catalog and retains each
+language's rule ID. A fixture's `cases.yml` can reuse JavaScript sources
+for TypeScript or supply one source template with positive and negative
+replacements.
+
 ## Control flow and termination
 
 - In a counter loop, compare the same variable that advances. An increment
