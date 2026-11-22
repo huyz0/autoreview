@@ -246,31 +246,27 @@ mod tests {
         repo
     }
 
-    #[test]
-    fn rollback_demotes_a_promoted_rule_back_to_shadow() {
-        let repo = tracked_rule_fixture("promoted");
-        let history_dir = history_dir_for(repo.path());
+    fn assert_rollback(from: &str, to: &str) {
+        let repo = tracked_rule_fixture(from);
         run_rules_rollback(repo.path(), "go-example").unwrap();
 
-        let store = HistoryStore::open(&history_dir).unwrap();
+        let store = HistoryStore::open(&history_dir_for(repo.path())).unwrap();
         let state = store.rule_state("go-example").unwrap().unwrap();
-        assert_eq!(state.status, "shadow");
-        assert!(repo.path().join(".autoreview/rules/shadow/go-example.yaml").exists());
-        assert!(!repo.path().join(".autoreview/rules/promoted/go-example.yaml").exists());
+        assert_eq!(state.status, to);
+        assert_eq!(state.invalid_at.is_some(), to == "rejected");
+        let rules = repo.path().join(".autoreview/rules");
+        assert!(rules.join(to).join("go-example.yaml").exists());
+        assert!(!rules.join(from).join("go-example.yaml").exists());
+    }
+
+    #[test]
+    fn rollback_demotes_a_promoted_rule_back_to_shadow() {
+        assert_rollback("promoted", "shadow");
     }
 
     #[test]
     fn rollback_rejects_a_shadow_rule_and_moves_its_file_without_deleting_it() {
-        let repo = tracked_rule_fixture("shadow");
-        let history_dir = history_dir_for(repo.path());
-        run_rules_rollback(repo.path(), "go-example").unwrap();
-
-        let store = HistoryStore::open(&history_dir).unwrap();
-        let state = store.rule_state("go-example").unwrap().unwrap();
-        assert_eq!(state.status, "rejected");
-        assert!(state.invalid_at.is_some());
-        assert!(repo.path().join(".autoreview/rules/rejected/go-example.yaml").exists());
-        assert!(!repo.path().join(".autoreview/rules/shadow/go-example.yaml").exists());
+        assert_rollback("shadow", "rejected");
     }
 
     #[test]

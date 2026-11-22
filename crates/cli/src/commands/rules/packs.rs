@@ -291,6 +291,12 @@ mod tests {
         dir
     }
 
+    fn invalid_rule(contents: &str) -> anyhow::Error {
+        let dir = pack_fixture();
+        std::fs::write(dir.path().join("broken.yml"), contents).unwrap();
+        run_rules_packs_validate(dir.path()).unwrap_err()
+    }
+
     #[test]
     fn validate_succeeds_for_a_well_formed_pack() {
         let dir = pack_fixture();
@@ -314,19 +320,13 @@ mod tests {
 
     #[test]
     fn validate_reports_a_pattern_rule_missing_its_rule_block() {
-        let dir = pack_fixture();
-        std::fs::write(dir.path().join("broken.yml"), "id: acme-broken\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\n").unwrap();
-
-        let err = run_rules_packs_validate(dir.path()).unwrap_err();
+        let err = invalid_rule("id: acme-broken\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\n");
         assert!(err.to_string().contains("1 validation problem"), "got: {err}");
     }
 
     #[test]
     fn validate_reports_a_taint_rule_missing_sinks() {
-        let dir = pack_fixture();
-        std::fs::write(dir.path().join("broken.yml"), "id: acme-broken\nkind: taint\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\nsources:\n  - call: FormValue\n").unwrap();
-
-        let err = run_rules_packs_validate(dir.path()).unwrap_err();
+        let err = invalid_rule("id: acme-broken\nkind: taint\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\nsources:\n  - call: FormValue\n");
         assert!(err.to_string().contains("1 validation problem"), "got: {err}");
     }
 
@@ -342,13 +342,7 @@ mod tests {
         run_rules_packs_validate(dir.path()).unwrap();
     }
 
-    /// A `kind: call-sequence` rule
-    /// used to fall through their `_ => counts.pattern += 1` wildcard arm
-    /// and get silently counted as a pattern rule in `rules packs`/
-    /// `rules packs validate`'s printed breakdown. `validate_rule_file`'s
-    /// own returned `kind` is the single source of truth for that
-    /// counting, so pinning it here catches a regression at either call
-    /// site without needing to capture stdout.
+    /// Preserve the declared kind so both pack commands count it correctly.
     #[test]
     fn validate_rule_file_returns_call_sequence_as_its_own_kind_not_pattern() {
         let contents = "id: acme-unreleased-lock\nkind: call-sequence\nlanguage: Java\ncategory: correctness\nseverity: error\nmessage: m\nafter:\n  - call: lock\nunless:\n  - call: unlock\n";
@@ -359,20 +353,14 @@ mod tests {
 
     #[test]
     fn validate_reports_a_call_sequence_rule_missing_unless() {
-        let dir = pack_fixture();
-        std::fs::write(dir.path().join("broken.yml"), "id: acme-broken\nkind: call-sequence\nlanguage: Java\ncategory: correctness\nseverity: error\nmessage: m\nafter:\n  - call: lock\nunless: []\ncheckBeforeReturn: true\n").unwrap();
-
-        let err = run_rules_packs_validate(dir.path()).unwrap_err();
+        let err = invalid_rule("id: acme-broken\nkind: call-sequence\nlanguage: Java\ncategory: correctness\nseverity: error\nmessage: m\nafter:\n  - call: lock\nunless: []\ncheckBeforeReturn: true\n");
         assert!(err.to_string().contains("1 validation problem"), "got: {err}");
         assert!(err.to_string().contains("unless"), "got: {err}");
     }
 
     #[test]
     fn validate_reports_an_unknown_kind_clearly() {
-        let dir = pack_fixture();
-        std::fs::write(dir.path().join("broken.yml"), "id: acme-broken\nkind: made-up-kind\nlanguage: Java\ncategory: correctness\nseverity: error\nmessage: m\n").unwrap();
-
-        let err = run_rules_packs_validate(dir.path()).unwrap_err();
+        let err = invalid_rule("id: acme-broken\nkind: made-up-kind\nlanguage: Java\ncategory: correctness\nseverity: error\nmessage: m\n");
         assert!(err.to_string().contains("unknown `kind: made-up-kind`"), "got: {err}");
     }
 
