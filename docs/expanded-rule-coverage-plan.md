@@ -136,8 +136,16 @@ single-line `uses` value. Local actions and full commit SHAs pass.
 Additional local checks report an ignored Node writable-stream
 backpressure signal in a recognized producer loop, use of a fresh
 context when a Go tracer has a parent parameter, and a Rust vector
-length increase when a fresh capacity allocation has no preceding
-references that could initialize it.
+length increase beyond the initialized prefix of a fresh allocation.
+The vector check counts straight-line pushes, literal resizes, and
+writes to literal spare-capacity indices. It reports gaps in the prefix
+and leaves opaque mutations, pointer escapes, and conditional writes
+unclassified.
+
+Existing high-cardinality metrics rules use
+`observability.metric-cardinality`. Spring, SQLx, Go and Prisma
+transaction checks appear under both `persistence.transaction-boundaries`
+and `persistence.data-integrity`.
 
 Go transaction checks follow typed database parameters, aliases, begin
 errors, and commit or rollback through supported branches. The Tokio

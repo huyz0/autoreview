@@ -6,12 +6,12 @@ import (
 	"time"
 )
 
-func bounded(url string) (*http.Response, error) {
+func Bounded(url string) (*http.Response, error) {
 	client := &http.Client{Timeout: time.Second}
 	return client.Get(url)
 }
 
-func request(ctx context.Context, url string) (*http.Response, error) {
+func Request(ctx context.Context, url string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err

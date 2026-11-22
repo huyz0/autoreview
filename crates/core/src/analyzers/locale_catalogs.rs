@@ -1,3 +1,4 @@
+mod cursor;
 mod icu;
 mod json;
 

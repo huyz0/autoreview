@@ -532,19 +532,24 @@ fn rules_list_filters_builtin_rule_kinds_by_subcategory() {
     let repo = init_repo(&[("README.md", "rules\n")]);
     let output = Command::cargo_bin("autoreview").unwrap()
         .current_dir(repo.path())
-        .args(["rules", "list", "--subcategories", "reliability,build", "--json"])
+        .args(["rules", "list", "--subcategories", "reliability,build,persistence.data-integrity,observability.metric-cardinality", "--json"])
         .assert().success().get_output().stdout.clone();
     let rules: Vec<serde_json::Value> = serde_json::from_slice(&output).unwrap();
     for (id, kind) in [
         ("go-discarded-context-cancel", "pattern"),
         ("go-context-cancel-on-all-paths", "framework"),
         ("github-actions-mutable-reference", "artifact"),
+        ("java-spring-transaction-self-invocation", "framework"),
+        ("rust-sqlx-pool-write-during-transaction", "rust"),
+        ("ts-prom-client-high-cardinality-label", "pattern"),
     ] {
         assert!(rules.iter().any(|rule| rule["id"] == id && rule["kind"] == kind), "{id}");
     }
     assert!(rules.iter().all(|rule| rule["subcategory"].is_null()
         && rule["subcategories"].as_array().unwrap().iter().any(|label| {
-            label.as_str().is_some_and(|label| label.starts_with("reliability.") || label.starts_with("build."))
+            label.as_str().is_some_and(|label| label.starts_with("reliability.")
+                || label.starts_with("build.")
+                || matches!(label, "persistence.data-integrity" | "observability.metric-cardinality"))
         })));
 }
 
@@ -617,8 +622,7 @@ export async function shadowed(publish: Sender, values: Order) {
     repo.commit(&[(source_path, source), ("examples/orders.tsx", source)], "add order operations");
     assert!(scoped_static_diff(repo.path(), "messaging.atomic-publication").findings.is_empty());
 
-    std::fs::create_dir_all(repo.path().join(".autoreview")).unwrap();
-    std::fs::write(repo.path().join(".autoreview/config.yaml"), r#"
+    write_artifact_config(repo.path(), r#"
 artifactChecks:
   outboxOperations:
     - paths: ['src/*.tsx']
@@ -630,7 +634,7 @@ artifactChecks:
         module: ./broker
         export: send
         firstArgument: orders.updated
-"#).unwrap();
+"#);
     let report = scoped_static_diff(repo.path(), "messaging.atomic-publication");
     let expected = [(8, 7), (12, 14)];
     assert_eq!(report.findings.len(), expected.len(), "{:#?}", report.findings);
@@ -653,6 +657,12 @@ fn scoped_static_diff(repo: &std::path::Path, subcategory: &str) -> autoreview_s
     serde_json::from_slice(&std::fs::read(report_path).unwrap()).unwrap()
 }
 
+fn write_artifact_config(root: &std::path::Path, yaml: &str) {
+    let directory = root.join(".autoreview");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("config.yaml"), yaml).unwrap();
+}
+
 #[test]
 fn icu_catalog_policy_reports_missing_arguments_and_nested_select_other() {
     let base = "locales/en.json";
@@ -671,9 +681,8 @@ fn icu_catalog_policy_reports_missing_arguments_and_nested_select_other() {
 }"#;
     let repo = init_repo(&[(base, source), (translation, good_translation)]);
     repo.commit(&[(translation, lost)], "drop placeholders from translation");
-    let dir = repo.path().join(".autoreview");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("config.yaml"), "artifactChecks:\n  localeCatalogs:\n    - reference: locales/en.json\n      translations: [locales/fr.json]\n").unwrap();
+    write_artifact_config(repo.path(),
+        "artifactChecks:\n  localeCatalogs:\n    - reference: locales/en.json\n      translations: [locales/fr.json]\n");
     let report = scoped_static_diff(repo.path(), "internationalization");
     assert_eq!(report.findings.len(), 2);
     for finding in report.findings {
@@ -708,10 +717,8 @@ fn postgres_policy_tracks_changed_sql_and_transaction_sidecars() {
     ], "change the migration wrapping policy");
     for enabled in [false, true] {
         if enabled {
-            let dir = repo.path().join(".autoreview");
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("config.yaml"),
-                "artifactChecks:\n  transactionalPostgresMigrations: ['migration/*.sql']\n").unwrap();
+            write_artifact_config(repo.path(),
+                "artifactChecks:\n  transactionalPostgresMigrations: ['migration/*.sql']\n");
         }
         let report = scoped_static_diff(repo.path(), "deployment.migrations");
         let findings: Vec<_> = report.findings.iter()
@@ -762,11 +769,10 @@ message Envelope {
     let repo = init_repo(&[(path, previous), ("unconfigured.proto", previous)]);
     repo.commit(&[(path, current), ("unconfigured.proto", current)], "change message fields");
 
-    let config = ".autoreview/config.yaml";
     for enabled in [false, true] {
         if enabled {
-            std::fs::create_dir_all(repo.path().join(".autoreview")).unwrap();
-            std::fs::write(repo.path().join(config), "artifactChecks:\n  protobufCompatibility: ['schemas/*.proto']\n").unwrap();
+            write_artifact_config(repo.path(),
+                "artifactChecks:\n  protobufCompatibility: ['schemas/*.proto']\n");
         }
         let report = scoped_static_diff(repo.path(), "compatibility");
         let expected = [
@@ -797,10 +803,8 @@ fn workflow_pinning_policy_is_opt_in_and_points_to_the_changed_steps() {
     repo.commit(&[(workflow, changed)], "add external actions");
     for enabled in [false, true] {
         if enabled {
-            let dir = repo.path().join(".autoreview");
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("config.yaml"),
-                "artifactChecks:\n  immutableGithubActionRefs: true\n").unwrap();
+            write_artifact_config(repo.path(),
+                "artifactChecks:\n  immutableGithubActionRefs: true\n");
         }
         let report = scoped_static_diff(repo.path(), "build.dependency-integrity");
         let lines: Vec<_> = report.findings.iter()

@@ -11,7 +11,7 @@ use super::two_result_call;
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     id: "go-otel-span-not-ended",
     category: "correctness",
-    subcategory: "observability.span-lifecycle",
+    subcategories: &["observability.span-lifecycle"],
     title: "OpenTelemetry span can leave the function without ending",
     message: "At least one path leaves this span open. Defer span.End after starting the span, or explicitly transfer the span to the caller.",
     reference: "https://opentelemetry.io/docs/languages/go/instrumentation/#creating-spans",
@@ -20,7 +20,7 @@ pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
 pub(in crate::analyzers::framework_checks) const TRACE_PARENT_RULE: Rule = Rule {
     id: "go-otel-span-discards-parent-context",
     category: "correctness",
-    subcategory: "observability.trace-propagation",
+    subcategories: &["observability.trace-propagation"],
     title: "OpenTelemetry span starts from a fresh context",
     message: "This span starts from a fresh context even though the function has a context parameter. Use the existing or derived context when this span belongs to the same trace.",
     reference: "https://opentelemetry.io/docs/languages/go/instrumentation/#creating-spans",

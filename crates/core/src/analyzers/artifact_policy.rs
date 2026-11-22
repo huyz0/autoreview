@@ -36,7 +36,7 @@ impl Rule {
     }
 
     fn metadata(&self) -> std::collections::HashMap<String, serde_json::Value> {
-        rule_metadata(self.reference, self.subcategory)
+        rule_metadata(self.reference, &[self.subcategory])
     }
 
     pub fn finding(&self, path: &str, range: LocationRange, snippet: &str, message: String) -> AgentFinding {
@@ -53,10 +53,10 @@ impl Rule {
     }
 }
 
-pub(super) fn rule_metadata(reference: &str, subcategory: &str) -> std::collections::HashMap<String, serde_json::Value> {
+pub(super) fn rule_metadata(reference: &str, subcategories: &[&str]) -> std::collections::HashMap<String, serde_json::Value> {
     std::collections::HashMap::from([
         ("references".into(), serde_json::json!([reference])),
-        ("subcategory".into(), serde_json::json!([subcategory])),
+        ("subcategory".into(), serde_json::json!(subcategories)),
     ])
 }
 

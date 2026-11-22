@@ -31,7 +31,7 @@ pub(super) const RULES: &[Rule] = &[
     Rule {
         id: "typescript-json-cast-without-validation",
         category: "correctness",
-        subcategory: "validation.runtime-boundaries",
+        subcategories: &["validation.runtime-boundaries"],
         title: "Fetch JSON payload asserted as a domain type",
         message: "This assertion gives the decoded Fetch payload a domain type without validating its runtime shape.",
         reference: "https://www.typescriptlang.org/docs/handbook/2/everyday-types.html#type-assertions",
@@ -40,7 +40,7 @@ pub(super) const RULES: &[Rule] = &[
 const RULES_BODY: Rule = Rule {
     id: "",
     category: "correctness",
-    subcategory: "protocol.response-lifecycle",
+    subcategories: &["protocol.response-lifecycle"],
     title: "Fetch response body consumed twice",
     message: "Both reads can consume the same Fetch response. Reuse the decoded value or clone the response before either read.",
     reference: "https://fetch.spec.whatwg.org/#body-unusable",
@@ -48,7 +48,7 @@ const RULES_BODY: Rule = Rule {
 const RULES_STATUS: Rule = Rule {
     id: "",
     category: "correctness",
-    subcategory: "protocol.status-handling",
+    subcategories: &["protocol.status-handling"],
     title: "Fetch JSON returned without checking the response status",
     message: "This path returns decoded JSON without handling the response status. Fetch also resolves for HTTP error responses.",
     reference: "https://fetch.spec.whatwg.org/#dom-response-ok",

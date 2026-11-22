@@ -2,7 +2,7 @@ package example
 
 import "net/http"
 
-func bounded(url string) (*http.Response, error) {
+func Bounded(url string) (*http.Response, error) {
 	var last error
 	for i := 0; i < 3; i++ {
 		response, err := http.Get(url)

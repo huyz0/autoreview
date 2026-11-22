@@ -6,7 +6,7 @@ use super::{children, descendants, location, text, AgentFinding, Node, Rule};
 pub(super) const RULE: Rule = Rule {
     id: "rabbitmq-ack-in-finally",
     category: "correctness",
-    subcategory: "messaging.acknowledgements",
+    subcategories: &["messaging.acknowledgements"],
     title: "RabbitMQ acknowledgement runs even if processing fails",
     message: "This finally block acknowledges the delivery after either successful or failed processing. Acknowledge success explicitly and choose reject or requeue behavior for failures.",
     reference: "https://www.rabbitmq.com/docs/confirms#consumer-acks",

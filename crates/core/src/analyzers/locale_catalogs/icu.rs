@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use super::cursor::Cursor;
+
 #[derive(Default)]
 pub(super) struct Signature {
     pub placeholders: BTreeSet<String>,
@@ -7,14 +9,16 @@ pub(super) struct Signature {
 }
 
 pub(super) fn signature(source: &str) -> Option<Signature> {
-    let mut parser = Parser { source, at: 0, signature: Signature::default() };
+    let mut parser = Parser {
+        cursor: Cursor::new(source),
+        signature: Signature::default(),
+    };
     parser.message(false, false, 0)?;
     Some(parser.signature)
 }
 
 struct Parser<'s> {
-    source: &'s str,
-    at: usize,
+    cursor: Cursor<'s>,
     signature: Signature,
 }
 
@@ -23,8 +27,8 @@ impl Parser<'_> {
         if depth >= 64 {
             return None;
         }
-        while let Some(byte) = self.peek() {
-            self.at += 1;
+        while let Some(byte) = self.cursor.peek() {
+            self.cursor.at += 1;
             match byte {
                 b'{' => self.argument(depth)?,
                 b'}' if nested => return Some(()),
@@ -43,13 +47,13 @@ impl Parser<'_> {
         }
         let name = name.to_owned();
         self.signature.placeholders.insert(name.clone());
-        if self.take()? == b'}' {
+        if self.cursor.take()? == b'}' {
             return Some(());
         }
         let category = self.take_until_arg_delimiter()?.trim().to_owned();
         let plural = matches!(category.as_str(), "plural" | "selectordinal");
         let selector = plural || category == "select";
-        if self.take()? == b'}' {
+        if self.cursor.take()? == b'}' {
             return (!selector).then_some(());
         }
         if selector {
@@ -60,33 +64,40 @@ impl Parser<'_> {
     }
 
     fn choices(&mut self, name: &str, plural: bool, depth: usize) -> Option<()> {
-        self.whitespace();
-        if plural && self.source.get(self.at..)?.starts_with("offset:") {
-            self.at += "offset:".len();
-            self.whitespace();
-            let offset = self.at;
-            self.take_while(|byte| byte.is_ascii_digit());
-            if self.at == offset {
+        self.cursor.whitespace();
+        if plural
+            && self
+                .cursor
+                .source
+                .get(self.cursor.at..)?
+                .starts_with("offset:")
+        {
+            self.cursor.at += "offset:".len();
+            self.cursor.whitespace();
+            let offset = self.cursor.at;
+            self.cursor.take_while(|byte| byte.is_ascii_digit());
+            if self.cursor.at == offset {
                 return None;
             }
         }
         let mut other = false;
         let mut choices = 0;
         loop {
-            self.whitespace();
-            if self.peek()? == b'}' {
-                self.at += 1;
+            self.cursor.whitespace();
+            if self.cursor.peek()? == b'}' {
+                self.cursor.at += 1;
                 break;
             }
-            let start = self.at;
-            self.take_while(|byte| !byte.is_ascii_whitespace() && !matches!(byte, b'{' | b'}'));
-            let selector = self.source.get(start..self.at)?;
+            let start = self.cursor.at;
+            self.cursor
+                .take_while(|byte| !byte.is_ascii_whitespace() && !matches!(byte, b'{' | b'}'));
+            let selector = self.cursor.source.get(start..self.cursor.at)?;
             if selector.is_empty() {
                 return None;
             }
             other |= selector == "other";
-            self.whitespace();
-            if self.take()? != b'{' {
+            self.cursor.whitespace();
+            if self.cursor.take()? != b'{' {
                 return None;
             }
             self.message(true, plural, depth + 1)?;
@@ -99,7 +110,7 @@ impl Parser<'_> {
     }
 
     fn style(&mut self) -> Option<()> {
-        while let Some(byte) = self.take() {
+        while let Some(byte) = self.cursor.take() {
             match byte {
                 b'}' => return Some(()),
                 b'{' => return None,
@@ -111,17 +122,19 @@ impl Parser<'_> {
     }
 
     fn apostrophe(&mut self, plural: bool) {
-        if self.peek() == Some(b'\'') {
-            self.at += 1;
+        if self.cursor.peek() == Some(b'\'') {
+            self.cursor.at += 1;
             return;
         }
-        if !matches!(self.peek(), Some(b'{' | b'}')) && !(plural && self.peek() == Some(b'#')) {
+        if !matches!(self.cursor.peek(), Some(b'{' | b'}'))
+            && !(plural && self.cursor.peek() == Some(b'#'))
+        {
             return;
         }
-        while let Some(byte) = self.take() {
+        while let Some(byte) = self.cursor.take() {
             if byte == b'\'' {
-                if self.peek() == Some(b'\'') {
-                    self.at += 1;
+                if self.cursor.peek() == Some(b'\'') {
+                    self.cursor.at += 1;
                 } else {
                     return;
                 }
@@ -130,28 +143,10 @@ impl Parser<'_> {
     }
 
     fn take_until_arg_delimiter(&mut self) -> Option<&str> {
-        let start = self.at;
-        self.take_while(|byte| !matches!(byte, b',' | b'{' | b'}'));
-        matches!(self.peek(), Some(b',' | b'}')).then(|| &self.source[start..self.at])
-    }
-
-    fn take_while(&mut self, predicate: impl Fn(u8) -> bool) {
-        while self.peek().is_some_and(&predicate) {
-            self.at += 1;
-        }
-    }
-
-    fn whitespace(&mut self) {
-        self.take_while(|byte| byte.is_ascii_whitespace());
-    }
-
-    fn peek(&self) -> Option<u8> {
-        self.source.as_bytes().get(self.at).copied()
-    }
-
-    fn take(&mut self) -> Option<u8> {
-        let byte = self.peek()?;
-        self.at += 1;
-        Some(byte)
+        let start = self.cursor.at;
+        self.cursor
+            .take_while(|byte| !matches!(byte, b',' | b'{' | b'}'));
+        matches!(self.cursor.peek(), Some(b',' | b'}'))
+            .then(|| &self.cursor.source[start..self.cursor.at])
     }
 }

@@ -48,7 +48,7 @@ pub(super) fn catalog_entries() -> impl Iterator<Item = RuleCatalogEntry> {
         id: rule.id.into(),
         kind: "framework".into(),
         category: rule.category.into(),
-        subcategories: vec![rule.subcategory.into()],
+        subcategories: rule.subcategories.iter().map(|label| (*label).into()).collect(),
     })
 }
 
@@ -86,7 +86,7 @@ pub fn run_framework_checks(root: &Path, changed: &[String]) -> Vec<AgentFinding
 struct Rule {
     id: &'static str,
     category: &'static str,
-    subcategory: &'static str,
+    subcategories: &'static [&'static str],
     title: &'static str,
     message: &'static str,
     reference: &'static str,
@@ -94,7 +94,7 @@ struct Rule {
 
 impl Rule {
     fn metadata(&self) -> std::collections::HashMap<String, serde_json::Value> {
-        super::artifact_policy::rule_metadata(self.reference, self.subcategory)
+        super::artifact_policy::rule_metadata(self.reference, self.subcategories)
     }
 
     fn finding(&self, anchor: Location, related: Vec<Location>) -> AgentFinding {

@@ -8,6 +8,7 @@ message: >-
   combination creates a time series. Keep metric labels bounded and put
   per-request identifiers in traces or logs.
 metadata:
+  subcategory: [observability.metric-cardinality]
   references:
     - https://prometheus.io/docs/practices/naming/#labels
 rule:

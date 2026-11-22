@@ -36,7 +36,7 @@ impl RustReviewRule {
         match self.id {
             "rust-vec-set-len-before-initialization" => &["memory.initialization"],
             "rust-timeout-consumes-join-handle" => &["reliability.cancellation", "concurrency.task-lifecycle"],
-            "rust-sqlx-pool-write-during-transaction" => &["persistence.transaction-boundaries"],
+            "rust-sqlx-pool-write-during-transaction" => &["persistence.transaction-boundaries", "persistence.data-integrity"],
             "rust-tokio-select-restarts-read-exact" => &["concurrency.cancellation-safety"],
             _ => &[],
         }

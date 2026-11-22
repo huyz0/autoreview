@@ -6,7 +6,7 @@ use super::web::{binding_nodes, field_text, first_argument, is_function, named_i
 pub(super) const RULE: Rule = Rule {
     id: "prisma-outer-client-write-in-transaction",
     category: "correctness",
-    subcategory: "persistence.transaction-boundaries",
+    subcategories: &["persistence.transaction-boundaries", "persistence.data-integrity"],
     title: "Prisma write uses the outer client inside an interactive transaction",
     message: "This write uses the client that opened the transaction and can run outside its rollback boundary. Use the transaction callback's client for work that must roll back together.",
     reference: "https://docs.prisma.io/docs/orm/v7/prisma-client/queries/transactions#interactive-transactions",

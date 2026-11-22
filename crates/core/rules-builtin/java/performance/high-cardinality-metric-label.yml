@@ -8,6 +8,7 @@ message: >-
   combination can register a new meter. Keep metric tags bounded and put
   per-request identifiers in traces or logs.
 metadata:
+  subcategory: [observability.metric-cardinality]
   references:
     - https://docs.micrometer.io/micrometer/reference/concepts/high-cardinality-tags-detector.html
 rule:

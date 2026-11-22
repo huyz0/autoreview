@@ -5,7 +5,7 @@ import (
 	"net/http"
 )
 
-func stop(signal context.Context, srv *http.Server) error {
+func Stop(signal context.Context, srv *http.Server) error {
 	<-signal.Done()
 	return srv.Shutdown(signal)
 }

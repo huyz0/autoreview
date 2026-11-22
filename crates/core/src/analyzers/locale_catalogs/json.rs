@@ -1,5 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
+
+use super::cursor::Cursor;
 
 pub(super) struct Message {
     pub decoded: String,
@@ -7,72 +9,81 @@ pub(super) struct Message {
 }
 
 pub(super) fn catalog(source: &str) -> Option<BTreeMap<Vec<String>, Message>> {
-    let mut parser = Catalog { source, at: 0, messages: BTreeMap::new() };
+    let mut parser = Catalog {
+        cursor: Cursor::new(source),
+        messages: BTreeMap::new(),
+    };
     parser.object(&mut Vec::new(), 0)?;
-    parser.skip_space();
-    (parser.at == source.len()).then_some(parser.messages)
+    parser.cursor.whitespace();
+    (parser.cursor.at == source.len()).then_some(parser.messages)
 }
 
 struct Catalog<'s> {
-    source: &'s str,
-    at: usize,
+    cursor: Cursor<'s>,
     messages: BTreeMap<Vec<String>, Message>,
 }
 
 impl Catalog<'_> {
     fn object(&mut self, path: &mut Vec<String>, depth: usize) -> Option<()> {
-        if depth >= 64 || self.take()? != b'{' {
-            return None;
+        (depth < 64).then_some(())?;
+        self.cursor.expect(b'{')?;
+        self.cursor.whitespace();
+        if self.cursor.peek() == Some(b'}') {
+            return self.cursor.expect(b'}');
         }
-        self.skip_space();
-        if self.peek() == Some(b'}') {
-            self.at += 1;
-            return Some(());
-        }
+        let mut keys = BTreeSet::new();
         loop {
-            let key = self.string()?;
-            if self.take()? != b':' {
-                return None;
-            }
-            self.skip_space();
-            path.push(key.decoded);
-            match self.peek()? {
-                b'{' => self.object(path, depth + 1)?,
-                b'"' => {
-                    let message = self.string()?;
-                    if self.messages.insert(path.clone(), message).is_some() {
-                        return None;
-                    }
-                }
-                _ => {
-                    let mut stream = serde_json::Deserializer::from_str(self.source.get(self.at..)?)
-                        .into_iter::<serde::de::IgnoredAny>();
-                    stream.next()?.ok()?;
-                    self.at += stream.byte_offset();
-                }
-            }
+            let key = self.string()?.decoded;
+            keys.insert(key.clone()).then_some(())?;
+            self.cursor.whitespace();
+            self.cursor.expect(b':')?;
+            self.cursor.whitespace();
+            path.push(key);
+            self.entry(path, depth)?;
             path.pop();
-            match self.take()? {
-                b',' => {}
-                b'}' => return Some(()),
-                _ => return None,
+            self.cursor.whitespace();
+            if self.cursor.peek() != Some(b',') {
+                break;
             }
+            self.cursor.take()?;
+            self.cursor.whitespace();
+        }
+        self.cursor.expect(b'}')
+    }
+
+    fn entry(&mut self, path: &mut Vec<String>, depth: usize) -> Option<()> {
+        match self.cursor.peek()? {
+            b'{' => self.object(path, depth + 1),
+            b'"' => {
+                let message = self.string()?;
+                self.messages.insert(path.clone(), message);
+                Some(())
+            }
+            _ => self.ignore_value(),
         }
     }
 
+    fn ignore_value(&mut self) -> Option<()> {
+        let rest = self.cursor.source.get(self.cursor.at..)?;
+        let mut stream =
+            serde_json::Deserializer::from_str(rest).into_iter::<serde::de::IgnoredAny>();
+        stream.next()?.ok()?;
+        self.cursor.at += stream.byte_offset();
+        Some(())
+    }
+
     fn string(&mut self) -> Option<Message> {
-        self.skip_space();
-        let start = self.at;
-        if self.take()? != b'"' {
-            return None;
-        }
-        while let Some(byte) = self.peek() {
-            self.at += 1;
+        let start = self.cursor.at;
+        self.cursor.expect(b'"')?;
+        while let Some(byte) = self.cursor.take() {
             match byte {
-                b'\\' => { self.at += 1; }
+                b'\\' => {
+                    self.cursor.take()?;
+                }
                 b'"' => {
-                    let range = start..self.at;
-                    let decoded = serde_json::from_str(self.source.get(range.clone())?).ok()?;
+                    let range = start..self.cursor.at;
+                    let decoded =
+                        serde_json::from_str(self.cursor.source.get(range.clone())?).ok()?;
                     return Some(Message { decoded, range });
                 }
                 _ => {}
@@ -80,21 +91,15 @@ impl Catalog<'_> {
         }
         None
     }
+}
 
-    fn skip_space(&mut self) {
-        while self.peek().is_some_and(|byte| byte.is_ascii_whitespace()) {
-            self.at += 1;
-        }
-    }
+#[cfg(test)]
+mod tests {
+    use super::catalog;
 
-    fn peek(&self) -> Option<u8> {
-        self.source.as_bytes().get(self.at).copied()
-    }
-
-    fn take(&mut self) -> Option<u8> {
-        self.skip_space();
-        let byte = self.peek()?;
-        self.at += 1;
-        Some(byte)
+    #[test]
+    fn repeated_object_keys_do_not_combine_distinct_messages() {
+        let source = r#"{"dialog":{"open":"Open"},"dialog":{"close":"Close"}}"#;
+        assert!(catalog(source).is_none());
     }
 }

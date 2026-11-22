@@ -7,7 +7,7 @@ use super::span::aliases;
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     id: "go-sql-db-write-during-transaction",
     category: "correctness",
-    subcategory: "persistence.transaction-boundaries",
+    subcategories: &["persistence.transaction-boundaries", "persistence.data-integrity"],
     title: "SQL write uses the parent database during a transaction",
     message: "This Exec call runs through the database that opened the active transaction. Use the transaction handle for writes that must commit or roll back with it.",
     reference: "https://go.dev/doc/database/execute-transactions",

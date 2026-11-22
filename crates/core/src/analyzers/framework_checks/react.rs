@@ -8,7 +8,7 @@ use super::web::{binding_nodes, first_argument, named_imports};
 pub(super) const INTERVAL_RULE: Rule = Rule {
     id: "react-use-effect-interval-not-cleared",
     category: "correctness",
-    subcategory: "frontend.effect-cleanup",
+    subcategories: &["frontend.effect-cleanup"],
     title: "React effect leaves an interval running",
     message: "This effect starts an interval that remains active on a cleanup path. Clear the same interval in the returned cleanup function.",
     reference: "https://react.dev/reference/react/useEffect",

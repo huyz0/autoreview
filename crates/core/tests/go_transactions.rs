@@ -62,4 +62,8 @@ func switched(db, other *sq.DB, yes bool) {
     assert_eq!(findings[0].source.rule_id.as_deref(), Some("go-sql-db-write-during-transaction"));
     assert_eq!(findings[0].location.snippet, "primary.Exec(\"outside\")");
     assert_eq!(findings[0].related_locations.as_ref().unwrap()[0].snippet, "primary.Begin()");
+    assert_eq!(
+        findings[0].meta.as_ref().unwrap()["subcategory"],
+        serde_json::json!(["persistence.transaction-boundaries", "persistence.data-integrity"])
+    );
 }

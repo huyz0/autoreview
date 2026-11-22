@@ -10,7 +10,7 @@ use super::{children, descendants, location, text, AgentFinding, Node, Rule};
 pub(super) const RULE: Rule = Rule {
     id: "jest-spy-not-restored",
     category: "correctness",
-    subcategory: "testing.mock-lifecycle",
+    subcategories: &["testing.mock-lifecycle"],
     title: "Jest spy can outlive its test",
     message: "This spy replaces a shared method and can remain installed after the test exits. Restore it in cleanup, use scoped disposal, or configure Jest to restore mocks.",
     reference: "https://jestjs.io/docs/jest-object#jestspyonobject-methodname",

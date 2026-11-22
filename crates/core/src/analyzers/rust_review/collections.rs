@@ -1,7 +1,9 @@
+mod initialization;
+
 use autoreview_schema::Severity;
 use tree_sitter::Node;
 
-use super::syntax::{arguments, children, descendants, method_call, Source};
+use super::syntax::{arguments, children, method_call, Source};
 use super::{Review, RustReviewRule};
 
 const STRONG_CYCLE: RustReviewRule = RustReviewRule {
@@ -49,42 +51,9 @@ pub(super) fn check<'tree>(review: &mut Review<'tree, '_>, node: Node<'tree>) {
     if let Some(binding) = forgotten_drain(&review.source, node) {
         review.report_related(&FORGOTTEN_DRAIN, node, &[binding]);
     }
-    if let Some(binding) = uninitialized_length(&review.source, node) {
+    if let Some(binding) = initialization::uninitialized_length(&review.source, node) {
         review.report_related(&UNINITIALIZED_LEN, node, &[binding]);
     }
-}
-
-fn uninitialized_length<'t>(source: &Source<'t, '_>, call: Node<'t>) -> Option<Node<'t>> {
-    let receiver = method_receiver(source, call, "set_len")?;
-    let length = arguments(call).next().filter(|arg| arg.kind() == "integer_literal")?;
-    let length = source.text(length).strip_suffix("usize").unwrap_or(source.text(length));
-    if length.replace('_', "").parse::<usize>().ok()? == 0 {
-        return None;
-    }
-    let binding = source.local_binding(receiver)?;
-    let initializer = binding.child_by_field_name("value").filter(|value| value.kind() == "call_expression")?;
-    let constructor = initializer.child_by_field_name("function")?;
-    let owner = constructor.child_by_field_name("path")?;
-    let owner = if owner.kind() == "generic_type" { owner.child_by_field_name("type")? } else { owner };
-    if source.text(constructor.child_by_field_name("name")?) != "with_capacity"
-        || !standard_vec(source, owner)
-    {
-        return None;
-    }
-    let scope = binding.parent().filter(|parent| parent.kind() == "block")?;
-    if std::iter::successors(call.parent(), |node| node.parent())
-        .take_while(|node| *node != scope)
-        .any(|node| matches!(node.kind(), "closure_expression" | "async_block" | "loop_expression" | "while_expression" | "for_expression"))
-    {
-        return None;
-    }
-    let intervening_reference = descendants(scope).any(|node| {
-        node.start_byte() >= binding.end_byte()
-            && node.end_byte() <= receiver.start_byte()
-            && node.kind() == "identifier"
-            && source.text(node) == source.text(receiver)
-    });
-    (!intervening_reference).then_some(binding)
 }
 
 fn strong_cycle<'tree>(source: &Source<'tree, '_>, call: Node<'tree>) -> Option<Node<'tree>> {
@@ -227,6 +196,41 @@ fn empty() {
         assert_eq!(findings[0].source.rule_id.as_deref(), Some(super::UNINITIALIZED_LEN.id));
         assert_eq!(findings[0].meta.as_ref().unwrap()["subcategory"][0], "memory.initialization");
         assert!(findings[0].related_locations.as_ref().unwrap()[0].snippet.contains("with_capacity"));
+    }
+
+    #[test]
+    fn vec_set_len_requires_a_contiguous_initialized_prefix() {
+        let source = r#"
+fn partially_initialized() {
+    let mut values = Vec::with_capacity(4);
+    values.push(1);
+    values.spare_capacity_mut()[0].write(2);
+    let _len = values.len();
+    unsafe { values.set_len(3); }
+}
+fn initialized_with_gap() {
+    let mut values = Vec::with_capacity(4);
+    values.resize(1, 0);
+    values.spare_capacity_mut()[1].write(1);
+    unsafe { values.set_len(3); }
+}
+fn initialized_contiguously() {
+    let mut values = Vec::with_capacity(4);
+    values.push(1);
+    values.spare_capacity_mut()[1].write(3);
+    values.spare_capacity_mut()[0].write(2);
+    unsafe { values.set_len(3); }
+}
+fn captured() {
+    let mut values = Vec::with_capacity(4);
+    let mut fill = || { values.push(1); };
+    fill();
+    unsafe { values.set_len(1); }
+}
+"#;
+        let findings = analyze_file("prefix.rs", source);
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+        assert_eq!(findings.iter().map(|finding| finding.location.range.start_line).collect::<Vec<_>>(), [7, 13]);
     }
 
     #[test]

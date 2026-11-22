@@ -19,7 +19,7 @@ pub(super) use transactions::RULE as TRANSACTION_RULE;
 pub(super) const RULE: Rule = Rule {
     id: "go-context-cancel-on-all-paths",
     category: "correctness",
-    subcategory: "reliability.cancellation",
+    subcategories: &["reliability.cancellation"],
     title: "Context cancellation is missing on a return path",
     message: "At least one path returns without calling, deferring, or returning the cancellation function. Arrange cleanup after the context is created, or return the cancel function to transfer ownership.",
     reference: "https://go.dev/doc/database/cancel-operations",

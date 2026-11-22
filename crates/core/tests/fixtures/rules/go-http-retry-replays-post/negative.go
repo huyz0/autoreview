@@ -1,10 +1,7 @@
 package example
 
-import (
-	"net/http"
-	"strings"
-)
+import "net/http"
 
-func once(url string) (*http.Response, error) {
-	return http.Post(url, "text/plain", strings.NewReader("payload"))
+func PostOnce(url string) (*http.Response, error) {
+	return http.Post(url, "text/plain", nil)
 }

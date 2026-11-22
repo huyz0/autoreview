@@ -9,7 +9,7 @@ use super::{children, class_members, containing, descendants, Java};
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     id: "java-executor-shutdown-hook-without-await",
     category: "correctness",
-    subcategory: "reliability.shutdown",
+    subcategories: &["reliability.shutdown"],
     title: "JVM shutdown hook can exit before executor tasks complete",
     message: "ExecutorService.shutdown starts an orderly shutdown but returns immediately. Wait for termination in this hook or close the executor on supported JDKs.",
     reference: "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ExecutorService.html#shutdown()",
