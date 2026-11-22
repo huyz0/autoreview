@@ -96,3 +96,16 @@ subcategory selection, and absence of duplicate diagnostics. Review the
 full change with Autoreview and distinguish deliberately failing fixtures
 from findings in implementation code. Keep the delivery goal active until
 every row is implemented and its acceptance cases are verified.
+
+## First implementation
+
+The catalog now has ten new rule families. The first protocol checks
+cover adjacent Fetch statements and direct promise callbacks. The
+Node write check starts with equal string-literal paths, and the OTel
+check starts with an explicitly wrong unit on a known metric. These
+limits keep the matches reproducible while the framework analyzers
+grow alias, control-flow, and helper resolution.
+
+The first reliability labels cover known timeout, cancellation, and
+retry rules. Rule listing and the remaining analyzer metadata still
+need the shared taxonomy work in step 1.

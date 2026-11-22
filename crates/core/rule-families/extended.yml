@@ -194,3 +194,32 @@ fetch-json-without-status-check:
           - follows:
               pattern: const $RESPONSE = await fetch($$$ARGS)
   languages: {JavaScript: {}, TypeScript: {}}
+
+otel-http-duration-unit:
+  category: correctness
+  severity: warning
+  message: The OpenTelemetry HTTP request duration metric uses seconds. Convert the recorded value and declare the unit as s.
+  metadata:
+    references: ["https://opentelemetry.io/docs/specs/semconv/http/http-metrics/"]
+    subcategory: [observability.metric-units]
+  rule:
+    pattern: const $HISTOGRAM = $METER.createHistogram($NAME, $OPTIONS)
+    follows:
+      pattern: const $METER = metrics.getMeter($$$ARGS)
+    inside:
+      kind: program
+      stopBy: end
+      has:
+        kind: import_statement
+        all:
+          - has: {field: source, regex: '^["'']@opentelemetry/api["'']$'}
+          - has: {kind: import_specifier, regex: '^metrics$', stopBy: end}
+  constraints:
+    NAME: {regex: '^["'']http\.(client|server)\.request\.duration["'']$'}
+    OPTIONS:
+      has:
+        kind: pair
+        all:
+          - has: {field: key, regex: '^unit$'}
+          - has: {field: value, regex: '^["'']ms["'']$'}
+  languages: {JavaScript: {}, TypeScript: {}}
