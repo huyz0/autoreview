@@ -223,6 +223,7 @@ fn recognize_null_guard(cond: Node, source: &[u8]) -> Option<(String, crate::cfg
 fn lower_if(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {
     let null_guard = stmt.child_by_field_name("condition").and_then(|cond| {
         cfg.nodes[current].stmts.push(Stmt::Other(format!("if {}", text(cond, source))));
+        cfg.nodes[current].condition_span = Some(cond.byte_range());
         recognize_null_guard(cond, source)
     });
 

@@ -30,6 +30,7 @@ fn rules() -> impl Iterator<Item = &'static Rule> {
         &java::HIBERNATE_RULE,
         &java::OTEL_RULE,
         &java::CONSTRUCTOR_RULE,
+        &java::EXECUTOR_SHUTDOWN_RULE,
         &java::PAGINATION_RULE,
         &jest::RULE,
         &react::INTERVAL_RULE,

@@ -1,4 +1,5 @@
 mod constructor;
+mod executor_shutdown;
 mod hibernate;
 mod hierarchy;
 mod otel;
@@ -15,6 +16,7 @@ use super::{children, descendants, location, parse_source, text};
 use hierarchy::Hierarchy;
 
 pub(super) use constructor::RULE as CONSTRUCTOR_RULE;
+pub(super) use executor_shutdown::RULE as EXECUTOR_SHUTDOWN_RULE;
 pub(super) use hibernate::RULE as HIBERNATE_RULE;
 pub(super) use otel::RULE as OTEL_RULE;
 pub(super) use pagination::RULE as PAGINATION_RULE;
@@ -35,6 +37,9 @@ pub(super) fn run(root: &Path, paths: &[String]) -> Vec<AgentFinding> {
         let types = hierarchy.get_or_insert_with(|| Hierarchy::load(root));
         findings.extend(constructor::findings(&java, types));
         findings.extend(spring::findings(&java, types));
+        if source.contains("addShutdownHook") {
+            findings.extend(executor_shutdown::findings(&java));
+        }
         if source.contains("unpaged") {
             findings.extend(pagination::findings(&java));
         }

@@ -154,6 +154,12 @@ try body can fail.
 The reliability catalog includes Go HTTP checks for an explicitly
 disabled timeout, direct retries without a budget, repeated POSTs,
 and graceful shutdown using a context that has already been canceled.
+The Java executor rule recognizes JVM shutdown hooks using a method
+reference or lambda. It follows normal hook exits and flags a
+`shutdown()` call when a path can return without a completion call
+on the same executor. A blocking close, a recognized wait, or deliberate
+immediate shutdown satisfies this check. Completion hidden inside another
+helper and the result of a timed wait are outside the first version.
 
 The PostgreSQL pack uses repository-declared globs for migrations
 guaranteed to run inside a transaction. A file with a Flyway sidecar

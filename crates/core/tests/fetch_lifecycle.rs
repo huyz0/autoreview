@@ -73,18 +73,14 @@ async function reallocatedInLoop(urls: string[]) {
 "#;
     let findings = review("responses.ts", source);
     assert_eq!(findings.len(), 2, "{findings:#?}");
-    let finding = &findings[0];
+    assert_body_evidence(&findings[0], "alias.arrayBuffer()", "alias.text()");
+    assert_body_evidence(&findings[1], "response.text()", "response.blob()");
+}
+
+fn assert_body_evidence(finding: &autoreview_schema::AgentFinding, primary: &str, first: &str) {
     assert_eq!(finding.source.rule_id.as_deref(), Some(BODY));
-    assert_eq!(finding.location.snippet, "alias.arrayBuffer()");
-    assert_eq!(
-        finding.related_locations.as_ref().unwrap()[0].snippet,
-        "alias.text()"
-    );
-    assert_eq!(findings[1].location.snippet, "response.text()");
-    assert_eq!(
-        findings[1].related_locations.as_ref().unwrap()[0].snippet,
-        "response.blob()"
-    );
+    assert_eq!(finding.location.snippet, primary);
+    assert_eq!(finding.related_locations.as_ref().unwrap()[0].snippet, first);
 }
 
 #[test]
