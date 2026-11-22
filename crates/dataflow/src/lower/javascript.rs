@@ -188,26 +188,27 @@ fn lower_if(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> 
         None => true_start,
     };
 
-    let false_end = if let Some(alt) = stmt.child_by_field_name("alternative") {
-        let false_start = cfg.push_node(stmt.start_position().row as u32 + 1);
-        cfg.edges.push((current, false_start, EdgeKind::False));
-        match alt.named_child(0) {
-            Some(inner) if inner.kind() == "statement_block" => lower_block(cfg, inner, source, false_start),
-            Some(inner) if inner.kind() == "if_statement" => lower_if(cfg, inner, source, false_start),
-            _ => false_start,
-        }
-    } else {
-        current
-    };
+    let false_end = stmt.child_by_field_name("alternative")
+        .map(|alt| lower_alternative(cfg, alt, source, current));
 
     let join = cfg.push_node(stmt.end_position().row as u32 + 1);
     cfg.edges.push((true_end, join, EdgeKind::Fallthrough));
-    if false_end != current || stmt.child_by_field_name("alternative").is_some() {
-        cfg.edges.push((false_end, join, EdgeKind::Fallthrough));
-    } else {
-        cfg.edges.push((current, join, EdgeKind::False));
-    }
+    cfg.edges.push(match false_end {
+        Some(end) => (end, join, EdgeKind::Fallthrough),
+        None => (current, join, EdgeKind::False),
+    });
     join
+}
+
+fn lower_alternative(cfg: &mut Cfg<Stmt>, alternative: Node, source: &[u8], current: NodeId) -> NodeId {
+    let if_statement = alternative.parent().unwrap_or(alternative);
+    let start = cfg.push_node(if_statement.start_position().row as u32 + 1);
+    cfg.edges.push((current, start, EdgeKind::False));
+    match alternative.named_child(0) {
+        Some(inner) if inner.kind() == "statement_block" => lower_block(cfg, inner, source, start),
+        Some(inner) => lower_statement(cfg, inner, source, start),
+        None => start,
+    }
 }
 
 /// Shared lowering for `for`/`while` — both have a `body` field and the

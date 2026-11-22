@@ -28,6 +28,12 @@ async function oppositeGuards(flag: boolean) {
     if (flag) await response.text();
     if (!flag) await response.json();
 }
+async function singleStatementElse(flag: boolean) {
+    const response = await fetch('/');
+    if (flag) return;
+    else await response.blob();
+    await response.text();
+}
 async function unreachable() {
     const response = await fetch('/');
     await response.text();
@@ -66,13 +72,18 @@ async function reallocatedInLoop(urls: string[]) {
 }
 "#;
     let findings = review("responses.ts", source);
-    assert_eq!(findings.len(), 1, "{findings:#?}");
+    assert_eq!(findings.len(), 2, "{findings:#?}");
     let finding = &findings[0];
     assert_eq!(finding.source.rule_id.as_deref(), Some(BODY));
     assert_eq!(finding.location.snippet, "alias.arrayBuffer()");
     assert_eq!(
         finding.related_locations.as_ref().unwrap()[0].snippet,
         "alias.text()"
+    );
+    assert_eq!(findings[1].location.snippet, "response.text()");
+    assert_eq!(
+        findings[1].related_locations.as_ref().unwrap()[0].snippet,
+        "response.blob()"
     );
 }
 

@@ -131,27 +131,22 @@ impl<'t, 's, 'a> Syntax<'t, 's, 'a> {
 
     pub fn condition(&self, span: Range<usize>) -> Option<Condition<'s>> {
         let node = unwrapped(self.root.descendant_for_byte_range(span.start, span.end)?)?;
-        let mut positive = true;
-        let mut current = node;
-        while current.kind() == "unary_expression"
-            && field_text(current, "operator", self.source) == Some("!")
-        {
-            positive = !positive;
-            current = unwrapped(current.child_by_field_name("argument")?)?;
-        }
+        let (current, positive) = condition_polarity(node, self.source)?;
         match current.kind() {
-            "binary_expression" => {
-                let (binding, test) = self.status_comparison(current, positive)?;
-                return Some(Condition::Response(binding, test));
-            }
-            "identifier" => {
-                let binding = self.binding(text(current, self.source), current);
-                return Some(Condition::Flag(binding, positive));
-            }
-            "true" => return Some(Condition::Constant(positive)),
-            "false" => return Some(Condition::Constant(!positive)),
-            _ => {}
+            "binary_expression" => self
+                .status_comparison(current, positive)
+                .map(|(binding, test)| Condition::Response(binding, test)),
+            "identifier" => Some(Condition::Flag(
+                self.binding(text(current, self.source), current),
+                positive,
+            )),
+            "true" => Some(Condition::Constant(positive)),
+            "false" => Some(Condition::Constant(!positive)),
+            _ => self.response_condition(current, positive),
         }
+    }
+
+    fn response_condition(&self, current: Node<'t>, positive: bool) -> Option<Condition<'s>> {
         let (binding, field) = self.response_member(current)?;
         let test = match field {
             "ok" => Test::Ok { positive },
@@ -259,18 +254,24 @@ fn compared_status(op: &str, status: u16) -> Option<(Option<Status>, Option<Stat
     } else {
         Status::Error
     });
-    let supported_code = (200..600).contains(&status);
     let error = Some(Status::Error);
     let accepted = Some(Status::Examined);
-    match op {
-        "==" | "===" if supported_code => Some((exact, None)),
-        "!=" | "!==" if supported_code => Some((None, exact)),
-        ">=" if matches!(status, 300 | 400) => Some((error, accepted)),
-        "<" if matches!(status, 300 | 400) => Some((accepted, error)),
-        ">" if matches!(status, 299 | 399) => Some((error, accepted)),
-        "<=" if matches!(status, 299 | 399) => Some((accepted, error)),
+    match (op, status) {
+        ("==" | "===", 200..=599) => Some((exact, None)),
+        ("!=" | "!==", 200..=599) => Some((None, exact)),
+        (">=", 300 | 400) | (">", 299 | 399) => Some((error, accepted)),
+        ("<", 300 | 400) | ("<=", 299 | 399) => Some((accepted, error)),
         _ => None,
     }
+}
+
+fn condition_polarity<'t>(mut node: Node<'t>, source: &str) -> Option<(Node<'t>, bool)> {
+    let mut positive = true;
+    while node.kind() == "unary_expression" && field_text(node, "operator", source) == Some("!") {
+        positive = !positive;
+        node = unwrapped(node.child_by_field_name("argument")?)?;
+    }
+    Some((node, positive))
 }
 
 fn default_import(node: Node<'_>) -> Option<Node<'_>> {
