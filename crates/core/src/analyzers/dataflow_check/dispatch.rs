@@ -68,7 +68,7 @@ impl DataflowReview<'_> {
             findings.extend(run_loopvar_checks(path, &lowered));
         }
         findings.extend(run_call_order_rules(
-            path,
+            &file,
             language,
             &lowered,
             &self.call_sequences,

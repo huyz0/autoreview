@@ -5,8 +5,9 @@ use super::{
     call_order_rules, make_finding, rule_meta, AgentFinding, Cfg, Node, Severity, Stmt,
     SummarySource,
 };
-use autoreview_dataflow::taint;
+use autoreview_dataflow::{call_order, taint};
 use autoreview_langsupport::Language;
+use autoreview_schema::{Location, LocationRange, Side};
 
 /// The reporting and dispatch fields shared by the CFG rule families.
 pub struct DataflowRuleDef<Spec> {
@@ -115,7 +116,11 @@ fn render_call_order_message(
     template: &str,
     hit: &autoreview_dataflow::call_order::CallOrderHit,
 ) -> String {
-    template.replace("{trigger_call}", &hit.trigger_call)
+    let message = template.replace("{trigger_call}", &hit.trigger_call);
+    match &hit.entry {
+        Some(entry) => message.replace("{collection}", &entry.collection).replace("{key}", &entry.key),
+        None => message,
+    }
 }
 
 /// Runs every `kind: call-sequence` rule (see
@@ -126,7 +131,7 @@ fn render_call_order_message(
 /// `run_taint_rules`, since the obligation this models is meant to
 /// resolve within one function.
 pub(super) fn run_call_order_rules(
-    path: &str,
+    file: &SummarySource,
     language: Language,
     lowered: &[(Node, Cfg<Stmt>)],
     rules: &[call_order_rules::CallOrderRuleDef],
@@ -147,32 +152,51 @@ pub(super) fn run_call_order_rules(
         language == Language::Go && rules.iter().any(|rule| rule.spec.check_before_return);
     let functions: Vec<_> = lowered
         .iter()
-        .map(|(node, cfg)| (cfg, check_go_defers && contains_go_defer(*node)))
+        .map(|(node, cfg)| (*node, cfg, check_go_defers && contains_go_defer(*node)))
         .collect();
     for rule in rules {
-        for (cfg, deferred_cleanup) in &functions {
-            let hits = call_sequence_hits(cfg, &rule.spec, *deferred_cleanup);
-            findings.extend(hits.iter().map(|hit| call_order_finding(path, rule, hit)));
+        for &(node, cfg, deferred_cleanup) in &functions {
+            let hits = if rule.spec.identity.is_some() {
+                call_order::check_keyed(&rule.spec, cfg, node, file.content.as_bytes())
+            } else {
+                call_sequence_hits(cfg, &rule.spec, deferred_cleanup)
+            };
+            findings.extend(hits.iter().map(|hit| call_order_finding(file, rule, hit)));
         }
     }
     findings
 }
 
 fn call_order_finding(
-    path: &str,
+    file: &SummarySource,
     rule: &call_order_rules::CallOrderRuleDef,
     hit: &autoreview_dataflow::call_order::CallOrderHit,
 ) -> AgentFinding {
-    let title = format!(
-        "`{}` reached with an unresolved `{}` obligation still open",
-        hit.trigger_call, rule.id
-    );
-    rule.finding(
-        path,
+    let title = match &hit.entry {
+        Some(entry) => format!(
+            "`{}` reached with key `{}` still pending in `{}` (registered at line {})",
+            hit.trigger_call, entry.key, entry.collection, entry.registration_line
+        ),
+        None => format!(
+            "`{}` reached with an unresolved `{}` obligation still open",
+            hit.trigger_call, rule.id
+        ),
+    };
+    let mut finding = rule.finding(
+        file.path,
         hit.source_line,
         title,
         render_call_order_message(&rule.message, hit),
-    )
+    );
+    if let Some(entry) = &hit.entry {
+        finding.related_locations = Some(vec![Location {
+            path: file.path.to_owned(),
+            range: LocationRange { start_line: entry.registration_line, ..Default::default() },
+            snippet: file.content.lines().nth(entry.registration_line.saturating_sub(1) as usize).unwrap_or_default().trim().to_owned(),
+            side: Side::New,
+        }]);
+    }
+    finding
 }
 
 fn call_sequence_hits(

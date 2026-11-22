@@ -78,6 +78,7 @@ impl Lower<'_> {
                 target: callee,
                 args,
                 assigned_to: target,
+                site: crate::lower::site::capture(expr, self.source),
             },
         );
         at

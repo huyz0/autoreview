@@ -208,6 +208,51 @@ before:
   - call: parse
 ```
 
+### Track a collection entry
+
+Use `identity` when a function must remove the same entry it registered.
+At a branch join, an entry stays pending if any incoming path leaves it
+registered. `before` checks the entry used by the trigger call.
+`checkBeforeReturn` checks all pending entries at explicit returns and
+when execution reaches the end of the function.
+
+```yaml
+id: pending-request-cleanup
+language: TypeScript
+category: correctness
+severity: warning
+kind: call-sequence
+message: "Remove {key} from {collection} before {trigger_call}."
+after:
+  - callRegex: '^pending[.]register$'
+unless:
+  - callRegex: '^pending[.]remove$'
+checkBeforeReturn: true
+identity:
+  receiver: true
+  keyArgument: 0
+```
+
+`receiver: true` selects the collection in `pending.register(key)`. To
+check helper calls such as `register(pending, key)` and
+`remove(pending, key)`, use `collectionArgument: 0` and `keyArgument: 1`.
+Argument positions start at zero and apply to every call named by the
+rule. Select either the receiver or a collection argument, and use
+different positions for the collection and key when both are arguments.
+The message can include `{collection}`, `{key}`, and `{trigger_call}`.
+A finding links to the registration line.
+
+Use a scoped rule for an explicit cleanup contract, such as a pending
+request registry. The engine identifies collections by stable local or
+parameter names and keys by stable names or simple string and decimal
+integer literals. Computed keys, fields, alias resolution, and writes or
+shadowing of relevant bindings fall outside the analysis. A potentially
+matching cleanup that the engine cannot model suppresses the check for
+that function. Keyed checks skip loops, try/finally, switches and match
+expressions, and Go defer. A pair represents membership, so repeated
+registration of the same pair still takes one removal. Native collection
+writes such as Go map indexing are outside this call-based DSL.
+
 ## `semantic: true`
 
 Independent of `kind` — marks a rule as syntactically precise but

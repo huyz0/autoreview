@@ -16,6 +16,7 @@ pub mod java;
 pub mod javascript;
 pub mod kotlin;
 pub mod rust;
+pub(crate) mod site;
 
 use tree_sitter::Node;
 

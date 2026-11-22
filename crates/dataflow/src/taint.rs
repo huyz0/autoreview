@@ -138,7 +138,7 @@ fn is_tainted(facts: &TaintFacts, var: &str) -> bool {
 fn apply(spec: &TaintSpec, facts: &TaintFacts, stmt: &Stmt, summaries: Option<&HashMap<String, bool>>) -> TaintFacts {
     let mut out = facts.0.clone();
     match stmt {
-        Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(v) } => {
+        Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(v), .. } => {
             if spec.sanitizers.iter().any(|p| p.matches(name)) {
                 out.insert(v.clone(), false);
             } else if spec.sources.iter().any(|p| p.matches(name)) {

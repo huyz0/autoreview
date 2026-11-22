@@ -1,44 +1,11 @@
-//! A generic, declarative "call ordering" engine — closes a gap the
-//! taint engine structurally can't cover: taint tracks *data* flowing
-//! from a source to a sink through variables; this tracks a *control*
-//! fact — has some earlier call happened, on this path, without an
-//! intervening call that would make it safe — with no variable/receiver
-//! identity involved at all. That's exactly the shape of two real
-//! vulnerability/bug classes surveyed in `RULE_ENGINE_RESEARCH.md`'s
-//! rule-set enrichment pass and explicitly declined there at the time
-//! for lack of this primitive:
-//!
-//! - **XXE** (CWE-611): an XML parser factory (`DocumentBuilderFactory
-//!   .newInstance()`, ...) is unsafe by default; a `parse()` call reached
-//!   without an intervening secure-configuration call (`setFeature`,
-//!   `setExpandEntityReferences(false)`, ...) anywhere earlier on that
-//!   path is the vulnerability CodeQL's XXE queries look for.
-//! - **Unreleased lock** (CWE-459-adjacent): a `Lock.lock()` call
-//!   obligates a matching `unlock()` before the function returns; a
-//!   `return`/`throw` reached while that obligation is still open is a
-//!   real correctness bug (the lock leaks, every future caller
-//!   deadlocks).
-//!
-//! Both are "did event A happen without event B happening before event
-//! C" — modeled here as one boolean fact (`pending`) per CFG path, seeded
-//! by an `after` call, cleared by an `unless` call, and checked against
-//! either a `before` call or every `Stmt::Return`. This is deliberately
-//! **not variable/receiver-tracked** — unlike `taint::TaintFacts`
-//! (keyed per-variable) this is a single flag for the whole function,
-//! the same simplification `go_typed_nil_interface_return`'s summary
-//! walk and the taint engine's own `compute_source_summary` already make
-//! elsewhere in this crate. The tradeoff is real and worth stating
-//! plainly: a function juggling *two* independent resources of the same
-//! kind (two locks, two parser factories) can produce a false negative
-//! (one gets configured/unlocked, masking the other still being
-//! unsafe/held) — narrower than a full per-object points-to analysis,
-//! but the same "structural heuristic over full precision" tradeoff this
-//! whole crate already makes (see `taint`'s and `lib.rs`'s own module
-//! docs). Rules built on this engine should be scoped to functions where
-//! that single-resource-at-a-time assumption is realistic (a
-//! parse-one-document handler, a lock-a-critical-section method) — not a
-//! reason to avoid the primitive, since the alternative today is no
-//! detection at all for this vulnerability shape.
+//! Checks call obligations within one function's control-flow graph.
+//! Rules may track one pending flag or a separate obligation per collection
+//! and key. Keyed rules use stable source bindings and simple literals.
+
+mod identity;
+mod keyed;
+
+pub use keyed::check_keyed;
 
 use crate::cfg::{Cfg, CfgNode, NodeId, Stmt};
 use crate::lattice::Lattice;
@@ -64,6 +31,26 @@ pub struct CallOrderSpec {
     /// mode (unreleased-lock's shape), independent of (and combinable
     /// with) `before`.
     pub check_before_return: bool,
+    pub identity: Option<EntryIdentity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionSelector {
+    Receiver,
+    Argument(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryIdentity {
+    pub collection: CollectionSelector,
+    pub key_argument: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryHit {
+    pub collection: String,
+    pub key: String,
+    pub registration_line: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,14 +85,14 @@ pub struct CallOrderHit {
     pub trigger_call: String,
     pub node: NodeId,
     pub source_line: u32,
+    pub entry: Option<EntryHit>,
 }
 
-/// Runs `spec` against one function's already-lowered CFG. See the module
-/// doc comment for the single-boolean-fact tradeoff this makes — no
-/// interprocedural variant exists (or is planned) since the obligation
-/// this models is meant to resolve within one function, not across a
-/// call boundary.
+/// Runs the original function-wide obligation check.
 pub fn check(spec: &CallOrderSpec, cfg: &Cfg<Stmt>) -> Vec<CallOrderHit> {
+    if spec.identity.is_some() {
+        return Vec::new();
+    }
     let out_facts = solver::solve(cfg, |_id, node: &CfgNode<Stmt>, in_fact: &Pending| {
         Pending(node.stmts.iter().fold(in_fact.0, |pending, stmt| apply(spec, pending, stmt)))
     });
@@ -117,10 +104,10 @@ pub fn check(spec: &CallOrderSpec, cfg: &Cfg<Stmt>) -> Vec<CallOrderHit> {
         for (index, stmt) in node.stmts.iter().enumerate() {
             match stmt {
                 Stmt::Call { target: crate::cfg::CallTarget::Named(name), .. } if pending && spec.before.iter().any(|p| p.matches(name)) => {
-                    hits.push(CallOrderHit { trigger_call: name.clone(), node: node_id, source_line: node.statement_line(index) });
+                    hits.push(CallOrderHit { trigger_call: name.clone(), node: node_id, source_line: node.statement_line(index), entry: None });
                 }
                 Stmt::Return { .. } if pending && spec.check_before_return => {
-                    hits.push(CallOrderHit { trigger_call: "return".to_string(), node: node_id, source_line: node.statement_line(index) });
+                    hits.push(CallOrderHit { trigger_call: "return".to_string(), node: node_id, source_line: node.statement_line(index), entry: None });
                 }
                 _ => {}
             }
@@ -142,6 +129,7 @@ mod tests {
             unless: vec![NamePattern::suffix("setFeature")],
             before: vec![NamePattern::suffix("parse")],
             check_before_return: false,
+            identity: None,
         }
     }
 
@@ -152,6 +140,7 @@ mod tests {
             unless: vec![NamePattern::suffix("Unlock")],
             before: vec![],
             check_before_return: true,
+            identity: None,
         }
     }
 
@@ -165,7 +154,7 @@ mod tests {
     }
 
     fn call(name: &str, assigned_to: Option<&str>) -> Stmt {
-        Stmt::Call { target: CallTarget::Named(name.to_string()), args: vec![], assigned_to: assigned_to.map(str::to_string) }
+        Stmt::Call { target: CallTarget::Named(name.to_string()), args: vec![], assigned_to: assigned_to.map(str::to_string), site: None }
     }
 
     #[test]

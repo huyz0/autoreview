@@ -792,6 +792,7 @@ pub(super) fn validate_rule_file(contents: &str) -> anyhow::Result<(String, Stri
             }
         }
         "call-sequence" => {
+            autoreview_core::analyzers::call_order_rules::validate_identity(contents)?;
             let rule: MinimalCallSequenceRule = serde_yaml::from_str(contents).map_err(|err| anyhow::anyhow!("kind: call-sequence rule is missing a valid `after:`/`unless:` list: {err}"))?;
             if rule.after.is_empty() {
                 anyhow::bail!("kind: call-sequence rule's `after:` list is empty — nothing would ever start the check");

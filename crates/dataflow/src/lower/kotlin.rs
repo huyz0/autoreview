@@ -66,7 +66,7 @@ fn classify_rhs(node: Node, source: &[u8]) -> RhsShape {
 /// `"recv.method"`, matching Go's own qualified-selector convention so a
 /// taint rule's sink/source pattern can match on either the bare trailing
 /// name or the full qualified form.
-fn call_target_name(call: Node, source: &[u8]) -> Option<String> {
+pub(super) fn call_target_name(call: Node, source: &[u8]) -> Option<String> {
     let callee = call.named_child(0)?;
     match callee.kind() {
         "identifier" => Some(text(callee, source).to_string()),
@@ -100,7 +100,7 @@ fn lower_property_declaration(node: Node, source: &[u8]) -> Stmt {
 
     if value.kind() == "call_expression" {
         if let Some(name) = call_target_name(value, source) {
-            return Stmt::Call { target: crate::cfg::CallTarget::Named(name), args: call_arg_identifiers(value, source), assigned_to: Some(lhs) };
+            return super::site::named(name, call_arg_identifiers(value, source), Some(lhs), value, source);
         }
     }
 
@@ -148,7 +148,7 @@ fn lower_statement_inner(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current
         // invisible to the taint engine, which only inspects `Stmt::Call`.
         "call_expression" => {
             let lowered = call_target_name(stmt, source)
-                .map(|name| Stmt::Call { target: crate::cfg::CallTarget::Named(name), args: call_arg_identifiers(stmt, source), assigned_to: None })
+                .map(|name| super::site::named(name, call_arg_identifiers(stmt, source), None, stmt, source))
                 .unwrap_or_else(|| Stmt::Other(text(stmt, source).to_string()));
             cfg.nodes[current].stmts.push(lowered);
             current
@@ -333,7 +333,7 @@ mod tests {
         let cfg = lower("class Foo {\n    fun f(stmt: Any, sql: String): Any {\n        val e = stmt.executeQuery(sql)\n        return e\n    }\n}\n");
         assert!(
             cfg.nodes.iter().any(|n| n.stmts.iter().any(
-                |s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(a) } if name == "stmt.executeQuery" && a == "e" && args.contains(&"sql".to_string()))
+                |s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(a), .. } if name == "stmt.executeQuery" && a == "e" && args.contains(&"sql".to_string()))
             )),
             "got: {:#?}",
             cfg.nodes
@@ -345,7 +345,7 @@ mod tests {
         let cfg = lower("class Foo {\n    fun f(stmt: Any, sql: String) {\n        stmt.executeUpdate(sql)\n    }\n}\n");
         assert!(
             cfg.nodes.iter().any(|n| n.stmts.iter().any(
-                |s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: None } if name == "stmt.executeUpdate" && args.contains(&"sql".to_string()))
+                |s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: None, .. } if name == "stmt.executeUpdate" && args.contains(&"sql".to_string()))
             )),
             "got: {:#?}",
             cfg.nodes

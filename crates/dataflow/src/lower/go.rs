@@ -117,7 +117,7 @@ fn call_arg_identifiers(call: Node, source: &[u8]) -> Vec<String> {
 /// text, so taint-rule sink/source patterns that only care about the
 /// trailing method name (not the specific receiver) should match on the
 /// suffix after the last `.`, not the whole string.
-fn call_target_name(call: Node, source: &[u8]) -> Option<String> {
+pub(super) fn call_target_name(call: Node, source: &[u8]) -> Option<String> {
     let func = call.child_by_field_name("function")?;
     match func.kind() {
         "identifier" => Some(text(func, source).to_string()),
@@ -177,6 +177,7 @@ fn lower_composite_literal_fields(composite: Node, source: &[u8]) -> Vec<Stmt> {
                 target: crate::cfg::CallTarget::Named(format!("{type_name}{{{}}}", text(key, source))),
                 args: vec![text(value_ident, source).to_string()],
                 assigned_to: None,
+                site: None,
             })
         })
         .collect()
@@ -202,7 +203,7 @@ fn lower_assign_like(node: Node, source: &[u8]) -> Vec<Stmt> {
         if primary.kind() == "identifier" && text(primary, source) != "_" {
             if let Some(name) = call_target_name(rhs_node, source) {
                 let args = call_arg_identifiers(rhs_node, source);
-                return vec![Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(text(primary, source).to_string()) }];
+                return vec![super::site::named(name, args, Some(text(primary, source).to_string()), rhs_node, source)];
             }
         }
         return vec![Stmt::Other(text(node, source).to_string())];
@@ -220,7 +221,7 @@ fn lower_assign_like(node: Node, source: &[u8]) -> Vec<Stmt> {
     if rhs_node.kind() == "call_expression" {
         if let Some(name) = call_target_name(rhs_node, source) {
             let args = call_arg_identifiers(rhs_node, source);
-            return vec![Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(lhs) }];
+            return vec![super::site::named(name, args, Some(lhs), rhs_node, source)];
         }
     }
 
@@ -383,7 +384,7 @@ fn lower_statement_inner(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current
             let lowered = stmt
                 .named_child(0)
                 .filter(|n| n.kind() == "call_expression")
-                .and_then(|call| call_target_name(call, source).map(|name| Stmt::Call { target: crate::cfg::CallTarget::Named(name), args: call_arg_identifiers(call, source), assigned_to: None }))
+                .and_then(|call| call_target_name(call, source).map(|name| super::site::named(name, call_arg_identifiers(call, source), None, call, source)))
                 .unwrap_or_else(|| Stmt::Other(text(stmt, source).to_string()));
             cfg.nodes[current].stmts.push(lowered);
             current
@@ -729,7 +730,7 @@ mod tests {
         let cfg = lower("package p\nfunc f(userInput string) {\n\tcmd := exec.Command(\"sh\", \"-c\", userInput)\n\t_ = cmd\n}\n");
         assert!(
             cfg.nodes.iter().any(
-                |n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(a) } if name == "exec.Command" && a == "cmd" && args.contains(&"userInput".to_string())))
+                |n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(a), .. } if name == "exec.Command" && a == "cmd" && args.contains(&"userInput".to_string())))
             ),
             "got: {:#?}",
             cfg.nodes
@@ -741,7 +742,7 @@ mod tests {
         let cfg = lower("package p\nfunc f(userInput string) {\n\tcmd := &exec.Cmd{Path: userInput, Dir: \"/tmp\"}\n\t_ = cmd\n}\n");
         assert!(
             cfg.nodes.iter().any(|n| n.stmts.iter().any(
-                |s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: None } if name == "exec.Cmd{Path}" && args == &vec!["userInput".to_string()])
+                |s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: None, .. } if name == "exec.Cmd{Path}" && args == &vec!["userInput".to_string()])
             )),
             "got: {:#?}",
             cfg.nodes
@@ -783,7 +784,7 @@ mod tests {
         let cfg = lower("package p\nfunc f(path string) {\n\tfile, err := os.Open(path)\n\t_ = file\n\t_ = err\n}\n");
         assert!(
             cfg.nodes.iter().any(
-                |n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(a) } if name == "os.Open" && a == "file" && args.contains(&"path".to_string())))
+                |n| n.stmts.iter().any(|s| matches!(s, Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(a), .. } if name == "os.Open" && a == "file" && args.contains(&"path".to_string())))
             ),
             "got: {:#?}",
             cfg.nodes
