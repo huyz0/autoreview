@@ -1,0 +1,690 @@
+# Each family declares common fields and language-specific AST matchers.
+# Language variants retain the same rule IDs as standalone rules.
+
+async-foreach-callback:
+  category: correctness
+  severity: warning
+  semantic: true
+  message: >-
+    Array forEach does not await an async callback or propagate its rejected promise. Use
+    for…of with await when processing must finish in order, or explicitly await a group of
+    promises with a concurrency limit when needed.
+  metadata:
+    references: ["https://tc39.es/ecma262/multipage/indexed-collections.html#sec-array.prototype.foreach"]
+  rule:
+    any:
+      - pattern: "$ITEMS.forEach($CALLBACK)"
+      - pattern: "$ITEMS.forEach($CALLBACK, $THIS)"
+  constraints:
+    CALLBACK:
+      all:
+        - any:
+            - kind: arrow_function
+            - kind: function_expression
+        - regex: "^async(?:\\s|\\()"
+  languages: {JavaScript: {}, TypeScript: {}}
+
+busy-select-loop:
+  category: performance
+  severity: warning
+  semantic: true
+  message: >-
+    The empty default branch immediately repeats this select while no case is ready. Remove
+    default to wait for work, or add a deliberate timer or backoff if polling is required.
+  metadata: &go_for_statements
+    references: ["https://go.dev/ref/spec#For_statements"]
+  rule:
+    kind: for_statement
+    regex: "^for\\s*\\{"
+    has:
+      field: body
+      has:
+        kind: statement_list
+        has:
+          kind: select_statement
+          all:
+            - has:
+                kind: communication_case
+            - has:
+                kind: default_case
+                not:
+                  has:
+                    kind: statement_list
+        not:
+          has:
+            any:
+              - all:
+                  - kind: select_statement
+                  - follows:
+                      kind: select_statement
+                      stopBy: end
+              - not:
+                  any:
+                    - kind: select_statement
+                    - kind: comment
+  languages:
+    Go: {}
+
+direct-unconditional-recursion:
+  category: correctness
+  severity: warning
+  message: >-
+    The only statement calls this function again without a stopping branch. Check whether the
+    call should target a different function or whether a base case is missing.
+  languages:
+    Go:
+      metadata: *go_for_statements
+      rule:
+        not:
+          has:
+            field: parameters
+            has:
+              kind: parameter_declaration
+              has:
+                field: name
+                pattern: "$F"
+        any:
+          - pattern: "func $F() { $F() }"
+          - pattern: "func $F() $RESULT { return $F() }"
+          - pattern: "func $F($P $T) { $F($P) }"
+          - pattern: "func $F($P $T) $RESULT { return $F($P) }"
+    Java:
+      semantic: true
+      metadata:
+        references: ["https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/StackOverflowError.html"]
+      rule:
+        any:
+          - pattern:
+              context: "class Sample { $R $F() { return $F(); } }"
+              selector: method_declaration
+          - pattern:
+              context: "class Sample { void $F() { $F(); } }"
+              selector: method_declaration
+          - pattern:
+              context: "class Sample { $R $F($T $P) { return $F($P); } }"
+              selector: method_declaration
+          - pattern:
+              context: "class Sample { void $F($T $P) { $F($P); } }"
+              selector: method_declaration
+    JavaScript:
+      metadata: &ecmascript_functions
+        references:
+          - "https://tc39.es/ecma262/multipage/ecmascript-language-functions-and-classes.html#sec-function-definitions"
+      rule:
+        not: &web_recursion_shadow
+          has:
+            kind: formal_parameters
+            has:
+              kind: identifier
+              pattern: "$F"
+              stopBy: end
+        any:
+          - pattern: "function $F() { return $F(); }"
+          - pattern: "function $F() { $F(); }"
+          - pattern: "function $F($P) { return $F($P); }"
+          - pattern: "function $F($P) { $F($P); }"
+    Kotlin:
+      semantic: true
+      metadata:
+        references: ["https://kotlinlang.org/docs/functions.html#tail-recursive-functions"]
+      rule:
+        not:
+          has:
+            kind: function_value_parameters
+            has:
+              kind: parameter
+              has:
+                kind: simple_identifier
+                pattern: "$F"
+        any:
+          - pattern: "fun $F(): $R { return $F() }"
+          - pattern: "fun $F() { $F() }"
+          - pattern: "fun $F($P: $T): $R { return $F($P) }"
+          - pattern: "fun $F($P: $T) { $F($P) }"
+          - pattern: "fun $F(): $R = $F()"
+          - pattern: "fun $F($P: $T): $R = $F($P)"
+    Rust:
+      metadata:
+        references: ["https://doc.rust-lang.org/rustc/lints/listing/warn-by-default.html#unconditional-recursion"]
+      rule:
+        not:
+          has:
+            field: parameters
+            has:
+              kind: parameter
+              has:
+                field: pattern
+                pattern: "$F"
+        any:
+          - pattern: "fn $F() { $F(); }"
+          - pattern: "fn $F() -> $R { $F() }"
+          - pattern: "fn $F($P: $T) { $F($P); }"
+          - pattern: "fn $F($P: $T) -> $R { $F($P) }"
+          - pattern: "fn $F($P: $T) -> $R { return $F($P); }"
+        inside: &rust_module_scope
+          any:
+            - kind: source_file
+            - kind: declaration_list
+              inside:
+                kind: mod_item
+    TypeScript:
+      metadata: *ecmascript_functions
+      rule:
+        not: *web_recursion_shadow
+        any:
+          - pattern: "function $F() { return $F(); }"
+          - pattern: "function $F() { $F(); }"
+          - pattern: "function $F($P: $T) { return $F($P); }"
+          - pattern: "function $F($P: $T) { $F($P); }"
+          - pattern: "function $F(): $R { return $F(); }"
+          - pattern: "function $F($P: $T): $R { return $F($P); }"
+
+for-counter-wrong-direction:
+  category: correctness
+  severity: warning
+  message: >-
+    The loop update moves the counter away from the condition's bound. Check the update and
+    comparison before relying on the loop to terminate.
+  constraints:
+    INDEX: {kind: identifier}
+  languages:
+    Go:
+      metadata: *go_for_statements
+      rule:
+        kind: for_statement
+        has:
+          kind: for_clause
+          any:
+            - all:
+                - &for_counter_wrong_direction_all
+                  has:
+                    field: condition
+                    any:
+                      - pattern: "$INDEX < $BOUND"
+                      - pattern: "$INDEX <= $BOUND"
+                      - pattern: "$BOUND > $INDEX"
+                      - pattern: "$BOUND >= $INDEX"
+                - has:
+                    field: update
+                    any:
+                      - pattern: "$INDEX--"
+            - all:
+                - &for_counter_wrong_direction_all_2
+                  has:
+                    field: condition
+                    any:
+                      - pattern: "$INDEX > $BOUND"
+                      - pattern: "$INDEX >= $BOUND"
+                      - pattern: "$BOUND < $INDEX"
+                      - pattern: "$BOUND <= $INDEX"
+                - has:
+                    field: update
+                    any:
+                      - pattern: "$INDEX++"
+    Java:
+      metadata:
+        references: ["https://docs.oracle.com/javase/specs/jls/se21/html/jls-14.html#jls-14.14.1"]
+      rule:
+        kind: for_statement
+        any:
+          - all:
+              - *for_counter_wrong_direction_all
+              - has:
+                  field: update
+                  any:
+                    - pattern:
+                        context: "class Sample { void run() { for (;; $INDEX--) {} } }"
+                        selector: update_expression
+                    - pattern:
+                        context: "class Sample { void run() { for (;; --$INDEX) {} } }"
+                        selector: update_expression
+          - all:
+              - *for_counter_wrong_direction_all_2
+              - has:
+                  field: update
+                  any:
+                    - pattern:
+                        context: "class Sample { void run() { for (;; $INDEX++) {} } }"
+                        selector: update_expression
+                    - pattern:
+                        context: "class Sample { void run() { for (;; ++$INDEX) {} } }"
+                        selector: update_expression
+    JavaScript: &web_counter_direction
+      metadata:
+        references: ["https://eslint.org/docs/latest/rules/for-direction"]
+      rule:
+        kind: for_statement
+        any:
+          - all: [
+              *for_counter_wrong_direction_all,
+              {has: {field: increment, any: [{pattern: "$INDEX--"}, {pattern: "--$INDEX"}]}}
+            ]
+          - all: [
+              *for_counter_wrong_direction_all_2,
+              {has: {field: increment, any: [{pattern: "$INDEX++"}, {pattern: "++$INDEX"}]}}
+            ]
+    TypeScript: *web_counter_direction
+
+front-removal-while-draining-array:
+  category: performance
+  severity: info
+  semantic: true
+  message: >-
+    Repeatedly removing the first element of a large array can move or reindex the remaining
+    elements. If this is an array-backed queue, consider a head index or a deque and preserve
+    how consumers observe the queue.
+  metadata:
+    references: ["https://tc39.es/ecma262/multipage/indexed-collections.html#sec-array.prototype.shift"]
+  rule:
+    pattern: "$QUEUE.shift()"
+    inside:
+      any:
+        - pattern: "while ($QUEUE.length > 0) { $$$BODY }"
+        - pattern: "while ($QUEUE.length !== 0) { $$$BODY }"
+        - pattern: "while ($QUEUE.length) { $$$BODY }"
+      stopBy: &web_function_boundaries
+        any:
+          - kind: arrow_function
+          - kind: function_expression
+          - kind: function_declaration
+          - kind: method_definition
+  constraints:
+    QUEUE: {kind: identifier}
+  languages: {JavaScript: {}, TypeScript: {}}
+
+includes-per-iteration:
+  category: performance
+  severity: info
+  semantic: true
+  message: >-
+    If this receiver is an array, includes can scan it for every input element. Consider a Set
+    built once for repeated membership tests against an unchanged array.
+  metadata:
+    references: ["https://tc39.es/ecma262/multipage/indexed-collections.html#sec-array.prototype.includes"]
+  rule:
+    pattern: "$HAYSTACK.includes($ITEM)"
+    inside:
+      any:
+        - pattern: "for (const $ITEM of $INPUT) { $$$BODY }"
+        - pattern: "for (let $ITEM of $INPUT) { $$$BODY }"
+      stopBy: *web_function_boundaries
+  constraints: &identifier_membership
+    HAYSTACK: {kind: identifier}
+    ITEM: {kind: identifier}
+  languages: {JavaScript: {}, TypeScript: {}}
+
+inclusive-len-index-loop:
+  category: correctness
+  severity: warning
+  semantic: true
+  message: >-
+    This range includes len(), which is one past the last valid index. Use an exclusive range,
+    or enumerate an iterator when the index and item are both needed.
+  metadata:
+    references: ["https://doc.rust-lang.org/reference/expressions/range-expr.html"]
+  rule:
+    pattern: "for $INDEX in 0..=$ITEMS.len() { $$$BODY }"
+    has:
+      kind: block
+      has:
+        pattern: "$ITEMS[$INDEX]"
+        stopBy: &rust_function_boundaries
+          any:
+            - kind: closure_expression
+            - kind: function_item
+  constraints: &identifier_index_access
+    INDEX: {kind: identifier}
+    ITEMS: {kind: identifier}
+  languages:
+    Rust: {}
+
+inclusive-length-index-loop:
+  category: correctness
+  severity: warning
+  semantic: true
+  message: >-
+    The loop includes the collection length, which is one past the last valid element index.
+    Use a strict less-than bound or iterate over the items directly.
+  constraints: *identifier_index_access
+  languages:
+    Go:
+      metadata: *go_for_statements
+      rule:
+        pattern: "for $INDEX := 0; $INDEX <= len($ITEMS); $INDEX++ { $$$BODY }"
+        has:
+          field: body
+          has: {pattern: "$ITEMS[$INDEX]", stopBy: {any: [{kind: func_literal}]}}
+    Java:
+      metadata:
+        references: ["https://docs.oracle.com/javase/specs/jls/se21/html/jls-15.html#jls-15.10.4"]
+      rule:
+        pattern:
+          context: "class Sample { void run() { for (int $INDEX = 0; $INDEX <= $ITEMS.length; $INDEX++) { $$$BODY } } }"
+          selector: for_statement
+        has:
+          field: body
+          has:
+            pattern: "$ITEMS[$INDEX]"
+            stopBy:
+              any:
+                - kind: lambda_expression
+                - kind: method_declaration
+                - kind: class_declaration
+    JavaScript: &web_length_index
+      metadata:
+        references: ["https://tc39.es/ecma262/multipage/indexed-collections.html#sec-array-objects"]
+      rule:
+        pattern: "for (let $INDEX = 0; $INDEX <= $ITEMS.length; $INDEX++) { $$$BODY }"
+        has:
+          field: body
+          has:
+            pattern: "$ITEMS[$INDEX]"
+            stopBy: *web_function_boundaries
+    TypeScript: *web_length_index
+
+inclusive-size-index-loop:
+  category: correctness
+  severity: warning
+  semantic: true
+  message: >-
+    This range includes size, which is one past the last valid index. Use indices or until
+    size for a forward index loop.
+  metadata:
+    references: ["https://kotlinlang.org/docs/ranges.html"]
+  rule:
+    pattern:
+      context: "fun run() { for ($INDEX in 0..$ITEMS.size) { $$$BODY } }"
+      selector: for_statement
+    has:
+      kind: control_structure_body
+      has:
+        pattern:
+          context: "fun run() { $ITEMS[$INDEX] }"
+          selector: indexing_expression
+        stopBy: end
+  constraints:
+    INDEX: {kind: simple_identifier}
+    ITEMS: {kind: simple_identifier}
+  languages:
+    Kotlin: {}
+
+list-membership-per-iteration:
+  category: performance
+  severity: info
+  semantic: true
+  message: >-
+    This loop can scan the same list for each element of the input. Consider a set built once
+    before the loop when the searched list stays unchanged and the lookup happens often.
+  languages:
+    Java:
+      metadata:
+        references: ["https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/ArrayList.html"]
+      rule:
+        all:
+          - pattern: "$HAYSTACK.contains($ITEM)"
+          - inside:
+              pattern:
+                context: "class Sample { void run() { for ($T $ITEM : $INPUT) { $$$BODY } } }"
+                selector: enhanced_for_statement
+              stopBy:
+                any:
+                  - kind: lambda_expression
+                  - kind: method_declaration
+          - inside:
+              kind: method_declaration
+              has:
+                field: parameters
+                has:
+                  kind: formal_parameter
+                  all:
+                    - has: {field: name, pattern: "$HAYSTACK"}
+                    - has: {field: type, regex: "^java\\.util\\.ArrayList\\s*(<|$)"}
+              stopBy:
+                any:
+                  - kind: lambda_expression
+                  - kind: method_declaration
+      constraints:
+        HAYSTACK: {kind: identifier}
+        ITEM: {kind: identifier}
+    Kotlin:
+      metadata:
+        references: ["https://kotlinlang.org/docs/collections-overview.html#list"]
+      rule:
+        all:
+          - pattern:
+              context: "fun run() { $HAYSTACK.contains($ARGUMENT) }"
+              selector: call_expression
+          - has:
+              kind: call_suffix
+              has:
+                kind: value_arguments
+                has:
+                  kind: value_argument
+                  has:
+                    kind: simple_identifier
+                    pattern: "$ITEM"
+          - inside:
+              pattern:
+                context: "fun run() { for ($ITEM in $INPUT) { $$$BODY } }"
+                selector: for_statement
+              stopBy:
+                any:
+                  - kind: lambda_literal
+                  - kind: function_declaration
+          - inside:
+              kind: function_declaration
+              has:
+                kind: function_value_parameters
+                has:
+                  kind: parameter
+                  all:
+                    - has:
+                        kind: simple_identifier
+                        pattern: "$HAYSTACK"
+                    - has:
+                        kind: user_type
+                        regex: "^(kotlin\\.collections\\.)?List\\s*<"
+              stopBy:
+                any:
+                  - kind: lambda_literal
+                  - kind: function_declaration
+      constraints:
+        HAYSTACK: {kind: simple_identifier}
+
+nested-loop-field-join:
+  category: performance
+  severity: info
+  semantic: true
+  message: >-
+    The inner loop compares one field from each collection for every pair. Consider indexing
+    the inner collection by the compared key if it stays unchanged. Preserve duplicate
+    matches, equality, and any required output order.
+  constraints:
+    OUTER: {kind: identifier}
+    INNER: {kind: identifier}
+    RIGHT: {kind: identifier}
+  languages:
+    JavaScript: &web_field_join
+      metadata:
+        references: ["https://tc39.es/ecma262/multipage/keyed-collections.html#sec-map-objects"]
+      rule:
+        pattern: "$OUTER.$FIRST === $INNER.$SECOND"
+        not:
+          pattern: "$SAME.$FIRST === $SAME.$SECOND"
+        inside:
+          pattern: "for (const $INNER of $RIGHT) { $$$INNER_BODY }"
+          stopBy: *web_function_boundaries
+          inside:
+            pattern: "for (const $OUTER of $LEFT) { $$$OUTER_BODY }"
+            stopBy: *web_function_boundaries
+    Rust:
+      metadata: &rust_collection_costs
+        references: ["https://doc.rust-lang.org/std/collections/index.html#cost-of-collection-operations"]
+      rule:
+        pattern: "$OUTER.$FIRST == $INNER.$SECOND"
+        not:
+          pattern: "$SAME.$FIRST == $SAME.$SECOND"
+        inside:
+          pattern: "for $INNER in $RIGHT { $$$INNER_BODY }"
+          stopBy: &rust_function_and_async_boundaries
+            any:
+              - kind: closure_expression
+              - kind: function_item
+              - kind: async_block
+          inside:
+            pattern: "for $OUTER in $LEFT { $$$OUTER_BODY }"
+            stopBy: *rust_function_and_async_boundaries
+    TypeScript: *web_field_join
+
+overlapping-recursive-steps:
+  category: performance
+  severity: info
+  semantic: true
+  message: >-
+    The n - 1 and n - 2 recursive calls revisit the same smaller inputs. For large inputs,
+    compute the recurrence iteratively or memoize by input when reusing the result preserves
+    behavior.
+  metadata:
+    references: ["https://www.ocw.mit.edu/courses/6-006-introduction-to-algorithms-fall-2011/resources/lecture-19-dynamic-programming-i-fibonacci-shortest-paths/"]
+  languages:
+    Go:
+      rule:
+        pattern: |
+          func $F($N int) int {
+            if $N <= 1 {
+              return $N
+            }
+            return $F($N - 1) + $F($N - 2)
+          }
+    Java:
+      rule:
+        any:
+          - pattern:
+              context: "class Sample { int $F(int $N) { if ($N <= 1) return $N; return $F($N - 1) + $F($N - 2); } }"
+              selector: method_declaration
+    JavaScript:
+      rule:
+        any:
+          - pattern: "function $F($N) { if ($N <= 1) return $N; return $F($N - 1) + $F($N - 2); }"
+    Kotlin:
+      rule:
+        any:
+          - pattern: "fun $F($N: Int): Int { if ($N <= 1) return $N; return $F($N - 1) + $F($N - 2) }"
+    Rust:
+      rule:
+        any:
+          - pattern: "fn $F($N: u64) -> u64 { if $N <= 1 { return $N; } $F($N - 1) + $F($N - 2) }"
+        inside: *rust_module_scope
+    TypeScript:
+      rule:
+        any:
+          - pattern: "function $F($N: number): number { if ($N <= 1) return $N; return $F($N - 1) + $F($N - 2); }"
+
+react-hook-in-loop:
+  category: correctness
+  severity: warning
+  semantic: true
+  message: >-
+    A React Hook is called from a loop. Move it to the top level of the component or custom
+    Hook, or extract the repeated UI into keyed child components that own their hooks.
+  metadata:
+    references: ["https://react.dev/reference/eslint-plugin-react-hooks/lints/rules-of-hooks"]
+  rule:
+    all:
+      - pattern: "$HOOK($$$ARGS)"
+      - inside:
+          any:
+            - kind: for_statement
+            - kind: for_in_statement
+            - kind: while_statement
+            - kind: do_statement
+          stopBy: *web_function_boundaries
+      - inside:
+          kind: program
+          stopBy: end
+          has:
+            kind: import_statement
+            all:
+              - has:
+                  field: source
+                  regex: "^[\"']react[\"']$"
+              - has:
+                  pattern: "$HOOK"
+                  kind: import_specifier
+                  stopBy: end
+  constraints:
+    HOOK:
+      regex: "^use(State|Effect|LayoutEffect|InsertionEffect|Reducer|Memo|Callback|Ref|Context|Id|ImperativeHandle|SyncExternalStore|Transition|DeferredValue|DebugValue|ActionState|Optimistic|EffectEvent)$"
+  languages: {JavaScript: {}, TypeScript: {}}
+
+slice-membership-per-iteration:
+  category: performance
+  severity: info
+  semantic: true
+  constraints: *identifier_membership
+  languages:
+    Go:
+      message: >-
+        slices.Contains scans the slice for each range value. For many lookups against the
+        same unchanged slice, consider building a membership map once outside the loop.
+      metadata:
+        references: ["https://go.dev/src/slices/slices.go"]
+      rule:
+        pattern: "slices.Contains($HAYSTACK, $ITEM)"
+        inside:
+          pattern: "for _, $ITEM := range $SOURCE { $$$BODY }"
+          stopBy:
+            kind: func_literal
+    Rust:
+      message: >-
+        This loop may scan the same slice for each input element. Consider a HashSet built
+        once before the loop when hashing preserves the intended equality and the slice stays
+        unchanged.
+      metadata: *rust_collection_costs
+      rule:
+        all:
+          - pattern: "$COLLECTION.contains($ITEM)"
+          - inside:
+              pattern: "for $ITEM in $INPUT { $$$BODY }"
+              stopBy: *rust_function_boundaries
+          - inside:
+              kind: function_item
+              has: &rust_typed_parameter
+                field: parameters
+                has:
+                  kind: parameter
+                  all:
+                    - has: {field: pattern, pattern: "$COLLECTION"}
+                    - has: {field: type, pattern: "$COLLECTION_TYPE"}
+              stopBy: *rust_function_boundaries
+      constraints:
+        COLLECTION: {kind: identifier}
+        ITEM: {kind: identifier}
+        COLLECTION_TYPE: {regex: '^&\s*\['}
+
+vec-front-removal-while-draining:
+  category: performance
+  severity: info
+  semantic: true
+  message: >-
+    Removing index zero from a Vec shifts the remaining elements. For a FIFO drain, consider
+    VecDeque::pop_front or consume the Vec in order when ownership permits.
+  metadata:
+    references: ["https://doc.rust-lang.org/std/vec/struct.Vec.html#method.remove"]
+  rule:
+    all:
+      - pattern: "$COLLECTION.remove(0)"
+      - inside:
+          any:
+            - pattern: "while !$COLLECTION.is_empty() { $$$BODY }"
+            - pattern: "while $COLLECTION.len() > 0 { $$$BODY }"
+          stopBy: *rust_function_and_async_boundaries
+      - inside:
+          kind: function_item
+          has: *rust_typed_parameter
+          stopBy: *rust_function_and_async_boundaries
+  constraints:
+    COLLECTION: {kind: identifier}
+    COLLECTION_TYPE: {regex: '^(?:&\s*mut\s+)?(?:std::vec::)?Vec\s*<'}
+  languages:
+    Rust: {}

@@ -52,7 +52,7 @@ const RULE_DIR_LANGUAGES: &[(&str, &[Language])] = &[
 /// Builtin ast-grep rules, embedded at compile time for the same reason the
 /// builtin skills are: a single binary shouldn't need a side-car data
 /// directory installed next to it to have any deterministic coverage at all.
-pub(crate) static BUILTIN_RULES: Dir = include_dir!("$CARGO_MANIFEST_DIR/rules-builtin");
+pub(crate) static BUILTIN_RULES: Dir = include_dir!("$OUT_DIR/compiled-rules");
 
 pub(crate) fn is_relevant_source_file(path: &str) -> bool {
     autoreview_langsupport::language_for_path(Path::new(path)).is_some()

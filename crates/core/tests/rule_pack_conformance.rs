@@ -6,13 +6,11 @@
 //! rules we ship today — adding a new rule means adding rule YAML +
 //! fixture files, not touching this test file.
 //!
-//! Rules are discovered by walking `rules-builtin/` at test time (not via
-//! the `include_dir!` embed used at build time for the shipped binary — an
-//! external integration test can just read the crate's own source tree off
-//! disk). Each rule's `id`/`language` drives which fixture files it expects
-//! at `tests/fixtures/rules/<rule-id>/{positive,negative}.<ext>` — a missing
-//! fixture pair fails the test for that rule, so a new rule without
-//! fixtures can't silently ship untested.
+//! Rules are discovered in the same compiled rule directory embedded in
+//! the shipped binary. Each rule's `id`/`language` selects its fixtures
+//! from `tests/fixtures/rules/<rule-id>/`. Use a positive and negative
+//! source pair or a `cases.yml` file when both cases share a template
+//! or TypeScript exercises the same sources as JavaScript.
 //!
 //! Requires the real `ast-grep` binary; skips (not fails) when it's absent,
 //! so this suite is safe to run anywhere but exercises real integration
@@ -41,11 +39,41 @@ fn ast_grep_available() -> bool {
 }
 
 fn rules_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("rules-builtin")
+    Path::new(env!("OUT_DIR")).join("compiled-rules")
 }
 
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("rules")
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SharedFixtures {
+    JavaScript { javascript: String },
+    Template { template: String, positive: String, negative: String },
+}
+
+fn read_fixture(rule: &RuleMeta, case: &str, extension: &str) -> anyhow::Result<String> {
+    let dir = fixtures_dir().join(&rule.id);
+    let path = dir.join(format!("{case}.{extension}"));
+    if path.is_file() {
+        return Ok(std::fs::read_to_string(path)?);
+    }
+    let shared = dir.join("cases.yml");
+    anyhow::ensure!(shared.is_file(), "missing fixture {}", path.display());
+    let fixture = serde_yaml::from_str(&std::fs::read_to_string(shared)?)?;
+    match fixture {
+        SharedFixtures::JavaScript { javascript } => {
+            let source = fixtures_dir().join(javascript).join(format!("{case}.js"));
+            Ok(std::fs::read_to_string(source)?)
+        }
+        SharedFixtures::Template { template, positive, negative } => {
+            const PLACEHOLDER: &str = "@CASE@";
+            anyhow::ensure!(template.matches(PLACEHOLDER).count() == 1, "{} needs one {PLACEHOLDER}", rule.id);
+            let replacement = if case == "positive" { positive } else { negative };
+            Ok(template.replace(PLACEHOLDER, &replacement))
+        }
+    }
 }
 
 /// Only `kind: pattern` (or `kind`-absent) rules — this test drives
@@ -126,20 +154,14 @@ fn every_builtin_rule_fires_on_its_positive_fixture_and_stays_silent_on_its_nega
     for rule in &rules {
         let ext = extension_for_language(&rule.language);
         let filename = scan_filename_for_language(&rule.language);
-        let fixture_dir = fixtures_dir().join(&rule.id);
-        let positive_path = fixture_dir.join(format!("positive.{ext}"));
-        let negative_path = fixture_dir.join(format!("negative.{ext}"));
-
-        let (Ok(positive), Ok(negative)) = (std::fs::read_to_string(&positive_path), std::fs::read_to_string(&negative_path)) else {
-            failures.push(format!("{}: missing fixture files (expected {} and {})", rule.id, positive_path.display(), negative_path.display()));
-            continue;
-        };
+        let positive = read_fixture(rule, "positive", ext).unwrap_or_else(|error| panic!("{}: {error}", rule.id));
+        let negative = read_fixture(rule, "negative", ext).unwrap_or_else(|error| panic!("{}: {error}", rule.id));
 
         if rule.language == "Rust" {
-            for (path, source) in [(&positive_path, &positive), (&negative_path, &negative)] {
+            for (case, source) in [("positive", &positive), ("negative", &negative)] {
                 let mut parser = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Rust).unwrap();
                 if parser.parse(source, None).unwrap().root_node().has_error() {
-                    failures.push(format!("{}: invalid Rust fixture {}", rule.id, path.display()));
+                    failures.push(format!("{}: invalid Rust {case} fixture", rule.id));
                 }
             }
         }
@@ -177,11 +199,11 @@ fn typescript_pattern_catalog_has_tsx_parity() {
     for rule in discover_rules().into_iter().filter(|rule| rule.language == "TypeScript") {
         let dir = fixtures_dir().join(&rule.id);
         for (fixture, expected) in [("positive", 1), ("negative", 0)] {
-            let ordinary = dir.join(format!("{fixture}.ts"));
             let with_jsx = dir.join(format!("{fixture}.tsx"));
-            let source = if with_jsx.exists() { with_jsx } else { ordinary };
+            let extension = if with_jsx.exists() { "tsx" } else { "ts" };
+            let source = read_fixture(&rule, fixture, extension).unwrap();
             let path = format!("{}-{fixture}.tsx", rule.id);
-            std::fs::copy(source, repo.path().join(&path)).unwrap();
+            std::fs::write(repo.path().join(&path), source).unwrap();
             samples.push((path, rule.id.clone(), expected));
         }
     }

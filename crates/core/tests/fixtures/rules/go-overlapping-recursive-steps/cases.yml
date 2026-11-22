@@ -1,0 +1,11 @@
+template: |
+  package flow
+
+  func estimate(n int) int {
+      if n <= 1 {
+          return n
+      }
+      return estimate(n-1) + @CASE@
+  }
+positive: "estimate(n-2)"
+negative: "estimate(0)"
