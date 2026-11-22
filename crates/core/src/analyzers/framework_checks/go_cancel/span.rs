@@ -212,7 +212,7 @@ fn selector(call: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
     ))
 }
 
-fn aliases<'a>(file: &'a File, package: &'static str) -> HashSet<&'a str> {
+pub(super) fn aliases<'a>(file: &'a File, package: &'static str) -> HashSet<&'a str> {
     descendants(file.root())
         .filter(|node| node.kind() == "import_spec")
         .filter(|node| {

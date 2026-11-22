@@ -2,6 +2,7 @@ mod flow;
 mod http;
 mod package;
 mod span;
+mod transactions;
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -13,6 +14,7 @@ use super::{location, Rule};
 pub(super) use http::RULE as HTTP_RULE;
 pub(super) use span::RULE as SPAN_RULE;
 pub(super) use span::TRACE_PARENT_RULE;
+pub(super) use transactions::RULE as TRANSACTION_RULE;
 
 pub(super) const RULE: Rule = Rule {
     id: "go-context-cancel-on-all-paths",
@@ -51,6 +53,7 @@ fn package_findings(peers: &[&package::File], paths: &[String]) -> Vec<AgentFind
         if paths.contains(&file.path) {
             findings.extend(span::findings(file));
             findings.extend(http::findings(file));
+            findings.extend(transactions::findings(file));
         }
         for (binding, exit, used) in package::leaks(file, &helpers) {
             let sources: Vec<_> = helpers.evidence(used).collect();

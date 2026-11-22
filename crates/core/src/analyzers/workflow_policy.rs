@@ -1,48 +1,26 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
+use autoreview_schema::{AgentFinding, LocationRange};
 use serde_yaml::Value;
 
-use super::ast_grep::{RuleCatalogEntry, RuleDefinition};
+use super::artifact_policy::{read_snapshot_file, Rule};
 
-const ID: &str = "github-actions-mutable-reference";
-const SUBCATEGORY: &str = "build.dependency-integrity";
-const REFERENCE: &str = "https://docs.github.com/en/actions/reference/security/secure-use#using-third-party-actions";
-
-pub(super) fn catalog_entry() -> RuleCatalogEntry {
-    RuleCatalogEntry {
-        id: ID.into(), kind: "artifact".into(), category: "security".into(), subcategories: vec![SUBCATEGORY.into()],
-    }
-}
-
-pub(super) fn definition(id: &str) -> Option<RuleDefinition> {
-    if id != ID {
-        return None;
-    }
-    let entry = catalog_entry();
-    let details = serde_json::json!({
-        "id": ID, "kind": entry.kind, "category": entry.category,
-        "enabledBy": "artifactChecks.immutableGithubActionRefs",
-        "metadata": {"references": [REFERENCE], "subcategory": [SUBCATEGORY]},
-    });
-    Some(RuleDefinition {
-        id: entry.id, source_label: "builtin".into(), kind: entry.kind, category: entry.category,
-        semantic: false, yaml: serde_yaml::to_string(&details).ok()?,
-    })
-}
+pub(super) const RULE: Rule = Rule {
+    id: "github-actions-mutable-reference",
+    category: "security",
+    subcategory: "build.dependency-integrity",
+    tool: "autoreview-workflow-policy",
+    title: "GitHub Actions dependency uses a mutable reference",
+    reference: "https://docs.github.com/en/actions/reference/security/secure-use#using-third-party-actions",
+    enabled_by: "artifactChecks.immutableGithubActionRefs",
+};
 
 pub fn run_workflow_policy(root: &Path, files: &[String]) -> Vec<AgentFinding> {
     let Ok(root) = root.canonicalize() else { return Vec::new() };
     files.iter().filter(|path| workflow_path(Path::new(path))).flat_map(|path| {
-        let requested = root.join(path);
-        let Some(resolved) = requested.canonicalize().ok().filter(|file| file.starts_with(&root)) else {
-            return Vec::new();
-        };
-        if !requested.symlink_metadata().is_ok_and(|meta| meta.is_file()) {
-            return Vec::new();
-        }
-        std::fs::read_to_string(resolved).ok().map_or_else(Vec::new, |source| check_workflow(path, &source))
+        read_snapshot_file(&root, Path::new(path))
+            .map_or_else(Vec::new, |source| check_workflow(path, &source))
     }).collect()
 }
 
@@ -106,32 +84,6 @@ fn uses_on_line(line: &str) -> Option<String> {
 }
 
 fn finding(path: &str, reference: &str, line: usize, source: &str) -> AgentFinding {
-    AgentFinding {
-        source: FindingSource {
-            kind: FindingSourceKind::Analyzer,
-            tool: "autoreview-workflow-policy".to_owned(),
-            rule_id: Some(ID.to_owned()),
-            aspect: None,
-            backend: None,
-        },
-        category: "security".to_owned(),
-        severity: Severity::Medium,
-        confidence: 1.0,
-        title: "GitHub Actions dependency uses a mutable reference".to_owned(),
-        message: format!("Pin {reference} to the full commit SHA for the intended revision."),
-        location: Location {
-            path: path.to_owned(),
-            range: LocationRange { start_line: line as u32 + 1, ..Default::default() },
-            snippet: source.trim().to_owned(),
-            side: Side::New,
-        },
-        related_locations: None,
-        suggestion: None,
-        tags: None,
-        meta: Some(std::collections::HashMap::from([
-            ("references".to_owned(), serde_json::json!([REFERENCE])),
-            ("subcategory".to_owned(), serde_json::json!([SUBCATEGORY])),
-        ])),
-        suggested_patch: None,
-    }
+    RULE.finding(path, LocationRange { start_line: line as u32 + 1, ..Default::default() },
+        source, format!("Pin {reference} to the full commit SHA for the intended revision."))
 }

@@ -136,7 +136,7 @@ pub struct RuleCatalogEntry {
 }
 
 pub fn list_builtin_rules() -> Vec<RuleCatalogEntry> {
-    use super::super::{framework_checks, rust_review, workflow_policy};
+    use super::super::{artifact_policy, framework_checks, rust_review};
 
     let mut catalog = Vec::new();
     walk_rule_files(&rule_roots(&[]), &mut |meta| {
@@ -152,7 +152,7 @@ pub fn list_builtin_rules() -> Vec<RuleCatalogEntry> {
         id: rule.id.into(), kind: "rust".into(), category: rule.category.into(),
         subcategories: rule.subcategories().iter().map(|label| (*label).into()).collect(),
     }));
-    catalog.push(workflow_policy::catalog_entry());
+    catalog.extend(artifact_policy::rules().map(artifact_policy::Rule::entry));
     catalog.sort_by(|left, right| left.id.cmp(&right.id));
     catalog
 }
@@ -164,7 +164,7 @@ pub fn find_rule_definition(
     if let Some(definition) = super::super::framework_checks::definition(rule_id) {
         return Some(definition);
     }
-    if let Some(definition) = super::super::workflow_policy::definition(rule_id) {
+    if let Some(definition) = super::super::artifact_policy::rules().find(|rule| rule.id == rule_id).and_then(super::super::artifact_policy::Rule::definition) {
         return Some(definition);
     }
     for root in rule_roots(registered_packs) {

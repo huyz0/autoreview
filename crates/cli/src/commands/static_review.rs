@@ -14,6 +14,7 @@ pub(super) struct ReviewInput<'a> {
     pub audit_rust_deps: bool,
     pub tier4_go: bool,
     pub immutable_github_action_refs: bool,
+    pub transactional_postgres_migrations: &'a [String],
 }
 
 impl ReviewInput<'_> {
@@ -47,6 +48,14 @@ pub(super) fn collect(
     }
     if input.immutable_github_action_refs && input.wants("security") {
         findings.extend(autoreview_core::run_workflow_policy(input.source_root, changed_files));
+    }
+    if !input.transactional_postgres_migrations.is_empty() && input.wants("correctness") {
+        match autoreview_core::run_postgres_migration_policy(
+            input.source_root, changed_files, input.transactional_postgres_migrations,
+        ) {
+            Ok(migrations) => findings.extend(migrations),
+            Err(error) => record_warning(&mut warnings, format!("PostgreSQL migration policy failed: {error}")),
+        }
     }
     findings.extend(structural(
         input.source_root,

@@ -3,6 +3,7 @@ mod collections;
 mod design;
 mod mocking;
 mod panics;
+mod select_io;
 mod sql;
 mod tasks;
 mod test_state;
@@ -36,6 +37,7 @@ impl RustReviewRule {
             "rust-vec-set-len-before-initialization" => &["memory.initialization"],
             "rust-timeout-consumes-join-handle" => &["reliability.cancellation", "concurrency.task-lifecycle"],
             "rust-sqlx-pool-write-during-transaction" => &["persistence.transaction-boundaries"],
+            "rust-tokio-select-restarts-read-exact" => &["concurrency.cancellation-safety"],
             _ => &[],
         }
     }
@@ -60,6 +62,7 @@ pub(super) fn rules() -> impl Iterator<Item = &'static RustReviewRule> {
         .chain(tasks::RULES)
         .chain(test_state::RULES)
         .copied()
+        .chain(std::iter::once(&select_io::RULE))
 }
 
 struct Review<'tree, 'text> {
@@ -157,6 +160,7 @@ fn analyze_file(path: &str, text: &str) -> Vec<AgentFinding> {
         panics::check(&mut review, node);
         design::check(&mut review, node);
         tasks::check(&mut review, node);
+        select_io::check(&mut review, node);
         test_state::check(&mut review, node);
     }
     review.findings

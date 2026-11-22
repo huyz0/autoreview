@@ -549,6 +549,50 @@ fn rules_list_filters_builtin_rule_kinds_by_subcategory() {
 }
 
 #[test]
+fn postgres_policy_tracks_changed_sql_and_transaction_sidecars() {
+    let sql = "migration/V001.sql";
+    let sidecar = "migration/V001.sql.conf";
+    let statement = "/* keep */\ncreate UNIQUE index\nconcurrently idx on orders (created_at);\n";
+    let repo = init_repo(&[
+        (sql, statement),
+        (sidecar, "executeInTransaction=false\n"),
+        ("migration/V003.sql.conf", "executeInTransaction=false\n"),
+        ("other/V002.sql", "SELECT 1;\n"),
+    ]);
+    repo.commit(&[
+        (sidecar, "# overrides\nexecuteInTransaction=true\n"),
+        ("other/V002.sql", "CREATE INDEX CONCURRENTLY idx ON table_name (column_name);\n"),
+        ("migration/V003.sql", "CREATE INDEX CONCURRENTLY idx3 ON orders (created_at);\n"),
+    ], "change the migration wrapping policy");
+    for enabled in [false, true] {
+        if enabled {
+            let dir = repo.path().join(".autoreview");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("config.yaml"),
+                "artifactChecks:\n  transactionalPostgresMigrations: ['migration/*.sql']\n").unwrap();
+        }
+        let output = Command::cargo_bin("autoreview").unwrap()
+            .current_dir(repo.path())
+            .args(["diff", "--base", "HEAD~1", "--static-only", "--changed-lines",
+                "--subcategories", "deployment.migrations"])
+            .assert().success().get_output().stdout.clone();
+        let path = report_path_from_stdout(&String::from_utf8(output).unwrap());
+        let report: autoreview_schema::ReviewReport = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let findings: Vec<_> = report.findings.iter()
+            .filter(|finding| finding.source.rule_id.as_deref() == Some("postgres-concurrent-index-in-transaction"))
+            .collect();
+        if enabled {
+            assert_eq!(findings.len(), 1);
+            assert_eq!(findings[0].location.path, sql);
+            assert_eq!(findings[0].location.range.start_line, 2);
+            assert_eq!(findings[0].related_locations.as_ref().unwrap()[0].path, sidecar);
+        } else {
+            assert!(findings.is_empty());
+        }
+    }
+}
+
+#[test]
 fn workflow_pinning_policy_is_opt_in_and_points_to_the_changed_steps() {
     let workflow = ".github/workflows/checks.yml";
     let baseline = "jobs:\n  test:\n    steps: []\n";

@@ -2,8 +2,8 @@ mod interval;
 
 use std::collections::HashSet;
 
-use super::{children, descendants, location, text, AgentFinding, Node, Path, Rule};
-use super::web::{self, binding_nodes, first_argument};
+use super::{children, descendants, location, text, AgentFinding, Node, Rule};
+use super::web::{binding_nodes, first_argument, named_imports};
 
 pub(super) const INTERVAL_RULE: Rule = Rule {
     id: "react-use-effect-interval-not-cleared",
@@ -14,11 +14,7 @@ pub(super) const INTERVAL_RULE: Rule = Rule {
     reference: "https://react.dev/reference/react/useEffect",
 };
 
-pub(super) fn run(root: &Path, paths: &[String]) -> Vec<AgentFinding> {
-    web::run(root, paths, inspect)
-}
-
-fn inspect(path: &str, source: &str, root: Node<'_>) -> Vec<AgentFinding> {
+pub(super) fn inspect(path: &str, source: &str, root: Node<'_>) -> Vec<AgentFinding> {
     let hooks = imported_hooks(root, source);
     if hooks.is_empty() || timer_bindings_shadowed(root, source) {
         return Vec::new();
@@ -40,18 +36,8 @@ fn inspect(path: &str, source: &str, root: Node<'_>) -> Vec<AgentFinding> {
 }
 
 fn imported_hooks<'s>(root: Node<'_>, source: &'s str) -> HashSet<&'s str> {
-    let imports = children(root).filter(|node| {
-        node.kind() == "import_statement"
-            && node.child_by_field_name("source")
-                .is_some_and(|module| text(module, source).trim_matches(['\'', '"']) == "react")
-    });
-    imports.flat_map(descendants)
-        .filter(|node| node.kind() == "import_specifier")
-        .filter_map(|node| {
-            let imported = node.child_by_field_name("name")?;
-            (text(imported, source) == "useEffect")
-                .then(|| text(node.child_by_field_name("alias").unwrap_or(imported), source))
-        })
+    named_imports(root, source, "react")
+        .filter_map(|(original, local)| (original == "useEffect").then_some(local))
         .filter(|hook| !shadowed(root, source, hook))
         .collect()
 }

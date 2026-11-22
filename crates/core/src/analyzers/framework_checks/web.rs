@@ -4,7 +4,29 @@ use autoreview_langsupport::{language_for_path, parser_for, Language};
 use autoreview_schema::AgentFinding;
 use tree_sitter::Node;
 
-use super::{children, parse_source, text};
+use super::{children, descendants, parse_source, text};
+
+pub(super) fn imports_from<'t, 's>(
+    root: Node<'t>, source: &'s str, module: &'s str,
+) -> impl Iterator<Item = Node<'t>> + use<'t, 's> {
+    children(root).filter(move |node| {
+        node.kind() == "import_statement"
+            && field_text(*node, "source", source)
+                .is_some_and(|name| name.trim_matches(['\'', '"']) == module)
+    })
+}
+
+pub(super) fn named_imports<'t, 's>(
+    root: Node<'t>, source: &'s str, module: &'s str,
+) -> impl Iterator<Item = (&'s str, &'s str)> + use<'t, 's> {
+    imports_from(root, source, module).flat_map(descendants).filter_map(move |node| {
+        if node.kind() != "import_specifier" {
+            return None;
+        }
+        let original = field_text(node, "name", source)?;
+        Some((original, field_text(node, "alias", source).unwrap_or(original)))
+    })
+}
 
 pub(super) fn run(
     root: &Path, paths: &[String], check: impl Fn(&str, &str, Node<'_>) -> Vec<AgentFinding>,

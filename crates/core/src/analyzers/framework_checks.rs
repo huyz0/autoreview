@@ -1,6 +1,8 @@
 mod go_cancel;
 mod java;
+mod jest;
 mod prisma;
+mod rabbitmq;
 mod react;
 mod web;
 
@@ -18,14 +20,17 @@ fn rules() -> &'static [&'static Rule] {
         &go_cancel::RULE,
         &go_cancel::SPAN_RULE,
         &go_cancel::TRACE_PARENT_RULE,
+        &go_cancel::TRANSACTION_RULE,
         &go_cancel::HTTP_RULE,
         &java::SPRING_RULE,
         &java::HIBERNATE_RULE,
         &java::OTEL_RULE,
         &java::CONSTRUCTOR_RULE,
         &java::PAGINATION_RULE,
+        &jest::RULE,
         &react::INTERVAL_RULE,
         &prisma::RULE,
+        &rabbitmq::RULE,
     ]
 }
 
@@ -62,8 +67,13 @@ pub(super) fn definition(id: &str) -> Option<RuleDefinition> {
 pub fn run_framework_checks(root: &Path, changed: &[String]) -> Vec<AgentFinding> {
     let mut findings = go_cancel::run(root, changed);
     findings.extend(java::run(root, changed));
-    findings.extend(react::run(root, changed));
-    findings.extend(prisma::run(root, changed));
+    findings.extend(web::run(root, changed, |path, source, file| {
+        let mut web_findings = react::inspect(path, source, file);
+        web_findings.extend(prisma::inspect(path, source, file));
+        web_findings.extend(rabbitmq::inspect(path, source, file));
+        web_findings.extend(jest::inspect(root, path, source, file));
+        web_findings
+    }));
     findings
 }
 

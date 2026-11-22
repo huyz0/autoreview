@@ -252,3 +252,82 @@ node-writable-ignored-backpressure:
     API: {regex: '^createWriteStream$'}
     STREAM: {kind: identifier}
   languages: {JavaScript: {}, TypeScript: {}}
+
+http-client-disabled-timeout:
+  category: correctness
+  severity: warning
+  message: This client explicitly disables its timeout and Get supplies no request context. Set a client timeout or use a request with a deadline.
+  metadata:
+    references: ["https://pkg.go.dev/net/http#Client"]
+    subcategory: [reliability.deadlines]
+  rule:
+    pattern: return $CLIENT.Get($URL)
+    follows:
+      pattern: '$CLIENT := &http.Client{Timeout: 0}'
+    inside: &net_http_import
+      kind: source_file
+      stopBy: end
+      has: {kind: import_spec, regex: '^"net/http"$', stopBy: end}
+  languages: {Go: {}}
+
+http-retry-without-budget:
+  category: correctness
+  severity: warning
+  semantic: true
+  message: This retry loop keeps issuing remote requests until one succeeds. Bound attempts or use an overall deadline and delay retries.
+  metadata:
+    references: ["https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/"]
+    subcategory: [reliability.retries]
+  rule: &http_retry_until_success
+    pattern: |
+      for {
+        $RESPONSE, $ERR := http.$METHOD($$$ARGS)
+        if $ERR == nil {
+          return $RESPONSE, nil
+        }
+      }
+    inside: *net_http_import
+  constraints:
+    METHOD: {regex: '^(Get|Head)$'}
+  languages: {Go: {}}
+
+http-retry-replays-post:
+  category: correctness
+  severity: info
+  semantic: true
+  message: An HTTP POST can have succeeded before the client receives an error. Bound retries and use server-supported idempotency for operations that must happen once.
+  metadata:
+    references: ["https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/"]
+    subcategory: [reliability.retries]
+  rule: *http_retry_until_success
+  constraints:
+    METHOD: {regex: '^Post$'}
+  languages: {Go: {}}
+
+http-shutdown-with-canceled-context:
+  category: correctness
+  severity: warning
+  message: This context is already canceled when Shutdown starts. Give graceful shutdown its own timeout so it can wait for active requests.
+  metadata:
+    references: ["https://pkg.go.dev/net/http#Server.Shutdown"]
+    subcategory: [reliability.shutdown]
+  rule:
+    pattern: return $SERVER.Shutdown($CTX)
+    follows:
+      kind: expression_statement
+      has: {pattern: <-$CTX.Done()}
+    all:
+      - inside: *net_http_import
+      - inside:
+          kind: function_declaration
+          stopBy:
+            any:
+              - kind: func_literal
+              - kind: function_declaration
+          has:
+            field: parameters
+            has:
+              pattern:
+                context: 'func f($SERVER *http.Server) {}'
+                selector: parameter_declaration
+  languages: {Go: {}}

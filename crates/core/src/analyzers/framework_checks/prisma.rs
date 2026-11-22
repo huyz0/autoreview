@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use super::{children, descendants, location, text, AgentFinding, Node, Path, Rule};
-use super::web::{self, binding_nodes, field_text, first_argument, is_function};
+use super::{children, descendants, location, text, AgentFinding, Node, Rule};
+use super::web::{binding_nodes, field_text, first_argument, is_function, named_imports};
 
 pub(super) const RULE: Rule = Rule {
     id: "prisma-outer-client-write-in-transaction",
@@ -12,22 +12,13 @@ pub(super) const RULE: Rule = Rule {
     reference: "https://docs.prisma.io/docs/orm/v7/prisma-client/queries/transactions#interactive-transactions",
 };
 
-pub(super) fn run(root: &Path, paths: &[String]) -> Vec<AgentFinding> {
-    web::run(root, paths, |path, source, file| {
-        client_bindings(file, source).map_or_else(Vec::new, |clients| writes(path, source, file, &clients))
-    })
+pub(super) fn inspect(path: &str, source: &str, file: Node<'_>) -> Vec<AgentFinding> {
+    client_bindings(file, source).map_or_else(Vec::new, |clients| writes(path, source, file, &clients))
 }
 
 fn prisma_imports<'s>(root: Node<'_>, source: &'s str) -> HashSet<&'s str> {
-    children(root)
-        .filter(|node| node.kind() == "import_statement"
-            && field_text(*node, "source", source).is_some_and(|module| module.trim_matches(['\'', '"']) == "@prisma/client"))
-        .flat_map(descendants)
-        .filter_map(|node| {
-            (node.kind() == "import_specifier" && field_text(node, "name", source) == Some("PrismaClient"))
-                .then(|| field_text(node, "alias", source).or_else(|| field_text(node, "name", source)))
-                .flatten()
-        })
+    named_imports(root, source, "@prisma/client")
+        .filter_map(|(original, local)| (original == "PrismaClient").then_some(local))
         .collect()
 }
 

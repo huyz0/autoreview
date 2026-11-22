@@ -164,6 +164,7 @@ fn run_static_analyzers(run: &ReviewRun<'_>) -> (Vec<Finding>, StaticFindings) {
             audit_rust_deps: run.options.audit_rust_deps,
             tier4_go: run.config.symindex.tier4_go,
             immutable_github_action_refs: run.config.artifact_checks.immutable_github_action_refs,
+            transactional_postgres_migrations: &run.config.artifact_checks.transactional_postgres_migrations,
         },
         run.changed_files,
         run.packs,

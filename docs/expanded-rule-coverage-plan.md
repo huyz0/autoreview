@@ -131,3 +131,29 @@ backpressure signal in a recognized producer loop, use of a fresh
 context when a Go tracer has a parent parameter, and a Rust vector
 length increase when a fresh capacity allocation has no preceding
 references that could initialize it.
+
+Go transaction checks follow typed database parameters, aliases, begin
+errors, and commit or rollback through supported branches. The Tokio
+check flags direct `read_exact` futures recreated in a loop with a
+competing `select!` arm. It resolves the macro and receiver type.
+
+Jest spy cleanup covers explicit restoration, cleanup in `finally`,
+`using`, and visible `afterEach` hooks. A JSON Jest configuration or
+the `jest` section of `package.json` can own automatic restoration.
+Dynamic Jest configuration is left unclassified. RabbitMQ checks
+manual delivery acknowledgements in `finally` when the corresponding
+try body can fail.
+
+The reliability catalog includes Go HTTP checks for an explicitly
+disabled timeout, direct retries without a budget, repeated POSTs,
+and graceful shutdown using a context that has already been canceled.
+
+The PostgreSQL pack uses repository-declared globs for migrations
+guaranteed to run inside a transaction. A file with a Flyway sidecar
+declaring `executeInTransaction=false` is exempt.
+
+```yaml
+artifactChecks:
+  transactionalPostgresMigrations:
+    - 'migrations/postgres/*.sql'
+```

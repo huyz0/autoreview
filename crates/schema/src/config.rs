@@ -507,6 +507,8 @@ impl Default for MineFromCommentsConfig {
 pub struct ArtifactChecksConfig {
     #[serde(default)]
     pub immutable_github_action_refs: bool,
+    #[serde(default)]
+    pub transactional_postgres_migrations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

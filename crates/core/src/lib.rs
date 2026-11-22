@@ -28,6 +28,7 @@ pub use analyzers::bidi_check::run_bidi_control_character_check;
 pub use analyzers::cargo_audit::run_cargo_audit;
 pub use analyzers::cargo_review::run_cargo_review;
 pub use analyzers::workflow_policy::run_workflow_policy;
+pub use analyzers::postgres_migrations::run_postgres_migration_policy;
 pub use analyzers::clippy::run_clippy;
 pub use analyzers::rust_review::{run_rust_review, rust_review_rule, rust_review_semantic_ids};
 pub use analyzers::churn::{detect_shotgun_surgery, run_divergent_change_check};
