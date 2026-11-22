@@ -155,11 +155,13 @@ otel-http-duration-unit:
     pattern: const $HISTOGRAM = $METER.createHistogram($NAME, $OPTIONS)
     follows:
       pattern: const $METER = metrics.getMeter($$$ARGS)
+      stopBy: end
     inside: *known_named_import
   constraints:
-    MODULE: {regex: '^["'']@opentelemetry/api["'']$'}
-    API: {regex: '^metrics$'}
-    NAME: {regex: '^["'']http\.(client|server)\.request\.duration["'']$'}
+    <<: &known_otel_http_metric
+      MODULE: {regex: '^["'']@opentelemetry/api["'']$'}
+      API: {regex: '^metrics$'}
+      NAME: {regex: '^["'']http\.(client|server)\.request\.duration["'']$'}
     OPTIONS: &wrong_duration_unit
       has:
         kind: pair
@@ -180,7 +182,9 @@ otel-http-duration-recorded-milliseconds:
     references: ["https://opentelemetry.io/docs/specs/semconv/http/http-metrics/"]
     subcategory: [observability.metric-units]
   rule:
-    pattern: $HISTOGRAM.record($VALUE, $$$ATTRIBUTES)
+    any:
+      - pattern: $HISTOGRAM.record($VALUE)
+      - pattern: $HISTOGRAM.record($VALUE, $$$ATTRIBUTES)
     all:
       - inside:
           kind: expression_statement
@@ -205,9 +209,7 @@ otel-http-duration-recorded-milliseconds:
             stopBy: end
     inside: *known_named_import
   constraints:
-    MODULE: {regex: '^["'']@opentelemetry/api["'']$'}
-    API: {regex: '^metrics$'}
-    NAME: {regex: '^["'']http\.(client|server)\.request\.duration["'']$'}
+    <<: *known_otel_http_metric
     VALUE:
       any:
         - pattern: performance.now() - $START

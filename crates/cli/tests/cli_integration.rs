@@ -648,6 +648,35 @@ artifactChecks:
     }
 }
 
+#[test]
+fn tsx_metric_units_report_one_finding_for_each_distinct_mismatch() {
+    if !ast_grep_available() {
+        return;
+    }
+    let path = "instrumentation.tsx";
+    let source = r#"import { metrics } from '@opentelemetry/api';
+const meter = metrics.getMeter('service');
+const duration = meter.createHistogram('http.server.request.duration', { unit: 's' });
+const legacy = meter.createHistogram('http.client.request.duration', { unit: 'ms' });
+const started = performance.now();
+duration.record(performance.now() - started);
+duration.record((performance.now() - started) / 1000);
+legacy.record(performance.now() - started);
+"#;
+    let repo = init_repo(&[(path, "// instrumentation\n")]);
+    repo.commit(&[(path, source)], "add metric recordings");
+    let report = scoped_static_diff(repo.path(), "observability.metric-units");
+    let mut actual: Vec<_> = report.findings.iter().map(|finding| (
+        finding.location.range.start_line,
+        finding.source.rule_id.as_deref().unwrap(),
+    )).collect();
+    actual.sort_unstable();
+    assert_eq!(actual, [
+        (4, "typescript-otel-http-duration-unit"),
+        (6, "typescript-otel-http-duration-recorded-milliseconds"),
+    ]);
+}
+
 fn scoped_static_diff(repo: &std::path::Path, subcategory: &str) -> autoreview_schema::ReviewReport {
     let output = Command::cargo_bin("autoreview").unwrap()
         .current_dir(repo)

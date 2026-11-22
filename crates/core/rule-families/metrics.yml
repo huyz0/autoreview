@@ -19,7 +19,7 @@ micrometer-high-cardinality-tag:
             pattern: import io.micrometer.core.instrument.$METER;
           stopBy: end
   constraints:
-    METER:
+    METER: &micrometer_instruments
       regex: '^(Counter|Timer|DistributionSummary)$'
     KEY:
       regex: >-
@@ -41,8 +41,7 @@ micrometer-high-cardinality-tag:
                 stopBy: end
               stopBy: end
       constraints:
-        METER:
-          regex: '^(Counter|Timer|DistributionSummary)$'
+        METER: *micrometer_instruments
         KEY:
           regex: >-
             (?i)^"(?:user[_.-]?id|request[_.-]?id|trace[_.-]?id|span[_.-]?id|session[_.-]?id|email|uuid)"$
@@ -100,3 +99,26 @@ prom-client-high-cardinality-label:
       id: js-prom-client-high-cardinality-label
     TypeScript:
       id: ts-prom-client-high-cardinality-label
+    Go:
+      id: go-prometheus-high-cardinality-label
+      rule:
+        all:
+          - pattern: prometheus.$METER($OPTIONS, $LABELS)
+          - inside:
+              kind: source_file
+              has:
+                kind: import_spec
+                regex: '^"github\.com/prometheus/client_golang/prometheus"$'
+                stopBy: end
+              stopBy: end
+      constraints:
+        METER:
+          regex: '^New(Counter|Gauge|Histogram|Summary)Vec$'
+        LABELS:
+          all:
+            - kind: composite_literal
+            - has:
+                kind: interpreted_string_literal
+                regex: >-
+                  (?i)^(?:"|')(?:user[_.-]?id|request[_.-]?id|trace[_.-]?id|span[_.-]?id|session[_.-]?id|email|uuid)(?:"|')$
+                stopBy: end
