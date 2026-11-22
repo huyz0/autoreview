@@ -503,6 +503,130 @@ fn static_review_uses_the_requested_commit_and_handles_renames_from_a_subdirecto
     assert_eq!(std::fs::read_to_string(repo.path().join("src/café renamed.go")).unwrap(), baseline);
 }
 
+
+#[test]
+fn java_nullability_regressions_are_reviewed_and_replayed_against_the_base() {
+    const RULE: &str = "java-new-nullable-return-breaks-caller";
+    let helper = "src/service/Names.java";
+    let caller = "src/client/Caller.java";
+    let original = r#"package service;
+public class Names {
+    public static String label(boolean missing) {
+        return "ready";
+    }
+    public static String existing(boolean missing) {
+        if (missing) return null;
+        return "ready";
+    }
+    public static String unknown() {
+        return System.getProperty("name");
+    }
+    public static String unreachable() {
+        return "ready";
+    }
+}
+"#;
+    let caller_source = r#"package client;
+import service.Names;
+class Caller {
+    int length() {
+        String value = Names.label(true);
+        return value.length();
+    }
+    int chained() {
+        return service.Names.label(true).length();
+    }
+    int guarded() {
+        String value = Names.label(true);
+        if (/* checked here */ value == null) return 0;
+        return value.length();
+    }
+    int guardedAlias() {
+        String value = Names.label(true);
+        String alias = value;
+        if (alias == null) throw new IllegalStateException();
+        return value.length();
+    }
+    int reassigned() {
+        String value = Names.label(true);
+        value = "ready";
+        return value.length();
+    }
+    String staticCall() {
+        String value = Names.label(true);
+        return value.valueOf(1);
+    }
+    int unrelated() {
+        String value = other.Names.label(true);
+        return value.length();
+    }
+    int existing() {
+        return Names.existing(true).length();
+    }
+    int unknownBaseline() {
+        return Names.unknown().length();
+    }
+    int unreachableNull() {
+        return Names.unreachable().length();
+    }
+    int nonNullArgument() {
+        return Names.label(false).length();
+    }
+}
+"#;
+    let repo = init_repo(&[
+        (helper, original),
+        (caller, caller_source),
+        ("src/other/Names.java", "package other; public class Names { public static String label(boolean b) { return \"other\"; } }"),
+    ]);
+    let base = current_commit(repo.path());
+    let regression = original
+        .replacen("        return \"ready\";", "        if (missing) return null;\n        return \"ready\";", 1)
+        .replace("return System.getProperty(\"name\");", "return null;")
+        .replace("public static String unreachable() {", "public static String unreachable() {\n        if (false) return null;")
+        .replace("public static String existing(boolean missing) {", "public static String existing(boolean missing) { // still nullable");
+    repo.commit(&[(helper, &regression)], "Introduce a nullable return");
+    let bad = current_commit(repo.path());
+    repo.commit(&[(helper, original)], "Restore the helper contract");
+    let fixed = current_commit(repo.path());
+
+    let output = Command::cargo_bin("autoreview").unwrap()
+        .current_dir(repo.path())
+        .args(["diff", "--base", &base, "--head", &bad, "--static-only", "--changed-lines",
+            "--subcategories", "correctness.nullability"])
+        .assert().success().get_output().stdout.clone();
+    let report = report_path_from_stdout(&String::from_utf8(output).unwrap());
+    let review: autoreview_schema::ReviewReport = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    let mut lines: Vec<_> = review.findings.iter()
+        .filter(|item| item.source.rule_id.as_deref() == Some(RULE))
+        .map(|item| {
+            assert_eq!(item.location.path, caller);
+            let related = item.related_locations.as_ref().unwrap();
+            assert!(related.iter().any(|location| location.path == helper && location.range.start_line == 4));
+            assert!(related.iter().any(|location| location.path == caller && location.snippet.contains("Names.label")));
+            item.location.range.start_line
+        }).collect();
+    lines.sort_unstable();
+    assert_eq!(lines, [6, 9], "{:?}", review.findings);
+
+    let suite = serde_json::json!({
+        "cases": [{
+            "name": "new nullable return",
+            "rule": {"tool": "autoreview-frameworks", "id": RULE},
+            "base": base,
+            "before": {"commit": bad, "path": caller, "lines": lines},
+            "after": {"commit": fixed, "path": caller, "lines": []}
+        }]
+    });
+    std::fs::write(repo.path().join("replay.yaml"), suite.to_string()).unwrap();
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["rules", "replay", "--suite", "replay.yaml"]).assert().success().get_output().stdout.clone();
+    let replay: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(replay["rules"][0]["truePositives"], 2);
+    assert_eq!(replay["rules"][0]["falsePositives"], 0);
+    assert_eq!(replay["rules"][0]["falseNegatives"], 0);
+}
+
 #[test]
 fn diff_subcategories_intersect_with_aspects() {
     if !ast_grep_available() {

@@ -52,6 +52,7 @@ pub enum IdentityOperand {
 #[derive(Debug, Clone)]
 pub struct CallSite {
     pub start: usize,
+    pub end: usize,
     pub receiver: Option<String>,
     pub arguments: Vec<Option<IdentityOperand>>,
     pub(crate) local: bool,
@@ -193,6 +194,24 @@ impl<S> Cfg<S> {
 
     pub fn successors(&self, node: NodeId) -> Vec<NodeId> {
         self.edges.iter().filter(|(from, _, _)| *from == node).map(|(_, to, _)| *to).collect()
+    }
+
+    /// Marks nodes reachable from the entry through the modeled edges.
+    pub fn reachable(&self) -> Vec<bool> {
+        self.reachable_where(|_, _| true)
+    }
+
+    pub fn reachable_where(&self, take_edge: impl Fn(NodeId, EdgeKind) -> bool) -> Vec<bool> {
+        let mut reachable = vec![false; self.nodes.len()];
+        let mut pending: Vec<_> = self.nodes.get(self.entry).map(|_| self.entry).into_iter().collect();
+        while let Some(node) = pending.pop() {
+            if !std::mem::replace(&mut reachable[node], true) {
+                pending.extend(self.edges.iter().filter_map(|&(from, to, kind)| {
+                    (from == node && take_edge(from, kind)).then_some(to)
+                }));
+            }
+        }
+        reachable
     }
 
     /// A minimal builder: pushes an empty node and returns its id. Callers

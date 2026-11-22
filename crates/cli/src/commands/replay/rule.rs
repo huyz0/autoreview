@@ -53,6 +53,10 @@ impl Rule {
         finding.source.rule_id.as_deref() == Some(&self.id)
     }
 
+    pub(super) fn compares_revisions(&self) -> bool {
+        self.tool == Tool::AutoreviewFrameworks && self.id == "java-new-nullable-return-breaks-caller"
+    }
+
     pub(super) fn check_replay_support(&self) -> anyhow::Result<()> {
         let definition = autoreview_core::find_rule_definition(&self.id, &[]);
         let kind = definition.as_ref().map(|rule| rule.kind.as_str());

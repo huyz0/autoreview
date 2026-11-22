@@ -163,6 +163,11 @@ as the within-file `duplicate-code-block` check. Use `ast-grep`,
 as the tool name. Install ast-grep for pattern cases. A mismatch makes the
 command exit nonzero after printing the results.
 
+For `java-new-nullable-return-breaks-caller`, set `base` on the case to the
+commit before the nullability change. Both the before and after revisions
+are reviewed against that base. Label the unchanged caller file and the
+dereference lines. Use `tool: autoreview-frameworks`.
+
 To enable the CI gate, add a `gate` list to the same file and commit it to
 the target branch. For example:
 

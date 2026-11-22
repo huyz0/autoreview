@@ -3,6 +3,9 @@ mod executor_shutdown;
 mod hibernate;
 mod hierarchy;
 mod otel;
+mod nullability;
+pub use nullability::run as run_nullability_regressions;
+pub(super) use nullability::RULE as NULLABILITY_REGRESSION_RULE;
 mod pagination;
 mod spring;
 

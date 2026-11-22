@@ -10,6 +10,7 @@ mod react;
 mod web;
 
 pub use outbox::run_outbox_policy;
+pub use java::run_nullability_regressions;
 
 use std::path::Path;
 
@@ -33,6 +34,7 @@ fn rules() -> impl Iterator<Item = &'static Rule> {
         &java::CONSTRUCTOR_RULE,
         &java::EXECUTOR_SHUTDOWN_RULE,
         &java::PAGINATION_RULE,
+        &java::NULLABILITY_REGRESSION_RULE,
         &jest::RULE,
         &react::INTERVAL_RULE,
         &prisma::RULE,

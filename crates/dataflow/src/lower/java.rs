@@ -175,13 +175,18 @@ fn lower_statement_inner(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current
             current
         }
         "return_statement" => {
-            // Unlike Go, `return_statement`'s value is a direct child
-            // (verified separately, not assumed from Go's shape).
-            let value = stmt.named_child(0).filter(|n| n.kind() == "identifier").map(|n| text(n, source).to_string());
+            let expression = stmt.named_child(0);
+            let value = expression
+                .filter(|node| node.kind() == "identifier")
+                .map(|node| text(node, source).to_owned());
+            if let Some(call) = expression.filter(|node| node.kind() == "method_invocation") {
+                lower_return_call(cfg, current, call, source, None);
+            }
+            cfg.nodes[current].return_start = Some(stmt.start_byte());
             cfg.nodes[current].stmts.push(Stmt::Return { value });
-            cfg.edges.push((current, cfg.exit, EdgeKind::Fallthrough));
-            cfg.push_node(stmt.start_position().row as u32 + 1)
+            end_flow(cfg, stmt, current, EdgeKind::Fallthrough)
         }
+        "throw_statement" => end_flow(cfg, stmt, current, EdgeKind::Exceptional),
         "if_statement" => lower_if(cfg, stmt, source, current),
         "for_statement" | "while_statement" | "enhanced_for_statement" => lower_loop(cfg, stmt, source, current),
         _ => {
@@ -189,6 +194,23 @@ fn lower_statement_inner(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current
             current
         }
     }
+}
+
+fn end_flow(cfg: &mut Cfg<Stmt>, stmt: Node<'_>, current: NodeId, kind: EdgeKind) -> NodeId {
+    cfg.edges.push((current, cfg.exit, kind));
+    cfg.push_node(stmt.start_position().row as u32 + 1)
+}
+
+fn lower_return_call(
+    cfg: &mut Cfg<Stmt>, current: NodeId, call: Node<'_>, source: &[u8], assigned_to: Option<String>,
+) {
+    let Some(mut target) = method_invocation_target_name(call, source) else { return };
+    if let Some(receiver) = call.child_by_field_name("object").filter(|node| node.kind() == "method_invocation") {
+        let temp = format!("$result@{}", receiver.start_byte());
+        lower_return_call(cfg, current, receiver, source, Some(temp.clone()));
+        target = format!("{temp}.{target}");
+    }
+    cfg.emit(current, super::site::named(target, call_arg_identifiers(call, source), assigned_to, call, source), super::line(call));
 }
 
 /// Recognizes `x != null` / `null != x` (and the `==` counterpart) — the
@@ -199,7 +221,7 @@ fn lower_statement_inner(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current
 /// grep's bundled dump — unlike Go's condition, which has no such
 /// wrapper), so this unwraps one level before matching.
 fn recognize_null_guard(cond: Node, source: &[u8]) -> Option<(String, crate::cfg::GuardOp)> {
-    let cond = if cond.kind() == "parenthesized_expression" { cond.named_child(0)? } else { cond };
+    let cond = unwrap_condition(cond)?;
     if cond.kind() != "binary_expression" {
         return None;
     }
@@ -209,15 +231,22 @@ fn recognize_null_guard(cond: Node, source: &[u8]) -> Option<(String, crate::cfg
         ("null_literal", "identifier") => right,
         _ => return None,
     };
-    let op_text = text(cond, source);
-    let op = if op_text.contains("!=") {
-        crate::cfg::GuardOp::NotEqual
-    } else if op_text.contains("==") {
-        crate::cfg::GuardOp::Equal
-    } else {
-        return None;
+    let op = match cond.child_by_field_name("operator")?.kind() {
+        "!=" => crate::cfg::GuardOp::NotEqual,
+        "==" => crate::cfg::GuardOp::Equal,
+        _ => return None,
     };
     Some((text(var_node, source).to_string(), op))
+}
+
+fn unwrap_condition(mut node: Node<'_>) -> Option<Node<'_>> {
+    while node.kind() == "parenthesized_expression" {
+        let mut cursor = node.walk();
+        let expression = node.named_children(&mut cursor)
+            .find(|child| !matches!(child.kind(), "line_comment" | "block_comment"))?;
+        node = expression;
+    }
+    Some(node)
 }
 
 fn lower_if(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> NodeId {
@@ -228,7 +257,11 @@ fn lower_if(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> 
     });
 
     let true_start = cfg.push_node(stmt.start_position().row as u32 + 1);
-    cfg.edges.push((current, true_start, EdgeKind::True));
+    let condition = stmt.child_by_field_name("condition").and_then(unwrap_condition);
+    let literal = condition.map(|node| node.kind());
+    if literal != Some("false") {
+        cfg.edges.push((current, true_start, EdgeKind::True));
+    }
     if let Some((var, op)) = &null_guard {
         cfg.nodes[true_start].stmts.push(Stmt::Guard { var: var.clone(), op: *op, against: crate::cfg::GuardAgainst::Nil });
     }
@@ -238,21 +271,24 @@ fn lower_if(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> 
         None => true_start,
     };
 
-    let false_end = if let Some(alt) = stmt.child_by_field_name("alternative") {
-        let false_start = cfg.push_node(stmt.start_position().row as u32 + 1);
+    let false_start = cfg.push_node(stmt.start_position().row as u32 + 1);
+    if literal != Some("true") {
         cfg.edges.push((current, false_start, EdgeKind::False));
-        if alt.kind() == "block" { lower_block(cfg, alt, source, false_start) } else { lower_statement(cfg, alt, source, false_start) }
-    } else {
-        current
+    }
+    if let Some((var, op)) = null_guard {
+        use crate::cfg::GuardOp::{Equal, NotEqual};
+        let opposite = match op { Equal => NotEqual, NotEqual => Equal };
+        cfg.nodes[false_start].stmts.push(Stmt::Guard { var, op: opposite, against: crate::cfg::GuardAgainst::Nil });
+    }
+    let false_end = match stmt.child_by_field_name("alternative") {
+        Some(block) if block.kind() == "block" => lower_block(cfg, block, source, false_start),
+        Some(single) => lower_statement(cfg, single, source, false_start),
+        None => false_start,
     };
 
     let join = cfg.push_node(stmt.end_position().row as u32 + 1);
     cfg.edges.push((true_end, join, EdgeKind::Fallthrough));
-    if false_end != current || stmt.child_by_field_name("alternative").is_some() {
-        cfg.edges.push((false_end, join, EdgeKind::Fallthrough));
-    } else {
-        cfg.edges.push((current, join, EdgeKind::False));
-    }
+    cfg.edges.push((false_end, join, EdgeKind::Fallthrough));
     join
 }
 

@@ -78,6 +78,14 @@ pub fn dedupe_fuzzy(findings: Vec<Finding>, line_window: u32, title_threshold: f
 
     'outer: for finding in sorted {
         for existing in kept.iter_mut() {
+            let same_analyzer_rule = finding.source.kind == autoreview_schema::FindingSourceKind::Analyzer
+                && existing.source.kind == finding.source.kind
+                && existing.source.tool == finding.source.tool
+                && finding.source.rule_id.is_some()
+                && existing.source.rule_id == finding.source.rule_id;
+            if same_analyzer_rule {
+                continue;
+            }
             let same_file = existing.location.path == finding.location.path;
             let near_line = (existing.location.range.start_line as i64 - finding.location.range.start_line as i64).unsigned_abs() as u32 <= line_window;
             if same_file && near_line && title_similarity(&existing.title, &finding.title) >= title_threshold {

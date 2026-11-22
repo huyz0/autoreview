@@ -40,6 +40,7 @@ pub(in crate::analyzers::framework_checks::java) struct Method {
     pub generic: bool,
     pub visibility: Visibility,
     pub is_static: bool,
+    pub return_type: Option<String>,
     pub is_final: bool,
     pub location: Location,
     pub start: usize,
@@ -220,7 +221,7 @@ impl Type {
 }
 
 impl Method {
-    fn parse(java: &Java<'_>, node: Node<'_>, interface: bool) -> Option<Self> {
+    pub(in crate::analyzers::framework_checks::java) fn parse(java: &Java<'_>, node: Node<'_>, interface: bool) -> Option<Self> {
         let params = node.child_by_field_name("parameters")?;
         let parameters = type_children(params)
             .filter(|part| part.kind() != "receiver_parameter")
@@ -233,6 +234,7 @@ impl Method {
             generic: node.child_by_field_name("type_parameters").is_some(),
             visibility: visibility(node, interface),
             is_static: modifiers(node).any(|modifier| modifier.kind() == "static"),
+            return_type: node.child_by_field_name("type").and_then(|node| simple_type(java, node)),
             is_final: modifiers(node).any(|modifier| modifier.kind() == "final"),
             location: java.location(node),
             start: node.start_byte(),
@@ -296,7 +298,7 @@ fn transaction(java: &Java<'_>, node: Node<'_>) -> Option<Transaction> {
     })
 }
 
-fn type_key(java: &Java<'_>, declaration: Node<'_>) -> Option<String> {
+pub(in crate::analyzers::framework_checks::java) fn type_key(java: &Java<'_>, declaration: Node<'_>) -> Option<String> {
     let mut hierarchy = vec![java.field(declaration, "name")?];
     let mut parent = declaration.parent()?;
     while matches!(parent.kind(), "class_body" | "interface_body") {

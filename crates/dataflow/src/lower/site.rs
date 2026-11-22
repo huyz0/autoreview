@@ -31,6 +31,7 @@ pub(crate) fn capture(call: Node<'_>, source: &[u8]) -> Option<Box<CallSite>> {
         .collect();
     Some(Box::new(CallSite {
         start: call.start_byte(),
+        end: call.end_byte(),
         receiver,
         arguments,
         local: local_call(call),

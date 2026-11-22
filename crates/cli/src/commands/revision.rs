@@ -27,9 +27,23 @@ pub(super) fn compare_protobuf(
     if changed.is_empty() {
         return Ok(Vec::new());
     }
-    let merge_base = git_path_value(repo, &["merge-base", base, head])?;
-    let snapshot = checkout_snapshot(repo, &merge_base)?;
+    let snapshot = merge_base_snapshot(repo, base, head)?;
     autoreview_core::run_protobuf_policy(snapshot.path(), head_root, &changed, globs)
+}
+
+pub(super) fn compare_java_nullability(
+    repo: &Path, head_root: &Path, base: &str, head: &str, paths: &[String],
+) -> anyhow::Result<Vec<autoreview_schema::AgentFinding>> {
+    if !paths.iter().any(|path| path.ends_with(".java")) {
+        return Ok(Vec::new());
+    }
+    let snapshot = merge_base_snapshot(repo, base, head)?;
+    Ok(autoreview_core::run_nullability_regressions(snapshot.path(), head_root, paths))
+}
+
+fn merge_base_snapshot(repo: &Path, base: &str, head: &str) -> anyhow::Result<tempfile::TempDir> {
+    let merge_base = git_path_value(repo, &["merge-base", base, head])?;
+    checkout_snapshot(repo, &merge_base)
 }
 
 /// External analyzers need a filesystem, and some need Git history. Share

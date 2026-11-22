@@ -31,6 +31,7 @@ struct Suite {
 struct Case {
     name: String,
     rule: Rule,
+    base: Option<String>,
     before: Label,
     after: Label,
 }
@@ -113,6 +114,7 @@ fn replay_side(
     snapshots: &mut BTreeMap<String, tempfile::TempDir>,
     rule: &Rule,
     label: &Label,
+    base: Option<&str>,
     pinned: bool,
 ) -> anyhow::Result<SnapshotResult> {
     let path = Path::new(&label.path);
@@ -161,9 +163,15 @@ fn replay_side(
         "label contains a line outside '{}' at {commit}",
         label.path
     );
-    let lines = rule
-        .tool
-        .scan(snapshot, std::slice::from_ref(&label.path))?
+    let findings = match base {
+        Some(base) => {
+            let facts = autoreview_core::collect_diff_facts(&repo.to_string_lossy(), base, &commit, None)?;
+            let changed: Vec<_> = facts.files.into_iter().map(|file| file.path).collect();
+            super::revision::compare_java_nullability(repo, snapshot, base, &commit, &changed)?
+        }
+        None => rule.tool.scan(snapshot, std::slice::from_ref(&label.path))?,
+    };
+    let lines = findings
         .into_iter()
         .filter(|finding| finding.location.path == label.path && rule.matches(finding))
         .map(|finding| finding.location.range.start_line)
@@ -193,9 +201,15 @@ fn replay(repo: &Path, suite: &Suite, gate_only: bool) -> anyhow::Result<Vec<Cas
         case.rule
             .check_replay_support()
             .with_context(|| format!("case '{}'", case.name))?;
-        let before = replay_side(repo, &mut snapshots, &case.rule, &case.before, gate_only)
+        let base = case.base.as_deref();
+        ensure!(
+            base.is_some() == case.rule.compares_revisions(),
+            "case '{}' must specify base only for a rule that compares revisions", case.name
+        );
+        let base = base.map(|reference| resolve_commit(repo, reference)).transpose()?;
+        let before = replay_side(repo, &mut snapshots, &case.rule, &case.before, base.as_deref(), gate_only)
             .with_context(|| format!("case '{}' before", case.name))?;
-        let after = replay_side(repo, &mut snapshots, &case.rule, &case.after, gate_only)
+        let after = replay_side(repo, &mut snapshots, &case.rule, &case.after, base.as_deref(), gate_only)
             .with_context(|| format!("case '{}' after", case.name))?;
         ensure!(
             before.commit != after.commit,
