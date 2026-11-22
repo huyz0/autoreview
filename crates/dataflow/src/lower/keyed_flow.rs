@@ -33,6 +33,7 @@ impl Flow<'_> {
             }
             "try_statement" | "try_expression" => self.protected(cfg, node, current),
             "throw_statement" | "throw_expression" => {
+                super::record_evaluation(cfg, current, node);
                 let stmt = Stmt::Throw {
                     exception: handlers::throw_type(node, self.source),
                     implicit: false,
@@ -40,6 +41,7 @@ impl Flow<'_> {
                 cfg.terminate(current, stmt, line(node))
             }
             "defer_statement" => {
+                super::record_evaluation(cfg, current, node);
                 if let Some(stmt) = self.deferred(node) {
                     cfg.emit(current, stmt, line(node));
                 }
@@ -61,6 +63,14 @@ impl Flow<'_> {
         let current = self.exceptional_edge(cfg, node, current);
         if matches!(node.kind(), "if_statement" | "if_expression") {
             cfg.nodes[current].condition = keyed_syntax::condition(node, self.source);
+            // Go evaluates an optional initializer before the test.
+            if node.child_by_field_name("initializer").is_none() {
+                if let Some(test) = node.child_by_field_name("condition") {
+                    super::record_evaluation(cfg, current, test);
+                }
+            }
+        } else {
+            super::record_evaluation(cfg, current, node);
         }
         self.lower_return_value(cfg, node, current);
         let start = cfg.nodes[current].stmts.len();
@@ -241,6 +251,7 @@ pub(crate) fn supports_try(node: Node<'_>) -> bool {
 pub(super) fn expression_body(cfg: &mut Cfg<Stmt>, expr: Node<'_>, source: &[u8], at: NodeId) {
     let at =
         throwing_call(expr, source).map_or(at, |call| cfg.fork_exception(at, call, line(expr)));
+    super::record_evaluation(cfg, at, expr);
     if let Some(call) = direct_call(expr, source) {
         cfg.emit(at, call, line(expr));
     }

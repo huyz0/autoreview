@@ -24,47 +24,15 @@ pub(crate) fn writes(node: Node<'_>, source: &[u8]) -> Vec<BindingWrite> {
 }
 
 fn write(node: Node<'_>, source: &[u8]) -> Option<BindingWrite> {
-    let (target, value, assignment) = match node.kind() {
-        "assignment" | "assignment_expression" | "assignment_statement" => (
-            node.child_by_field_name("left")?,
-            node.child_by_field_name("right")?,
-            true,
-        ),
-        "short_var_declaration" => (
-            node.child_by_field_name("left")?,
-            node.child_by_field_name("right")?,
-            false,
-        ),
-        "let_declaration" => (
-            node.child_by_field_name("pattern")?,
-            node.child_by_field_name("value")?,
-            false,
-        ),
-        "variable_declarator" | "var_spec" => (
-            node.child_by_field_name("name")?,
-            node.child_by_field_name("value")?,
-            false,
-        ),
-        "property_declaration" => kotlin_initializer(node)?,
-        _ => return None,
-    };
-    if assignment
-        && source
-            .get(target.end_byte()..value.start_byte())
-            .is_none_or(|op| op.trim_ascii() != b"=")
-    {
-        return None;
-    }
+    let (target, value, assignment) = assignment_parts(node, source)?;
+    let value = value?;
     let name = simple(target)
         .filter(|target| identifier(*target))?
         .utf8_text(source)
         .ok()?
         .to_owned();
     let value = simple(value).and_then(|value| {
-        if matches!(
-            value.kind(),
-            "new_expression" | "object_creation_expression"
-        ) {
+        if matches!(value.kind(), "new_expression" | "object_creation_expression") {
             Some(IdentityOperand::Fresh {
                 name: name.clone(),
                 start: value.start_byte(),
@@ -78,11 +46,45 @@ fn write(node: Node<'_>, source: &[u8]) -> Option<BindingWrite> {
     if !assignment && value.is_none() {
         return None;
     }
-    Some(BindingWrite {
-        name,
-        start: node.start_byte(),
-        value,
-    })
+    Some(BindingWrite { name, start: node.start_byte(), value })
+}
+
+pub(crate) fn assignment_parts<'tree>(
+    node: Node<'tree>, source: &[u8],
+) -> Option<(Node<'tree>, Option<Node<'tree>>, bool)> {
+    let (target, value, assignment) = match node.kind() {
+        "assignment" | "assignment_expression" | "assignment_statement" => (
+            node.child_by_field_name("left")?,
+            node.child_by_field_name("right"),
+            true,
+        ),
+        "short_var_declaration" => (
+            node.child_by_field_name("left")?,
+            node.child_by_field_name("right"),
+            false,
+        ),
+        "let_declaration" => (
+            node.child_by_field_name("pattern")?,
+            node.child_by_field_name("value"),
+            false,
+        ),
+        "variable_declarator" | "var_spec" => (
+            node.child_by_field_name("name")?,
+            node.child_by_field_name("value"),
+            false,
+        ),
+        "property_declaration" => {
+            let (target, value, _) = kotlin_initializer(node)?;
+            (target, Some(value), false)
+        }
+        _ => return None,
+    };
+    if assignment
+        && !node.children(&mut node.walk()).any(|token| token.utf8_text(source) == Ok("="))
+    {
+        return None;
+    }
+    Some((target, value, assignment))
 }
 
 pub(super) fn expression(node: Node<'_>) -> Option<Node<'_>> {

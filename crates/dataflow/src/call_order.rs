@@ -4,6 +4,7 @@
 
 mod bindings;
 mod contract;
+mod result_use;
 pub use contract::{ContractLanguage, ContractMode, ResultContract};
 mod identity;
 mod plan;

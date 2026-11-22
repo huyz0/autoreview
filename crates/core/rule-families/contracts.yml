@@ -9,6 +9,17 @@ discarded-remove-file-result:
   contract: {mode: must-use, import: "std::fs", methods: [remove_file]}
   languages: {Rust: {}}
 
+discarded-objects-comparison:
+  kind: call-sequence
+  category: correctness
+  severity: warning
+  message: "Use the boolean returned by Objects.equals or Objects.deepEquals to make the comparison have an effect."
+  metadata:
+    subcategory: [correctness.logic]
+    references: ["https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Objects.html#equals(java.lang.Object,java.lang.Object)"]
+  contract: {mode: must-use, import: java.util.Objects, methods: [equals, deepEquals]}
+  languages: {Java: {}}
+
 tokio-blocking-task-detached:
   category: correctness
   severity: warning

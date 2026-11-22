@@ -30,7 +30,8 @@ impl<'a, 'src> Plan<'a, 'src> {
     ) -> Option<Self> {
         let mut sources = Sources::default();
         sources.collect(cfg)?;
-        let syntax = Syntax::scan(function, source, &sources.writes, unit)?;
+        let track_results = spec.contract.as_ref().is_some_and(|contract| contract.mode == ContractMode::MustUse);
+        let syntax = Syntax::scan(function, source, &sources.writes, unit, track_results)?;
         let api = spec.contract.as_ref().map(|contract| ApiMatcher::new(contract, function, source));
         if api.as_ref().is_some_and(|api| !api.supports_local_handles(function, source)) {
             return None;

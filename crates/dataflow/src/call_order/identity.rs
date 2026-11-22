@@ -63,6 +63,7 @@ impl<'src> Syntax<'src> {
         source: &'src [u8],
         writes: &HashSet<usize>,
         unit: usize,
+        track_results: bool,
     ) -> Option<Self> {
         let mut syntax = Self {
             owner: function.start_byte(),
@@ -78,7 +79,7 @@ impl<'src> Syntax<'src> {
             if let Some(name) = local_callable(node, function, source) {
                 syntax.local_callables.insert(name);
             }
-            syntax.bindings.visit(node, source, writes.contains(&node.start_byte()));
+            syntax.bindings.visit(node, source, writes.contains(&node.start_byte()), track_results);
             nodes.extend(children(node));
         }
         syntax.bindings.record_borrowed_writes();
@@ -125,6 +126,10 @@ impl<'src> Syntax<'src> {
 
     pub(super) fn taken_name(&self, name: &str) -> bool {
         self.bindings.names().any(|binding| binding == name)
+    }
+
+    pub(super) fn local_result_binding(&self, name: &str, start: usize, defining: bool) -> Option<usize> {
+        self.bindings.local_value(name, start, defining)
     }
 
     pub(super) fn shadows_api(&self, name: &str) -> bool {

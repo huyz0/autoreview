@@ -158,6 +158,115 @@ fn every_call_order_rule_declares_a_category() {
 }
 
 #[test]
+fn assigned_results_are_used_only_by_reachable_reads_of_the_original_value() {
+    let cases = [
+        ("move.go", "go-os-rename-discarded-error", r#"package storage
+import "os"
+func overwritten(from, to string) error {
+    var err, alias = os.Rename(from, to), error(nil) // unused result
+    err, alias = nil, err
+    alias = err
+    return alias
+}
+func swapped(from, to string) error {
+    var err, alias = os.Rename(from, to), error(nil)
+    err, alias = nil, err
+    return alias
+}
+func checked(from, to string) error {
+    if err := os.Rename(from, to); err != nil { return err }
+    return nil
+}
+func named(from, to string) (err error) {
+    err = os.Rename(from, to)
+    return
+}
+func deferred(from, to string) {
+    err := os.Rename(from, to)
+    defer inspect(err)
+}
+func blank(from, to string) {
+    err := os.Rename(from, to) // unused result
+    _ = err
+}
+"#),
+        ("Main.kt", "kotlin-discarded-run-catching-result", r#"import kotlin.runCatching
+fun parse(s: String, active: Boolean): Int {
+    val result = runCatching { s.toInt() }
+    if (active) return result.getOrThrow()
+    return 0
+}
+fun show(s: String) {
+    val parsed = runCatching { s.toInt() }
+    println("Read: $parsed")
+}
+fun overwrite(s: String): Int {
+    var parsed = runCatching { s.toInt() } // unused result
+    parsed = runCatching { 0 }
+    return parsed.getOrThrow()
+}
+"#),
+        ("lib.rs", "rust-discarded-remove-file-result", r#"use std::fs::remove_file;
+fn overwrite(path: &str, spare: &str, refresh: bool) -> std::io::Result<()> {
+    let mut removed = remove_file(path); // unused result
+    if refresh {
+        removed = remove_file(spare);
+    } else {
+        removed = Ok(());
+    }
+    removed
+}
+fn log(path: &str) {
+    let removed = remove_file(path);
+    println!("{removed:?}");
+}
+fn propagate(path: &str) -> std::io::Result<()> {
+    let _removed = remove_file(path)?;
+    Ok(())
+}
+fn shadow(path: &str) -> std::io::Result<()> {
+    let removed = remove_file(path); // unused result
+    let removed = Ok(());
+    removed
+}
+fn forward(path: &str) -> std::io::Result<()> {
+    let outcome = remove_file(path);
+    let outcome = outcome;
+    outcome
+}
+"#),
+        ("Page.tsx", "typescript-node-fs-discarded-promise", r#"import { rename } from 'node:fs/promises';
+export async function Page(from: string, to: string) {
+    const result = rename(from, to); // unused result
+    return <main><result /></main>;
+    await result;
+}
+export async function Render(from: string, to: string) {
+    const pending = rename(from, to);
+    try { return <main />; } finally { await pending; }
+}
+export function Schedule(from: string, to: string) {
+    let pending = rename(from, to);
+    schedule(() => pending.catch(report));
+}
+const preview = rename => {
+    const pending = rename('fake', 'never');
+};
+"#),
+    ];
+    for (path, rule, source) in cases {
+        let repo = write_single_file(path, source);
+        let findings = run_dataflow_check(repo.path(), &[path.into()], &[]);
+        let mut matches: Vec<_> = findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some(rule))
+            .map(|finding| finding.location.range.start_line).collect();
+        matches.sort_unstable();
+        let expected: Vec<_> = source.lines().enumerate().filter(|(_, text)| text.contains("// unused result"))
+            .map(|(index, _)| index as u32 + 1).collect();
+        assert_eq!(matches, expected, "{path}: {findings:#?}");
+    }
+}
+
+#[test]
 fn applies_pack_call_sequences_to_go_and_web_languages() {
     use autoreview_core::ResolvedRulePack;
     use autoreview_schema::RulePackTrust;
