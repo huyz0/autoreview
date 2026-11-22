@@ -1,4 +1,5 @@
 mod parser;
+mod rules;
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -10,39 +11,7 @@ use globset::{Glob, GlobSetBuilder};
 use super::artifact_policy::{read_snapshot_file, source_lines, Rule};
 use parser::{Field, Message};
 
-const POLICY: &str = "artifactChecks.protobufCompatibility";
-const SCHEMA_GUIDE: &str = "https://protobuf.dev/programming-guides/proto3/#updating";
-const TOOL: &str = "autoreview-protobuf";
-
-pub(super) const REUSED_TAG: Rule = Rule {
-    id: "protobuf-field-tag-reused",
-    category: "correctness",
-    subcategory: "compatibility.schema-evolution",
-    tool: TOOL,
-    title: "Protobuf field number assigned to another field",
-    reference: SCHEMA_GUIDE,
-    enabled_by: POLICY,
-};
-
-pub(super) const UNRESERVED_TAG: Rule = Rule {
-    id: "protobuf-removed-field-tag-not-reserved",
-    category: "correctness",
-    subcategory: "compatibility.schema-evolution",
-    tool: TOOL,
-    title: "Removed Protobuf field number is still available",
-    reference: SCHEMA_GUIDE,
-    enabled_by: POLICY,
-};
-
-pub(super) const INCOMPATIBLE_FIELD: Rule = Rule {
-    id: "protobuf-incompatible-field-change",
-    category: "correctness",
-    subcategory: "compatibility.rolling-upgrades",
-    tool: TOOL,
-    title: "Protobuf field change can break mixed-version readers",
-    reference: SCHEMA_GUIDE,
-    enabled_by: POLICY,
-};
+pub(super) use rules::{INCOMPATIBLE_FIELD, REUSED_TAG, UNRESERVED_TAG};
 
 struct Declaration<'a> {
     path: &'a str,
@@ -121,8 +90,7 @@ fn compare_message(
     findings: &mut Vec<AgentFinding>,
 ) {
     for (&tag, current) in &new.message.fields {
-        let earlier = old.message.fields.get(&tag);
-        if let Some(finding) = check_new_field(name, old, new, tag, earlier, current) {
+        if let Some(finding) = check_new_field(name, old, new, tag, current) {
             findings.push(finding);
         }
     }
@@ -141,9 +109,9 @@ fn check_new_field(
     old: &Declaration<'_>,
     new: &Declaration<'_>,
     tag: u32,
-    earlier: Option<&Field<'_>>,
     current: &Field<'_>,
 ) -> Option<AgentFinding> {
+    let earlier = old.message.fields.get(&tag);
     if earlier.is_none() {
         if let Some((&previous_tag, previous_field)) = old
             .message
@@ -153,9 +121,9 @@ fn check_new_field(
         {
             return Some(finding(
                 &INCOMPATIBLE_FIELD,
-                name,
-                tag,
-                format!("the field number changed from {previous_tag} to {tag}"),
+                format!(
+                    "`{name}` field {tag}: the field number changed from {previous_tag} to {tag}."
+                ),
                 (new, &current.span, Side::New),
                 (old, &previous_field.span, Side::Old),
             ));
@@ -176,9 +144,7 @@ fn check_new_field(
     let evidence = earlier.map_or(&old.message.span, |field| &field.span);
     Some(finding(
         rule,
-        name,
-        tag,
-        reason,
+        format!("`{name}` field {tag}: {reason}."),
         (new, &current.span, Side::New),
         (old, evidence, Side::Old),
     ))
@@ -206,9 +172,7 @@ fn check_removed_field(
     };
     Some(finding(
         rule,
-        name,
-        tag,
-        reason.into(),
+        format!("`{name}` field {tag}: {reason}."),
         (old, &earlier.span, Side::Old),
         (new, &new.message.span, Side::New),
     ))
@@ -318,19 +282,12 @@ fn location((declaration, span, side): Evidence<'_>) -> Location {
 
 fn finding(
     rule: &Rule,
-    name: &str,
-    tag: u32,
-    reason: String,
+    message: String,
     primary: Evidence<'_>,
     related: Evidence<'_>,
 ) -> AgentFinding {
     let primary = location(primary);
-    let mut finding = rule.finding(
-        &primary.path,
-        primary.range,
-        &primary.snippet,
-        format!("`{name}` field {tag}: {reason}."),
-    );
+    let mut finding = rule.finding(&primary.path, primary.range, &primary.snippet, message);
     finding.location.side = primary.side;
     finding.related_locations = Some(vec![location(related)]);
     finding

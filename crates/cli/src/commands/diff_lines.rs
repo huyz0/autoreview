@@ -93,40 +93,33 @@ fn decode_path(path: &[u8], prefix: &[u8]) -> anyhow::Result<Option<String>> {
         return Ok(None);
     }
     let path = path.strip_suffix(b"\t").unwrap_or(path);
-    let mut decoded = Vec::new();
-    let path = if let Some(quoted) = path.strip_prefix(b"\"").and_then(|p| p.strip_suffix(b"\"")) {
-        let mut bytes = quoted.iter().copied();
-        while let Some(byte) = bytes.next() {
-            let byte = if byte == b'\\' {
-                match bytes.next() {
-                    Some(b'\\') => b'\\',
-                    Some(b'"') => b'"',
-                    Some(b'a') => 7,
-                    Some(b'b') => 8,
-                    Some(b't') => b'\t',
-                    Some(b'n') => b'\n',
-                    Some(b'v') => 11,
-                    Some(b'f') => 12,
-                    Some(b'r') => b'\r',
-                    Some(first @ b'0'..=b'3') => {
-                        let second = bytes.next().filter(|n| matches!(n, b'0'..=b'7'));
-                        let third = bytes.next().filter(|n| matches!(n, b'0'..=b'7'));
-                        let (Some(second), Some(third)) = (second, third) else {
-                            anyhow::bail!("invalid quoted Git path");
-                        };
-                        (first - b'0') * 64 + (second - b'0') * 8 + (third - b'0')
-                    }
-                    _ => anyhow::bail!("invalid quoted Git path"),
-                }
-            } else {
-                byte
-            };
-            decoded.push(byte);
-        }
-        decoded.as_slice()
-    } else {
-        path
-    };
+    let decoded = path.strip_prefix(b"\"").and_then(|p| p.strip_suffix(b"\""))
+        .map(decode_quoted_path).transpose()?;
+    let path = decoded.as_deref().unwrap_or(path);
     let path = path.strip_prefix(prefix).ok_or_else(|| anyhow::anyhow!("invalid path in Git diff"))?;
     Ok(Some(std::str::from_utf8(path)?.to_owned()))
+}
+
+fn decode_quoted_path(path: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let mut bytes = path.iter().copied();
+    let mut decoded = Vec::with_capacity(path.len());
+    while let Some(byte) = bytes.next() {
+        decoded.push(if byte == b'\\' { decode_escape(&mut bytes)? } else { byte });
+    }
+    Ok(decoded)
+}
+
+fn decode_escape(bytes: &mut impl Iterator<Item = u8>) -> anyhow::Result<u8> {
+    const ESCAPES: &[(u8, u8)] = &[
+        (b'\\', b'\\'), (b'"', b'"'), (b'a', 7), (b'b', 8), (b't', b'\t'),
+        (b'n', b'\n'), (b'v', 11), (b'f', 12), (b'r', b'\r'),
+    ];
+    let value = bytes.next().and_then(|first| match first {
+        b'0'..=b'3' => {
+            let mut digit = || bytes.next().filter(|number| matches!(number, b'0'..=b'7')).map(|number| number - b'0');
+            Some((first - b'0') * 64 + digit()? * 8 + digit()?)
+        }
+        _ => ESCAPES.iter().find_map(|&(escaped, decoded)| (escaped == first).then_some(decoded)),
+    });
+    value.ok_or_else(|| anyhow::anyhow!("invalid quoted Git path"))
 }
