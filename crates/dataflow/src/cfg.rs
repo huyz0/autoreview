@@ -40,8 +40,10 @@ pub enum CallTarget {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IdentityOperand {
     Binding(String),
+    Fresh { name: String, start: usize },
     String(String),
     Integer(String),
+    Boolean(bool),
 }
 
 /// Positional operands are separate from the flattened arguments used for taint.
@@ -70,10 +72,19 @@ pub enum ClosureKind {
 }
 
 #[derive(Debug, Clone)]
+pub struct BindingWrite {
+    pub(crate) name: String,
+    pub(crate) start: usize,
+    pub(crate) value: Option<IdentityOperand>,
+}
+
+#[derive(Debug, Clone)]
 pub enum Stmt {
     Assign { lhs: VarId, rhs: RhsShape },
     Return { value: Option<VarId> },
-    Throw,
+    Throw { exception: Option<String>, implicit: bool },
+    Rebind(BindingWrite),
+    DeferredBlock(Box<Cfg<Stmt>>),
     DeferredCall { target: String, site: Option<Box<CallSite>> },
     Call { target: CallTarget, args: Vec<VarId>, assigned_to: Option<VarId>, site: Option<Box<CallSite>> },
     Guard { var: VarId, op: GuardOp, against: GuardAgainst },
@@ -98,6 +109,8 @@ pub struct CfgNode<S> {
     pub stmts: Vec<S>,
     pub source_line: u32,
     statement_lines: Vec<Option<u32>>,
+    pub(crate) condition: Option<(String, bool)>,
+    pub(crate) throwing_call: Option<(String, usize)>,
 }
 
 impl<S> CfgNode<S> {
@@ -123,6 +136,7 @@ pub enum EdgeKind {
     /// The true/false arms of a conditional.
     True,
     False,
+    Exceptional,
     /// A loop's back-edge (re-entering the loop header).
     Loop,
 }
@@ -135,6 +149,7 @@ pub struct Cfg<S> {
     pub edges: Vec<(NodeId, NodeId, EdgeKind)>,
     // Remaining copies of finally blocks for distinct exit paths.
     pub(crate) keyed_flow: Option<usize>,
+    pub(crate) keyed_exceptions: bool,
 }
 
 impl<S> Cfg<S> {
@@ -152,12 +167,19 @@ impl<S> Cfg<S> {
     /// a fluent builder API, since the lowering passes' control flow is
     /// varied enough that a generic builder would just get in the way.
     pub fn push_node(&mut self, source_line: u32) -> NodeId {
-        self.nodes.push(CfgNode { stmts: Vec::new(), source_line, statement_lines: Vec::new() });
+        self.nodes.push(CfgNode { stmts: Vec::new(), source_line, statement_lines: Vec::new(), condition: None, throwing_call: None });
         self.nodes.len() - 1
     }
 
+    pub(crate) fn emit(&mut self, at: NodeId, stmt: S, line: u32) {
+        let node = &mut self.nodes[at];
+        let start = node.stmts.len();
+        node.stmts.push(stmt);
+        node.record_statement_lines(start, line);
+    }
+
     pub fn new_empty() -> Self {
-        Cfg { entry: 0, exit: 0, nodes: Vec::new(), edges: Vec::new(), keyed_flow: None }
+        Cfg { entry: 0, exit: 0, nodes: Vec::new(), edges: Vec::new(), keyed_flow: None, keyed_exceptions: false }
     }
 }
 

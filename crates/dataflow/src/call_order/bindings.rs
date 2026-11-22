@@ -32,11 +32,17 @@ impl<'src> Bindings<'src> {
         self.declarations.contains_key(name) && self.resolve(name, start).is_none()
     }
 
-    pub(super) fn visit(&mut self, node: Node<'_>, source: &'src [u8]) {
+    pub(super) fn visit(&mut self, node: Node<'_>, source: &'src [u8], modeled_write: bool) {
         self.record_declarations(node, source);
-        if let Some(target) = write_target(node, source) {
-            self.writes.extend(names_in(target, source));
+        if !modeled_write {
+            if let Some(target) = write_target(node, source) {
+                self.writes.extend(names_in(target, source));
+            }
         }
+    }
+
+    pub(super) fn can_read(&self, name: &str) -> bool {
+        self.declarations.get(name).is_some_and(Option::is_some) && !self.writes.contains(name)
     }
 
     pub(super) fn resolve<'a>(

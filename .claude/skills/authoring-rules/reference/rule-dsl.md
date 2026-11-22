@@ -214,7 +214,7 @@ Use `identity` when a function must remove the same entry it registered.
 At a branch join, an entry stays pending if any incoming path leaves it
 registered. `before` checks the entry used by the trigger call.
 `checkBeforeReturn` checks pending entries when the function returns,
-throws explicitly, or reaches the end of its body.
+throws on a modeled path, or reaches the end of its body.
 
 ```yaml
 id: pending-request-cleanup
@@ -243,31 +243,36 @@ The message can include `{collection}`, `{key}`, and `{trigger_call}`.
 A finding links to the registration line.
 
 Use a scoped rule for an explicit cleanup contract, such as a pending
-request registry. Collections use stable local or parameter names. Keys
-can also use simple string or decimal integer literals. Direct aliases,
-including chains of aliases from simple initializers, keep the original
-identity. For example, `const alias = pending` allows `alias.remove(key)`
-to satisfy the rule above. A receiver pattern can match the name at the
-call site or the original binding name.
+request registry. The engine follows local and parameter bindings, direct
+copies, and simple reassignments along each path. Keys can also be simple
+string, decimal integer, or boolean literals. Assigning a new value does
+not change the identity of an entry already registered through the old
+value. A receiver pattern can match the name at the call site or the
+original binding name.
 
-In Java, Kotlin, JavaScript, TypeScript, and TSX, a `finally` block runs
-before execution continues past its `try` or leaves it by a return or
-explicit throw. In Go, a direct `defer pending.Remove(key)` or
-`defer remove(pending, key)` schedules cleanup for the pair on that path.
-A deferred zero-argument function literal can also remove entries with
-an unconditional list of calls using stable captures. A scheduled removal
-counts at return or fallthrough. A `before` call earlier in the function
-still sees the entry as pending.
+Java, Kotlin, JavaScript, TypeScript, and TSX route explicit throws and
+possible exceptions from modeled call and construction expressions through
+`catch` and `finally`. Standalone `await` calls also have a rejection path.
+Calls named by the rule are treated as atomic events. Typed catches use
+syntactically known throw types and broad handlers. When a typed handler
+may or may not catch the exception, both routes remain possible.
 
-Computed keys, fields, reassignments, and shadowed bindings fall outside
-the supported identity analysis. The checker skips functions with
-unsupported flow such as catch handlers, try-with-resources, loops,
-switches, or match expressions. Implicit exceptions and Go panic routes
-are outside the model. A potentially matching cleanup the engine cannot
-model, such as a conditional removal inside a deferred closure, suppresses the check for
-that function. A pair represents membership, so repeated registration of
-the same pair still takes one removal. Native collection writes such as
-Go map indexing are outside this call-based DSL.
+In Go, direct `defer pending.Remove(key)` or `defer remove(pending, key)`
+captures the pair when the defer is scheduled. An inline zero-argument
+deferred closure reads its captures at exit and can make conditional
+removals. Deferred actions run in reverse scheduling order, on the paths
+that scheduled them. Earlier `before` calls still see pending entries.
+
+The analysis skips functions whose cleanup depends on unmodeled effects,
+such as a computed key it cannot resolve or a deferred helper body outside
+the function. Shadowed names, complex writes, Java try-with-resources,
+embedded Kotlin try expressions, loops, switches, and match expressions
+have limited or no coverage. Exception modeling covers direct call and
+construction expressions in supported statement positions. It does not
+infer exceptions from arbitrary expressions or Go panic. The analysis
+also bounds the number of paths it explores. A pair represents membership,
+so repeated registration of the same pair still takes one removal. Native
+collection writes such as Go map indexing are outside this call-based DSL.
 
 ## `semantic: true`
 

@@ -48,7 +48,7 @@ pub struct EntryIdentity {
     pub key_argument: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntryHit {
     pub collection: String,
     pub key: String,

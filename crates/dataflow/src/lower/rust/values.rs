@@ -21,7 +21,7 @@ impl Lower<'_> {
                     let rhs = self
                         .variable(expr, names)
                         .map_or(RhsShape::Unknown, RhsShape::Var);
-                    self.emit(at, line(expr), Stmt::Assign { lhs, rhs });
+                    self.cfg.emit(at, Stmt::Assign { lhs, rhs }, line(expr));
                 }
                 at
             }
@@ -71,15 +71,15 @@ impl Lower<'_> {
                 }
             }
         }
-        self.emit(
+        self.cfg.emit(
             at,
-            line(expr),
             Stmt::Call {
                 target: callee,
                 args,
                 assigned_to: target,
                 site: crate::lower::site::capture(expr, self.source),
             },
+            line(expr),
         );
         at
     }
