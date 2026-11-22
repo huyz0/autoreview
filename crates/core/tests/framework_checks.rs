@@ -61,10 +61,28 @@ class Adapter implements Provider {
 }
 "#;
     let found = scan(&[("Base.java", source)], &["Base.java"]);
-    assert_eq!(found.len(), 1, "{found:#?}");
-    assert_eq!(found[0].source.rule_id.as_deref(), Some("java-constructor-calls-overridable-method"));
+    let calls: Vec<_> = found
+        .iter()
+        .map(|item| item.location.snippet.as_str())
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            "this.configure(value)",
+            "overload(value)",
+            "resolve(\"key\")"
+        ],
+        "{found:#?}"
+    );
+    assert_eq!(
+        found[0].source.rule_id.as_deref(),
+        Some("java-constructor-calls-overridable-method")
+    );
     assert_eq!(found[0].location.snippet, "this.configure(value)");
-    assert_eq!(found[0].related_locations.as_ref().unwrap()[0].snippet, "protected void configure(String value) {}");
+    assert_eq!(
+        found[0].related_locations.as_ref().unwrap()[0].snippet,
+        "protected void configure(String value) {}"
+    );
 }
 
 #[test]
@@ -86,8 +104,14 @@ func helper() {
     let found = scan(&[("proxy.go", source)], &["proxy.go"]);
     assert_eq!(found.len(), 2, "{found:#?}");
     for finding in found {
-        assert_eq!(finding.source.rule_id.as_deref(), Some("go-http-handler-discards-request-context"));
-        assert_eq!(finding.related_locations.as_ref().unwrap()[0].snippet, "req");
+        assert_eq!(
+            finding.source.rule_id.as_deref(),
+            Some("go-http-handler-discards-request-context")
+        );
+        assert_eq!(
+            finding.related_locations.as_ref().unwrap()[0].snippet,
+            "req"
+        );
     }
 }
 
@@ -116,8 +140,14 @@ import org.springframework.web.bind.annotation.RestController;
 "#;
     let found = scan(&[("Endpoint.java", source)], &["Endpoint.java"]);
     assert_eq!(found.len(), 1, "{found:#?}");
-    assert_eq!(found[0].source.rule_id.as_deref(), Some("java-spring-unpaged-repository-endpoint"));
-    assert_eq!(found[0].location.snippet, "this.rows.findAll(Pageable.unpaged())");
+    assert_eq!(
+        found[0].source.rule_id.as_deref(),
+        Some("java-spring-unpaged-repository-endpoint")
+    );
+    assert_eq!(
+        found[0].location.snippet,
+        "this.rows.findAll(Pageable.unpaged())"
+    );
 }
 
 #[test]
@@ -294,11 +324,177 @@ class Service {
         .iter()
         .map(|finding| finding.location.range.start_line)
         .collect();
-    assert_eq!(lines, [4, 5], "{found:#?}");
+    assert_eq!(lines, [4, 5, 7], "{found:#?}");
     let woven = format!(
         "import org.springframework.transaction.annotation.EnableTransactionManagement;\n{java}\n@EnableTransactionManagement(mode = AdviceMode.ASPECTJ) class Config {{}}"
     );
     assert!(scan(&[("Service.java", &woven)], &["Service.java"]).is_empty());
+}
+
+#[test]
+fn constructor_resolves_inherited_protected_methods_and_interface_defaults() {
+    let base = r#"package parents;
+public class Parent {
+    protected void prepare(String task) {}
+    protected final void prepare(Object task) {}
+    protected final void fixed() {}
+    void packageOnly() {}
+    private void hidden() {}
+}
+"#;
+    let contract = r#"package parents;
+public interface Contract {
+    default void check() {}
+}
+"#;
+    let child = r#"package app;
+import parents.Parent;
+import parents.Contract;
+public class Child extends Parent implements Contract {
+    Child(String task) {
+        prepare(task);
+        this.prepare((Object) task);
+        super.prepare(task);
+        fixed();
+        check();
+        checkDeferred(() -> check());
+    }
+    private void checkDeferred(Runnable later) {}
+}
+"#;
+    let found = scan(
+        &[
+            ("parents/Parent.java", base),
+            ("parents/Contract.java", contract),
+            ("app/Child.java", child),
+        ],
+        &["app/Child.java"],
+    );
+    let evidence: Vec<_> = found
+        .iter()
+        .map(|item| {
+            (
+                item.location.snippet.as_str(),
+                item.related_locations.as_ref().unwrap()[0].path.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        evidence,
+        [
+            ("prepare(task)", "parents/Parent.java"),
+            ("check()", "parents/Contract.java")
+        ],
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn inherited_transaction_resolution_honors_dispatch_and_override_metadata() {
+    let parent = r#"package model;
+import org.springframework.transaction.annotation.Transactional;
+public class BaseService {
+    @Transactional public void save(String name) {}
+    public void save(Object name) {}
+    @Transactional public void inherited() {}
+    @Transactional public void overridden() {}
+}
+"#;
+    let api = r#"package model;
+import org.springframework.transaction.annotation.Transactional;
+public interface TaskApi {
+    @Transactional default void refresh() {}
+}
+"#;
+    let worker = r#"package application;
+import model.BaseService;
+import model.TaskApi;
+import org.springframework.transaction.annotation.Transactional;
+class Worker extends BaseService implements TaskApi {
+    public void run(Worker proxy, String value, Object payload) {
+        this.save(value);
+        super.save(value);
+        save(payload);
+        save(null);
+        proxy.save(value);
+        inherited();
+        overridden();
+        refresh();
+    }
+    @Override public void overridden() {}
+    @Transactional public void alreadyTransactional() { inherited(); }
+}
+"#;
+    let found = scan(
+        &[
+            ("model/BaseService.java", parent),
+            ("model/TaskApi.java", api),
+            ("application/Worker.java", worker),
+        ],
+        &["application/Worker.java"],
+    );
+    let evidence: Vec<_> = found
+        .iter()
+        .map(|item| {
+            (
+                item.location.snippet.as_str(),
+                item.related_locations.as_ref().unwrap()[0].path.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        evidence,
+        [
+            ("this.save(value)", "model/BaseService.java"),
+            ("super.save(value)", "model/BaseService.java"),
+            ("inherited()", "model/BaseService.java"),
+            ("overridden()", "model/BaseService.java"),
+            ("refresh()", "model/TaskApi.java"),
+        ],
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn inherited_lookup_ignores_inaccessible_and_unresolved_candidates() {
+    let base = r#"package common;
+import org.springframework.transaction.annotation.Transactional;
+public class Base {
+    @Transactional void checkpoint() {}
+    @Transactional private void reset() {}
+    @Transactional protected void write(Object value) {}
+}
+"#;
+    let bridge = r#"package unrelated;
+public class Bridge extends common.Base {}
+"#;
+    let child = r#"package common;
+import org.springframework.transaction.annotation.Transactional;
+class Child extends unrelated.Bridge {
+    Child() { reset(); }
+    void run() {
+        checkpoint();
+        write(value());
+    }
+    private void reset() {}
+    private void checkpoint() {}
+    protected void write(String text) {}
+    String value() { return ""; }
+}
+class UnknownHierarchy extends vendor.Parent {
+    void run() { write("text"); }
+    @Transactional void write(Object object) {}
+}
+"#;
+    let found = scan(
+        &[
+            ("Base.java", base),
+            ("Bridge.java", bridge),
+            ("Child.java", child),
+        ],
+        &["Child.java"],
+    );
+    assert!(found.is_empty(), "{found:#?}");
 }
 
 #[test]

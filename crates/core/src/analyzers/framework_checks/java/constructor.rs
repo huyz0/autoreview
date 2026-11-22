@@ -2,7 +2,8 @@ use autoreview_schema::AgentFinding;
 use tree_sitter::Node;
 
 use super::super::Rule;
-use super::{arity, class_members, descendants, local_target, modifiers, Java};
+use super::hierarchy::{Hierarchy, Lookup};
+use super::{class_members, descendants, modifiers, Java};
 
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     id: "java-constructor-calls-overridable-method",
@@ -12,31 +13,28 @@ pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     reference: "https://docs.pmd-code.org/pmd-doc-7.22.0/pmd_rules_java_errorprone.html#constructorcallsoverridablemethod",
 };
 
-pub(super) fn findings(java: &Java<'_>) -> Vec<AgentFinding> {
+pub(super) fn findings(java: &Java<'_>, hierarchy: &Hierarchy) -> Vec<AgentFinding> {
     descendants(java.root)
         .filter(|node| node.kind() == "class_declaration")
         .filter(|class| modifiers(*class).all(|modifier| modifier.kind() != "final"))
-        .flat_map(|class| class_findings(java, class))
+        .filter_map(|class| Some((class, hierarchy.owner(java, class)?)))
+        .flat_map(|(class, owner)| class_findings(java, class, &Lookup::new(hierarchy, owner)))
         .collect()
 }
 
-fn class_findings<'a>(java: &Java<'a>, class: Node<'a>) -> Vec<AgentFinding> {
-    let methods: Vec<_> = class_members(class)
-        .filter(|member| member.kind() == "method_declaration")
-        .collect();
-    let has_inherited_members = ["superclass", "interfaces"]
-        .iter()
-        .any(|field| class.child_by_field_name(field).is_some());
+fn class_findings(java: &Java<'_>, class: Node<'_>, lookup: &Lookup<'_>) -> Vec<AgentFinding> {
     class_members(class)
         .filter(|member| member.kind() == "constructor_declaration")
-        .filter_map(|constructor| constructor.child_by_field_name("body"))
-        .flat_map(eager_calls)
-        // Without inherited signatures, only a zero-argument call is unambiguous.
-        .filter(|call| !has_inherited_members || arity(*call, "arguments") == Some(0))
-        .filter_map(|call| {
-            let target = local_target(java, call, &methods)?;
-            overridable(target)
-                .then(|| RULE.finding(java.location(call), vec![java.location(target)]))
+        .filter_map(|constructor| Some((constructor, constructor.child_by_field_name("body")?)))
+        .flat_map(|(constructor, body)| {
+            eager_calls(body)
+                .filter_map(move |call| {
+                    Some((call, lookup.resolve(java, constructor, call, false)?))
+                })
+                .filter(|(_, target)| target.overridable())
+                .map(|(call, target)| {
+                    RULE.finding(java.location(call), vec![target.method.location.clone()])
+                })
         })
         .collect()
 }
@@ -62,8 +60,4 @@ fn eager_calls(body: Node<'_>) -> impl Iterator<Item = Node<'_>> {
         }
         None
     })
-}
-
-fn overridable(method: Node<'_>) -> bool {
-    modifiers(method).all(|modifier| !matches!(modifier.kind(), "private" | "static" | "final"))
 }
