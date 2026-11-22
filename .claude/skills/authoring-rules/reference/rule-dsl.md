@@ -302,17 +302,17 @@ class. It replaces `after`, `before`, `identity`, and
 analysis as keyed cleanup.
 
 ```yaml
-id: go-gzip-writer-unclosed
+id: example-zip-writer-lifecycle
 language: Go
 category: correctness
 severity: warning
 kind: call-sequence
-message: "Close the gzip writer to write its footer."
+message: "Close the ZIP writer to finish the archive directory."
 contract:
   mode: must-complete
-  import: compress/gzip
+  import: archive/zip
   methods: [NewWriter]
-  borrows: [Write, Flush]
+  borrows: [Create, CreateHeader]
 unless:
   - call: Close
 ```

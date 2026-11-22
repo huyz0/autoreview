@@ -1,6 +1,6 @@
 import java.util.concurrent.CompletableFuture;
 
-class Main {
+class TaskOwner {
     private CompletableFuture<Void> pending;
 
     void store(Runnable work) {

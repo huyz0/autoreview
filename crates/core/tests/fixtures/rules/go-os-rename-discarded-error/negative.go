@@ -2,7 +2,7 @@ package storage
 
 import filesystem "os"
 
-func publish(staging, destination string) error {
+func moveStagedFile(staging, destination string) error {
     return filesystem.Rename(staging, destination)
 }
 
