@@ -29,6 +29,9 @@ deep tier.
   and Hibernate reads that initialize a mapped lazy collection for each
   result of a typed query. The Spring check assumes proxy mode. The Hibernate
   check reports a query pattern that should be confirmed in generated SQL.
+  Java constructor dispatch and Spring self-invocation trace superclass and
+  interface methods declared in the repository. Findings point to the resolved
+  declaration or transaction annotation, including in another file.
 - **Telemetry checks** flag likely high-cardinality Prometheus and Micrometer
   labels, Go OpenTelemetry spans that can exit without ending, and Java
   OpenTelemetry scopes discarded without a cleanup owner.

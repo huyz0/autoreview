@@ -2,9 +2,9 @@ use autoreview_schema::AgentFinding;
 use tree_sitter::Node;
 
 use super::super::Rule;
-use super::{children, class_members, containing, descendants, local_target, Java};
+use super::hierarchy::{Hierarchy, Lookup};
+use super::{class_members, containing, descendants, Java};
 
-const TX: &str = "org.springframework.transaction.annotation.Transactional";
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     id: "java-spring-transaction-self-invocation",
     category: "correctness",
@@ -13,39 +13,51 @@ pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     reference: "https://docs.spring.io/spring/reference/data-access/transaction/declarative/annotations.html",
 };
 
-pub(super) fn findings(java: &Java<'_>) -> Vec<AgentFinding> {
-    let mut findings = Vec::new();
-    if source_enables_aspectj(java) {
-        return findings;
+pub(super) fn findings(java: &Java<'_>, hierarchy: &Hierarchy) -> Vec<AgentFinding> {
+    if hierarchy.aspectj_enabled(java) {
+        return Vec::new();
     }
-    for class in descendants(java.root).filter(|node| node.kind() == "class_declaration") {
-        let methods: Vec<_> = class_members(class)
-            .filter(|node| node.kind() == "method_declaration")
-            .collect();
-        for &caller in &methods {
-            for call in calls(caller) {
-                if let Some(annotation) = target_annotation(java, caller, call, &methods) {
-                    findings
-                        .push(RULE.finding(java.location(call), vec![java.location(annotation)]));
-                }
-            }
-        }
-    }
-    findings
-}
-
-fn source_enables_aspectj(java: &Java<'_>) -> bool {
-    const ENABLE: &str = "org.springframework.transaction.annotation.EnableTransactionManagement";
     descendants(java.root)
         .filter(|node| node.kind() == "class_declaration")
-        .filter_map(|class| java.annotation(class, ENABLE))
-        .any(|annotation| {
-            java.field(annotation, "arguments")
-                .is_some_and(|arguments| arguments.contains("ASPECTJ"))
+        .filter_map(|class| Some((class, hierarchy.owner(java, class)?)))
+        .flat_map(|(class, owner)| {
+            class_findings(java, class, &Lookup::new(hierarchy, owner), hierarchy)
         })
+        .collect()
+}
+
+fn class_findings(
+    java: &Java<'_>,
+    class: Node<'_>,
+    lookup: &Lookup<'_>,
+    hierarchy: &Hierarchy,
+) -> Vec<AgentFinding> {
+    class_members(class)
+        .filter(|node| node.kind() == "method_declaration")
+        .flat_map(|caller| {
+            let declared = lookup.declared(java, caller);
+            let caller_transaction = declared.filter(|method| method.overridable())
+                .and_then(|method| hierarchy.transaction(method));
+            calls(caller).filter_map(move |call| {
+                let target = lookup.resolve(java, caller, call, true)?;
+                if !target.overridable()
+                    || declared.is_some_and(|caller| std::ptr::eq(caller.method, target.method))
+                {
+                    return None;
+                }
+                let transaction = hierarchy.transaction(target)?;
+                let same_defaults = caller_transaction.is_some_and(|caller| {
+                    caller.default_settings && transaction.default_settings
+                });
+                (!same_defaults)
+                    .then(|| RULE.finding(java.location(call), vec![transaction.location.clone()]))
+            })
+        })
+        .collect()
 }
 
 fn calls(caller: Node<'_>) -> impl Iterator<Item = Node<'_>> {
+    let class_body = containing(caller, "class_body");
     caller
         .child_by_field_name("body")
         .into_iter()
@@ -53,39 +65,6 @@ fn calls(caller: Node<'_>) -> impl Iterator<Item = Node<'_>> {
         .filter(move |node| {
             node.kind() == "method_invocation"
                 && containing(*node, "method_declaration") == Some(caller)
-        })
-}
-
-fn target_annotation<'a>(
-    java: &Java<'a>,
-    caller: Node<'a>,
-    call: Node<'a>,
-    methods: &[Node<'a>],
-) -> Option<Node<'a>> {
-    if containing(call, "class_body") != containing(caller, "class_body") {
-        return None;
-    }
-    let target = local_target(java, call, methods)?;
-    if target == caller || !proxyable(target) {
-        return None;
-    }
-    let annotation = java.annotation(target, TX)?;
-    let class_transaction =
-        containing(caller, "class_declaration").and_then(|class| java.annotation(class, TX));
-    if annotation.kind() == "marker_annotation"
-        && (java.annotation(caller, TX).is_some() || class_transaction.is_some())
-    {
-        return None;
-    }
-    Some(annotation)
-}
-
-fn proxyable(method: Node<'_>) -> bool {
-    children(method)
-        .find(|node| node.kind() == "modifiers")
-        .is_some_and(|mods| {
-            let mut cursor = mods.walk();
-            let mut modifiers = mods.children(&mut cursor);
-            modifiers.all(|node| !matches!(node.kind(), "private" | "static" | "final"))
+                && containing(*node, "class_body") == class_body
         })
 }

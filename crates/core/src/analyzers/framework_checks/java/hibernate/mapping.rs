@@ -7,7 +7,7 @@ use autoreview_langsupport::{parser_for, Language};
 use autoreview_schema::Location;
 use tree_sitter::Node;
 
-use super::super::{annotations, children, class_members, Java};
+use super::super::{annotations, children, class_members, source_files, Java};
 
 pub(in crate::analyzers::framework_checks::java) type Entities = HashMap<String, Entity>;
 
@@ -51,35 +51,6 @@ pub(in crate::analyzers::framework_checks::java) fn index(root: &Path) -> Entiti
     entities
 }
 
-fn source_files(root: &Path) -> Vec<std::path::PathBuf> {
-    let mut pending = vec![root.to_owned()];
-    let mut java = Vec::new();
-    while let Some(dir) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            let path = entry.path();
-            if kind.is_dir() && source_directory(&entry.file_name()) {
-                pending.push(path);
-            } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "java") {
-                java.push(path);
-            }
-        }
-    }
-    java
-}
-
-fn source_directory(name: &std::ffi::OsStr) -> bool {
-    !name.to_string_lossy().starts_with('.')
-        && !matches!(
-            name.to_str(),
-            Some("target" | "build" | "node_modules" | "vendor" | "out")
-        )
-}
 
 fn entity(java: &Java<'_>, declaration: Node<'_>) -> Option<(String, Entity)> {
     if declaration.kind() != "class_declaration" {

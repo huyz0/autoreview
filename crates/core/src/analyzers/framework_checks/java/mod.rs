@@ -1,5 +1,6 @@
 mod constructor;
 mod hibernate;
+mod hierarchy;
 mod otel;
 mod pagination;
 mod spring;
@@ -11,6 +12,7 @@ use autoreview_schema::AgentFinding;
 use tree_sitter::{Node, Tree};
 
 use super::{children, descendants, location, parse_source, text};
+use hierarchy::Hierarchy;
 
 pub(super) use constructor::RULE as CONSTRUCTOR_RULE;
 pub(super) use hibernate::RULE as HIBERNATE_RULE;
@@ -24,13 +26,15 @@ pub(super) fn run(root: &Path, paths: &[String]) -> Vec<AgentFinding> {
         return findings;
     };
     let mut entity_index = None;
+    let mut hierarchy = None;
     for path in paths.iter().filter(|path| path.ends_with(".java")) {
         let Some((source, tree)) = parse_source(&mut parser, &root.join(path)) else {
             continue;
         };
         let java = Java::new(path, &source, &tree);
-        findings.extend(constructor::findings(&java));
-        findings.extend(spring::findings(&java));
+        let types = hierarchy.get_or_insert_with(|| Hierarchy::load(root));
+        findings.extend(constructor::findings(&java, types));
+        findings.extend(spring::findings(&java, types));
         if source.contains("unpaged") {
             findings.extend(pagination::findings(&java));
         }
@@ -154,27 +158,32 @@ fn modifiers(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
     modifiers.children(&mut cursor).collect::<Vec<_>>().into_iter()
 }
 
-fn arity(node: Node<'_>, field: &str) -> Option<usize> {
-    Some(children(node.child_by_field_name(field)?).filter(|node| {
-        !matches!(node.kind(), "line_comment" | "block_comment")
-    }).count())
+fn source_files(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut pending = vec![root.to_owned()];
+    let mut java = Vec::new();
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() && source_directory(&entry.file_name()) {
+                pending.push(path);
+            } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "java") {
+                java.push(path);
+            }
+        }
+    }
+    java
 }
 
-fn arity_of(method: Node<'_>) -> Option<usize> {
-    let params = method.child_by_field_name("parameters")?;
-    if children(params).any(|node| node.kind() == "spread_parameter") {
-        return None;
-    }
-    arity(method, "parameters")
-}
-
-fn local_target<'a>(java: &Java<'a>, call: Node<'a>, methods: &[Node<'a>]) -> Option<Node<'a>> {
-    if call.child_by_field_name("object").is_some_and(|receiver| receiver.kind() != "this") {
-        return None;
-    }
-    let name = java.field(call, "name")?;
-    let arguments = arity(call, "arguments")?;
-    let mut candidates = methods.iter().copied().filter(|method| java.field(*method, "name") == Some(name));
-    let target = candidates.next()?;
-    (candidates.next().is_none() && arity_of(target) == Some(arguments)).then_some(target)
+fn source_directory(name: &std::ffi::OsStr) -> bool {
+    !name.to_string_lossy().starts_with('.')
+        && !matches!(
+            name.to_str(),
+            Some("target" | "build" | "node_modules" | "vendor" | "out")
+        )
 }
