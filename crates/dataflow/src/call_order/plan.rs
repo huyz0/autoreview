@@ -52,7 +52,10 @@ impl<'a, 'src> Plan<'a, 'src> {
     ) -> Option<Call> {
         let start = site.map_or(0, |site| site.start);
         let matches = |patterns| self.syntax.matches(patterns, name, start, values);
-        let removed = matches(&self.spec.unless);
+        let removed = matches(&self.spec.unless) && (
+            !self.spec.contract.as_ref().is_some_and(|contract| contract.complete_observed)
+            || site.is_some_and(|site| site.observed)
+        );
         let entry = site.and_then(|site| {
             if let Some(selector) = self.spec.identity {
                 return self.syntax.entry(selector, site, values);
@@ -77,21 +80,32 @@ impl<'a, 'src> Plan<'a, 'src> {
 
     pub(super) fn has_registration(&self) -> bool {
         match &self.api {
-            Some(api) => self.syntax.any_call(|name| api.matches(name, |root| self.syntax.taken_name(root))),
+            Some(api) => self.syntax.any_call(|name| api.matches(name, |root| self.syntax.shadows_api(root))),
             None => self.syntax.has_registration(&self.spec.after),
         }
     }
 
     pub(super) fn source_mode(&self, name: &str) -> Option<ContractMode> {
         let api = self.api.as_ref()?;
-        api.matches(name, |root| self.syntax.taken_name(root))
+        api.matches(name, |root| self.syntax.shadows_api(root))
             .then_some(api.mode())
+    }
+
+    pub(super) fn is_completion(&self, name: &str, start: usize, values: &Values) -> bool {
+        self.syntax.matches(&self.spec.unless, name, start, values)
+    }
+
+    pub(super) fn needs_completion(&self, site: &CallSite) -> bool {
+        let requires_await = self.spec.contract.as_ref().is_some_and(|contract| contract.acquire_awaited);
+        (!requires_await || site.awaited) && !(site.awaited && self.spec.unless.iter().any(|pattern| pattern.matches("await")))
     }
 
     pub(super) fn may_throw(&self, name: &str, start: usize, values: &Values) -> bool {
         // A call selected by this rule is a modeled event. Opaque calls can
         // transfer before completing their ordinary statement.
-        self.source_mode(name).is_none() && [&self.spec.after, &self.spec.unless, &self.spec.before]
+        (self.source_mode(name).is_none()
+            || self.spec.contract.as_ref().is_some_and(|contract| contract.acquire_awaited))
+            && [&self.spec.after, &self.spec.unless, &self.spec.before]
             .into_iter()
             .all(|patterns| !self.syntax.matches(patterns, name, start, values))
     }

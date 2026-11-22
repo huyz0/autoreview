@@ -69,6 +69,7 @@ fn classify_rhs(node: Node, source: &[u8]) -> RhsShape {
 pub(super) fn call_target_name(call: Node, source: &[u8]) -> Option<String> {
     let callee = call.named_child(0)?;
     match callee.kind() {
+        "call_expression" => call_target_name(callee, source),
         "identifier" => Some(text(callee, source).to_string()),
         "navigation_expression" => {
             let receiver = callee.named_child(0)?;

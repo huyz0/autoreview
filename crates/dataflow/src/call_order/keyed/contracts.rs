@@ -1,7 +1,6 @@
 use crate::call_order::ContractMode;
 
 use super::{CallOrderHit, CallSite, Engine, Entry, IdentityOperand, State, StatementLocation};
-use crate::call_order::plan::Call;
 
 impl Engine<'_, '_, '_, '_> {
     pub(super) fn apply_contract_source(
@@ -26,13 +25,10 @@ impl Engine<'_, '_, '_, '_> {
             }
             Some(ContractMode::MustUse) => {}
             Some(ContractMode::MustComplete) => {
-                let value = IdentityOperand::Fresh {
-                    name: name.to_owned(),
-                    start: site.start,
-                    age: 0,
-                    unit: 0,
-                };
-                let handle = state.materialize(plan, &value, site.start)?;
+                if !plan.needs_completion(site) {
+                    return Some(true);
+                }
+                let handle = state.allocate(plan, name, site.start);
                 state.pending.insert(
                     Entry::handle(handle.clone()),
                     self.registration(frame, location.line),
@@ -48,22 +44,10 @@ impl Engine<'_, '_, '_, '_> {
         frame: usize,
         name: &str,
         site: Option<&CallSite>,
-        call: &Call,
         state: &mut State<'_>,
     ) {
-        let Some(plan) = self.program.frames[frame].plan.as_ref() else {
-            return;
-        };
-        let Some(contract) = &plan.spec.contract else {
-            return;
-        };
-        let Some(site) =
-            site.filter(|_| !call.removed && contract.mode == ContractMode::MustComplete)
-        else {
-            return;
-        };
-        let method = name.rsplit('.').next().unwrap_or(name);
-        if contract.borrows.iter().any(|borrow| borrow == method) {
+        let Some((plan, site)) = self.program.frames[frame].plan.as_ref().zip(site) else { return };
+        if !allows_unresolved_transfer(plan, name, site, &state.values) {
             return;
         }
         let receiver = site
@@ -76,4 +60,15 @@ impl Engine<'_, '_, '_, '_> {
             }
         }
     }
+}
+
+fn allows_unresolved_transfer(
+    plan: &crate::call_order::plan::Plan<'_, '_>, name: &str, site: &CallSite,
+    values: &super::Values,
+) -> bool {
+    let Some(contract) = &plan.spec.contract else { return false };
+    let method = name.rsplit('.').next().unwrap_or(name);
+    contract.mode == ContractMode::MustComplete
+        && !plan.is_completion(name, site.start, values)
+        && !contract.borrows.iter().any(|borrow| borrow == method)
 }

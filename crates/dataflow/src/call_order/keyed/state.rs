@@ -94,20 +94,19 @@ impl<'graph> State<'graph> {
         operand: &IdentityOperand,
         location: usize,
     ) -> Option<IdentityOperand> {
-        if let IdentityOperand::Fresh {
-            start, name, age, ..
-        } = operand
-        {
-            let unit = plan.syntax.unit;
-            self.age(unit, *start);
-            return Some(IdentityOperand::Fresh {
-                name: name.clone(),
-                start: *start,
-                age: *age,
-                unit,
-            });
+        if let IdentityOperand::Fresh { start, name, .. } = operand {
+            if let Some((_, Some(value))) = self.result.as_ref().filter(|(site, _)| site == start) {
+                return Some(value.clone());
+            }
+            return Some(self.allocate(plan, name, *start));
         }
         self.operand(plan, operand, location)
+    }
+
+    pub(super) fn allocate(&mut self, plan: &Plan<'_, '_>, name: &str, start: usize) -> IdentityOperand {
+        let unit = plan.syntax.unit;
+        self.age(unit, start);
+        IdentityOperand::Fresh { name: name.to_owned(), start, age: 0, unit }
     }
 
     pub(super) fn operand(

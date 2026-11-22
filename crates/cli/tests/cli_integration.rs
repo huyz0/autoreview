@@ -663,17 +663,63 @@ fn api_contract_rules_replay_on_bad_and_fixed_commits() {
     let fix_files = FIXTURES.map(|(_, path, _, fixed, _)| (path, fixed));
     repo.commit(&fix_files, "Satisfy API contracts");
     let after = current_commit(repo.path());
-    let cases: Vec<_> = FIXTURES.iter().map(|(id, path, _, _, line)| serde_json::json!({
+    let cases = FIXTURES.map(|(id, path, _, _, line)| contract_replay_case(id, path, line, &before, &after));
+    assert_contract_replay(repo.path(), &cases);
+}
+
+fn contract_replay_case(id: &str, path: &str, line: u32, before: &str, after: &str) -> serde_json::Value {
+    serde_json::json!({
         "name": id,
         "rule": { "tool": "autoreview-dataflow", "id": id },
         "before": { "commit": before, "path": path, "lines": [line] },
         "after": { "commit": after, "path": path, "lines": [] }
-    })).collect();
-    std::fs::write(repo.path().join("contracts.yaml"), serde_json::json!({ "cases": cases }).to_string()).unwrap();
+    })
+}
+
+fn assert_contract_replay(repo: &std::path::Path, cases: &[serde_json::Value]) {
+    std::fs::write(repo.join("contracts.yaml"), serde_json::json!({ "cases": cases }).to_string()).unwrap();
     Command::cargo_bin("autoreview").unwrap()
-        .current_dir(repo.path())
+        .current_dir(repo)
         .args(["rules", "replay", "--suite", "contracts.yaml"])
         .assert().success();
+}
+
+#[test]
+fn node_contracts_replay_in_tsx_with_the_typescript_rule_ids() {
+    let path = "Jobs.tsx";
+    let bad = r#"import { open, rename } from 'node:fs/promises';
+import { Worker } from 'node:worker_threads';
+
+export function Relabel(name: string) {
+  rename(name, 'published');
+  return <div />;
+}
+export async function Read(path: string) {
+  const file = await open(path);
+  file.close();
+  return <article />;
+}
+export function Launch(path: string) {
+  const job = new Worker(path);
+  return <aside />;
+}
+"#;
+    let fixed = bad
+        .replace("function Relabel(", "async function Relabel(")
+        .replace("  rename(", "  await rename(")
+        .replace("  file.close();", "  await file.close();")
+        .replace("function Launch(", "async function Launch(")
+        .replace("  return <aside", "  await job.terminate();\n  return <aside");
+    let repo = init_repo(&[(path, bad)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[(path, &fixed)], "Observe promises and finish owned handles");
+    let after = current_commit(repo.path());
+    let cases = [
+        ("typescript-node-fs-discarded-promise", 5),
+        ("typescript-node-file-handle-unclosed", 11),
+        ("typescript-node-worker-outlives-owner", 15),
+    ].map(|(id, line)| contract_replay_case(id, path, line, &before, &after));
+    assert_contract_replay(repo.path(), &cases);
 }
 
 #[test]

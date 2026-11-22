@@ -2,6 +2,8 @@ use tree_sitter::Node;
 
 use crate::lower::site::children;
 
+mod imports;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContractMode {
     MustUse,
@@ -12,6 +14,9 @@ pub enum ContractMode {
 pub enum ContractLanguage {
     Go,
     Java,
+    Kotlin,
+    Rust,
+    Web,
 }
 
 #[derive(Debug, Clone)]
@@ -21,13 +26,15 @@ pub struct ResultContract {
     pub import: String,
     pub methods: Vec<String>,
     pub borrows: Vec<String>,
+    pub acquire_awaited: bool,
+    pub complete_observed: bool,
 }
 
 /// Resolve explicit imports and fully qualified Java calls. A name-only
 /// match cannot prove that an API owns a result or requires completion.
 pub(super) struct ApiMatcher<'a> {
     contract: &'a ResultContract,
-    qualifiers: Vec<String>,
+    names: Vec<String>,
 }
 
 impl<'a> ApiMatcher<'a> {
@@ -35,14 +42,14 @@ impl<'a> ApiMatcher<'a> {
         let root = std::iter::successors(Some(function), Node::parent)
             .last()
             .unwrap_or(function);
-        let qualifiers = match contract.language {
-            ContractLanguage::Go => go_qualifiers(root, source, &contract.import),
-            ContractLanguage::Java => java_qualifiers(root, function, source, &contract.import),
+        let names = match contract.language {
+            ContractLanguage::Go => qualified_names(go_qualifiers(root, source, &contract.import), ".", contract),
+            ContractLanguage::Java => qualified_names(java_qualifiers(root, function, source, &contract.import), ".", contract),
+            ContractLanguage::Kotlin => imports::kotlin_names(root, source, contract),
+            ContractLanguage::Rust => imports::rust_names(function, source, contract),
+            ContractLanguage::Web => imports::web_names(root, source, contract),
         };
-        Self {
-            contract,
-            qualifiers,
-        }
+        Self { contract, names }
     }
 
     pub(super) fn mode(&self) -> ContractMode {
@@ -56,7 +63,7 @@ impl<'a> ApiMatcher<'a> {
         let owner = function.parent().and_then(|body| body.parent());
         let mut pending = vec![function];
         while let Some(node) = pending.pop() {
-            if may_store_handle(node, owner, source) || returns_tuple(node) {
+            if may_store_handle(node, owner, source) || returns_tuple(node) || using_declaration(node) {
                 return false;
             }
             pending.extend(children(node));
@@ -65,20 +72,20 @@ impl<'a> ApiMatcher<'a> {
     }
 
     pub(super) fn matches(&self, call: &str, bound: impl Fn(&str) -> bool) -> bool {
-        let Some((qualifier, method)) = call.rsplit_once('.') else {
-            return false;
-        };
-        let root = qualifier.split('.').next().unwrap_or(qualifier);
-        self.qualifiers
-            .iter()
-            .any(|candidate| candidate == qualifier)
-            && self
-                .contract
-                .methods
-                .iter()
-                .any(|candidate| candidate == method)
-            && !bound(root)
+        let call = call.strip_prefix("::").unwrap_or(call);
+        let root = call.split(['.', ':']).next().unwrap_or(call);
+        self.names.iter().any(|name| name == call) && !bound(root)
     }
+}
+
+fn qualified_names(qualifiers: Vec<String>, separator: &str, contract: &ResultContract) -> Vec<String> {
+    qualifiers.into_iter().flat_map(|qualifier| {
+        contract.methods.iter().map(move |method| format!("{qualifier}{separator}{method}"))
+    }).collect()
+}
+
+fn using_declaration(node: Node<'_>) -> bool {
+    node.kind() == "using_declaration" || node.children(&mut node.walk()).any(|token| token.kind() == "using")
 }
 
 fn returns_tuple(node: Node<'_>) -> bool {
@@ -94,7 +101,7 @@ fn may_store_handle(node: Node<'_>, owner: Option<Node<'_>>, source: &[u8]) -> b
     }
     if !matches!(
         node.kind(),
-        "assignment_statement" | "assignment_expression"
+        "assignment_statement" | "assignment_expression" | "assignment"
     ) {
         return false;
     }
@@ -110,7 +117,7 @@ fn may_store_handle(node: Node<'_>, owner: Option<Node<'_>>, source: &[u8]) -> b
 fn nonlocal_target(target: Node<'_>, owner: Option<Node<'_>>, source: &[u8]) -> bool {
     matches!(
         target.kind(),
-        "field_access" | "selector_expression" | "index_expression" | "array_access"
+        "field_access" | "selector_expression" | "index_expression" | "array_access" | "member_expression" | "subscript_expression" | "field_expression" | "navigation_expression"
     ) || owner
         .zip(target.utf8_text(source).ok())
         .is_some_and(|(owner, name)| type_body_shadows(owner, source, name))

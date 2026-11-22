@@ -71,13 +71,17 @@ enum ContractModeYaml {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ContractYaml {
     mode: ContractModeYaml,
     import: String,
     methods: Vec<String>,
     #[serde(default)]
     borrows: Vec<String>,
+    #[serde(default)]
+    acquire_awaited: bool,
+    #[serde(default)]
+    complete_observed: bool,
 }
 
 impl ContractYaml {
@@ -85,7 +89,10 @@ impl ContractYaml {
         let language = match language {
             "Go" => ContractLanguage::Go,
             "Java" => ContractLanguage::Java,
-            _ => anyhow::bail!("call-sequence contracts currently support Go and Java"),
+            "Kotlin" => ContractLanguage::Kotlin,
+            "Rust" => ContractLanguage::Rust,
+            "JavaScript" | "TypeScript" | "Tsx" => ContractLanguage::Web,
+            _ => anyhow::bail!("unsupported language for a call-sequence contract"),
         };
         let mode = match self.mode {
             ContractModeYaml::MustUse => ContractMode::MustUse,
@@ -95,7 +102,13 @@ impl ContractYaml {
         anyhow::ensure!(!self.methods.is_empty() && self.methods.iter().chain(&self.borrows).all(|name| {
             !name.is_empty() && name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
         }), "contract methods and borrows must contain literal method names");
-        Ok(ResultContract { mode, language, import: self.import, methods: self.methods, borrows: self.borrows })
+        anyhow::ensure!(!(self.acquire_awaited || self.complete_observed)
+            || (language == ContractLanguage::Web && mode == ContractMode::MustComplete),
+            "acquireAwaited and completeObserved require a web must-complete contract");
+        Ok(ResultContract {
+            mode, language, import: self.import, methods: self.methods, borrows: self.borrows,
+            acquire_awaited: self.acquire_awaited, complete_observed: self.complete_observed,
+        })
     }
 }
 

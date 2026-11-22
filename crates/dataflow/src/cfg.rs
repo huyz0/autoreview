@@ -54,6 +54,8 @@ pub struct CallSite {
     pub start: usize,
     pub end: usize,
     pub discarded: bool,
+    pub awaited: bool,
+    pub observed: bool,
     pub receiver: Option<String>,
     pub arguments: Vec<Option<IdentityOperand>>,
     pub(crate) local: bool,

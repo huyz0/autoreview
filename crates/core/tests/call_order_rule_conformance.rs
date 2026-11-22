@@ -16,13 +16,7 @@ struct RuleMeta {
     id: String,
     language: String,
     #[serde(default)]
-    kind: String,
-    #[serde(default)]
     category: String,
-}
-
-fn rules_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("rules-builtin")
 }
 
 fn fixtures_dir() -> PathBuf {
@@ -30,28 +24,13 @@ fn fixtures_dir() -> PathBuf {
 }
 
 fn discover_call_order_rules() -> Vec<RuleMeta> {
-    let mut rules = Vec::new();
-    walk(&rules_dir(), &mut rules);
-    rules.retain(|r| r.kind == "call-sequence");
-    rules.sort_by(|a, b| a.id.cmp(&b.id));
-    rules
-}
-
-fn walk(dir: &Path, out: &mut Vec<RuleMeta>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            walk(&path, out);
-            continue;
-        }
-        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
-            continue;
-        }
-        let contents = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-        let Ok(meta) = serde_yaml::from_str::<RuleMeta>(&contents) else { continue };
-        out.push(meta);
-    }
+    autoreview_core::list_builtin_rules().into_iter()
+        .filter(|entry| entry.kind == "call-sequence")
+        .map(|entry| {
+            let definition = autoreview_core::find_rule_definition(&entry.id, &[]).unwrap();
+            serde_yaml::from_str(&definition.yaml).unwrap()
+        })
+        .collect()
 }
 
 fn extension_for_language(language: &str) -> &'static str {
@@ -59,17 +38,16 @@ fn extension_for_language(language: &str) -> &'static str {
         "Go" => "go",
         "Java" => "java",
         "Kotlin" => "kt",
-        other => panic!("call_order_rule_conformance doesn't know the fixture extension for language {other:?} — add it to extension_for_language"),
+        "Rust" => "rs",
+        "JavaScript" => "js",
+        "TypeScript" => "ts",
+        "Tsx" => "tsx",
+        other => panic!("missing call-sequence fixture extension for {other:?}"),
     }
 }
 
-fn scan_filename_for_language(language: &str) -> &'static str {
-    match language {
-        "Go" => "main.go",
-        "Java" => "Main.java",
-        "Kotlin" => "Main.kt",
-        other => panic!("call_order_rule_conformance doesn't know the scan filename for language {other:?} — add it to scan_filename_for_language"),
-    }
+fn scan_filename_for_language(language: &str) -> String {
+    format!("Main.{}", extension_for_language(language))
 }
 
 fn write_single_file(filename: &str, contents: &str) -> tempfile::TempDir {
@@ -81,7 +59,7 @@ fn write_single_file(filename: &str, contents: &str) -> tempfile::TempDir {
 #[test]
 fn every_call_order_rule_fires_on_its_positive_fixture_and_stays_silent_on_its_negative_fixture() {
     let rules = discover_call_order_rules();
-    assert!(!rules.is_empty(), "expected to discover at least one kind: call-sequence rule under {}", rules_dir().display());
+    assert!(!rules.is_empty(), "expected built-in call-sequence rules");
 
     let mut failures = Vec::new();
 
@@ -97,8 +75,8 @@ fn every_call_order_rule_fires_on_its_positive_fixture_and_stays_silent_on_its_n
             continue;
         };
 
-        let positive_dir = write_single_file(filename, &positive);
-        let positive_findings = run_dataflow_check(positive_dir.path(), &[filename.to_string()], &[]);
+        let positive_dir = write_single_file(&filename, &positive);
+        let positive_findings = run_dataflow_check(positive_dir.path(), std::slice::from_ref(&filename), &[]);
         let positive_matches: Vec<_> = positive_findings.iter().filter(|f| f.source.rule_id.as_deref() == Some(rule.id.as_str())).collect();
         if positive_matches.len() != 1 {
             failures.push(format!(
@@ -109,8 +87,8 @@ fn every_call_order_rule_fires_on_its_positive_fixture_and_stays_silent_on_its_n
             ));
         }
 
-        let negative_dir = write_single_file(filename, &negative);
-        let negative_findings = run_dataflow_check(negative_dir.path(), &[filename.to_string()], &[]);
+        let negative_dir = write_single_file(&filename, &negative);
+        let negative_findings = run_dataflow_check(negative_dir.path(), std::slice::from_ref(&filename), &[]);
         let negative_matches: Vec<_> = negative_findings.iter().filter(|f| f.source.rule_id.as_deref() == Some(rule.id.as_str())).collect();
         if !negative_matches.is_empty() {
             failures.push(format!("{}: expected 0 matches on negative fixture, got {}", rule.id, negative_matches.len()));
@@ -279,8 +257,8 @@ fn a_call_order_rules_declared_cwe_reaches_the_finding() {
     let filename = scan_filename_for_language(&rule.language);
 
     let positive = std::fs::read_to_string(fixtures_dir().join(rule_id).join(format!("positive.{}", extension_for_language(&rule.language)))).expect("positive fixture exists");
-    let dir = write_single_file(filename, &positive);
-    let findings = run_dataflow_check(dir.path(), &[filename.to_string()], &[]);
+    let dir = write_single_file(&filename, &positive);
+    let findings = run_dataflow_check(dir.path(), std::slice::from_ref(&filename), &[]);
 
     let finding = findings.iter().find(|f| f.source.rule_id.as_deref() == Some(rule_id)).expect("the positive fixture must fire this rule");
     let meta = finding.meta.as_ref().unwrap_or_else(|| panic!("{rule_id} declares a metadata block, so its finding must carry meta"));

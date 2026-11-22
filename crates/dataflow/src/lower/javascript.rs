@@ -36,7 +36,7 @@ fn classify_rhs(node: Node, source: &[u8]) -> RhsShape {
 /// expression -> object/property`) lowers to `"recv.method"`, matching Go's
 /// own qualified-selector convention.
 pub(super) fn call_target_name(call: Node, source: &[u8]) -> Option<String> {
-    let func = call.child_by_field_name("function")?;
+    let func = call.child_by_field_name("function").or_else(|| call.child_by_field_name("constructor"))?;
     match func.kind() {
         "identifier" => Some(text(func, source).to_string()),
         "member_expression" => {
@@ -104,7 +104,7 @@ fn initializer_call(value: Node<'_>, keyed: bool) -> Option<Node<'_>> {
             expression = super::keyed_syntax::expression_value(expression.named_child(0)?)?;
         }
     }
-    (expression.kind() == "call_expression").then_some(expression)
+    (expression.kind() == "call_expression" || (keyed && expression.kind() == "new_expression")).then_some(expression)
 }
 
 /// Lowers one function body into a `Cfg`. `fn_node` must be a
