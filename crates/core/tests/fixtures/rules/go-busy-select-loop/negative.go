@@ -1,6 +1,6 @@
 package flow
 
-func wait(done <-chan struct{}, heartbeat func()) {
+func blockUntilDone(done <-chan struct{}, heartbeat func()) {
 	for {
 		select {
 		case <-done:
@@ -27,7 +27,7 @@ func paused(done <-chan struct{}, wait func()) {
 			return
 		default:
 		}
-		wait()
+		blockUntilDone()
 	}
 }
 

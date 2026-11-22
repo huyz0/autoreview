@@ -1,10 +1,10 @@
 package flow
 
-func run(x int) int {
+func countDown(x int) int {
 	if x <= 0 {
 		return x
 	}
-	return run(x - 1)
+	return countDown(x - 1)
 }
 func outer()                  { inner() }
 func inner()                  {}

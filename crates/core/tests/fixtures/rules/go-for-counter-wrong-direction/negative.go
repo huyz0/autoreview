@@ -1,6 +1,6 @@
 package flow
 
-func f(n int) {
+func runBothDirections(n int) {
 	for i := 0; i < n; i++ {
 		println(i)
 	}
