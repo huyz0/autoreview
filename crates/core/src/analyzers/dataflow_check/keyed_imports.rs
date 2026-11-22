@@ -11,8 +11,10 @@ use super::dispatch::profile;
 use super::dsl::call_order_finding;
 use super::{call_order_rules::CallOrderRuleDef, AgentFinding};
 
+mod go;
 mod jvm;
-mod modules;
+mod rust;
+mod web;
 
 const UNIT_LIMIT: usize = 64;
 
@@ -20,6 +22,13 @@ struct Source {
     language: Language,
     parsed: ParsedFile,
     imports: Vec<KeyedImport>,
+}
+
+struct ImportSource<'a> {
+    resolver: &'a Resolver<'a>,
+    path: &'a Path,
+    node: Node<'a>,
+    source: &'a str,
 }
 
 struct Resolver<'a> {
@@ -162,13 +171,17 @@ impl Resolver<'_> {
     fn imports(&self, path: &Path, language: Language, parsed: &ParsedFile) -> Vec<KeyedImport> {
         let source = &parsed.0;
         let node = parsed.1.root_node();
+        let input = ImportSource {
+            resolver: self,
+            path,
+            node,
+            source,
+        };
         let imports = match language {
-            Language::Go => modules::go(self, path, node, source),
+            Language::Go => input.go(),
             Language::Java | Language::Kotlin => jvm::imports(self, path, language, node, source),
-            Language::Rust => modules::rust(self, path, node, source),
-            Language::JavaScript | Language::TypeScript | Language::Tsx => {
-                modules::web(self, path, node, source)
-            }
+            Language::Rust => input.rust(),
+            Language::JavaScript | Language::TypeScript | Language::Tsx => input.web(),
         };
         imports
             .into_iter()
@@ -228,4 +241,13 @@ fn children(node: Node<'_>) -> Vec<Node<'_>> {
 
 fn text<'src>(node: Node<'_>, source: &'src str) -> Option<&'src str> {
     node.utf8_text(source.as_bytes()).ok()
+}
+
+fn unquote(value: &str) -> Option<&str> {
+    let delimiter = value.chars().next()?;
+    if !matches!(delimiter, '\'' | '"' | '`') {
+        return None;
+    }
+    let content = value.strip_prefix(delimiter)?.strip_suffix(delimiter)?;
+    (!content.contains(['\\', '\n', '\r'])).then_some(content)
 }
