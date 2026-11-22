@@ -110,23 +110,15 @@ fn lower_property_declaration(node: Node, source: &[u8]) -> Stmt {
 /// Lowers one function body into a `Cfg`. `fn_node` must be a
 /// `function_declaration` with a `function_body` child.
 pub fn lower_function(source: &[u8], fn_node: Node) -> Cfg<Stmt> {
-    lower_with_cfg(Cfg::new_empty(), source, fn_node)
+    super::function(Cfg::new_empty(), source, fn_node, function_body(fn_node), lower_block)
 }
 
-pub(super) fn lower_with_cfg(mut cfg: Cfg<Stmt>, source: &[u8], fn_node: Node) -> Cfg<Stmt> {
-    let entry = cfg.push_node(fn_node.start_position().row as u32 + 1);
-    let exit = cfg.push_node(fn_node.end_position().row as u32 + 1);
-    cfg.entry = entry;
-    cfg.exit = exit;
-
-    // A single-expression function body (`fun f() = expr`) has no
-    // `block` child at all — not modeled, falls through untouched.
-    let end = first_child_of_kind(fn_node, "function_body").and_then(|body| first_child_of_kind(body, "block")).map(|block| lower_block(&mut cfg, block, source, entry)).unwrap_or(entry);
-    cfg.edges.push((end, exit, EdgeKind::Fallthrough));
-    cfg
+pub(super) fn function_body(node: Node<'_>) -> Option<Node<'_>> {
+    first_child_of_kind(node, "function_body").and_then(|body| first_child_of_kind(body, "block"))
 }
 
-fn lower_block(cfg: &mut Cfg<Stmt>, block: Node, source: &[u8], current: NodeId) -> NodeId {
+
+pub(super) fn lower_block(cfg: &mut Cfg<Stmt>, block: Node, source: &[u8], current: NodeId) -> NodeId {
     super::lower_block(cfg, block, source, current, lower_statement_inner)
 }
 

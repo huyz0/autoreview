@@ -22,26 +22,36 @@ pub(crate) mod keyed_flow;
 use autoreview_langsupport::Language;
 use tree_sitter::Node;
 
-use crate::cfg::{Cfg, NodeId, Stmt};
+use crate::cfg::{Cfg, EdgeKind, NodeId, Stmt};
 
 /// Lower control flow used exclusively by keyed call-sequence rules. Use
 /// the ordinary graph when the function has no deferred or finally path.
-pub fn keyed_variant(language: Language, source: &[u8], function: Node<'_>) -> Option<Cfg<Stmt>> {
-    let lower = match language {
-        Language::Go => go::lower_with_cfg,
-        Language::Java => java::lower_with_cfg,
-        Language::Kotlin => kotlin::lower_with_cfg,
-        Language::JavaScript | Language::TypeScript | Language::Tsx => javascript::lower_with_cfg,
+pub fn keyed_variant(language: Language, source: &[u8], node: Node<'_>) -> Option<Cfg<Stmt>> {
+    let lower: StatementLowerer = match language {
+        Language::Go => go::lower_block,
+        Language::Java => java::lower_block,
+        Language::Kotlin => kotlin::lower_block,
+        Language::JavaScript | Language::TypeScript | Language::Tsx => javascript::lower_block,
         _ => return None,
     };
-    keyed_flow::needed(function).then(|| {
+    keyed_flow::needed(node).then(|| {
         let mut cfg = Cfg::new_empty();
-        cfg.keyed_flow = Some(128);
-        lower(cfg, source, function)
+        cfg.keyed_flow = Some(keyed_flow::EXIT_PATH_LIMIT);
+        let body = if language == Language::Kotlin { kotlin::function_body(node) } else { node.child_by_field_name("body") };
+        function(cfg, source, node, body, lower)
     })
 }
 
 type StatementLowerer = fn(&mut Cfg<Stmt>, Node<'_>, &[u8], NodeId) -> NodeId;
+
+fn function(mut cfg: Cfg<Stmt>, source: &[u8], node: Node<'_>, body: Option<Node<'_>>, lower_body: StatementLowerer) -> Cfg<Stmt> {
+    let entry = cfg.push_node(node.start_position().row as u32 + 1);
+    cfg.entry = entry;
+    cfg.exit = cfg.push_node(node.end_position().row as u32 + 1);
+    let end = body.map_or(entry, |block| lower_body(&mut cfg, block, source, entry));
+    cfg.edges.push((end, cfg.exit, EdgeKind::Fallthrough));
+    cfg
+}
 
 fn lower_block(cfg: &mut Cfg<Stmt>, block: Node<'_>, source: &[u8], mut current: NodeId, lower: StatementLowerer) -> NodeId {
     let mut cursor = block.walk();

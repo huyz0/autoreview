@@ -213,6 +213,10 @@ fn alias_chains_match_receiver_scoped_rules_and_literal_keys() {
     );
     let clean = source.replace("other.remove(key)", "alias.drop(key)");
     assert!(findings("JavaScript", "worker.js", &clean, RECEIVER, true).is_empty());
+    let rebound = source
+        .replace("const alias = shared;", "let alias = shared;")
+        .replace("other.remove(key);", "alias.drop(key); alias = other;");
+    assert!(findings("JavaScript", "worker.js", &rebound, RECEIVER, true).is_empty());
 }
 
 #[test]
@@ -356,7 +360,9 @@ func pending(root *Registry, key string, ready bool) {
     let hits = findings("Go", "worker.go", source, RECEIVER, true);
     assert_eq!(hits.len(), 1, "{hits:#?}");
     assert_eq!(hits[0].location.range.start_line, 8);
-    let source = source.replace("alias := root", "var alias = root");
+    let source = source
+        .replace("alias := root", "var alias = root")
+        .replace("defer alias.remove(saved)", "{ defer alias.remove(saved) }");
     let partial = source.replace("root.remove(key)", "root.remove(\"wrong\")");
     let hits = findings("Go", "worker.go", &partial, RECEIVER, true);
     assert_eq!(hits.len(), 2, "{hits:#?}");
@@ -392,24 +398,20 @@ func pending(root, other *Registry, key, wrong string, ready bool) {
 }
 
 #[test]
-fn go_deferred_closure_with_a_matching_call_stays_conservative() {
+fn a_straight_line_go_deferred_closure_covers_its_own_pairs() {
     let source = r#"package worker
-func pending(root *Registry, key string) {
+func pending(root *Registry, key string, ready bool) {
     root.register(key)
     defer func() { root.remove(key) }()
 }"#;
-    assert!(findings("Go", "worker.go", source, RECEIVER, true).is_empty());
-}
-
-#[test]
-fn a_reassigned_alias_is_uncertain_even_with_a_receiver_scoped_regex() {
-    let source = r#"function pending(root, other, key) {
-    let alias = root;
-    root.add(key);
-    alias.drop(key);
-    alias = other;
-}"#;
-    assert!(findings("JavaScript", "worker.js", source, RECEIVER, true).is_empty());
+    let wrong = source.replace("root.remove(key)", "root.remove(\"wrong\")");
+    let hits = findings("Go", "worker.go", &wrong, RECEIVER, true);
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(hits[0].message, "Clean up root and key before fallthrough");
+    let conditional = source.replace("root.remove(key)", "if ready { root.remove(key) }");
+    for clean_or_uncertain in [source, &conditional] {
+        assert!(findings("Go", "worker.go", clean_or_uncertain, RECEIVER, true).is_empty());
+    }
 }
 
 #[test]

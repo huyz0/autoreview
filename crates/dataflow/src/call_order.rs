@@ -2,7 +2,9 @@
 //! Rules may track one pending flag or a separate obligation per collection
 //! and key. Keyed rules use stable source bindings and simple literals.
 
+mod bindings;
 mod identity;
+mod plan;
 mod keyed;
 
 pub use keyed::check_keyed;

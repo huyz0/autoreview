@@ -2,11 +2,12 @@ use std::collections::{BTreeMap, HashSet};
 
 use tree_sitter::Node;
 
-use crate::cfg::{CallSite, CallTarget, Cfg, NodeId, Stmt};
+use crate::cfg::{Cfg, NodeId, Stmt};
 use crate::lattice::Lattice;
 use crate::solver;
 
-use super::identity::{Entry, Syntax};
+use super::identity::Entry;
+use super::plan::{prepare, Effect, Step};
 use super::{CallOrderHit, CallOrderSpec, EntryHit};
 
 #[derive(Clone, PartialEq, Eq)]
@@ -55,19 +56,6 @@ impl Lattice for Pending {
     }
 }
 
-#[derive(Default)]
-struct Step {
-    effect: Option<Effect>,
-    trigger: Option<(Entry, String)>,
-    exit: Option<&'static str>,
-}
-
-enum Effect {
-    Register(Entry),
-    Remove(Entry),
-    Defer(Entry),
-}
-
 impl Step {
     fn trigger_hit(&self, pending: &Pending, id: NodeId, line: u32) -> Option<CallOrderHit> {
         let (entry, call) = self.trigger.as_ref()?;
@@ -113,7 +101,6 @@ pub fn check_keyed(
     let Some(steps) = prepare(spec, cfg, function, source) else {
         return Vec::new();
     };
-    let reachable = Reachable::from_entry(cfg);
     let initial = Pending(
         steps
             .iter()
@@ -124,6 +111,10 @@ pub fn check_keyed(
             })
             .collect(),
     );
+    if initial.0.is_empty() {
+        return Vec::new();
+    }
+    let reachable = Reachable::from_entry(cfg);
     let out = solver::solve(cfg, |id, node, incoming: &Pending| {
         let mut pending = if id == cfg.entry {
             initial.clone()
@@ -144,115 +135,6 @@ pub fn check_keyed(
         check_exits: spec.check_before_return,
     }
     .collect(&steps, &reachable)
-}
-
-fn prepare(
-    spec: &CallOrderSpec,
-    cfg: &Cfg<Stmt>,
-    function: Node<'_>,
-    source: &[u8],
-) -> Option<Vec<Vec<Step>>> {
-    if cfg.keyed_flow == Some(0)
-        || !cfg.nodes.iter().flat_map(|node| &node.stmts).any(|stmt| {
-            matches!(
-                stmt,
-                Stmt::Call {
-                    target: CallTarget::Named(_),
-                    site: Some(_),
-                    ..
-                }
-            )
-        })
-    {
-        return None;
-    }
-    let syntax = Syntax::scan(function, source)?;
-    let mut modeled = HashSet::new();
-    let steps = cfg
-        .nodes
-        .iter()
-        .map(|node| {
-            node.stmts
-                .iter()
-                .map(|stmt| step(spec, &syntax, stmt, &mut modeled))
-                .collect::<Option<Vec<_>>>()
-        })
-        .collect::<Option<Vec<_>>>()?;
-    syntax
-        .models_cleanup(&spec.unless, &modeled)
-        .then_some(steps)
-}
-
-fn step(
-    spec: &CallOrderSpec,
-    syntax: &Syntax<'_>,
-    stmt: &Stmt,
-    modeled: &mut HashSet<usize>,
-) -> Option<Step> {
-    let (name, site, deferred) = match stmt {
-        Stmt::Call {
-            target: CallTarget::Named(name),
-            site,
-            ..
-        } => (name, site, false),
-        Stmt::DeferredCall { target, site } => (target, site, true),
-        Stmt::Return { .. } => {
-            return Some(Step {
-                exit: Some("return"),
-                ..Step::default()
-            })
-        }
-        Stmt::Throw => {
-            return Some(Step {
-                exit: Some("throw"),
-                ..Step::default()
-            })
-        }
-        _ => return Some(Step::default()),
-    };
-    let start = site.as_ref().map_or(0, |site| site.start);
-    let matches = |patterns| syntax.matches(patterns, name, start);
-    let entry = |site: &CallSite| syntax.entry(spec.identity?, site);
-    if deferred {
-        if matches(&spec.after) || matches(&spec.before) {
-            return None;
-        }
-        if !matches(&spec.unless) {
-            return Some(Step::default());
-        }
-        let site = site.as_ref()?;
-        let pair = entry(site)?;
-        modeled.insert(site.start);
-        return Some(Step {
-            effect: Some(Effect::Defer(pair)),
-            ..Step::default()
-        });
-    }
-
-    let trigger = matches(&spec.before)
-        .then(|| {
-            site.as_ref()
-                .and_then(|site| entry(site))
-                .map(|pair| (pair, name.clone()))
-        })
-        .flatten();
-    let effect = if matches(&spec.unless) {
-        let site = site.as_ref()?;
-        let pair = entry(site)?;
-        modeled.insert(site.start);
-        Some(Effect::Remove(pair))
-    } else if matches(&spec.after) {
-        site.as_ref()
-            .and_then(|site| entry(site))
-            .map(Effect::Register)
-    } else {
-        None
-    };
-    Some(Step {
-        effect,
-        trigger,
-        exit: None,
-    })
 }
 
 struct Reachable(HashSet<NodeId>);

@@ -303,31 +303,16 @@ pub fn function_name(fn_node: Node, source: &[u8]) -> Option<String> {
 /// Lowers one function/method body into a `Cfg`. `fn_node` must be a
 /// `function_declaration` or `method_declaration` with a `body` field.
 pub fn lower_function(source: &[u8], fn_node: Node) -> Cfg<Stmt> {
-    lower_with_cfg(Cfg::new_empty(), source, fn_node)
+    super::function(Cfg::new_empty(), source, fn_node, fn_node.child_by_field_name("body"), lower_block)
 }
 
-pub(super) fn lower_with_cfg(mut cfg: Cfg<Stmt>, source: &[u8], fn_node: Node) -> Cfg<Stmt> {
-    let entry = cfg.push_node(fn_node.start_position().row as u32 + 1);
-    let exit = cfg.push_node(fn_node.end_position().row as u32 + 1);
-    cfg.entry = entry;
-    cfg.exit = exit;
-
-    let Some(body) = fn_node.child_by_field_name("body") else {
-        cfg.edges.push((entry, exit, EdgeKind::Fallthrough));
-        return cfg;
-    };
-
-    let end = lower_block(&mut cfg, body, source, entry);
-    cfg.edges.push((end, exit, EdgeKind::Fallthrough));
-    cfg
-}
 
 /// Lowers a `block` node's `statement_list`, threading the "current open
 /// node" through sequentially and returning the node execution falls
 /// through to after the block. `current`'s stmts get appended to directly
 /// for straight-line statements; control-flow statements close it out and
 /// open fresh nodes for their branches/loop bodies.
-fn lower_block(cfg: &mut Cfg<Stmt>, block: Node, source: &[u8], current: NodeId) -> NodeId {
+pub(super) fn lower_block(cfg: &mut Cfg<Stmt>, block: Node, source: &[u8], current: NodeId) -> NodeId {
     // `statement_list` is a positional child of `block`, not a named
     // field (confirmed via `--debug-query=ast`: it has no `field:`
     // prefix in the dump) — find it by kind rather than

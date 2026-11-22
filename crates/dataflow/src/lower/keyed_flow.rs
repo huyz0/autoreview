@@ -4,6 +4,8 @@ use crate::cfg::{Cfg, EdgeKind, NodeId, Stmt};
 
 use super::{site, StatementLowerer};
 
+pub(super) const EXIT_PATH_LIMIT: usize = 128;
+
 pub(super) fn needed(function: Node<'_>) -> bool {
     let mut nodes = vec![function];
     while let Some(node) = nodes.pop() {
@@ -38,13 +40,8 @@ pub(super) fn lower(
             cfg.push_node(line(node))
         }
         "defer_statement" => {
-            if let Some(call) = node.named_child(0) {
-                if let Some(target) = super::go::call_target_name(call, source) {
-                    cfg.nodes[current].stmts.push(Stmt::DeferredCall {
-                        target,
-                        site: site::capture(call, source),
-                    });
-                }
+            if let Some(calls) = deferred_calls(node, source) {
+                cfg.nodes[current].stmts.extend(calls);
             }
             current
         }
@@ -60,7 +57,10 @@ struct Flow<'a> {
 
 impl Flow<'_> {
     fn block(&self, cfg: &mut Cfg<Stmt>, body: Node<'_>, entry: NodeId) -> NodeId {
-        super::lower_block(cfg, body, self.source, entry, self.ordinary)
+        let statements = site::children(body)
+            .find(|child| child.kind() == "statement_list")
+            .unwrap_or(body);
+        super::lower_block(cfg, statements, self.source, entry, self.ordinary)
     }
 
     fn try_finally(&self, cfg: &mut Cfg<Stmt>, node: Node<'_>, entry: NodeId) -> NodeId {
@@ -92,26 +92,81 @@ impl Flow<'_> {
     }
 
     fn finalize_exit(&self, cfg: &mut Cfg<Stmt>, finalizer: Node<'_>, from: NodeId) {
-        let Some(budget) = cfg.keyed_flow.as_mut().filter(|remaining| **remaining > 0) else {
-            return;
-        };
+        if let Some((start, exit)) = cfg.unwind_from(from, line(finalizer)) {
+            let end = self.block(cfg, finalizer, start);
+            cfg.resume_exit(end, exit);
+        }
+    }
+}
+
+struct Exit {
+    stmt: Stmt,
+    line: u32,
+}
+
+impl Cfg<Stmt> {
+    fn unwind_from(&mut self, from: NodeId, finally_line: u32) -> Option<(NodeId, Exit)> {
+        let budget = self
+            .keyed_flow
+            .as_mut()
+            .filter(|remaining| **remaining > 0)?;
         *budget -= 1;
-        let node = &mut cfg.nodes[from];
-        let exit_line = node.statement_line(node.stmts.len() - 1);
-        let terminator = node
+        let node = &mut self.nodes[from];
+        let line = node.statement_line(node.stmts.len() - 1);
+        let stmt = node
             .stmts
             .pop()
             .expect("temporary exit was reached by return or throw");
-
-        let start = cfg.push_node(line(finalizer));
-        cfg.edges.push((from, start, EdgeKind::Fallthrough));
-        let end = self.block(cfg, finalizer, start);
-        let node = &mut cfg.nodes[end];
-        let index = node.stmts.len();
-        node.stmts.push(terminator);
-        node.record_statement_lines(index, exit_line);
-        cfg.edges.push((end, cfg.exit, EdgeKind::Fallthrough));
+        let start = self.push_node(finally_line);
+        self.edges.push((from, start, EdgeKind::Fallthrough));
+        Some((start, Exit { stmt, line }))
     }
+
+    fn resume_exit(&mut self, end: NodeId, exit: Exit) {
+        let node = &mut self.nodes[end];
+        let index = node.stmts.len();
+        node.stmts.push(exit.stmt);
+        node.record_statement_lines(index, exit.line);
+        self.edges.push((end, self.exit, EdgeKind::Fallthrough));
+    }
+}
+
+fn deferred_calls(defer: Node<'_>, source: &[u8]) -> Option<Vec<Stmt>> {
+    let call = defer.named_child(0)?;
+    if let Some(direct) = deferred_call(call, source) {
+        return Some(vec![direct]);
+    }
+
+    // An immediately deferred zero-argument closure can schedule a straight
+    // line of removals. Anything else requires modeling its own execution.
+    let function = call
+        .child_by_field_name("function")
+        .filter(|node| node.kind() == "func_literal")?;
+    if site::children(call.child_by_field_name("arguments")?)
+        .next()
+        .is_some()
+    {
+        return None;
+    }
+    let body = function.child_by_field_name("body")?;
+    let Some(list) = site::children(body).find(|node| node.kind() == "statement_list") else {
+        return Some(Vec::new());
+    };
+    site::children(list)
+        .map(|stmt| {
+            let call = stmt.named_child(0).filter(|call| {
+                stmt.kind() == "expression_statement" && call.kind() == "call_expression"
+            })?;
+            deferred_call(call, source)
+        })
+        .collect()
+}
+
+fn deferred_call(call: Node<'_>, source: &[u8]) -> Option<Stmt> {
+    Some(Stmt::DeferredCall {
+        target: super::go::call_target_name(call, source)?,
+        site: site::capture(call, source),
+    })
 }
 
 pub(crate) fn blocks(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {

@@ -152,14 +152,17 @@ pub(super) fn run_call_order_rules(
         && rules.iter().any(|rule| rule.spec.identity.is_none() && rule.spec.check_before_return);
     let check_keyed = rules.iter().any(|rule| rule.spec.identity.is_some());
     let source = file.content.as_bytes();
-    for (node, cfg) in lowered {
+    let functions: Vec<_> = lowered.iter().map(|(node, cfg)| {
         let deferred_cleanup = check_go_defers && contains_go_defer(*node);
         let keyed = check_keyed.then(|| lower::keyed_variant(language, source, *node)).flatten();
-        for rule in &rules {
+        (*node, cfg, keyed, deferred_cleanup)
+    }).collect();
+    for rule in &rules {
+        for (node, cfg, keyed, deferred_cleanup) in &functions {
             let hits = if rule.spec.identity.is_some() {
                 call_order::check_keyed(&rule.spec, keyed.as_ref().unwrap_or(cfg), *node, source)
             } else {
-                call_sequence_hits(cfg, &rule.spec, deferred_cleanup)
+                call_sequence_hits(cfg, &rule.spec, *deferred_cleanup)
             };
             findings.extend(hits.iter().map(|hit| call_order_finding(file, rule, hit)));
         }

@@ -254,15 +254,17 @@ In Java, Kotlin, JavaScript, TypeScript, and TSX, a `finally` block runs
 before execution continues past its `try` or leaves it by a return or
 explicit throw. In Go, a direct `defer pending.Remove(key)` or
 `defer remove(pending, key)` schedules cleanup for the pair on that path.
-A scheduled removal counts at return or fallthrough. A `before` call
-earlier in the function still sees the entry as pending.
+A deferred zero-argument function literal can also remove entries with
+an unconditional list of calls using stable captures. A scheduled removal
+counts at return or fallthrough. A `before` call earlier in the function
+still sees the entry as pending.
 
 Computed keys, fields, reassignments, and shadowed bindings fall outside
 the supported identity analysis. The checker skips functions with
 unsupported flow such as catch handlers, try-with-resources, loops,
 switches, or match expressions. Implicit exceptions and Go panic routes
 are outside the model. A potentially matching cleanup the engine cannot
-model, such as a call inside a deferred closure, suppresses the check for
+model, such as a conditional removal inside a deferred closure, suppresses the check for
 that function. A pair represents membership, so repeated registration of
 the same pair still takes one removal. Native collection writes such as
 Go map indexing are outside this call-based DSL.
