@@ -39,6 +39,12 @@ struct Step {
 }
 
 impl Step {
+    fn trigger_hit(&self, pending: &Pending<Entry>, id: NodeId, line: u32) -> Option<CallOrderHit> {
+        let (entry, call) = self.trigger.as_ref()?;
+        let &registration = pending.0.get(entry)?;
+        Some(hit(call, id, line, entry, registration))
+    }
+
     fn apply(&self, pending: &mut Pending<Entry>, line: u32) {
         if self.returns {
             pending.0.clear();
@@ -72,14 +78,7 @@ pub fn check_keyed(
         }
         pending
     });
-    collect_hits(
-        spec,
-        cfg,
-        &steps,
-        &reachable,
-        &out,
-        function.end_position().row as u32 + 1,
-    )
+    collect_hits(spec.check_before_return, cfg, &steps, &reachable, &out)
 }
 
 fn prepare(
@@ -167,12 +166,11 @@ impl Reachable {
 }
 
 fn collect_hits(
-    spec: &CallOrderSpec,
+    check_returns: bool,
     cfg: &Cfg<Stmt>,
     steps: &[Vec<Step>],
     reachable: &Reachable,
     out: &[Pending<Entry>],
-    exit_line: u32,
 ) -> Vec<CallOrderHit> {
     let mut hits = Vec::new();
     for (id, node) in cfg
@@ -187,30 +185,30 @@ fn collect_hits(
             .fold(Pending::bottom(), |facts, &pred| facts.join(&out[pred]));
         for (index, step) in steps[id].iter().enumerate() {
             let line = node.statement_line(index);
-            if let Some((entry, call)) = &step.trigger {
-                if let Some(&registration) = pending.0.get(entry) {
-                    hits.push(hit(call, id, line, entry, registration));
-                }
-            }
-            if step.returns && spec.check_before_return {
-                hits.extend(
-                    pending
-                        .0
-                        .iter()
-                        .map(|(entry, &registration)| hit("return", id, line, entry, registration)),
-                );
+            hits.extend(step.trigger_hit(&pending, id, line));
+            if step.returns && check_returns {
+                hits.extend(exit_hits("return", id, line, &pending));
             }
             step.apply(&mut pending, line);
         }
     }
-    if spec.check_before_return {
-        if let Some(pending) = out.get(cfg.exit) {
-            hits.extend(pending.0.iter().map(|(entry, &registration)| {
-                hit("fallthrough", cfg.exit, exit_line, entry, registration)
-            }));
-        }
+    if check_returns {
+        let line = cfg.nodes[cfg.exit].source_line;
+        hits.extend(exit_hits("fallthrough", cfg.exit, line, &out[cfg.exit]));
     }
     hits
+}
+
+fn exit_hits<'a>(
+    call: &'a str,
+    id: NodeId,
+    line: u32,
+    pending: &'a Pending<Entry>,
+) -> impl Iterator<Item = CallOrderHit> + 'a {
+    pending
+        .0
+        .iter()
+        .map(move |(entry, &registration)| hit(call, id, line, entry, registration))
 }
 
 fn hit(

@@ -1,6 +1,21 @@
 use tree_sitter::Node;
 
-use crate::cfg::{CallSite, IdentityOperand};
+use crate::cfg::{CallSite, CallTarget, IdentityOperand, Stmt, VarId};
+
+pub(super) fn named(
+    name: String,
+    args: Vec<VarId>,
+    assigned_to: Option<VarId>,
+    call: Node<'_>,
+    source: &[u8],
+) -> Stmt {
+    Stmt::Call {
+        target: CallTarget::Named(name),
+        args,
+        assigned_to,
+        site: capture(call, source),
+    }
+}
 
 pub(crate) fn capture(call: Node<'_>, source: &[u8]) -> Option<Box<CallSite>> {
     let args = arguments(call)?;
@@ -126,30 +141,35 @@ fn operand(node: Node<'_>, source: &[u8]) -> Option<IdentityOperand> {
     if identifier(node) {
         return Some(IdentityOperand::Binding(spelling.into()));
     }
-    if matches!(
-        node.kind(),
-        "string" | "string_literal" | "interpreted_string_literal" | "line_string_literal"
-    ) {
-        let quote = if node.kind() == "string" && spelling.starts_with('\'') {
-            '\''
-        } else {
-            '"'
-        };
-        let content = spelling.strip_prefix(quote)?.strip_suffix(quote)?;
-        if !content.contains(['\\', '\n', '\r', '$', quote]) {
-            return Some(IdentityOperand::String(content.into()));
+    match node.kind() {
+        "string" | "string_literal" | "interpreted_string_literal" | "line_string_literal" => {
+            simple_string(spelling)
         }
+        "number"
+        | "number_literal"
+        | "integer_literal"
+        | "int_literal"
+        | "decimal_integer_literal" => decimal_integer(spelling),
+        _ => None,
     }
-    if matches!(
-        node.kind(),
-        "number" | "number_literal" | "integer_literal" | "int_literal" | "decimal_integer_literal"
-    ) && !spelling.is_empty()
+}
+
+fn simple_string(spelling: &str) -> Option<IdentityOperand> {
+    let quote = if spelling.starts_with('\'') {
+        '\''
+    } else {
+        '"'
+    };
+    let content = spelling.strip_prefix(quote)?.strip_suffix(quote)?;
+    (!content.contains(['\\', '\n', '\r', '$', quote]))
+        .then(|| IdentityOperand::String(content.into()))
+}
+
+fn decimal_integer(spelling: &str) -> Option<IdentityOperand> {
+    (!spelling.is_empty()
         && spelling.bytes().all(|byte| byte.is_ascii_digit())
-        && (spelling == "0" || !spelling.starts_with('0'))
-    {
-        return Some(IdentityOperand::Integer(spelling.into()));
-    }
-    None
+        && (spelling == "0" || !spelling.starts_with('0')))
+    .then(|| IdentityOperand::Integer(spelling.into()))
 }
 
 pub(crate) fn identifier(node: Node<'_>) -> bool {

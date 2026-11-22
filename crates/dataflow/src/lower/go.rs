@@ -203,7 +203,7 @@ fn lower_assign_like(node: Node, source: &[u8]) -> Vec<Stmt> {
         if primary.kind() == "identifier" && text(primary, source) != "_" {
             if let Some(name) = call_target_name(rhs_node, source) {
                 let args = call_arg_identifiers(rhs_node, source);
-                return vec![Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(text(primary, source).to_string()), site: super::site::capture(rhs_node, source) }];
+                return vec![super::site::named(name, args, Some(text(primary, source).to_string()), rhs_node, source)];
             }
         }
         return vec![Stmt::Other(text(node, source).to_string())];
@@ -221,7 +221,7 @@ fn lower_assign_like(node: Node, source: &[u8]) -> Vec<Stmt> {
     if rhs_node.kind() == "call_expression" {
         if let Some(name) = call_target_name(rhs_node, source) {
             let args = call_arg_identifiers(rhs_node, source);
-            return vec![Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, assigned_to: Some(lhs), site: super::site::capture(rhs_node, source) }];
+            return vec![super::site::named(name, args, Some(lhs), rhs_node, source)];
         }
     }
 
@@ -384,7 +384,7 @@ fn lower_statement_inner(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current
             let lowered = stmt
                 .named_child(0)
                 .filter(|n| n.kind() == "call_expression")
-                .and_then(|call| call_target_name(call, source).map(|name| Stmt::Call { target: crate::cfg::CallTarget::Named(name), args: call_arg_identifiers(call, source), assigned_to: None, site: super::site::capture(call, source) }))
+                .and_then(|call| call_target_name(call, source).map(|name| super::site::named(name, call_arg_identifiers(call, source), None, call, source)))
                 .unwrap_or_else(|| Stmt::Other(text(stmt, source).to_string()));
             cfg.nodes[current].stmts.push(lowered);
             current

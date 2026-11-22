@@ -96,7 +96,7 @@ fn lower_local_variable_declaration(node: Node, source: &[u8]) -> Stmt {
     let lhs = text(name_node, source).to_string();
     match declarators[0].child_by_field_name("value") {
         Some(value) if value.kind() == "method_invocation" => match method_invocation_target_name(value, source) {
-            Some(name) => Stmt::Call { target: crate::cfg::CallTarget::Named(name), args: call_arg_identifiers(value, source), assigned_to: Some(lhs), site: super::site::capture(value, source) },
+            Some(name) => super::site::named(name, call_arg_identifiers(value, source), Some(lhs), value, source),
             None => Stmt::Assign { lhs, rhs: RhsShape::Unknown },
         },
         Some(value) => Stmt::Assign { lhs, rhs: classify_rhs(value, source) },
@@ -121,7 +121,7 @@ fn lower_assignment_expression(node: Node, source: &[u8]) -> Stmt {
     let lhs = text(left, source).to_string();
     if right.kind() == "method_invocation" {
         if let Some(name) = method_invocation_target_name(right, source) {
-            return Stmt::Call { target: crate::cfg::CallTarget::Named(name), args: call_arg_identifiers(right, source), assigned_to: Some(lhs), site: super::site::capture(right, source) };
+            return super::site::named(name, call_arg_identifiers(right, source), Some(lhs), right, source);
         }
     }
     Stmt::Assign { lhs, rhs: classify_rhs(right, source) }
@@ -176,7 +176,7 @@ fn lower_statement_inner(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current
                     // engine, which only inspects `Stmt::Call` nodes.
                     "method_invocation" => {
                         if let Some(name) = method_invocation_target_name(inner, source) {
-                            cfg.nodes[current].stmts.push(Stmt::Call { target: crate::cfg::CallTarget::Named(name), args: call_arg_identifiers(inner, source), assigned_to: None, site: super::site::capture(inner, source) });
+                            cfg.nodes[current].stmts.push(super::site::named(name, call_arg_identifiers(inner, source), None, inner, source));
                             return current;
                         }
                     }
