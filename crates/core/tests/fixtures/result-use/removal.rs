@@ -34,3 +34,18 @@ fn passed_to_opaque_callback(path: &str, schedule: impl FnOnce(Box<dyn FnOnce()>
     let completed = remove_file(path);
     schedule(Box::new(move || completed.unwrap()));
 }
+
+struct Audit {
+    status: io::Result<()>,
+}
+
+impl Drop for Audit {
+    fn drop(&mut self) {
+        std::hint::black_box(&self.status);
+    }
+}
+
+fn destructor_reads_field(path: &str) {
+    let mut audit = Audit { status: Ok(()) };
+    audit.status = remove_file(path);
+}

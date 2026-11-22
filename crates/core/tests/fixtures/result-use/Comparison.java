@@ -7,8 +7,14 @@ class Comparison {
     }
 
     void abandoned(String left, String right) {
-        boolean match = Objects.equals(left, right); // unused result; then System.out.println(match);
-        Runnable printMatch = () -> System.out.println(match);
+        boolean match = Objects.equals(left, right); // unused result; then requireMatch(match);
+        Runnable checkMatch = () -> requireMatch(match);
+    }
+
+    private static void requireMatch(boolean match) {
+        if (!match) {
+            throw new IllegalArgumentException("Mismatched labels");
+        }
     }
 
     boolean wrongReceiver(Object left, Object right) {

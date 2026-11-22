@@ -243,7 +243,9 @@ impl Lower<'_, '_, '_> {
 
     fn expression(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
         let call = transparent(node);
-        if site::identifier(call) && node.parent().is_some_and(|parent| parent.kind() == "expression_statement") {
+        if self.place(call, false).is_some()
+            && node.parent().is_some_and(|parent| parent.kind() == "expression_statement")
+        {
             return;
         }
         let discarded = site::capture(call, self.source).is_some_and(|site| site.discarded);

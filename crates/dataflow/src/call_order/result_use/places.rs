@@ -107,8 +107,7 @@ fn static_member_use(node: Node<'_>, fields: &allocations::Members<'_>, source: 
 
 fn address_taken(node: Node<'_>) -> bool {
     std::iter::successors(node.parent(), Node::parent)
-        .skip_while(|node| node.kind() == "parenthesized_expression")
-        .next()
+        .find(|node| node.kind() != "parenthesized_expression")
         .is_some_and(|parent| {
             matches!(parent.kind(), "reference_expression" | "unary_expression")
                 && parent.child(0).is_some_and(|op| matches!(op.kind(), "&" | "&raw"))

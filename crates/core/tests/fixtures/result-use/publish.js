@@ -16,6 +16,12 @@ export async function overwrittenField(from, to, choose) {
     await slot.pending;
 }
 
+export function discardedFieldValue(from, to) {
+    const stats = {renameError: null};
+    stats.renameError = rename(from, to); // unused result; then return stats.renameError;
+    stats.renameError;
+}
+
 export async function throughCallback(from, to) {
     const value = rename(from, to);
     const expose = () => value;

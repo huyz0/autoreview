@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use crate::cfg::{Cfg, EdgeKind, NodeId, Stmt};
 
 use super::{plan::Plan, CallOrderHit, CallOrderSpec, ContractLanguage, KeyedUnit};
-use effects::{Demand, Effect, Origin, Value};
+use effects::{Demand, Effect, Origin, Value, Write};
 use places::Place;
 
 pub(super) fn check_units(spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>]) -> Vec<CallOrderHit> {
@@ -160,26 +160,29 @@ fn transfer(effects: &[Effect], live: &mut Live, closures: &[Body], mut observe:
                 live.insert(*binding);
             }
             Effect::Write(writes) => {
-                // Go multi-assignment evaluates every RHS before replacing
-                // any target, so kill all destinations before adding copies.
-                let mut copies = Vec::new();
-                for write in writes.iter().rev() {
-                    let used = write.target.is_some_and(|binding| live.remove(&binding));
-                    match &write.value {
-                        Value::Source(origin) => {
-                            if let Some(report) = &mut observe {
-                                report(origin, used);
-                            }
-                        }
-                        Value::Copy(binding) if used => copies.push(*binding),
-                        _ => {}
-                    }
-                }
-                live.extend(copies);
+                transfer_writes(writes, live, observe.as_deref_mut());
             }
             Effect::Invoke(index, demand) => {
-                closures[*index].invoke(live, *demand, observe.as_mut().map(|report| &mut **report));
+                closures[*index].invoke(live, *demand, observe.as_deref_mut());
             }
         }
     }
+}
+
+fn transfer_writes(writes: &[Write], live: &mut Live, mut observe: Option<&mut Observer<'_>>) {
+    // Go multi-assignment evaluates every RHS before replacing any target.
+    let mut copies = Vec::new();
+    for write in writes.iter().rev() {
+        let used = write.target.is_some_and(|binding| live.remove(&binding));
+        match &write.value {
+            Value::Source(origin) => {
+                if let Some(report) = &mut observe {
+                    report(origin, used);
+                }
+            }
+            Value::Copy(binding) if used => copies.push(*binding),
+            _ => {}
+        }
+    }
+    live.extend(copies);
 }

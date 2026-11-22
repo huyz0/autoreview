@@ -32,7 +32,7 @@ impl<'tree, 'src> Allocations<'tree, 'src> {
     pub(super) fn members(&self, value: Node<'_>) -> Option<Members<'src>> {
         let names = match self.language {
             ContractLanguage::Go => self.go_fields(value)?,
-            ContractLanguage::Rust => rust_fields(value)?,
+            ContractLanguage::Rust => self.rust_fields(value)?,
             ContractLanguage::Web => web_fields(value)?,
             ContractLanguage::Java | ContractLanguage::Kotlin => self.jvm_fields(value)?,
         };
@@ -90,6 +90,9 @@ impl<'tree, 'src> Allocations<'tree, 'src> {
         let ty = match self.language {
             ContractLanguage::Java if value.kind() == "object_creation_expression" => {
                 let args = value.child_by_field_name("arguments")?;
+                if children(value).any(|node| node.kind() == "class_body") {
+                    return None;
+                }
                 value
                     .child_by_field_name("type")
                     .filter(|ty| ty.kind() == "type_identifier" && args.named_child_count() == 0)?
@@ -100,6 +103,23 @@ impl<'tree, 'src> Allocations<'tree, 'src> {
         let declaration = self.declaration("class_declaration", ty.utf8_text(self.source).ok()?, value.start_byte())?;
         class_fields(declaration, self.language)
     }
+
+    fn rust_fields<'node>(&self, value: Node<'node>) -> Option<Vec<Node<'node>>> {
+        let body = value.child_by_field_name("body").filter(|_| value.kind() == "struct_expression")?;
+        let ty = value.child_by_field_name("name").filter(|ty| ty.kind() == "type_identifier")?;
+        let name = ty.utf8_text(self.source).ok()?;
+        self.declaration("struct_item", name, value.start_byte())?;
+        if descendants(self.root).any(|node| implements_drop(node, name, self.source)) {
+            return None;
+        }
+        children(body)
+            .map(|initializer| match initializer.kind() {
+                "field_initializer" => initializer.child_by_field_name("field"),
+                "shorthand_field_initializer" => initializer.named_child(0),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 fn declaration_visible(node: Node<'_>, at: usize) -> bool {
@@ -108,15 +128,16 @@ fn declaration_visible(node: Node<'_>, at: usize) -> bool {
         .is_some_and(|scope| scope.byte_range().contains(&at))
 }
 
-fn rust_fields(value: Node<'_>) -> Option<Vec<Node<'_>>> {
-    let body = value.child_by_field_name("body").filter(|_| value.kind() == "struct_expression")?;
-    children(body)
-        .map(|initializer| match initializer.kind() {
-            "field_initializer" => initializer.child_by_field_name("field"),
-            "shorthand_field_initializer" => initializer.named_child(0),
-            _ => None,
-        })
-        .collect()
+fn implements_drop(node: Node<'_>, name: &str, source: &[u8]) -> bool {
+    node.kind() == "impl_item"
+        && node
+            .child_by_field_name("trait")
+            .and_then(|part| part.utf8_text(source).ok())
+            .is_some_and(|name| name.rsplit("::").next() == Some("Drop"))
+        && node
+            .child_by_field_name("type")
+            .and_then(|part| part.utf8_text(source).ok())
+            .is_some_and(|ty| ty.split(|c: char| c != '_' && !c.is_alphanumeric()).any(|part| part == name))
 }
 
 fn web_fields(value: Node<'_>) -> Option<Vec<Node<'_>>> {
