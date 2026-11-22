@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use tree_sitter::Node;
 
 use crate::cfg::{Cfg, EdgeKind, NodeId, Stmt};
+use super::line;
 use values::unwrap_value;
 
 pub fn lower_function(source: &[u8], function: Node<'_>) -> Cfg<Stmt> {
@@ -54,19 +55,12 @@ impl Lower<'_> {
         node.utf8_text(self.source).unwrap_or("")
     }
 
-    fn emit(&mut self, at: NodeId, line: u32, stmt: Stmt) {
-        let node = &mut self.cfg.nodes[at];
-        let start = node.stmts.len();
-        node.stmts.push(stmt);
-        node.record_statement_lines(start, line);
-    }
-
     fn edge(&mut self, from: NodeId, to: NodeId, kind: EdgeKind) {
         self.cfg.edges.push((from, to, kind));
     }
 
     fn finish(&mut self, at: NodeId, source_line: u32) {
-        self.emit(at, source_line, Stmt::Return { value: None });
+        self.cfg.emit(at, Stmt::Return { value: None }, source_line);
         self.edge(at, self.cfg.exit, EdgeKind::Fallthrough);
     }
 
@@ -134,7 +128,7 @@ impl Lower<'_> {
     fn keyed_write(&mut self, node: Node<'_>, at: NodeId) {
         if self.cfg.keyed_flow.is_some() {
             for write in super::keyed_syntax::writes(node, self.source) {
-                self.emit(at, line(node), Stmt::Rebind(write));
+                self.cfg.emit(at, Stmt::Rebind(write), line(node));
             }
         }
     }
@@ -232,10 +226,6 @@ impl Lower<'_> {
         self.serial += 1;
         format!("{name}#{}", self.serial)
     }
-}
-
-fn line(node: Node<'_>) -> u32 {
-    node.start_position().row as u32 + 1
 }
 
 fn supported(node: Node<'_>) -> bool {

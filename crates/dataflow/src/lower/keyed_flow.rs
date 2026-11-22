@@ -2,7 +2,7 @@ use tree_sitter::Node;
 
 use crate::cfg::{CallTarget, Cfg, EdgeKind, NodeId, Stmt};
 
-use super::{keyed_syntax, site, StatementLowerer};
+use super::{keyed_syntax, line, site, StatementLowerer};
 
 mod handlers;
 
@@ -81,21 +81,7 @@ impl Flow<'_> {
         else {
             return current;
         };
-        let next = cfg.push_node(line(node));
-        let unwind = cfg.push_node(line(node));
-        cfg.nodes[current].throwing_call = Some(call);
-        cfg.edges.push((current, next, EdgeKind::Fallthrough));
-        cfg.edges.push((current, unwind, EdgeKind::Exceptional));
-        cfg.emit(
-            unwind,
-            Stmt::Throw {
-                exception: None,
-                implicit: true,
-            },
-            line(node),
-        );
-        cfg.edges.push((unwind, cfg.exit, EdgeKind::Fallthrough));
-        next
+        cfg.fork_exception(current, call, line(node))
     }
 
     fn deferred(&self, node: Node<'_>) -> Option<Stmt> {
@@ -154,11 +140,22 @@ pub(super) struct Exit {
 }
 
 impl Cfg<Stmt> {
-    fn emit(&mut self, at: NodeId, stmt: Stmt, line: u32) {
-        let node = &mut self.nodes[at];
-        let start = node.stmts.len();
-        node.stmts.push(stmt);
-        node.record_statement_lines(start, line);
+    fn fork_exception(&mut self, current: NodeId, call: (String, usize), line: u32) -> NodeId {
+        let next = self.push_node(line);
+        let unwind = self.push_node(line);
+        self.nodes[current].throwing_call = Some(call);
+        self.edges.push((current, next, EdgeKind::Fallthrough));
+        self.edges.push((current, unwind, EdgeKind::Exceptional));
+        self.emit(
+            unwind,
+            Stmt::Throw {
+                exception: None,
+                implicit: true,
+            },
+            line,
+        );
+        self.edges.push((unwind, self.exit, EdgeKind::Fallthrough));
+        next
     }
 
     fn terminate(&mut self, at: NodeId, stmt: Stmt, line: u32) -> NodeId {
@@ -200,8 +197,4 @@ impl Cfg<Stmt> {
 
 pub(crate) fn supports_try(node: Node<'_>) -> bool {
     handlers::Parts::new(node).is_some()
-}
-
-fn line(node: Node<'_>) -> u32 {
-    node.start_position().row as u32 + 1
 }

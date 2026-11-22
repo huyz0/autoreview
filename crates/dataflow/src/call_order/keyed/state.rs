@@ -65,26 +65,38 @@ impl State<'_> {
         node: &CfgNode<Stmt>,
         edge: EdgeKind,
     ) -> Option<Self> {
-        let mut state = self.clone();
-        if edge == EdgeKind::Exceptional {
-            let (name, start) = node.throwing_call.as_ref()?;
-            return plan.may_throw(name, *start, &state.values).then_some(state);
+        match edge {
+            EdgeKind::Exceptional => {
+                let (name, start) = node.throwing_call.as_ref()?;
+                plan.may_throw(name, *start, &self.values)
+                    .then(|| self.clone())
+            }
+            EdgeKind::True | EdgeKind::False => {
+                let mut state = self.clone();
+                state.assume(plan, node.condition.as_ref(), edge == EdgeKind::True)?;
+                Some(state)
+            }
+            _ => Some(self.clone()),
         }
-        let Some((name, positive)) = node
-            .condition
-            .as_ref()
-            .filter(|_| matches!(edge, EdgeKind::True | EdgeKind::False))
-        else {
-            return Some(state);
+    }
+
+    fn assume(
+        &mut self,
+        plan: &Plan<'_, '_>,
+        guard: Option<&(String, bool)>,
+        arm: bool,
+    ) -> Option<()> {
+        let Some((name, positive)) = guard else {
+            return Some(());
         };
-        let Some(value) = plan.syntax.resolve(&state.values, name, usize::MAX) else {
-            return Some(state);
+        let Some(value) = plan.syntax.resolve(&self.values, name, usize::MAX) else {
+            return Some(());
         };
-        let truth = (edge == EdgeKind::True) == *positive;
+        let truth = arm == *positive;
         if let IdentityOperand::Boolean(value) = value {
-            return (value == truth).then_some(state);
+            return (value == truth).then_some(());
         }
-        if state
+        if self
             .conditions
             .get(&value)
             .is_some_and(|current| *current != truth)
@@ -92,8 +104,8 @@ impl State<'_> {
             return None;
         }
         if plan.syntax.repeated_guard(name) {
-            state.conditions.insert(value, truth);
+            self.conditions.insert(value, truth);
         }
-        Some(state)
+        Some(())
     }
 }

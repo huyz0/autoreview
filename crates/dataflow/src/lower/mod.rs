@@ -66,6 +66,10 @@ fn lower_statement(cfg: &mut Cfg<Stmt>, stmt: Node<'_>, source: &[u8], current: 
     }
     let start = cfg.nodes[current].stmts.len();
     let next = lower(cfg, stmt, source, current);
-    cfg.nodes[current].record_statement_lines(start, stmt.start_position().row as u32 + 1);
+    cfg.nodes[current].record_statement_lines(start, line(stmt));
     next
+}
+
+fn line(node: Node<'_>) -> u32 {
+    node.start_position().row as u32 + 1
 }

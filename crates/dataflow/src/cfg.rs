@@ -171,6 +171,13 @@ impl<S> Cfg<S> {
         self.nodes.len() - 1
     }
 
+    pub(crate) fn emit(&mut self, at: NodeId, stmt: S, line: u32) {
+        let node = &mut self.nodes[at];
+        let start = node.stmts.len();
+        node.stmts.push(stmt);
+        node.record_statement_lines(start, line);
+    }
+
     pub fn new_empty() -> Self {
         Cfg { entry: 0, exit: 0, nodes: Vec::new(), edges: Vec::new(), keyed_flow: None, keyed_exceptions: false }
     }

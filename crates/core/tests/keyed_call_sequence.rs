@@ -34,6 +34,23 @@ fn findings(
     .collect()
 }
 
+#[track_caller]
+fn one(hits: &[AgentFinding]) -> &AgentFinding {
+    let [hit] = hits else {
+        panic!("expected one finding, got {hits:#?}")
+    };
+    hit
+}
+
+fn finding_lines(hits: &[AgentFinding]) -> Vec<u32> {
+    let mut lines: Vec<_> = hits
+        .iter()
+        .map(|hit| hit.location.range.start_line)
+        .collect();
+    lines.sort_unstable();
+    lines
+}
+
 const RECEIVER: &str = "{receiver: true, keyArgument: 0}";
 const ARGUMENT: &str = "{collectionArgument: 0, keyArgument: 2}";
 
@@ -74,10 +91,10 @@ fn a_wrong_collection_and_key_do_not_satisfy_cleanup() {
     remove(active, makeValue(), "second");
 }"#;
     let hits = findings("TypeScript", "worker.tsx", source, ARGUMENT, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(hits[0].location.range.start_line, 5);
+    let hit = one(&hits);
+    assert_eq!(hit.location.range.start_line, 5);
     assert_eq!(
-        hits[0].message,
+        hit.message,
         "Clean up active and \"first\" before fallthrough"
     );
 }
@@ -107,10 +124,10 @@ fn before_checks_only_the_trigger_collection_and_key() {
     active.finish("first");
 }"#;
     let hits = findings("JavaScript", "worker.js", source, RECEIVER, false);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(hits[0].location.range.start_line, 5);
+    let hit = one(&hits);
+    assert_eq!(hit.location.range.start_line, 5);
     assert_eq!(
-        hits[0].message,
+        hit.message,
         "Clean up active and \"first\" before active.finish"
     );
 }
@@ -145,8 +162,8 @@ fn stable_local_collections_and_numeric_keys_are_supported() {
     active.remove(5);
 }"#;
     let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(hits[0].message, "Clean up active and 4 before fallthrough");
+    let hit = one(&hits);
+    assert_eq!(hit.message, "Clean up active and 4 before fallthrough");
 }
 
 #[test]
@@ -186,8 +203,8 @@ fn rust_question_mark_checks_the_early_return() {
     Ok(())
 }"#;
     let hits = findings("Rust", "lib.rs", source, RECEIVER, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(hits[0].location.range.start_line, 3);
+    let hit = one(&hits);
+    assert_eq!(hit.location.range.start_line, 3);
 }
 
 #[test]
@@ -205,11 +222,8 @@ fn alias_chains_match_receiver_scoped_rules_and_literal_keys() {
     return;
 }"#;
     let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(
-        hits[0].message,
-        "Clean up root and \"pending\" before return"
-    );
+    let hit = one(&hits);
+    assert_eq!(hit.message, "Clean up root and \"pending\" before return");
     let clean = source.replace("other.remove(key)", "alias.drop(key)");
     assert!(findings("JavaScript", "worker.js", &clean, RECEIVER, true).is_empty());
     let rebound = source
@@ -229,8 +243,8 @@ fn positional_aliases_keep_the_collection_and_key_distinct() {
     return;
 }"#;
     let hits = findings("TypeScript", "worker.ts", source, ARGUMENT, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(hits[0].message, "Clean up root and first before return");
+    let hit = one(&hits);
+    assert_eq!(hit.message, "Clean up root and first before return");
     let clean = source.replace(
         "remove(collection, value(), second)",
         "remove(root, value(), first)",
@@ -249,8 +263,7 @@ fn rust_reborrowing_a_collection_keeps_its_identity() {
     assert!(findings("Rust", "lib.rs", source, RECEIVER, true).is_empty());
     let wrong = source.replace("alias.remove(&key)", "alias.remove(&\"other\")");
     let hits = findings("Rust", "lib.rs", &wrong, RECEIVER, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(hits[0].message, "Clean up root and key before return");
+    assert_key_pending_on_return(&hits);
 }
 
 #[test]
@@ -268,11 +281,7 @@ fn finally_runs_before_return_throw_and_fallthrough() {
     assert!(findings("JavaScript", "worker.js", source, RECEIVER, true).is_empty());
     let wrong = source.replace("alias.remove(key)", "alias.remove(\"other\")");
     let hits = findings("JavaScript", "worker.js", &wrong, RECEIVER, true);
-    let mut exits: Vec<_> = hits
-        .iter()
-        .map(|hit| hit.location.range.start_line)
-        .collect();
-    exits.sort_unstable();
+    let exits = finding_lines(&hits);
     assert_eq!(exits, [5, 6, 10], "{hits:#?}");
 }
 
@@ -292,8 +301,8 @@ fn nested_finally_preserves_the_original_exit_path() {
     }
 }"#;
     let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(hits[0].location.range.start_line, 5);
+    let hit = one(&hits);
+    assert_eq!(hit.location.range.start_line, 5);
 }
 
 #[test]
@@ -308,9 +317,9 @@ fn an_exit_in_finally_replaces_the_earlier_return() {
     }
 }"#;
     let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(hits[0].location.range.start_line, 7);
-    assert_eq!(hits[0].message, "Clean up root and key before throw");
+    let hit = one(&hits);
+    assert_eq!(hit.location.range.start_line, 7);
+    assert_eq!(hit.message, "Clean up root and key before throw");
 }
 
 #[test]
@@ -331,11 +340,7 @@ fn jvm_finally_handles_aliases_and_unbraced_returns() {
             RECEIVER,
             true,
         );
-        let mut lines: Vec<_> = hits
-            .iter()
-            .map(|hit| hit.location.range.start_line)
-            .collect();
-        lines.sort_unstable();
+        let lines = finding_lines(&hits);
         let expected = if language == "Java" { [5, 7] } else { [4, 6] };
         assert_eq!(lines, expected, "{language}: {hits:#?}");
     }
@@ -357,8 +362,8 @@ func pending(root *Registry, key string, ready bool) {
     return
 }"#;
     let hits = findings("Go", "worker.go", source, RECEIVER, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(hits[0].location.range.start_line, 8);
+    let hit = one(&hits);
+    assert_eq!(hit.location.range.start_line, 8);
     let source = source
         .replace("alias := root", "var alias = root")
         .replace("defer alias.remove(saved)", "{ defer alias.remove(saved) }");
@@ -386,12 +391,10 @@ func pending(root, other *Registry, key, wrong string, ready bool) {
         "root.register(key)\n        defer root.remove(wrong)",
     );
     let hits = findings("Go", "worker.go", &bad, RECEIVER, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(hits[0].message, "Clean up root and key before fallthrough");
+    let hit = one(&hits);
+    assert_eq!(hit.message, "Clean up root and key before fallthrough");
     assert_eq!(
-        hits[0].related_locations.as_ref().unwrap()[0]
-            .range
-            .start_line,
+        hit.related_locations.as_ref().unwrap()[0].range.start_line,
         8
     );
 }
@@ -405,8 +408,8 @@ func pending(root *Registry, key string, ready bool) {
 }"#;
     let wrong = source.replace("root.remove(key)", "root.remove(\"wrong\")");
     let hits = findings("Go", "worker.go", &wrong, RECEIVER, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(hits[0].message, "Clean up root and key before fallthrough");
+    let hit = one(&hits);
+    assert_eq!(hit.message, "Clean up root and key before fallthrough");
     let conditional = source.replace("root.remove(key)", "if ready { root.remove(key) }");
     assert!(findings("Go", "worker.go", source, RECEIVER, true).is_empty());
     let hits = findings("Go", "worker.go", &conditional, RECEIVER, true);
@@ -424,8 +427,8 @@ fn a_finalizer_that_cleans_only_one_branch_leaves_the_other_pending() {
     }
 }"#;
     let hits = findings("TypeScript", "worker.tsx", source, RECEIVER, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(hits[0].location.range.start_line, 4);
+    let hit = one(&hits);
+    assert_eq!(hit.location.range.start_line, 4);
 }
 
 #[test]
@@ -446,8 +449,8 @@ fn reassignment_tracks_the_collection_and_key_together() {
     assert!(findings("JavaScript", "worker.js", source, RECEIVER, true).is_empty());
     let wrong = source.replace("collection = other;", "collection = root;");
     let hits = findings("JavaScript", "worker.js", &wrong, RECEIVER, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(hits[0].message, "Clean up other and second before return");
+    let hit = one(&hits);
+    assert_eq!(hit.message, "Clean up other and second before return");
 }
 
 #[test]
@@ -464,8 +467,7 @@ fn reassigning_a_binding_preserves_the_identity_copied_before_it() {
     assert!(findings("JavaScript", "worker.js", source, RECEIVER, true).is_empty());
     let wrong = source.replace("saved.remove(original)", "root.remove(key)");
     let hits = findings("JavaScript", "worker.js", &wrong, RECEIVER, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(hits[0].message, "Clean up root and key before return");
+    assert_key_pending_on_return(&hits);
 }
 
 #[test]
@@ -498,8 +500,7 @@ fn rust_reassignment_of_a_key_keeps_the_old_obligation() {
     root.remove(&key);
 }"#;
     let hits = findings("Rust", "lib.rs", source, RECEIVER, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(hits[0].message, "Clean up root and key before return");
+    assert_key_pending_on_return(&hits);
     let clean = source.replace("remove(&key)", "remove(&saved)");
     assert!(findings("Rust", "lib.rs", &clean, RECEIVER, true).is_empty());
 }
@@ -522,8 +523,8 @@ fn opaque_calls_can_leave_through_catch_before_normal_cleanup() {
         "        root.remove(\"other\");",
     );
     let hits = findings("TypeScript", "worker.ts", &wrong, RECEIVER, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(hits[0].location.range.start_line, 7);
+    let hit = one(&hits);
+    assert_eq!(hit.location.range.start_line, 7);
 }
 
 #[test]
@@ -541,11 +542,7 @@ fn finally_cleans_an_implicit_exception_without_hiding_wrong_pairs() {
     assert!(findings("JavaScript", "worker.js", source, RECEIVER, true).is_empty());
     let missing = source.replace("root.remove(key);", "const ignored = true;");
     let hits = findings("JavaScript", "worker.js", &missing, RECEIVER, true);
-    let mut lines: Vec<_> = hits
-        .iter()
-        .map(|hit| hit.location.range.start_line)
-        .collect();
-    lines.sort_unstable();
+    let lines = finding_lines(&hits);
     assert_eq!(lines, [6, 10], "{hits:#?}");
 }
 
@@ -557,12 +554,9 @@ fn implicit_throw_does_not_run_later_normal_cleanup() {
     root.remove(key);
 }"#;
     let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(
-        hits[0].message,
-        "Clean up root and key before implicit throw"
-    );
-    assert_eq!(hits[0].location.range.start_line, 3);
+    let hit = one(&hits);
+    assert_eq!(hit.message, "Clean up root and key before implicit throw");
+    assert_eq!(hit.location.range.start_line, 3);
 }
 
 #[test]
@@ -601,11 +595,7 @@ func pending(root *Registry, first, second string) {
         "defer func() { root.remove(key) }()",
     );
     let hits = findings("Go", "worker.go", &closure, RECEIVER, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
-    assert_eq!(
-        hits[0].message,
-        "Clean up root and first before fallthrough"
-    );
+    assert_go_first_missing(&hits);
 }
 
 #[test]
@@ -625,9 +615,39 @@ func pending(root *Registry, first, second string, ready bool) {
     assert!(findings("Go", "worker.go", source, RECEIVER, true).is_empty());
     let wrong = source.replace("key = first", "key = second");
     let hits = findings("Go", "worker.go", &wrong, RECEIVER, true);
-    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_go_first_missing(&hits);
+}
+
+#[track_caller]
+fn assert_go_first_missing(hits: &[AgentFinding]) {
     assert_eq!(
-        hits[0].message,
+        one(hits).message,
         "Clean up root and first before fallthrough"
     );
+}
+
+#[test]
+fn jvm_reassignments_follow_mutable_local_aliases() {
+    let cases = [
+        ("Java", "Worker.java", "class Worker { void pending(Registry root, String key) { var selected = key; root.register(selected); selected = \"changed\"; root.remove(selected); }}"),
+        ("Kotlin", "Worker.kt", "fun pending(root: Registry, key: String) { var selected = key; root.register(selected); selected = \"changed\"; root.remove(selected) }"),
+    ];
+    for (language, path, code) in cases {
+        let hits = findings(language, path, code, RECEIVER, true);
+        assert_eq!(
+            one(&hits).message,
+            "Clean up root and key before fallthrough",
+            "{language}"
+        );
+        let clean = code.replace("remove(selected)", "remove(key)");
+        assert!(
+            findings(language, path, &clean, RECEIVER, true).is_empty(),
+            "{language}"
+        );
+    }
+}
+
+#[track_caller]
+fn assert_key_pending_on_return(hits: &[AgentFinding]) {
+    assert_eq!(one(hits).message, "Clean up root and key before return");
 }

@@ -115,6 +115,17 @@ impl<'src> Syntax<'src> {
             })
     }
 
+    pub(super) fn has_registration(&self, candidates: &[NamePattern]) -> bool {
+        self.calls.iter().any(|(_, name)| {
+            matches_any(candidates, name)
+                || name.split_once('.').is_some_and(|(_, member)| {
+                    self.bindings
+                        .names()
+                        .any(|binding| matches_receiver(candidates, binding, member))
+                })
+        })
+    }
+
     pub(super) fn models_cleanup(&self, cleanup: &[NamePattern], modeled: &HashSet<usize>) -> bool {
         let values = Values::new();
         self.calls.iter().all(|(start, name)| {

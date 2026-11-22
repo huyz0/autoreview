@@ -95,8 +95,12 @@ fn route(
 ) -> Vec<(NodeId, Exit)> {
     let mut leaving = Vec::new();
     for (from, exit) in exits {
-        if let Stmt::Throw { exception, .. } = &exit.stmt {
-            if caught(cfg, from, handlers, exception.as_deref()) {
+        if let Stmt::Throw {
+            exception,
+            implicit,
+        } = &exit.stmt
+        {
+            if caught(cfg, from, handlers, (exception.as_deref(), *implicit)) {
                 continue;
             }
         }
@@ -109,7 +113,7 @@ fn caught(
     cfg: &mut Cfg<Stmt>,
     from: NodeId,
     handlers: &[Handler],
-    exception: Option<&str>,
+    exception: (Option<&str>, bool),
 ) -> bool {
     for handler in handlers {
         let coverage = handler.coverage(exception);
@@ -131,7 +135,7 @@ enum Coverage {
 }
 
 impl Handler {
-    fn coverage(&self, exception: Option<&str>) -> Coverage {
+    fn coverage(&self, (exception, implicit): (Option<&str>, bool)) -> Coverage {
         if self.types.is_empty()
             || self
                 .types
@@ -140,18 +144,28 @@ impl Handler {
         {
             return Coverage::All;
         }
-        if self.types.iter().any(|kind| kind == "Exception")
-            && exception.is_none_or(|kind| kind.ends_with("Exception"))
-        {
-            return Coverage::All;
-        }
-        if exception.is_some_and(|thrown| thrown.ends_with("Error"))
-            && self.types.iter().all(|kind| kind.ends_with("Exception"))
-        {
-            return Coverage::None;
+        if self.types.iter().any(|kind| kind == "Exception") {
+            if implicit || exception.is_some_and(standard_exception) {
+                return Coverage::All;
+            }
+            if self.types.len() == 1 && matches!(exception, Some("Error" | "AssertionError")) {
+                return Coverage::None;
+            }
         }
         Coverage::Some
     }
+}
+
+fn standard_exception(name: &str) -> bool {
+    matches!(
+        name,
+        "RuntimeException"
+            | "IllegalArgumentException"
+            | "IllegalStateException"
+            | "IOException"
+            | "NullPointerException"
+            | "IndexOutOfBoundsException"
+    )
 }
 
 fn catch_types(node: Node<'_>, source: &[u8]) -> Vec<String> {

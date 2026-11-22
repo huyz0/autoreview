@@ -32,6 +32,9 @@ impl<'a, 'src> Plan<'a, 'src> {
             return None;
         }
         let syntax = Syntax::scan(function, source, &sources.writes)?;
+        if !syntax.has_registration(&spec.after) {
+            return None;
+        }
         syntax
             .models_cleanup(&spec.unless, &sources.calls)
             .then_some(Self {
