@@ -1,0 +1,27 @@
+id: kotlin-direct-unconditional-recursion
+language: Kotlin
+category: correctness
+severity: warning
+semantic: true
+message: >-
+  The only statement calls this function again without a stopping branch. Check whether the
+  call should target a different function or whether a base case is missing.
+metadata:
+  references:
+    - "https://kotlinlang.org/docs/functions.html#tail-recursive-functions"
+rule:
+  not:
+    has:
+      kind: function_value_parameters
+      has:
+        kind: parameter
+        has:
+          kind: simple_identifier
+          pattern: $F
+  any:
+    - pattern: "fun $F(): $R { return $F() }"
+    - pattern: "fun $F() { $F() }"
+    - pattern: "fun $F($P: $T): $R { return $F($P) }"
+    - pattern: "fun $F($P: $T) { $F($P) }"
+    - pattern: "fun $F(): $R = $F()"
+    - pattern: "fun $F($P: $T): $R = $F($P)"

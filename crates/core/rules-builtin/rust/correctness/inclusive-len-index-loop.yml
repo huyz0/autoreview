@@ -1,0 +1,26 @@
+id: rust-inclusive-len-index-loop
+language: Rust
+category: correctness
+severity: warning
+semantic: true
+message: >-
+  This range includes len(), which is one past the last valid index. Use an exclusive range,
+  or enumerate an iterator when the index and item are both needed.
+metadata:
+  references:
+    - "https://doc.rust-lang.org/reference/expressions/range-expr.html"
+rule:
+  pattern: for $INDEX in 0..=$ITEMS.len() { $$$BODY }
+  has:
+    kind: block
+    has:
+      pattern: $ITEMS[$INDEX]
+      stopBy:
+        any:
+          - kind: closure_expression
+          - kind: function_item
+constraints:
+  INDEX:
+    kind: identifier
+  ITEMS:
+    kind: identifier

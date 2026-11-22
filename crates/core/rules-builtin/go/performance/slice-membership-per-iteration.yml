@@ -1,0 +1,22 @@
+id: go-slice-membership-per-iteration
+language: Go
+category: performance
+severity: info
+semantic: true
+message: >-
+  slices.Contains scans the slice for each range value. For many lookups against the same
+  unchanged slice, consider building a membership map once outside the loop.
+metadata:
+  references:
+    - "https://go.dev/src/slices/slices.go"
+rule:
+  pattern: slices.Contains($HAYSTACK, $ITEM)
+  inside:
+    pattern: for _, $ITEM := range $SOURCE { $$$BODY }
+    stopBy:
+      kind: func_literal
+constraints:
+  HAYSTACK:
+    kind: identifier
+  ITEM:
+    kind: identifier

@@ -1,0 +1,17 @@
+id: java-overlapping-recursive-steps
+language: Java
+category: performance
+severity: info
+semantic: true
+message: >-
+  The n - 1 and n - 2 recursive calls revisit the same smaller inputs. For large inputs,
+  compute the recurrence iteratively or memoize by input when reusing the result preserves
+  behavior.
+metadata:
+  references:
+    - "https://www.ocw.mit.edu/courses/6-006-introduction-to-algorithms-fall-2011/resources/lecture-19-dynamic-programming-i-fibonacci-shortest-paths/"
+rule:
+  any:
+    - pattern:
+        context: "class Sample { int $F(int $N) { if ($N <= 1) return $N; return $F($N - 1) + $F($N - 2); } }"
+        selector: method_declaration

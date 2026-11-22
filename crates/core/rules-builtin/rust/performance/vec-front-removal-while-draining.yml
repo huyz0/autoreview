@@ -1,0 +1,44 @@
+id: rust-vec-front-removal-while-draining
+language: Rust
+category: performance
+severity: info
+semantic: true
+message: >-
+  Removing index zero from a Vec shifts the remaining elements. For a FIFO drain, consider
+  VecDeque::pop_front or consume the Vec in order when ownership permits.
+metadata:
+  references:
+    - "https://doc.rust-lang.org/std/vec/struct.Vec.html#method.remove"
+rule:
+  all:
+    - pattern: $QUEUE.remove(0)
+    - inside:
+        any:
+          - pattern: while !$QUEUE.is_empty() { $$$BODY }
+          - pattern: while $QUEUE.len() > 0 { $$$BODY }
+        stopBy:
+          any:
+            - kind: closure_expression
+            - kind: function_item
+            - kind: async_block
+    - inside:
+        kind: function_item
+        has:
+          field: parameters
+          has:
+            kind: parameter
+            all:
+              - has:
+                  field: pattern
+                  pattern: $QUEUE
+              - has:
+                  field: type
+                  regex: '^(?:&\s*mut\s+)?(?:std::vec::)?Vec\s*<'
+        stopBy:
+          any:
+            - kind: closure_expression
+            - kind: function_item
+            - kind: async_block
+constraints:
+  QUEUE:
+    kind: identifier

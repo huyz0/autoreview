@@ -1,0 +1,23 @@
+id: javascript-async-foreach-callback
+language: JavaScript
+category: correctness
+severity: warning
+semantic: true
+message: >-
+  Array forEach does not await an async callback or propagate its rejected promise. Use
+  for…of with await when processing must finish in order, or explicitly await a group of
+  promises with a concurrency limit when needed.
+metadata:
+  references:
+    - "https://tc39.es/ecma262/multipage/indexed-collections.html#sec-array.prototype.foreach"
+rule:
+  any:
+    - pattern: $ITEMS.forEach($CALLBACK)
+    - pattern: $ITEMS.forEach($CALLBACK, $THIS)
+constraints:
+  CALLBACK:
+    all:
+      - any:
+          - kind: arrow_function
+          - kind: function_expression
+      - regex: '^async(?:\s|\()'

@@ -6,6 +6,8 @@ A syntax rule can match a specific API sequence or local expression. Data flow i
 
 See [collection performance and retention](collection-coverage.md) for
 allocation, collection lifetime, and mutation checks by language.
+See [loop and recursion rules](loop-and-recursion-coverage.md) for control
+flow, repeated work, and stack depth.
 
 ## Code design and complexity
 

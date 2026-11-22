@@ -1,0 +1,50 @@
+id: java-for-counter-wrong-direction
+language: Java
+category: correctness
+severity: warning
+message: >-
+  The loop update moves the counter away from the condition's bound. Check the update and
+  comparison before relying on the loop to terminate.
+metadata:
+  references:
+    - "https://docs.oracle.com/javase/specs/jls/se21/html/jls-14.html#jls-14.14.1"
+rule:
+  kind: for_statement
+  any:
+    - all:
+        - has:
+            field: condition
+            any:
+              - pattern: "$INDEX < $BOUND"
+              - pattern: "$INDEX <= $BOUND"
+              - pattern: "$BOUND > $INDEX"
+              - pattern: "$BOUND >= $INDEX"
+        - has:
+            field: update
+            any:
+              - pattern:
+                  context: "class Sample { void run() { for (;; $INDEX--) {} } }"
+                  selector: update_expression
+              - pattern:
+                  context: "class Sample { void run() { for (;; --$INDEX) {} } }"
+                  selector: update_expression
+    - all:
+        - has:
+            field: condition
+            any:
+              - pattern: "$INDEX > $BOUND"
+              - pattern: "$INDEX >= $BOUND"
+              - pattern: "$BOUND < $INDEX"
+              - pattern: "$BOUND <= $INDEX"
+        - has:
+            field: update
+            any:
+              - pattern:
+                  context: "class Sample { void run() { for (;; $INDEX++) {} } }"
+                  selector: update_expression
+              - pattern:
+                  context: "class Sample { void run() { for (;; ++$INDEX) {} } }"
+                  selector: update_expression
+constraints:
+  INDEX:
+    kind: identifier

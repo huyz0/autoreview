@@ -1,0 +1,25 @@
+id: java-direct-unconditional-recursion
+language: Java
+category: correctness
+severity: warning
+semantic: true
+message: >-
+  The only statement calls this function again without a stopping branch. Check whether the
+  call should target a different function or whether a base case is missing.
+metadata:
+  references:
+    - "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/StackOverflowError.html"
+rule:
+  any:
+    - pattern:
+        context: "class Sample { $R $F() { return $F(); } }"
+        selector: method_declaration
+    - pattern:
+        context: "class Sample { void $F() { $F(); } }"
+        selector: method_declaration
+    - pattern:
+        context: "class Sample { $R $F($T $P) { return $F($P); } }"
+        selector: method_declaration
+    - pattern:
+        context: "class Sample { void $F($T $P) { $F($P); } }"
+        selector: method_declaration

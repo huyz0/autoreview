@@ -1,0 +1,31 @@
+id: rust-direct-unconditional-recursion
+language: Rust
+category: correctness
+severity: warning
+message: >-
+  The only statement calls this function again without a stopping branch. Check whether the
+  call should target a different function or whether a base case is missing.
+metadata:
+  references:
+    - "https://doc.rust-lang.org/rustc/lints/listing/warn-by-default.html#unconditional-recursion"
+rule:
+  not:
+    has:
+      field: parameters
+      has:
+        kind: parameter
+        has:
+          field: pattern
+          pattern: $F
+  any:
+    - pattern: "fn $F() { $F(); }"
+    - pattern: "fn $F() -> $R { $F() }"
+    - pattern: "fn $F($P: $T) { $F($P); }"
+    - pattern: "fn $F($P: $T) -> $R { $F($P) }"
+    - pattern: "fn $F($P: $T) -> $R { return $F($P); }"
+  inside:
+    any:
+      - kind: source_file
+      - kind: declaration_list
+        inside:
+          kind: mod_item

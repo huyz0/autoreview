@@ -1,0 +1,42 @@
+id: javascript-react-hook-in-loop
+language: JavaScript
+category: correctness
+severity: warning
+semantic: true
+message: >-
+  A React Hook is called from a loop. Move it to the top level of the component or custom
+  Hook, or extract the repeated UI into keyed child components that own their hooks.
+metadata:
+  references:
+    - "https://react.dev/reference/eslint-plugin-react-hooks/lints/rules-of-hooks"
+rule:
+  all:
+    - pattern: $HOOK($$$ARGS)
+    - inside:
+        any:
+          - kind: for_statement
+          - kind: for_in_statement
+          - kind: while_statement
+          - kind: do_statement
+        stopBy:
+          any:
+            - kind: arrow_function
+            - kind: function_expression
+            - kind: function_declaration
+            - kind: method_definition
+    - inside:
+        kind: program
+        stopBy: end
+        has:
+          kind: import_statement
+          all:
+            - has:
+                field: source
+                regex: '^["'']react["'']$'
+            - has:
+                pattern: $HOOK
+                kind: import_specifier
+                stopBy: end
+constraints:
+  HOOK:
+    regex: '^use(State|Effect|LayoutEffect|InsertionEffect|Reducer|Memo|Callback|Ref|Context|Id|ImperativeHandle|SyncExternalStore|Transition|DeferredValue|DebugValue|ActionState|Optimistic|EffectEvent)$'

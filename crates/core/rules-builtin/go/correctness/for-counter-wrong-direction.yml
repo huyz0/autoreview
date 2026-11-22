@@ -1,0 +1,42 @@
+id: go-for-counter-wrong-direction
+language: Go
+category: correctness
+severity: warning
+message: >-
+  The loop update moves the counter away from the condition's bound. Check the update and
+  comparison before relying on the loop to terminate.
+metadata:
+  references:
+    - "https://go.dev/ref/spec#For_statements"
+rule:
+  kind: for_statement
+  has:
+    kind: for_clause
+    any:
+      - all:
+          - has:
+              field: condition
+              any:
+                - pattern: "$INDEX < $BOUND"
+                - pattern: "$INDEX <= $BOUND"
+                - pattern: "$BOUND > $INDEX"
+                - pattern: "$BOUND >= $INDEX"
+          - has:
+              field: update
+              any:
+                - pattern: "$INDEX--"
+      - all:
+          - has:
+              field: condition
+              any:
+                - pattern: "$INDEX > $BOUND"
+                - pattern: "$INDEX >= $BOUND"
+                - pattern: "$BOUND < $INDEX"
+                - pattern: "$BOUND <= $INDEX"
+          - has:
+              field: update
+              any:
+                - pattern: "$INDEX++"
+constraints:
+  INDEX:
+    kind: identifier

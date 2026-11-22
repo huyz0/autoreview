@@ -1,0 +1,42 @@
+id: typescript-for-counter-wrong-direction
+language: TypeScript
+category: correctness
+severity: warning
+message: >-
+  The loop update moves the counter away from the condition's bound. Check the update and
+  comparison before relying on the loop to terminate.
+metadata:
+  references:
+    - "https://eslint.org/docs/latest/rules/for-direction"
+rule:
+  kind: for_statement
+  any:
+    - all:
+        - has:
+            field: condition
+            any:
+              - pattern: "$INDEX < $BOUND"
+              - pattern: "$INDEX <= $BOUND"
+              - pattern: "$BOUND > $INDEX"
+              - pattern: "$BOUND >= $INDEX"
+        - has:
+            field: increment
+            any:
+              - pattern: "$INDEX--"
+              - pattern: "--$INDEX"
+    - all:
+        - has:
+            field: condition
+            any:
+              - pattern: "$INDEX > $BOUND"
+              - pattern: "$INDEX >= $BOUND"
+              - pattern: "$BOUND < $INDEX"
+              - pattern: "$BOUND <= $INDEX"
+        - has:
+            field: increment
+            any:
+              - pattern: "$INDEX++"
+              - pattern: "++$INDEX"
+constraints:
+  INDEX:
+    kind: identifier

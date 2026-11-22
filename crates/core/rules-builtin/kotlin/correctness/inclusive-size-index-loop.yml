@@ -1,0 +1,27 @@
+id: kotlin-inclusive-size-index-loop
+language: Kotlin
+category: correctness
+severity: warning
+semantic: true
+message: >-
+  This range includes size, which is one past the last valid index. Use indices or until
+  size for a forward index loop.
+metadata:
+  references:
+    - "https://kotlinlang.org/docs/ranges.html"
+rule:
+  pattern:
+    context: 'fun run() { for ($INDEX in 0..$ITEMS.size) { $$$BODY } }'
+    selector: for_statement
+  has:
+    kind: control_structure_body
+    has:
+      pattern:
+        context: 'fun run() { $ITEMS[$INDEX] }'
+        selector: indexing_expression
+      stopBy: end
+constraints:
+  INDEX:
+    kind: simple_identifier
+  ITEMS:
+    kind: simple_identifier

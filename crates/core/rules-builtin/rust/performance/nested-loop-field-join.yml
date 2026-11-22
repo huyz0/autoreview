@@ -1,0 +1,37 @@
+id: rust-nested-loop-field-join
+language: Rust
+category: performance
+severity: info
+semantic: true
+message: >-
+  The inner loop compares one field from each collection for every pair. Consider indexing
+  the inner collection by the compared key if it stays unchanged. Preserve duplicate
+  matches, equality, and any required output order.
+metadata:
+  references:
+    - "https://doc.rust-lang.org/std/collections/index.html#cost-of-collection-operations"
+rule:
+  pattern: "$OUTER.$FIRST == $INNER.$SECOND"
+  not:
+    pattern: "$SAME.$FIRST == $SAME.$SECOND"
+  inside:
+    pattern: "for $INNER in $RIGHT { $$$INNER_BODY }"
+    stopBy:
+      any:
+        - kind: closure_expression
+        - kind: function_item
+        - kind: async_block
+    inside:
+      pattern: "for $OUTER in $LEFT { $$$OUTER_BODY }"
+      stopBy:
+        any:
+          - kind: closure_expression
+          - kind: function_item
+          - kind: async_block
+constraints:
+  OUTER:
+    kind: identifier
+  INNER:
+    kind: identifier
+  RIGHT:
+    kind: identifier

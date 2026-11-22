@@ -1,0 +1,28 @@
+id: typescript-front-removal-while-draining-array
+language: TypeScript
+category: performance
+severity: info
+semantic: true
+message: >-
+  Repeatedly removing the first element of a large array can move or reindex the remaining
+  elements. If this is an array-backed queue, consider a head index or a deque and preserve
+  how consumers observe the queue.
+metadata:
+  references:
+    - "https://tc39.es/ecma262/multipage/indexed-collections.html#sec-array.prototype.shift"
+rule:
+  pattern: $QUEUE.shift()
+  inside:
+    any:
+      - pattern: while ($QUEUE.length > 0) { $$$BODY }
+      - pattern: while ($QUEUE.length !== 0) { $$$BODY }
+      - pattern: while ($QUEUE.length) { $$$BODY }
+    stopBy:
+      any:
+        - kind: arrow_function
+        - kind: function_expression
+        - kind: function_declaration
+        - kind: method_definition
+constraints:
+  QUEUE:
+    kind: identifier

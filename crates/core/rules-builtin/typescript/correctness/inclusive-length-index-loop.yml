@@ -1,0 +1,28 @@
+id: typescript-inclusive-length-index-loop
+language: TypeScript
+category: correctness
+severity: warning
+semantic: true
+message: >-
+  The loop includes the collection length, which is one past the last valid element index.
+  Use a strict less-than bound or iterate over the items directly.
+metadata:
+  references:
+    - "https://tc39.es/ecma262/multipage/indexed-collections.html#sec-array-objects"
+rule:
+  pattern: "for (let $INDEX = 0; $INDEX <= $ITEMS.length; $INDEX++) { $$$BODY }"
+  has:
+    field: body
+    has:
+      pattern: "$ITEMS[$INDEX]"
+      stopBy:
+        any:
+          - kind: arrow_function
+          - kind: function_expression
+          - kind: function_declaration
+          - kind: method_definition
+constraints:
+  INDEX:
+    kind: identifier
+  ITEMS:
+    kind: identifier
