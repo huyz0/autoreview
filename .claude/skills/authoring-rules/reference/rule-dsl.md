@@ -330,14 +330,18 @@ satisfies its contract.
 
 Use `mode: must-use` for APIs such as `os.Rename` whose result carries an
 error. This mode requires `import` and a nonempty `methods` list. It checks
-bare call statements, explicit wildcard assignments, and results assigned
-to locals. The rule reports the original call when no reachable path reads
-its value. A reassignment replaces the value on that path. Copying into
-another local carries the result forward until that copy is read. A check,
-return, await, or pass to another call counts as a read. A web promise
-awaited directly already satisfies the contract. This local analysis treats
-stores to fields and captures by nested functions as possible uses. Omit
-`unless` and `borrows` for this mode.
+bare call statements, explicit wildcard assignments, and assigned results
+that no reachable path reads. Reassignment replaces the value on that path.
+The analysis follows copies through locals and statically named fields of
+fresh, nonescaping objects and structs. It matches a field read to the
+same receiver and field name.
+
+For a local closure with known call sites, the analysis follows reads and
+writes in its body when the closure runs. Returning a captured value passes
+it to the caller, where it can be read or discarded. Rust `move` closures
+capture the value at creation. Escaped callbacks, dynamic receivers, and
+objects with unknown accessors count as possible uses. A directly awaited
+web promise satisfies the contract. Omit `unless` and `borrows` for this mode.
 
 Go matches explicit package imports. Java matches explicit class imports and
 fully qualified calls in supported top-level types. Kotlin and Rust also

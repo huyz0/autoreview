@@ -1,12 +1,16 @@
-use std::collections::HashSet;
-
 use tree_sitter::Node;
 
-use crate::cfg::Evaluation;
+use crate::cfg::{Cfg, Evaluation, Stmt};
 use crate::lower::{keyed_syntax::assignment_parts, site};
 
-use super::super::{plan::Plan, ContractLanguage, KeyedFunction};
-use super::references::{captured_names, walk_names};
+use super::super::KeyedFunction;
+use super::closures::{Closure, Closures};
+use super::places::{Place, Places};
+use super::references::captured_names;
+use super::syntax::{items as assignment_items, targets as assignment_targets, transparent};
+use super::{Analysis, Body, ContractLanguage, Flow, Live, Plan};
+
+mod reads;
 
 #[derive(Clone)]
 pub(super) struct Origin {
@@ -17,45 +21,51 @@ pub(super) struct Origin {
 
 pub(super) enum Value {
     Source(Origin),
-    Copy(usize),
+    Copy(Place),
     Other,
 }
 
 pub(super) struct Write {
-    pub(super) target: Option<usize>,
+    pub(super) target: Option<Place>,
     pub(super) value: Value,
 }
 
 pub(super) enum Effect {
-    Read(usize),
+    Read(Place),
     Write(Vec<Write>),
+    Invoke(usize, Demand),
 }
 
-pub(super) fn lower<'src>(
-    plan: &Plan<'_, 'src>,
-    function: &KeyedFunction<'_, '_>,
-    source: &'src [u8],
-    reachable: &[bool],
-) -> Vec<Vec<Effect>> {
+#[derive(Clone, Copy)]
+pub(super) enum Demand {
+    Discarded,
+    Observed,
+    Slot(Place),
+}
+
+impl Demand {
+    pub(super) fn observed(self, live: &mut Live) -> bool {
+        match self {
+            Self::Discarded => false,
+            Self::Observed => true,
+            Self::Slot(slot) => live.remove(&slot),
+        }
+    }
+}
+
+pub(super) fn lower<'src>(plan: &Plan<'_, 'src>, function: &KeyedFunction<'_, '_>, source: &'src [u8]) -> Analysis {
     let language = plan.spec.contract.as_ref().unwrap().language;
-    let flow = Lower { plan, source, language, captured: captured_names(function.node, source, language) };
-    function
-        .graph
-        .nodes
+    let mut places = Places::new(plan, function.node, source);
+    let closures = Closures::scan(function.node, language, &places, source);
+    places.exclude_captures(captured_names(function.node, source, language, |node| closures.literal(node).is_some()));
+    let lower = Lower { plan, source, language, places: &places, closures: &closures, inside: None };
+    let owner = lower.body(function.node, function.graph);
+    let bodies = closures
+        .bodies
         .iter()
-        .zip(reachable)
-        .map(|(node, &reached)| {
-            let mut effects = Vec::new();
-            if reached {
-                for range in &node.evaluations {
-                    if let Some(syntax) = evaluation(function.node, range) {
-                        flow.statement(syntax, &mut effects);
-                    }
-                }
-            }
-            effects
-        })
-        .collect()
+        .map(|closure| Lower { inside: Some(closure), ..lower }.body(closure.node, &closure.graph))
+        .collect();
+    Analysis { owner, closures: bodies }
 }
 
 fn evaluation<'tree>(function: Node<'tree>, evaluation: &Evaluation) -> Option<Node<'tree>> {
@@ -66,15 +76,43 @@ fn evaluation<'tree>(function: Node<'tree>, evaluation: &Evaluation) -> Option<N
         .find(|node| node.kind_id() == evaluation.syntax_kind)
 }
 
-struct Lower<'plan, 'spec, 'src> {
-    plan: &'plan Plan<'spec, 'src>,
+struct Lower<'plan, 'src, 'tree> {
+    plan: &'plan Plan<'plan, 'src>,
     source: &'src [u8],
     language: ContractLanguage,
-    captured: HashSet<&'src str>,
+    places: &'plan Places<'plan, 'src>,
+    closures: &'plan Closures<'tree>,
+    inside: Option<&'plan Closure<'tree>>,
 }
 
 impl Lower<'_, '_, '_> {
+    fn body(&self, function: Node<'_>, graph: &Cfg<Stmt>) -> Body {
+        let flow = Flow::new(graph, self.plan);
+        let effects = graph
+            .nodes
+            .iter()
+            .zip(&flow.reachable)
+            .map(|(node, &reached)| {
+                let mut effects = Vec::new();
+                if reached {
+                    for syntax in node.evaluations.iter().filter_map(|range| evaluation(function, range)) {
+                        self.statement(syntax, &mut effects);
+                    }
+                }
+                effects
+            })
+            .collect();
+        Body { flow, effects }
+    }
+
     fn statement(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
+        if let Some(closure) = self.inside {
+            if let Some(value) = closure_result(node, closure) {
+                let value = self.value(value, effects);
+                effects.push(Effect::Write(vec![Write { target: Some(Place::Return), value }]));
+                return;
+            }
+        }
         match node.kind() {
             "expression_statement" => {
                 if let Some(expr) = site::children(node).next() {
@@ -125,7 +163,7 @@ impl Lower<'_, '_, '_> {
                 self.reads(*value, effects);
             }
         }
-        let writes = targets
+        let mut writes: Vec<_> = targets
             .into_iter()
             .enumerate()
             .filter_map(|(index, target)| {
@@ -133,6 +171,10 @@ impl Lower<'_, '_, '_> {
                 self.write(target, value, reassignment, effects)
             })
             .collect();
+        if !reassignment {
+            let initialized = writes.iter().flat_map(|write| self.allocation_fields(write.target)).collect::<Vec<_>>();
+            writes.extend(initialized);
+        }
         effects.push(Effect::Write(writes));
     }
 
@@ -145,7 +187,7 @@ impl Lower<'_, '_, '_> {
     ) -> Option<Write> {
         let name = target.utf8_text(self.source).ok()?;
         let wildcard = name == "_" && self.language != ContractLanguage::Web;
-        let binding = self.local(name, target.start_byte(), !reassignment).filter(|_| site::identifier(target));
+        let binding = self.place(target, !reassignment);
         if !wildcard && binding.is_none() {
             if reassignment {
                 self.reads(target, effects);
@@ -163,12 +205,13 @@ impl Lower<'_, '_, '_> {
 
     fn value(&self, node: Node<'_>, effects: &mut Vec<Effect>) -> Value {
         let value = transparent(node);
-        if site::identifier(value) {
-            if let Some(binding) =
-                value.utf8_text(self.source).ok().and_then(|name| self.local(name, value.start_byte(), false))
-            {
-                return Value::Copy(binding);
-            }
+        if let Some(binding) = self.place(value, false) {
+            return Value::Copy(binding);
+        }
+        if self.closure_call(value).is_some() {
+            let output = Place::CallResult(value.start_byte());
+            self.reads_with(value, effects, Demand::Slot(output));
+            return Value::Copy(output);
         }
         if let Some(origin) = self.origin(value) {
             // Any arguments still read their previous values.
@@ -179,22 +222,41 @@ impl Lower<'_, '_, '_> {
         Value::Other
     }
 
-    fn local(&self, name: &str, at: usize, defining: bool) -> Option<usize> {
-        if self.captured.contains(name) {
-            return None;
-        }
-        self.plan.syntax.local_result_binding(name, at, defining)
+    fn place(&self, node: Node<'_>, defining: bool) -> Option<Place> {
+        self.places.place(node, defining).map(|place| self.remap(place))
+    }
+
+    fn remap(&self, place: Place) -> Place {
+        self.inside.map_or(place, |closure| closure.remap(place))
+    }
+
+    fn allocation_fields(&self, target: Option<Place>) -> impl Iterator<Item = Write> + '_ {
+        target
+            .into_iter()
+            .filter_map(|place| match place {
+                Place::Local(binding) => Some(binding),
+                _ => None,
+            })
+            .flat_map(|binding| self.places.initialized_fields(binding))
+            .map(|target| Write { target: Some(target), value: Value::Other })
     }
 
     fn expression(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
         let call = transparent(node);
-        if site::identifier(call) && node.parent().is_some_and(|parent| parent.kind() == "expression_statement") {
+        if self.place(call, false).is_some()
+            && node.parent().is_some_and(|parent| parent.kind() == "expression_statement")
+        {
             return;
         }
-        self.reads(node, effects);
+        let discarded = site::capture(call, self.source).is_some_and(|site| site.discarded);
+        if discarded {
+            self.reads_with(call, effects, Demand::Discarded);
+        } else {
+            self.reads(node, effects);
+        }
         let call = if node.kind() == "defer_statement" {
             node.named_child(0).unwrap_or(node)
-        } else if site::capture(call, self.source).is_some_and(|site| site.discarded) {
+        } else if discarded {
             call
         } else {
             return;
@@ -212,37 +274,17 @@ impl Lower<'_, '_, '_> {
         self.plan.source_mode(&call)?;
         Some(Origin { call, start: node.start_byte(), line: node.start_position().row as u32 + 1 })
     }
-
-    fn reads(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
-        walk_names(node, self.source, self.language, |name, start| {
-            if let Some(binding) = self.local(name, start, false) {
-                effects.push(Effect::Read(binding));
-            }
-        });
-    }
 }
 
-fn assignment_targets<'tree>(node: Node<'tree>, target: Node<'tree>) -> Vec<Node<'tree>> {
-    if node.kind() == "var_spec" {
-        return node.children_by_field_name("name", &mut node.walk()).collect();
+fn closure_result<'tree>(node: Node<'tree>, closure: &Closure<'_>) -> Option<Node<'tree>> {
+    if matches!(node.kind(), "return_statement" | "return_expression") {
+        let values = assignment_items(site::children(node).next()?);
+        return (values.len() == 1).then(|| values[0]);
     }
-    assignment_items(target)
-}
-
-fn assignment_items(node: Node<'_>) -> Vec<Node<'_>> {
-    if node.kind() == "expression_list" {
-        return site::children(node).collect();
+    if closure.tail.is_some_and(|tail| tail.byte_range() == node.byte_range() && tail.kind() == node.kind())
+        && !matches!(node.kind(), "assignment" | "assignment_expression" | "property_declaration")
+    {
+        return Some(node);
     }
-    vec![node]
-}
-
-fn transparent(mut node: Node<'_>) -> Node<'_> {
-    while matches!(
-        node.kind(),
-        "parenthesized_expression" | "as_expression" | "satisfies_expression" | "non_null_expression"
-    ) {
-        let Some(inner) = site::children(node).next() else { break };
-        node = inner;
-    }
-    node
+    None
 }
