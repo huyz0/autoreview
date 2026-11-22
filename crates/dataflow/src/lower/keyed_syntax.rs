@@ -69,9 +69,10 @@ fn write(node: Node<'_>, source: &[u8]) -> Option<BindingWrite> {
                 name: name.clone(),
                 start: value.start_byte(),
                 age: 0,
+                unit: 0,
             })
         } else {
-            binding_value(value, source)
+            result_operand(value, source, !assignment)
         }
     });
     if !assignment && value.is_none() {
@@ -151,6 +152,29 @@ fn simple(node: Node<'_>) -> Option<Node<'_>> {
     let mut parts = children(node);
     let first = parts.next()?;
     parts.next().is_none().then_some(first)
+}
+
+pub(crate) fn result_operand(
+    node: Node<'_>,
+    source: &[u8],
+    fallback: bool,
+) -> Option<IdentityOperand> {
+    let node = expression_value(node)?;
+    if matches!(node.kind(), "call_expression" | "method_invocation") {
+        return Some(IdentityOperand::CallResult {
+            start: node.start_byte(),
+            fallback,
+        });
+    }
+    if matches!(node.kind(), "new_expression" | "object_creation_expression") {
+        return Some(IdentityOperand::Fresh {
+            name: "returned collection".into(),
+            start: node.start_byte(),
+            age: 0,
+            unit: 0,
+        });
+    }
+    binding_value(node, source)
 }
 
 fn binding_value(node: Node<'_>, source: &[u8]) -> Option<IdentityOperand> {

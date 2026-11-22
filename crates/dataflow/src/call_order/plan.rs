@@ -25,10 +25,11 @@ impl<'a, 'src> Plan<'a, 'src> {
         cfg: &Cfg<Stmt>,
         function: Node<'_>,
         source: &'src [u8],
+        unit: usize,
     ) -> Option<Self> {
         let mut sources = Sources::default();
         sources.collect(cfg)?;
-        let syntax = Syntax::scan(function, source, &sources.writes)?;
+        let syntax = Syntax::scan(function, source, &sources.writes, unit)?;
         syntax
             .models_cleanup(&spec.unless, &sources.calls)
             .then_some(Self {

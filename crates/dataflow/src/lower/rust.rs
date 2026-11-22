@@ -35,6 +35,9 @@ fn lower_function_with(cfg: Cfg<Stmt>, source: &[u8], function: Node<'_>) -> Cfg
         .filter(|body| supported(*body))
     {
         if let Some(end) = lower.block(body, entry, &HashMap::new()) {
+            if let Some(tail) = super::site::children(body).last() {
+                lower.return_identity(tail, end);
+            }
             lower.finish(end, body.end_position().row as u32 + 1);
         }
     }
@@ -80,6 +83,10 @@ impl Lower<'_> {
             }
             "return_expression" => {
                 let at = self.value(stmt.named_child(0), at, names, None);
+                if self.cfg.keyed_flow.is_some() {
+                    let value = stmt.named_child(0).and_then(|value| super::keyed_syntax::result_operand(value, self.source, false));
+                    self.cfg.emit(at, Stmt::ReturnIdentity(value), line(stmt));
+                }
                 self.finish(at, line(stmt));
                 return None;
             }
@@ -123,6 +130,13 @@ impl Lower<'_> {
             names.insert(name, target);
         }
         at
+    }
+
+    fn return_identity(&mut self, tail: Node<'_>, at: NodeId) {
+        if self.cfg.keyed_flow.is_some() {
+            let value = super::keyed_syntax::result_operand(tail, self.source, false);
+            self.cfg.emit(at, Stmt::ReturnIdentity(value), line(tail));
+        }
     }
 
     fn keyed_write(&mut self, node: Node<'_>, at: NodeId) {

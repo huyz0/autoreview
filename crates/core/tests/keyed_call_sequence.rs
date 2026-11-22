@@ -8,9 +8,29 @@ fn findings(
     identity: &str,
     check_returns: bool,
 ) -> Vec<AgentFinding> {
+    workspace_findings(
+        language,
+        &[(path, source)],
+        &[path],
+        identity,
+        check_returns,
+    )
+}
+
+fn workspace_findings(
+    language: &str,
+    files: &[(&str, &str)],
+    entries: &[&str],
+    identity: &str,
+    check_returns: bool,
+) -> Vec<AgentFinding> {
     let repo = tempfile::tempdir().unwrap();
     let pack = tempfile::tempdir().unwrap();
-    std::fs::write(repo.path().join(path), source).unwrap();
+    for &(path, source) in files {
+        let file = repo.path().join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, source).unwrap();
+    }
     std::fs::write(
         pack.path().join("pending.yml"),
         format!(
@@ -22,7 +42,10 @@ fn findings(
     ).unwrap();
     run_dataflow_check(
         repo.path(),
-        &[path.into()],
+        &entries
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect::<Vec<_>>(),
         &[ResolvedRulePack {
             id: "entries".into(),
             local_path: pack.path().into(),
@@ -903,4 +926,233 @@ fn assert_key_pending_on_fallthrough(hits: &[AgentFinding]) {
 fn assert_clean_js(source: &str) {
     let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
     assert!(hits.is_empty(), "{hits:#?}");
+}
+
+#[test]
+fn named_and_namespace_imports_keep_cross_file_registration_and_exit_locations() {
+    let helpers = r#"export function begin(active, key) {
+    active.register(key);
+}
+export function removeFrom(active, key) {
+    active.remove(key);
+}"#;
+    let caller = r#"import { begin as start } from "./helpers";
+import * as support from "./helpers";
+function pending(root, other, key) {
+    start(root, key);
+    support.removeFrom(other, key);
+}"#;
+    let files = [("app.ts", caller), ("helpers.ts", helpers)];
+    let hits = workspace_findings(
+        "TypeScript",
+        &files,
+        &["app.ts", "helpers.ts"],
+        RECEIVER,
+        true,
+    );
+    let found = one(&hits);
+    assert_eq!(found.location.path, "app.ts");
+    let registration = &found.related_locations.as_ref().unwrap()[0];
+    assert_eq!(registration.path, "helpers.ts");
+    assert_eq!(registration.range.start_line, 2);
+    assert_eq!(registration.snippet, "active.register(key);");
+    let clean = caller.replace("removeFrom(other, key)", "removeFrom(root, key)");
+    let files = [("app.ts", clean.as_str()), ("helpers.ts", helpers)];
+    assert!(workspace_findings("TypeScript", &files, &["app.ts"], RECEIVER, true).is_empty());
+}
+
+#[test]
+fn imported_return_values_flow_through_forwarders_and_keep_their_pairs() {
+    let first = r#"import { choose as selectedKey } from "./keys.js";
+export function forwardKey(key) { return selectedKey(key); }
+export function collection(active) { return active; }"#;
+    let keys = r#"export function choose(key) { return key; }"#;
+    let caller = r#"import { collection, forwardKey } from "./forward";
+function pending(root, spare, key) {
+    root.register(key);
+    const alias = collection(root);
+    const same = forwardKey(key);
+    alias.remove(same);
+}"#;
+    let files = [
+        ("worker.ts", caller),
+        ("forward.ts", first),
+        ("keys.ts", keys),
+    ];
+    assert!(workspace_findings("TypeScript", &files, &["worker.ts"], RECEIVER, true).is_empty());
+    let wrong = caller.replace("collection(root)", "collection(spare)");
+    let files = [
+        ("worker.ts", wrong.as_str()),
+        ("forward.ts", first),
+        ("keys.ts", keys),
+    ];
+    assert_key_pending_on_fallthrough(&workspace_findings(
+        "TypeScript",
+        &files,
+        &["worker.ts"],
+        RECEIVER,
+        true,
+    ));
+}
+
+#[test]
+fn branch_dependent_helper_returns_preserve_the_callers_obligation() {
+    let source = r#"function select(first, second, useFirst) {
+    if (useFirst) return first;
+    return second;
+}
+function pending(root, original, alternative, flag) {
+    root.register(original);
+    const chosen = select(original, alternative, flag);
+    root.remove(chosen);
+}"#;
+    let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
+    assert_eq!(
+        one(&hits).message,
+        "Clean up root and original before fallthrough"
+    );
+    let clean = source.replace("return second", "return first");
+    assert_clean_js(&clean);
+}
+
+#[test]
+fn returned_identity_is_evaluated_before_finally_rebinds_the_parameter() {
+    let source = r#"function pick(first, second) {
+    try {
+        return first;
+    } finally {
+        first = second;
+    }
+}
+function pending(root, key, other) {
+    root.register(key);
+    const alias = pick(key, other);
+    root.remove(alias);
+}"#;
+    assert_clean_js(source);
+    let wrong = source.replace("first = second;", "return second;");
+    assert_key_pending_on_fallthrough(&findings("JavaScript", "worker.js", &wrong, RECEIVER, true));
+}
+
+#[test]
+fn go_import_aliases_and_same_package_helpers_return_identities() {
+    let library = "package helpers\nfunc Choose(key string) string { return key }";
+    let sibling =
+        "package app\nfunc selectCollection(active *Registry) *Registry { return active }";
+    let caller = r#"package app
+import tools "example.test/worker/lookup"
+func pending(root *Registry, key string) {
+    root.register(key)
+    alias := selectCollection(root)
+    chosen := tools.Choose(key)
+    alias.remove(chosen)
+}"#;
+    let module = "module example.test/worker\n\ngo 1.22";
+    let files = [
+        ("go.mod", module),
+        ("lookup/lookup.go", library),
+        ("collector.go", sibling),
+        ("worker.go", caller),
+    ];
+    assert!(workspace_findings("Go", &files, &["worker.go"], RECEIVER, true).is_empty());
+    let wrong = caller.replace("tools.Choose(key)", "tools.Choose(\"other\")");
+    let files = [
+        ("go.mod", module),
+        ("lookup/lookup.go", library),
+        ("collector.go", sibling),
+        ("worker.go", &wrong),
+    ];
+    assert_key_pending_on_fallthrough(&workspace_findings(
+        "Go",
+        &files,
+        &["worker.go"],
+        RECEIVER,
+        true,
+    ));
+}
+
+#[test]
+fn java_static_imports_and_kotlin_aliases_follow_returned_keys() {
+    let cases = [
+        ("Java", "app/Worker.java", "support/Picker.java",
+         "package support;\npublic class Picker { public static String pick(String key) { return key; } }",
+         "package app;\nimport static support.Picker.pick;\nclass Worker { void pending(Registry root, String key) { root.register(key); var chosen = pick(key); root.remove(chosen); }}"),
+        ("Kotlin", "app/Worker.kt", "support/Picker.kt",
+         "package support\nfun pick(key: String): String = key",
+         "package app\nimport support.pick as choose\nfun pending(root: Registry, key: String) { root.register(key); val chosen = choose(key); root.remove(chosen) }"),
+    ];
+    for (language, path, helper, library, caller) in cases {
+        assert!(
+            workspace_findings(
+                language,
+                &[(path, caller), (helper, library)],
+                &[path],
+                RECEIVER,
+                true
+            )
+            .is_empty(),
+            "{language}"
+        );
+        let wrong = caller
+            .replace("pick(key)", "pick(\"other\")")
+            .replace("choose(key)", "choose(\"other\")");
+        assert_key_pending_on_fallthrough(&workspace_findings(
+            language,
+            &[(path, &wrong), (helper, library)],
+            &[path],
+            RECEIVER,
+            true,
+        ));
+    }
+}
+
+#[test]
+fn rust_module_paths_and_use_aliases_follow_tail_returns() {
+    let library = r#"pub(crate) fn key(value: &str) -> &str { value }
+pub(crate) fn collection(value: &mut Registry) -> &mut Registry { value }"#;
+    let caller = r#"mod support;
+use crate::support::key as select;
+fn pending(root: &mut Registry, key: &str) {
+    root.register(key);
+    let alias = support::collection(root);
+    let chosen = select(key);
+    alias.remove(&chosen);
+}"#;
+    let files = [("src/lib.rs", caller), ("src/support.rs", library)];
+    assert!(workspace_findings("Rust", &files, &["src/lib.rs"], RECEIVER, true).is_empty());
+    let wrong = caller.replace("select(key)", "select(\"other\")");
+    assert_key_pending_on_return(&workspace_findings(
+        "Rust",
+        &[("src/lib.rs", &wrong), ("src/support.rs", library)],
+        &["src/lib.rs"],
+        RECEIVER,
+        true,
+    ));
+}
+
+#[test]
+fn repeated_imported_allocations_do_not_alias_each_other() {
+    let library = "export function create() { return new Map(); }";
+    let caller = r#"import { create } from "./maps";
+function pending(key) {
+    const first = create();
+    const second = create();
+    first.register(key);
+    second.remove(key);
+}"#;
+    let files = [("app.ts", caller), ("maps.ts", library)];
+    let hits = workspace_findings("TypeScript", &files, &["app.ts"], RECEIVER, true);
+    assert_eq!(
+        one(&hits).message,
+        "Clean up returned collection and key before fallthrough"
+    );
+    let clean = caller.replace("second.remove(key)", "first.remove(key)");
+    assert!(workspace_findings(
+        "TypeScript",
+        &[("app.ts", &clean), ("maps.ts", library)],
+        &["app.ts"],
+        RECEIVER,
+        true
+    )
+    .is_empty());
 }

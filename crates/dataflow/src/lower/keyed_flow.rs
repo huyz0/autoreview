@@ -79,13 +79,15 @@ impl Flow<'_> {
     }
 
     fn lower_return_value(&self, cfg: &mut Cfg<Stmt>, node: Node<'_>, current: NodeId) {
-        if matches!(node.kind(), "return_statement" | "return_expression") {
-            if let Some(call) =
-                keyed_syntax::expression(node).and_then(|expr| direct_call(expr, self.source))
-            {
-                cfg.emit(current, call, line(node));
-            }
+        if !matches!(node.kind(), "return_statement" | "return_expression") {
+            return;
         }
+        let expr = keyed_syntax::expression(node);
+        if let Some(call) = expr.and_then(|expr| direct_call(expr, self.source)) {
+            cfg.emit(current, call, line(node));
+        }
+        let operand = expr.and_then(|expr| keyed_syntax::result_operand(expr, self.source, false));
+        cfg.emit(current, Stmt::ReturnIdentity(operand), line(node));
     }
 
     fn exceptional_edge(&self, cfg: &mut Cfg<Stmt>, node: Node<'_>, current: NodeId) -> NodeId {
@@ -233,4 +235,18 @@ impl Cfg<Stmt> {
 
 pub(crate) fn supports_try(node: Node<'_>) -> bool {
     handlers::Parts::new(node).is_some()
+}
+
+pub(super) fn expression_body(cfg: &mut Cfg<Stmt>, expr: Node<'_>, source: &[u8], at: NodeId) {
+    let at =
+        throwing_call(expr, source).map_or(at, |call| cfg.fork_exception(at, call, line(expr)));
+    if let Some(call) = direct_call(expr, source) {
+        cfg.emit(at, call, line(expr));
+    }
+    cfg.emit(
+        at,
+        Stmt::ReturnIdentity(keyed_syntax::result_operand(expr, source, false)),
+        line(expr),
+    );
+    cfg.terminate(at, Stmt::Return { value: None }, line(expr));
 }

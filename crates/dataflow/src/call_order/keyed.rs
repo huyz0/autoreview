@@ -11,9 +11,9 @@ use super::{CallOrderHit, CallOrderSpec, EntryHit};
 mod helpers;
 mod program;
 mod state;
-pub use program::KeyedFunction;
 use program::Program;
-use state::{Deferred, State};
+pub use program::{KeyedFunction, KeyedImport, KeyedUnit};
+use state::{Deferred, Registration, State};
 
 const PATH_BUDGET: usize = 16_384;
 
@@ -41,7 +41,24 @@ pub fn check_keyed_file(
     functions: &[KeyedFunction<'_, '_>],
     source: &[u8],
 ) -> Vec<CallOrderHit> {
-    let program = Program::new(spec, functions, source);
+    check_keyed_units(
+        spec,
+        &[KeyedUnit {
+            path: "",
+            source,
+            functions,
+            imports: &[],
+            entry: true,
+        }],
+    )
+}
+
+/// Follow direct helper calls across the supplied source units.
+pub fn check_keyed_units(
+    spec: &CallOrderSpec,
+    units: &[KeyedUnit<'_, '_, '_>],
+) -> Vec<CallOrderHit> {
+    let program = Program::new(spec, units);
     if !program
         .frames
         .iter()
@@ -73,6 +90,7 @@ struct Engine<'program, 'spec, 'src, 'graph> {
     hits: Vec<CallOrderHit>,
 }
 
+#[derive(Clone, Copy)]
 struct StatementLocation {
     node: NodeId,
     line: u32,
@@ -92,10 +110,18 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
         for exit in self.paths(frame, root.graph, State::default())? {
             for state in self.unwind(frame, exit.state)? {
                 if check_exits {
-                    self.hits
-                        .extend(state.pending.iter().map(|(entry, &registration)| {
-                            hit(exit.trigger, exit.node, exit.line, entry, registration)
-                        }));
+                    for (entry, &registration) in &state.pending {
+                        self.record_hit(
+                            exit.trigger,
+                            frame,
+                            StatementLocation {
+                                node: exit.node,
+                                line: exit.line,
+                            },
+                            entry,
+                            registration,
+                        );
+                    }
                 }
             }
         }
@@ -109,7 +135,12 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
         });
         let mut seen = HashSet::new();
         self.hits.retain(|hit| {
-            seen.insert((hit.source_line, hit.trigger_call.clone(), hit.entry.clone()))
+            seen.insert((
+                hit.path.clone(),
+                hit.source_line,
+                hit.trigger_call.clone(),
+                hit.entry.clone(),
+            ))
         });
         Some(std::mem::take(&mut self.hits))
     }
@@ -193,6 +224,11 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
         let plan = self.program.frames[frame].plan.as_ref()?;
         match stmt {
             Stmt::Rebind(write) => state.rebind(plan, write),
+            Stmt::ReturnIdentity(value) => {
+                state.returned = value
+                    .as_ref()
+                    .and_then(|value| state.materialize(plan, value, usize::MAX));
+            }
             Stmt::DeferredBlock(body) => state.schedule(Deferred::Block(body))?,
             Stmt::DeferredCall { target, site } => {
                 self.schedule_helper(frame, target, site.as_deref(), &mut state)?
@@ -245,7 +281,7 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
                 let outcomes = self.invoke(target, args, state)?;
                 outcomes
                     .into_iter()
-                    .map(|(threw, state)| (!threw).then_some(state))
+                    .map(|(threw, _, state)| (!threw).then_some(state))
                     .collect()
             }
             Deferred::Block(cfg) => {
@@ -285,15 +321,33 @@ fn exit_kind(stmt: &Stmt) -> Option<&'static str> {
     }
 }
 
-fn hit(call: &str, node: NodeId, line: u32, entry: &Entry, registration_line: u32) -> CallOrderHit {
-    CallOrderHit {
-        trigger_call: call.to_owned(),
-        node,
-        source_line: line,
-        entry: Some(EntryHit {
-            collection: entry.display_collection(),
-            key: entry.display_key(),
-            registration_line,
-        }),
+impl Engine<'_, '_, '_, '_> {
+    fn registration(&self, frame: usize, line: u32) -> Registration {
+        Registration {
+            unit: self.program.frames[frame].unit,
+            line,
+        }
+    }
+
+    fn record_hit(
+        &mut self,
+        call: &str,
+        frame: usize,
+        location: StatementLocation,
+        entry: &Entry,
+        registration: Registration,
+    ) {
+        self.hits.push(CallOrderHit {
+            trigger_call: call.to_owned(),
+            node: location.node,
+            source_line: location.line,
+            path: self.program.path(self.program.frames[frame].unit),
+            entry: Some(EntryHit {
+                collection: entry.display_collection(),
+                key: entry.display_key(),
+                registration_line: registration.line,
+                registration_path: self.program.path(registration.unit),
+            }),
+        });
     }
 }

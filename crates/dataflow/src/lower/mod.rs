@@ -38,6 +38,15 @@ pub fn keyed_variant(language: Language, source: &[u8], node: Node<'_>) -> Cfg<S
     cfg.keyed_flow = Some(keyed_flow::EXIT_PATH_LIMIT);
     cfg.keyed_exceptions = language != Language::Go;
     let body = if language == Language::Kotlin { kotlin::function_body(node) } else { node.child_by_field_name("body") };
+    if language == Language::Kotlin && body.is_none() {
+        if let Some(expr) = kotlin::expression_body(node) {
+            cfg.entry = cfg.push_node(line(node));
+            cfg.exit = cfg.push_node(node.end_position().row as u32 + 1);
+            let entry = cfg.entry;
+            keyed_flow::expression_body(&mut cfg, expr, source, entry);
+            return cfg;
+        }
+    }
     function(cfg, source, node, body, lower)
 }
 

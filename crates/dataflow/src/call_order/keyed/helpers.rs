@@ -1,8 +1,9 @@
 use crate::cfg::{CfgNode, Stmt};
 
-use super::{hit, CallSite, Deferred, Engine, State, StatementLocation, Values};
+use super::{CallSite, Deferred, Engine, State, StatementLocation, Values};
 
 type Outcomes<'graph> = Vec<(bool, State<'graph>)>;
+type Results<'graph> = Vec<(bool, Option<super::IdentityOperand>, State<'graph>)>;
 
 impl<'graph> Engine<'_, '_, '_, 'graph> {
     pub(super) fn fork_helper(
@@ -18,11 +19,17 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
         else {
             return Some(None);
         };
-        let mut outcomes = self.invoke(target, values, state.clone())?;
-        for (threw, state) in &mut outcomes {
-            state.executed_call = (!*threw).then_some(call.start);
-        }
-        Some(Some(outcomes))
+        let outcomes = self.invoke(target, values, state.clone())?;
+        Some(Some(
+            outcomes
+                .into_iter()
+                .map(|(threw, returned, mut state)| {
+                    state.executed_call = (!threw).then_some(call.start);
+                    state.result = Some((call.start, returned));
+                    (threw, state)
+                })
+                .collect(),
+        ))
     }
 
     pub(super) fn apply_call(
@@ -44,7 +51,10 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
             let outcomes = self.invoke(target, arguments, state.clone())?;
             let normal = outcomes
                 .into_iter()
-                .map(|(threw, state)| (!threw).then_some(state))
+                .map(|(threw, returned, mut state)| {
+                    state.result = site.map(|site| (site.start, returned));
+                    (!threw).then_some(state)
+                })
                 .collect::<Option<Vec<_>>>()?;
             return Some(Some(normal));
         }
@@ -53,15 +63,14 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
         let call = plan.call(name, site, &state.values)?;
         if let Some(entry) = call.entry {
             if let Some(&registration) = state.pending.get(&entry).filter(|_| call.trigger) {
-                self.hits.push(hit(
-                    name,
-                    location.node,
-                    location.line,
-                    &entry,
-                    registration,
-                ));
+                self.record_hit(name, frame, location, &entry, registration);
             }
-            state.update(entry, call.registered, call.removed, location.line);
+            state.update(
+                entry,
+                call.registered,
+                call.removed,
+                self.registration(frame, location.line),
+            );
         }
         Some(None)
     }
@@ -116,13 +125,11 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
         frame: usize,
         values: Values,
         mut state: State<'graph>,
-    ) -> Option<Outcomes<'graph>> {
+    ) -> Option<Results<'graph>> {
         if self.active.len() >= 12 || self.active.contains(&frame) {
             return None;
         }
-        let caller_values = std::mem::replace(&mut state.values, values);
-        let caller_deferred = std::mem::take(&mut state.deferred);
-        let caller_call = state.executed_call.take();
+        let caller = state.suspend(values);
         self.active.push(frame);
         let results = self.helper_exits(frame, state);
         self.active.pop();
@@ -130,10 +137,8 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
             results?
                 .into_iter()
                 .map(|(threw, mut state)| {
-                    state.values = caller_values.clone();
-                    state.deferred = caller_deferred.clone();
-                    state.executed_call = caller_call;
-                    (threw, state)
+                    let result = state.restore(&caller);
+                    (threw, result, state)
                 })
                 .collect(),
         )

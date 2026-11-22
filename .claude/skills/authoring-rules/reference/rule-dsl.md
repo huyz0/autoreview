@@ -263,11 +263,19 @@ deferred closure reads its captures at exit and can make conditional
 removals. Deferred actions run in reverse scheduling order, on the paths
 that scheduled them. Earlier `before` calls still see pending entries.
 
-Keyed rules follow direct calls to uniquely resolved synchronous helpers
-in the same source file. The analyzer binds positional arguments to
-parameters and carries pending entries back to the caller. It keeps a
-registration's original location when a helper creates an obligation.
-An eligible helper can also be used in a direct Go `defer`.
+Keyed rules follow direct calls to uniquely resolved synchronous helpers.
+The analyzer binds positional arguments to parameters, tracks returned
+collections and keys, and carries pending entries back to the caller.
+When a helper registers an entry, the finding includes its original file
+and line. An eligible helper can also be used in a direct Go `defer`.
+
+Cross-file lookup follows repository-local imports. It supports Go
+package calls and aliases within the root module, relative JavaScript and
+TypeScript imports, Java static imports and class-qualified static calls,
+Kotlin top-level imports and aliases, and ordinary Rust modules and
+`use` aliases. A direct helper result can initialize or reassign a
+binding. Return paths can yield different keys, and fresh allocations
+from repeat calls retain separate identities.
 
 Supported loops include `while`, ordinary `for`, and common iteration
 forms such as Go range, Java enhanced for, JavaScript and TypeScript
@@ -275,10 +283,11 @@ for-of, Kotlin for-in, and Rust for-in. The analyzer distinguishes the
 current iteration's keys from earlier keys. It follows unlabelled
 `break` and `continue`, including cleanup in crossed `finally` blocks.
 
-Helper resolution is syntactic. Cross-file calls, callbacks, recursive
-calls, returned identities, and dynamic dispatch have limited or no
-coverage. The analyzer bounds call depth, loop states, and deferred
-actions. It can skip cases involving unresolved computed keys, shadowed
+Helper resolution is syntactic and follows dependencies from reviewed
+files. Package-manager aliases, re-export chains, callbacks, recursive
+calls, dynamic dispatch, and nested computed arguments have limited or
+no coverage. The analyzer bounds dependency files, call depth, loop
+states, and deferred actions. It can skip cases involving unresolved computed keys, shadowed
 names, complex writes, labelled jumps, and heavily nested paths.
 Exception coverage is limited to modeled operations and catch types.
 A pair represents membership, so repeated registration of the same pair
