@@ -6,7 +6,7 @@ use std::path::Path;
 use autoreview_schema::{AgentFinding, Location, LocationRange, Side};
 use globset::{Glob, GlobSetBuilder};
 
-use super::artifact_policy::{read_snapshot_file, Rule};
+use super::artifact_policy::{read_snapshot_file, source_lines, Rule};
 
 pub(super) const RULE: Rule = Rule {
     id: "postgres-concurrent-index-in-transaction",
@@ -42,9 +42,7 @@ pub fn run_postgres_migration_policy(
         }
         let Some(source) = read_snapshot_file(&root, Path::new(path)) else { continue };
         for range in sql::concurrent_indexes(&source) {
-            let start = source[..range.start].bytes().filter(|byte| *byte == b'\n').count() as u32 + 1;
-            let end = start + source[range.clone()].bytes().filter(|byte| *byte == b'\n').count() as u32;
-            let mut finding = RULE.finding(path, LocationRange { start_line: start, end_line: Some(end), ..Default::default() },
+            let mut finding = RULE.finding(path, source_lines(&source, &range),
                 &source[range], "Run CREATE INDEX CONCURRENTLY outside the migration transaction.".into());
             if let Some((_, config_line)) = setting {
                 finding.related_locations = Some(vec![Location {

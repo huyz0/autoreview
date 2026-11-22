@@ -4,7 +4,7 @@ use std::process::Command;
 
 use autoreview_core::{run_ast_grep, run_golangci_lint, FileChange, ResolvedRulePack};
 use autoreview_langsupport::Language;
-use autoreview_schema::AgentFinding;
+use autoreview_schema::{AgentFinding, LocaleCatalogConfig};
 
 pub(super) struct ReviewInput<'a> {
     pub repo_root: &'a Path,
@@ -15,6 +15,7 @@ pub(super) struct ReviewInput<'a> {
     pub tier4_go: bool,
     pub immutable_github_action_refs: bool,
     pub transactional_postgres_migrations: &'a [String],
+    pub locale_catalogs: &'a [LocaleCatalogConfig],
 }
 
 impl ReviewInput<'_> {
@@ -56,6 +57,11 @@ pub(super) fn collect(
             Ok(migrations) => findings.extend(migrations),
             Err(error) => record_warning(&mut warnings, format!("PostgreSQL migration policy failed: {error}")),
         }
+    }
+    if !input.locale_catalogs.is_empty() && input.wants("correctness") {
+        findings.extend(autoreview_core::run_locale_catalog_policy(
+            input.source_root, changed_files, input.locale_catalogs,
+        ));
     }
     findings.extend(structural(
         input.source_root,

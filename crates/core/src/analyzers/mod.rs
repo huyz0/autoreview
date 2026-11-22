@@ -22,5 +22,6 @@ pub mod symindex_check;
 pub mod taint_rules;
 pub mod threshold_rules;
 mod artifact_policy;
+pub mod locale_catalogs;
 pub mod postgres_migrations;
 pub mod workflow_policy;

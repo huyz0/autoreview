@@ -549,6 +549,48 @@ fn rules_list_filters_builtin_rule_kinds_by_subcategory() {
 }
 
 #[test]
+fn icu_catalog_policy_reports_missing_arguments_and_nested_select_other() {
+    let base = "locales/en.json";
+    let translation = "locales/fr.json";
+    let source = r#"{
+  "inbox": {"message": "{count, plural, one{{user} sent one} other{{user} sent #}}"},
+  "usage": "Type '{example}' for {name}"
+}"#;
+    let good_translation = r#"{
+  "inbox": {"message": "{count, plural, one{{user} a envoyé un message} many{{user} en a envoyé #} other{{user} en a envoyé #}}"},
+  "usage": "Saisir '{exemple}' pour {name}"
+}"#;
+    let lost = r#"{
+  "inbox": {"message": "{count, plural, one{{sender, select, team{Équipe}}} other{Livré #}}"},
+  "usage": "Saisir '{exemple}' pour {name}"
+}"#;
+    let repo = init_repo(&[(base, source), (translation, good_translation)]);
+    repo.commit(&[(translation, lost)], "drop placeholders from translation");
+    let dir = repo.path().join(".autoreview");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("config.yaml"), "artifactChecks:\n  localeCatalogs:\n    - reference: locales/en.json\n      translations: [locales/fr.json]\n").unwrap();
+    let output = Command::cargo_bin("autoreview").unwrap()
+        .current_dir(repo.path())
+        .args(["diff", "--base", "HEAD~1", "--static-only", "--changed-lines", "--subcategories", "internationalization"])
+        .assert().success().get_output().stdout.clone();
+    let path = report_path_from_stdout(&String::from_utf8(output).unwrap());
+    let report: autoreview_schema::ReviewReport = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(report.findings.len(), 2);
+    for finding in report.findings {
+        assert_eq!(finding.location.path, translation);
+        assert_eq!(finding.location.range.start_line, 2);
+        match finding.source.rule_id.as_deref() {
+            Some("icu-translation-missing-other-branch") => assert!(finding.message.contains("sender")),
+            Some("icu-translation-drops-placeholder") => {
+                assert!(finding.message.contains("user"));
+                assert_eq!(finding.related_locations.unwrap()[0].path, base);
+            }
+            other => panic!("unexpected rule {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn postgres_policy_tracks_changed_sql_and_transaction_sidecars() {
     let sql = "migration/V001.sql";
     let sidecar = "migration/V001.sql.conf";

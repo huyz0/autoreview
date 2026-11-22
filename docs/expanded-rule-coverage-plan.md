@@ -157,3 +157,15 @@ artifactChecks:
   transactionalPostgresMigrations:
     - 'migrations/postgres/*.sql'
 ```
+
+For ICU JSON messages, declare a reference locale and the translations
+that share its contract. Changes in either side select the comparison.
+The rules identify lost placeholders and selectors that omit `other`,
+including selectors nested inside another message.
+
+```yaml
+artifactChecks:
+  localeCatalogs:
+    - reference: locales/en.json
+      translations: [locales/fr.json, locales/de.json]
+```

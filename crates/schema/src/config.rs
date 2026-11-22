@@ -509,6 +509,15 @@ pub struct ArtifactChecksConfig {
     pub immutable_github_action_refs: bool,
     #[serde(default)]
     pub transactional_postgres_migrations: Vec<String>,
+    #[serde(default)]
+    pub locale_catalogs: Vec<LocaleCatalogConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocaleCatalogConfig {
+    pub reference: String,
+    pub translations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
