@@ -53,13 +53,11 @@ name.toUpperCase();
     }
 }
 
-#[test]
-fn detects_discarded_strings_across_supported_languages() {
-    let samples = [
-        (
-            "input.go",
-            "go",
-            r#"package sample
+const SAMPLES: &[(&str, &str, &str)] = &[
+    (
+        "input.go",
+        "go",
+        r#"package sample
 import transform "strings"
 func Use(name string) string {
     transform.TrimSpace(name)
@@ -69,11 +67,11 @@ func Use(name string) string {
 }
 func Other(transform custom) { transform.TrimSpace("a") }
 "#,
-        ),
-        (
-            "Input.java",
-            "java",
-            r#"class Input {
+    ),
+    (
+        "Input.java",
+        "java",
+        r#"class Input {
     String convert(String name, Builder builder) {
         name.trim();
         name.replace("a", "b");
@@ -82,11 +80,11 @@ func Other(transform custom) { transform.TrimSpace("a") }
         return name.strip();
     }
 }"#,
-        ),
-        (
-            "Input.kt",
-            "kotlin",
-            r#"fun convert(name: String, builder: Builder): String {
+    ),
+    (
+        "Input.kt",
+        "kotlin",
+        r#"fun convert(name: String, builder: Builder): String {
     name.trim()
     val literal = " a "
     literal.replace("a", "b")
@@ -96,11 +94,11 @@ func Other(transform custom) { transform.TrimSpace("a") }
 }
 val mapper = { value: String -> value.trim() }
 "#,
-        ),
-        (
-            "input.js",
-            "javascript",
-            r#"function convert(obj) {
+    ),
+    (
+        "input.js",
+        "javascript",
+        r#"function convert(obj) {
     let name = " a ";
     name.trim();
     name.replace("a", "b");
@@ -109,39 +107,42 @@ val mapper = { value: String -> value.trim() }
     name = name.trim();
     return name.toLowerCase();
 }"#,
-        ),
-        (
-            "input.ts",
-            "typescript",
-            r#"function convert(name: string, obj: Builder) {
+    ),
+    (
+        "input.ts",
+        "typescript",
+        r#"function convert(name: string, obj: Builder) {
     name.trim();
     name.replace("a", "b");
     obj.trim();
     return name.trim().toLowerCase();
 }"#,
-        ),
-        (
-            "input.tsx",
-            "typescript",
-            r#"export function View(name: string) {
+    ),
+    (
+        "input.tsx",
+        "typescript",
+        r#"export function View(name: string) {
     name.trim();
     name.trim().replace("a", "b");
     return <p>{name.trim()}</p>;
 }"#,
-        ),
-        (
-            "input.rs",
-            "rust",
-            r#"fn convert(name: &str, mut owned: String) -> String {
+    ),
+    (
+        "input.rs",
+        "rust",
+        r#"fn convert(name: &str, mut owned: String) -> String {
     name.trim();
     owned.replace("a", "b");
     owned.make_ascii_lowercase();
     let _kept = name.trim();
     name.trim().to_uppercase()
 }"#,
-        ),
-    ];
-    for (path, language, source) in samples {
+    ),
+];
+
+#[test]
+fn detects_discarded_strings_across_supported_languages() {
+    for &(path, language, source) in SAMPLES {
         let repo = init_repo(&[(path, source)]);
         let expected_id = format!("{language}-discarded-string-transformation");
         let findings = run_framework_checks(repo.path(), &[path.into()]);

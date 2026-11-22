@@ -72,18 +72,18 @@ fn discarded(call: Node<'_>, language: Language) -> bool {
 fn kotlin_discarded<'t>(mut value: Node<'t>, mut parent: Node<'t>) -> bool {
     loop {
         match parent.kind() {
-            "block" | "lambda_literal" if next_statement(value) => return true,
+            "block" | "lambda_literal" if next_statement(value) => break true,
             "block" | "parenthesized_expression" => {}
             "if_expression" if parent.child_by_field_name("condition") != Some(value) => {}
-            "function_body" if value.kind() == "block" => return true,
+            "function_body" if value.kind() == "block" => break true,
             "for_statement" | "while_statement" | "do_while_statement" => {
-                return value.kind() == "block"
+                break value.kind() == "block"
             }
-            _ => return false,
+            _ => break false,
         }
         value = parent;
         let Some(outer) = parent.parent() else {
-            return false;
+            break false;
         };
         parent = outer;
     }

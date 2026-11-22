@@ -4,6 +4,7 @@ use tree_sitter::Node;
 
 mod bindings;
 mod indexing;
+mod string_types;
 use bindings::visible_local;
 
 pub(in crate::analyzers) fn children(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
@@ -164,7 +165,7 @@ impl<'tree, 'text> Source<'tree, 'text> {
         is_test_item(node, self.input)
     }
 
-    pub(in crate::analyzers) fn external_path(&self, node: Node<'tree>) -> Option<String> {
+    pub(super) fn external_path(&self, node: Node<'tree>) -> Option<String> {
         let mut reference = self.path(node)?;
         let head = reference.parts.first()?;
         if reference.absolute {
@@ -234,7 +235,7 @@ impl<'tree, 'text> Source<'tree, 'text> {
         self.unshadowed_prelude(node, self.text(node))
     }
 
-    pub(in crate::analyzers) fn unshadowed_prelude(&self, node: Node<'tree>, name: &str) -> bool {
+    pub(super) fn unshadowed_prelude(&self, node: Node<'tree>, name: &str) -> bool {
         matches!(node.kind(), "identifier" | "type_identifier")
             && self.text(node) == name
             && !ancestors(node).any(|parent| {
