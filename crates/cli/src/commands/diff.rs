@@ -219,14 +219,7 @@ fn append_protobuf_findings(run: &ReviewRun<'_>, findings: &mut Vec<AgentFinding
     let result = super::revision::compare_protobuf(
         &run.options.repo_root, run.source_root, &run.facts.base_ref, &run.facts.head_ref, globs,
     );
-    match result {
-        Ok(compatibility) => findings.extend(compatibility),
-        Err(error) => {
-            let warning = format!("Protobuf compatibility policy failed: {error}");
-            println!("  [warn] {warning}");
-            warnings.push(warning);
-        }
-    }
+    append_comparison("Protobuf compatibility policy", result, findings, warnings);
 }
 
 fn append_java_nullability_findings(run: &ReviewRun<'_>, findings: &mut Vec<AgentFinding>, warnings: &mut Vec<String>) {
@@ -236,10 +229,19 @@ fn append_java_nullability_findings(run: &ReviewRun<'_>, findings: &mut Vec<Agen
     let result = super::revision::compare_java_nullability(
         &run.options.repo_root, run.source_root, &run.facts.base_ref, &run.facts.head_ref, run.changed_files,
     );
+    append_comparison("Java nullability comparison", result, findings, warnings);
+}
+
+fn append_comparison(
+    label: &str,
+    result: anyhow::Result<Vec<AgentFinding>>,
+    findings: &mut Vec<AgentFinding>,
+    warnings: &mut Vec<String>,
+) {
     match result {
-        Ok(regressions) => findings.extend(regressions),
+        Ok(detected) => findings.extend(detected),
         Err(error) => {
-            let warning = format!("Java nullability comparison failed: {error}");
+            let warning = format!("{label} failed: {error}");
             println!("  [warn] {warning}");
             warnings.push(warning);
         }

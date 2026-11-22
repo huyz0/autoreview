@@ -150,64 +150,41 @@ fn solve(cfg: &Cfg<Stmt>, sources: &NullSources<'_>, reachable: &[bool]) -> Vec<
     })
 }
 
-/// Every `(node, stmt_index, var)` at which a `Return { value: Some(var) }`
-/// is reached with `var` currently tracked as nil-possible — the summary
-/// question, identical in shape to Go's own return-walk.
-fn walk_nil_returns(cfg: &Cfg<Stmt>, sources: &NullSources<'_>) -> Vec<(NodeId, usize, String)> {
+fn visit_statements(
+    cfg: &Cfg<Stmt>,
+    sources: &NullSources<'_>,
+    mut visit: impl FnMut(NodeId, usize, &Stmt, &NilFacts),
+) {
     let reachable = cfg.reachable();
     let out_facts = solve(cfg, sources, &reachable);
-    let mut hits = Vec::new();
-    for (node_id, node) in cfg.nodes.iter().enumerate().filter(|(id, _)| reachable[*id]) {
-        let preds = cfg.predecessors(node_id);
-        let mut facts = preds.iter().fold(NilFacts::bottom(), |acc, &p| acc.join(&out_facts[p]));
-        for (stmt_idx, stmt) in node.stmts.iter().enumerate() {
-            if let Stmt::Return { value: Some(v) } = stmt {
-                if facts.possible.contains(v) {
-                    hits.push((node_id, stmt_idx, v.clone()));
-                }
-            }
+    for (id, node) in cfg.nodes.iter().enumerate().filter(|(id, _)| reachable[*id]) {
+        let mut facts = cfg.predecessors(id).iter().fold(NilFacts::bottom(), |acc, &p| acc.join(&out_facts[p]));
+        for (index, stmt) in node.stmts.iter().enumerate() {
+            visit(id, index, stmt, &facts);
             facts = apply(&facts, stmt, sources);
         }
     }
-    hits
 }
 
-/// Every `(node, stmt_index, receiver_var, qualified_call_name)` at which a
-/// method call's receiver (the part of a `CallTarget::Named("recv.method")`
-/// before the first `.`) is currently nil-tracked when the call executes —
-/// the check question. A bare, unqualified call name (no `.`) has no
-/// receiver to check and is skipped. `null_safe_methods` excludes method
-/// names that are never actually risky on a null receiver in this
-/// language — Kotlin's stdlib defines `Any?.toString()` as a null-safe
-/// extension (`this?.toString() ?: "null"`), so it resolves and returns
-/// `"null"` rather than throwing even when the receiver is null, unlike
-/// every other method call on a nullable receiver (which either throws or,
-/// more commonly, doesn't compile without a `?.`/`!!` first). Java has no
-/// such exception — always pass an empty slice for Java.
+fn risky_use(
+    stmt: &Stmt, facts: &NilFacts, null_safe_methods: &[&str], node: NodeId, source_line: u32,
+) -> Option<NpeRiskHit> {
+    let Stmt::Call { target: CallTarget::Named(name), site, .. } = stmt else { return None };
+    let (receiver, method) = name.split_once('.')?;
+    (facts.possible.contains(receiver) && !null_safe_methods.contains(&method)).then(|| NpeRiskHit {
+        var: receiver.to_owned(),
+        call_name: name.clone(),
+        node,
+        source_line,
+        use_span: site.as_ref().map(|site| (site.start, site.end)),
+    })
+}
+
 fn walk_risky_dereferences(cfg: &Cfg<Stmt>, sources: &NullSources<'_>, null_safe_methods: &[&str]) -> Vec<NpeRiskHit> {
-    let reachable = cfg.reachable();
-    let out_facts = solve(cfg, sources, &reachable);
     let mut hits = Vec::new();
-    for (node_id, node) in cfg.nodes.iter().enumerate().filter(|(id, _)| reachable[*id]) {
-        let preds = cfg.predecessors(node_id);
-        let mut facts = preds.iter().fold(NilFacts::bottom(), |acc, &p| acc.join(&out_facts[p]));
-        for (stmt_idx, stmt) in node.stmts.iter().enumerate() {
-            if let Stmt::Call { target: CallTarget::Named(name), site, .. } = stmt {
-                if let Some((receiver, method)) = name.split_once('.') {
-                    if !null_safe_methods.contains(&method) && facts.possible.contains(receiver) {
-                        hits.push(NpeRiskHit {
-                            var: receiver.to_owned(),
-                            call_name: name.clone(),
-                            node: node_id,
-                            source_line: node.statement_line(stmt_idx),
-                            use_span: site.as_ref().map(|site| (site.start, site.end)),
-                        });
-                    }
-                }
-            }
-            facts = apply(&facts, stmt, sources);
-        }
-    }
+    visit_statements(cfg, sources, |node, index, stmt, facts| {
+        hits.extend(risky_use(stmt, facts, null_safe_methods, node, cfg.nodes[node].statement_line(index)));
+    });
     hits
 }
 
@@ -215,7 +192,14 @@ fn walk_risky_dereferences(cfg: &Cfg<Stmt>, sources: &NullSources<'_>, null_safe
 /// tracked as possibly null? Used to summarize helper functions for pass
 /// 2's interprocedural lookup.
 pub fn compute_summary(cfg: &Cfg<Stmt>) -> bool {
-    !walk_nil_returns(cfg, &NullSources { call: &|_, _| false, include_literals: true }).is_empty()
+    let mut nullable = false;
+    let sources = NullSources { call: &|_, _| false, include_literals: true };
+    visit_statements(cfg, &sources, |_, _, stmt, facts| {
+        if let Stmt::Return { value: Some(var) } = stmt {
+            nullable |= facts.possible.contains(var);
+        }
+    });
+    nullable
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,8 +215,8 @@ pub struct NpeRiskHit {
 /// every other function this pass resolved) to catch a variable assigned
 /// from a risky call and then dereferenced, not just an explicit `null`
 /// literal dereferenced directly. Pass `null_safe_methods` per
-/// `walk_risky_dereferences`'s own docs — empty for Java, `&["toString"]`
-/// for Kotlin.
+/// empty for Java or `&["toString"]` for Kotlin, where the nullable receiver
+/// extension returns the literal string "null".
 pub fn check(cfg: &Cfg<Stmt>, summaries: &HashMap<String, bool>, null_safe_methods: &[&str]) -> Vec<NpeRiskHit> {
     let call = |name: &str, _: Option<&CallSite>| summaries.get(name).copied().unwrap_or(false);
     walk_risky_dereferences(cfg, &NullSources { call: &call, include_literals: true }, null_safe_methods)

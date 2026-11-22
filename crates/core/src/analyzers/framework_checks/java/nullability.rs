@@ -2,10 +2,8 @@ mod returns;
 
 use returns::{ChangedReturns, changed_returns};
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
-};
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use autoreview_dataflow::{
     lower::java::lower_function, rules::java_kotlin_npe_risk::check_call_source,

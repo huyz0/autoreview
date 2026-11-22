@@ -509,71 +509,8 @@ fn java_nullability_regressions_are_reviewed_and_replayed_against_the_base() {
     const RULE: &str = "java-new-nullable-return-breaks-caller";
     let helper = "src/service/Names.java";
     let caller = "src/client/Caller.java";
-    let original = r#"package service;
-public class Names {
-    public static String label(boolean missing) {
-        return "ready";
-    }
-    public static String existing(boolean missing) {
-        if (missing) return null;
-        return "ready";
-    }
-    public static String unknown() {
-        return System.getProperty("name");
-    }
-    public static String unreachable() {
-        return "ready";
-    }
-}
-"#;
-    let caller_source = r#"package client;
-import service.Names;
-class Caller {
-    int length() {
-        String value = Names.label(true);
-        return value.length();
-    }
-    int chained() {
-        return service.Names.label(true).length();
-    }
-    int guarded() {
-        String value = Names.label(true);
-        if (/* checked here */ value == null) return 0;
-        return value.length();
-    }
-    int guardedAlias() {
-        String value = Names.label(true);
-        String alias = value;
-        if (alias == null) throw new IllegalStateException();
-        return value.length();
-    }
-    int reassigned() {
-        String value = Names.label(true);
-        value = "ready";
-        return value.length();
-    }
-    String staticCall() {
-        String value = Names.label(true);
-        return value.valueOf(1);
-    }
-    int unrelated() {
-        String value = other.Names.label(true);
-        return value.length();
-    }
-    int existing() {
-        return Names.existing(true).length();
-    }
-    int unknownBaseline() {
-        return Names.unknown().length();
-    }
-    int unreachableNull() {
-        return Names.unreachable().length();
-    }
-    int nonNullArgument() {
-        return Names.label(false).length();
-    }
-}
-"#;
+    let original = nullability_helper_source();
+    let caller_source = nullability_caller_source();
     let repo = init_repo(&[
         (helper, original),
         (caller, caller_source),
@@ -625,6 +562,77 @@ class Caller {
     assert_eq!(replay["rules"][0]["truePositives"], 2);
     assert_eq!(replay["rules"][0]["falsePositives"], 0);
     assert_eq!(replay["rules"][0]["falseNegatives"], 0);
+}
+
+fn nullability_helper_source() -> &'static str {
+    r#"package service;
+public class Names {
+    public static String label(boolean missing) {
+        return "ready";
+    }
+    public static String existing(boolean missing) {
+        if (missing) return null;
+        return "ready";
+    }
+    public static String unknown() {
+        return System.getProperty("name");
+    }
+    public static String unreachable() {
+        return "ready";
+    }
+}
+"#
+}
+
+fn nullability_caller_source() -> &'static str {
+    r#"package client;
+import service.Names;
+class Caller {
+    int length() {
+        String value = Names.label(true);
+        return value.length();
+    }
+    int chained() {
+        return service.Names.label(true).length();
+    }
+    int guarded() {
+        String value = Names.label(true);
+        if (/* checked here */ value == null) return 0;
+        return value.length();
+    }
+    int guardedAlias() {
+        String value = Names.label(true);
+        String alias = value;
+        if (alias == null) throw new IllegalStateException();
+        return value.length();
+    }
+    int reassigned() {
+        String value = Names.label(true);
+        value = "ready";
+        return value.length();
+    }
+    String staticCall() {
+        String value = Names.label(true);
+        return value.valueOf(1);
+    }
+    int unrelated() {
+        String value = other.Names.label(true);
+        return value.length();
+    }
+    int existing() {
+        return Names.existing(true).length();
+    }
+    int unknownBaseline() {
+        return Names.unknown().length();
+    }
+    int unreachableNull() {
+        return Names.unreachable().length();
+    }
+    int nonNullArgument() {
+        return Names.label(false).length();
+    }
+}
+"#
 }
 
 #[test]

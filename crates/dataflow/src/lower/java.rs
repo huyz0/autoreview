@@ -151,41 +151,11 @@ fn lower_statement_inner(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current
             current
         }
         "expression_statement" => {
-            if let Some(inner) = stmt.named_child(0) {
-                match inner.kind() {
-                    "assignment_expression" => {
-                        cfg.nodes[current].stmts.push(lower_assignment_expression(inner, source));
-                        return current;
-                    }
-                    // A bare call statement (`stmt.executeUpdate(sql);`, no
-                    // assignment) — without this, a sink whose return value
-                    // is discarded (the common case for e.g. `Statement`'s
-                    // mutating methods) would be invisible to the taint
-                    // engine, which only inspects `Stmt::Call` nodes.
-                    "method_invocation" => {
-                        if let Some(name) = method_invocation_target_name(inner, source) {
-                            cfg.nodes[current].stmts.push(super::site::named(name, call_arg_identifiers(inner, source), None, inner, source));
-                            return current;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            cfg.nodes[current].stmts.push(Stmt::Other(text(stmt, source).to_string()));
+            let lowered = lower_expression_statement(stmt, source);
+            cfg.nodes[current].stmts.push(lowered);
             current
         }
-        "return_statement" => {
-            let expression = stmt.named_child(0);
-            let value = expression
-                .filter(|node| node.kind() == "identifier")
-                .map(|node| text(node, source).to_owned());
-            if let Some(call) = expression.filter(|node| node.kind() == "method_invocation") {
-                lower_return_call(cfg, current, call, source, None);
-            }
-            cfg.nodes[current].return_start = Some(stmt.start_byte());
-            cfg.nodes[current].stmts.push(Stmt::Return { value });
-            end_flow(cfg, stmt, current, EdgeKind::Fallthrough)
-        }
+        "return_statement" => lower_return_statement(cfg, stmt, source, current),
         "throw_statement" => end_flow(cfg, stmt, current, EdgeKind::Exceptional),
         "if_statement" => lower_if(cfg, stmt, source, current),
         "for_statement" | "while_statement" | "enhanced_for_statement" => lower_loop(cfg, stmt, source, current),
@@ -194,6 +164,34 @@ fn lower_statement_inner(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current
             current
         }
     }
+}
+
+fn lower_expression_statement(stmt: Node<'_>, source: &[u8]) -> Stmt {
+    if let Some(expression) = stmt.named_child(0) {
+        match expression.kind() {
+            "assignment_expression" => return lower_assignment_expression(expression, source),
+            "method_invocation" => {
+                if let Some(name) = method_invocation_target_name(expression, source) {
+                    return super::site::named(name, call_arg_identifiers(expression, source), None, expression, source);
+                }
+            }
+            _ => {}
+        }
+    }
+    Stmt::Other(text(stmt, source).to_string())
+}
+
+fn lower_return_statement(cfg: &mut Cfg<Stmt>, stmt: Node<'_>, source: &[u8], current: NodeId) -> NodeId {
+    let expression = stmt.named_child(0);
+    let value = expression
+        .filter(|node| node.kind() == "identifier")
+        .map(|node| text(node, source).to_owned());
+    if let Some(call) = expression.filter(|node| node.kind() == "method_invocation") {
+        lower_return_call(cfg, current, call, source, None);
+    }
+    cfg.nodes[current].return_start = Some(stmt.start_byte());
+    cfg.nodes[current].stmts.push(Stmt::Return { value });
+    end_flow(cfg, stmt, current, EdgeKind::Fallthrough)
 }
 
 fn end_flow(cfg: &mut Cfg<Stmt>, stmt: Node<'_>, current: NodeId, kind: EdgeKind) -> NodeId {
@@ -265,11 +263,7 @@ fn lower_if(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> 
     if let Some((var, op)) = &null_guard {
         cfg.nodes[true_start].stmts.push(Stmt::Guard { var: var.clone(), op: *op, against: crate::cfg::GuardAgainst::Nil });
     }
-    let true_end = match stmt.child_by_field_name("consequence") {
-        Some(block) if block.kind() == "block" => lower_block(cfg, block, source, true_start),
-        Some(single) => lower_statement(cfg, single, source, true_start),
-        None => true_start,
-    };
+    let true_end = lower_arm(cfg, stmt.child_by_field_name("consequence"), source, true_start);
 
     let false_start = cfg.push_node(stmt.start_position().row as u32 + 1);
     if literal != Some("true") {
@@ -280,16 +274,20 @@ fn lower_if(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current: NodeId) -> 
         let opposite = match op { Equal => NotEqual, NotEqual => Equal };
         cfg.nodes[false_start].stmts.push(Stmt::Guard { var, op: opposite, against: crate::cfg::GuardAgainst::Nil });
     }
-    let false_end = match stmt.child_by_field_name("alternative") {
-        Some(block) if block.kind() == "block" => lower_block(cfg, block, source, false_start),
-        Some(single) => lower_statement(cfg, single, source, false_start),
-        None => false_start,
-    };
+    let false_end = lower_arm(cfg, stmt.child_by_field_name("alternative"), source, false_start);
 
     let join = cfg.push_node(stmt.end_position().row as u32 + 1);
     cfg.edges.push((true_end, join, EdgeKind::Fallthrough));
     cfg.edges.push((false_end, join, EdgeKind::Fallthrough));
     join
+}
+
+fn lower_arm(cfg: &mut Cfg<Stmt>, stmt: Option<Node<'_>>, source: &[u8], start: NodeId) -> NodeId {
+    match stmt {
+        Some(block) if block.kind() == "block" => lower_block(cfg, block, source, start),
+        Some(single) => lower_statement(cfg, single, source, start),
+        None => start,
+    }
 }
 
 /// Shared lowering for `for`/`while`/`for-each` — all three have a
