@@ -4,7 +4,11 @@ use std::path::Path;
 
 use serde_yaml::{Mapping, Value};
 
-const FAMILY_SOURCES: &[&str] = &["rule-families/loops.yml", "rule-families/extended.yml"];
+const FAMILY_SOURCES: &[&str] = &[
+    "rule-families/loops.yml",
+    "rule-families/extended.yml",
+    "rule-families/metrics.yml",
+];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=rules-builtin");
@@ -73,7 +77,11 @@ fn write_variant(
         "Rust" => "rust",
         _ => return Err(format!("unsupported language {language} in {name}").into()),
     };
-    let id = format!("{}-{name}", language.to_ascii_lowercase());
+    // Migrated families keep the IDs shipped by their standalone rules.
+    let id = rule.get("id").and_then(Value::as_str).map_or_else(
+        || format!("{}-{name}", language.to_ascii_lowercase()),
+        str::to_owned,
+    );
     rule.insert("id".into(), id.into());
     rule.insert("language".into(), language.into());
     let category = rule.get("category").and_then(Value::as_str).expect("rule variant requires a category");

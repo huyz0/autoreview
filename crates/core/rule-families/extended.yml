@@ -160,12 +160,58 @@ otel-http-duration-unit:
     MODULE: {regex: '^["'']@opentelemetry/api["'']$'}
     API: {regex: '^metrics$'}
     NAME: {regex: '^["'']http\.(client|server)\.request\.duration["'']$'}
-    OPTIONS:
+    OPTIONS: &wrong_duration_unit
       has:
         kind: pair
         all:
-          - has: {field: key, regex: '^unit$'}
-          - has: {field: value, regex: '^["'']ms["'']$'}
+          - has: {field: key, regex: '^unit$|^["'']unit["'']$'}
+          - has:
+              field: value
+              kind: string
+              not: {regex: '^["'']s["'']$'}
+  languages: {JavaScript: {}, TypeScript: {}}
+
+otel-http-duration-recorded-milliseconds:
+  category: correctness
+  severity: warning
+  semantic: true
+  message: This records elapsed milliseconds on an OpenTelemetry HTTP request duration histogram. Convert the elapsed value to seconds before recording it.
+  metadata:
+    references: ["https://opentelemetry.io/docs/specs/semconv/http/http-metrics/"]
+    subcategory: [observability.metric-units]
+  rule:
+    pattern: $HISTOGRAM.record($VALUE, $$$ATTRIBUTES)
+    all:
+      - inside:
+          kind: expression_statement
+          follows:
+            any:
+              - pattern: const $START = performance.now()
+              - pattern: const $START = Date.now()
+            stopBy: end
+      - inside:
+          kind: expression_statement
+          follows:
+            pattern: const $HISTOGRAM = $METER.createHistogram($NAME, $$$OPTIONS)
+            all:
+              - follows:
+                  pattern: const $METER = metrics.getMeter($$$ARGS)
+                  stopBy: end
+              - not:
+                  has:
+                    kind: object
+                    all: [*wrong_duration_unit]
+                    stopBy: end
+            stopBy: end
+    inside: *known_named_import
+  constraints:
+    MODULE: {regex: '^["'']@opentelemetry/api["'']$'}
+    API: {regex: '^metrics$'}
+    NAME: {regex: '^["'']http\.(client|server)\.request\.duration["'']$'}
+    VALUE:
+      any:
+        - pattern: performance.now() - $START
+        - pattern: Date.now() - $START
   languages: {JavaScript: {}, TypeScript: {}}
 
 node-writable-ignored-backpressure:

@@ -108,8 +108,9 @@ case. The TypeScript assertion rule uses the same response identity
 before reporting a direct cast to a concrete type. Helper return
 values, dynamically selected response methods, and
 arbitrary user-defined guards are outside this first implementation.
-The Node write check starts with equal string-literal paths, and the OTel
-check starts with an explicitly wrong unit on a known metric. These
+The Node write check starts with equal string-literal paths. The OTel
+checks flag an explicitly wrong unit on a known HTTP duration histogram
+or a recorded raw millisecond difference in the same block. These
 limits keep the matches reproducible while the framework analyzers
 grow alias, control-flow, and helper resolution.
 
