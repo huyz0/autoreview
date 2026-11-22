@@ -133,7 +133,7 @@ impl Flow<'_> {
 
 fn positioned_call(node: Node<'_>, source: &[u8]) -> Option<Stmt> {
     let call = match node.kind() {
-        "expression_statement" if node.named_child(0)?.kind() == "await_expression" => {
+        "expression_statement" if matches!(node.named_child(0)?.kind(), "await_expression" | "new_expression") => {
             keyed_syntax::expression(node)?
         }
         "call_expression" | "method_invocation" => node,
@@ -143,7 +143,7 @@ fn positioned_call(node: Node<'_>, source: &[u8]) -> Option<Stmt> {
 }
 
 fn direct_call(call: Node<'_>, source: &[u8]) -> Option<Stmt> {
-    if !matches!(call.kind(), "call_expression" | "method_invocation") {
+    if !matches!(call.kind(), "call_expression" | "method_invocation" | "new_expression") {
         return None;
     }
     Some(Stmt::Call {
@@ -156,8 +156,8 @@ fn direct_call(call: Node<'_>, source: &[u8]) -> Option<Stmt> {
 
 fn throwing_call(expr: Node<'_>, source: &[u8]) -> Option<ThrowingCall> {
     let target = match expr.kind() {
-        "method_invocation" | "call_expression" => site::name(expr, source).unwrap_or_default(),
-        "new_expression" | "object_creation_expression" => String::new(),
+        "method_invocation" | "call_expression" | "new_expression" => site::name(expr, source).unwrap_or_default(),
+        "object_creation_expression" => String::new(),
         _ => return None,
     };
     Some(ThrowingCall {

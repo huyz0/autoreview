@@ -26,13 +26,10 @@ impl Engine<'_, '_, '_, '_> {
             }
             Some(ContractMode::MustUse) => {}
             Some(ContractMode::MustComplete) => {
-                let value = IdentityOperand::Fresh {
-                    name: name.to_owned(),
-                    start: site.start,
-                    age: 0,
-                    unit: 0,
-                };
-                let handle = state.materialize(plan, &value, site.start)?;
+                if !plan.needs_completion(site) {
+                    return Some(true);
+                }
+                let handle = state.allocate(plan, name, site.start);
                 state.pending.insert(
                     Entry::handle(handle.clone()),
                     self.registration(frame, location.line),
@@ -62,6 +59,9 @@ impl Engine<'_, '_, '_, '_> {
         else {
             return;
         };
+        if plan.is_completion(name, site.start, &state.values) {
+            return;
+        }
         let method = name.rsplit('.').next().unwrap_or(name);
         if contract.borrows.iter().any(|borrow| borrow == method) {
             return;

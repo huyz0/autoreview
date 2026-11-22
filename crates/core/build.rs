@@ -8,6 +8,7 @@ const FAMILY_SOURCES: &[&str] = &[
     "rule-families/loops.yml",
     "rule-families/extended.yml",
     "rule-families/metrics.yml",
+    "rule-families/contracts.yml",
 ];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

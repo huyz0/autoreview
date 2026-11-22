@@ -107,25 +107,16 @@ struct Exit<'graph> {
 impl<'graph> Engine<'_, '_, '_, 'graph> {
     fn check(&mut self, frame: usize) -> Option<Vec<CallOrderHit>> {
         let root = &self.program.frames[frame];
-        let check_exits = root.plan.as_ref()?.spec.check_before_return;
+        let spec = root.plan.as_ref()?.spec;
+        let mut reported_handles = HashSet::new();
         for exit in self.paths(frame, root.graph, State::default())? {
+            let location = StatementLocation { node: exit.node, line: exit.line };
             for mut state in self.unwind(frame, exit.state)? {
-                if root.plan.as_ref()?.spec.contract.is_some() {
+                if spec.contract.is_some() {
                     state.transfer_returned_handle();
                 }
-                if check_exits {
-                    for (entry, &registration) in &state.pending {
-                        self.record_hit(
-                            exit.trigger,
-                            frame,
-                            StatementLocation {
-                                node: exit.node,
-                                line: exit.line,
-                            },
-                            entry,
-                            registration,
-                        );
-                    }
+                if spec.check_before_return {
+                    self.record_pending(frame, exit.trigger, location, &state, &mut reported_handles);
                 }
             }
         }
@@ -326,6 +317,22 @@ fn exit_kind(stmt: &Stmt) -> Option<&'static str> {
 }
 
 impl Engine<'_, '_, '_, '_> {
+    fn record_pending(
+        &mut self, frame: usize, trigger: &str, location: StatementLocation,
+        state: &State<'_>, handles: &mut HashSet<(usize, usize)>,
+    ) {
+        for (entry, &registration) in &state.pending {
+            if entry.key.is_none() {
+                if let IdentityOperand::Fresh { unit, start, .. } = &entry.collection {
+                    if !handles.insert((*unit, *start)) {
+                        continue;
+                    }
+                }
+            }
+            self.record_hit(trigger, frame, location, entry, registration);
+        }
+    }
+
     fn registration(&self, frame: usize, line: u32) -> Registration {
         Registration {
             unit: self.program.frames[frame].unit,

@@ -1,0 +1,110 @@
+discarded-remove-file-result:
+  kind: call-sequence
+  category: correctness
+  severity: warning
+  message: "Check or propagate the result of remove_file so a failed deletion is visible."
+  metadata:
+    subcategory: [correctness.error-handling]
+    references: ["https://doc.rust-lang.org/std/fs/fn.remove_file.html"]
+  contract: {mode: must-use, import: "std::fs", methods: [remove_file]}
+  languages: {Rust: {}}
+
+tokio-blocking-task-detached:
+  category: correctness
+  severity: warning
+  kind: call-sequence
+  semantic: true
+  message: "This blocking task may outlive its local owner. Await the JoinHandle or return it to a caller that owns completion."
+  metadata:
+    references: ["https://docs.rs/tokio/latest/tokio/task/struct.JoinHandle.html"]
+    subcategory: [concurrency.task-lifecycle]
+  contract: {mode: must-complete, import: "tokio::task", methods: [spawn_blocking], borrows: [abort, is_finished]}
+  unless: [{call: await}]
+  languages: {Rust: {}}
+
+discarded-run-catching-result:
+  category: correctness
+  kind: call-sequence
+  severity: warning
+  message: "runCatching stores thrown failures in its Result. Check or propagate that result to avoid swallowing them."
+  contract: {mode: must-use, import: kotlin, methods: [runCatching]}
+  metadata:
+    subcategory: [correctness.error-handling]
+    references: ["https://kotlinlang.org/api/core/kotlin-stdlib/kotlin/run-catching.html"]
+  languages: {Kotlin: {}}
+
+nio-lines-unclosed:
+  severity: warning
+  kind: call-sequence
+  category: correctness
+  message: "Close the stream returned by Files.lines or use a scoped use block so the open file is released."
+  metadata:
+    subcategory: [reliability.resource-lifecycle]
+    references: ["https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/file/Files.html#lines(java.nio.file.Path)"]
+  contract: {mode: must-complete, import: java.nio.file.Files, methods: [lines], borrows: [count, iterator, forEach]}
+  unless: [{call: close}, {call: use}]
+  languages: {Kotlin: {}}
+
+owned-coroutine-scope-uncancelled:
+  semantic: true
+  category: correctness
+  kind: call-sequence
+  severity: warning
+  message: "A locally created CoroutineScope can leave child coroutines running after this function exits. Cancel the scope or transfer it to its owner."
+  contract:
+    import: kotlinx.coroutines
+    mode: must-complete
+    methods: [CoroutineScope]
+    borrows: [launch, async, isActive]
+  unless: [{call: cancel}]
+  metadata:
+    subcategory: [concurrency.task-lifecycle]
+    references: ["https://kotlinlang.org/api/kotlinx.coroutines/kotlinx-coroutines-core/kotlinx.coroutines/-coroutine-scope.html"]
+  languages: {Kotlin: {}}
+
+node-fs-discarded-promise:
+  severity: warning
+  category: correctness
+  kind: call-sequence
+  message: "Await or return this filesystem promise so an error reaches the caller."
+  contract: {mode: must-use, import: "node:fs/promises", methods: [rename, unlink]}
+  metadata:
+    subcategory: [correctness.error-handling]
+    references: ["https://nodejs.org/api/fs.html#promises-api"]
+  languages: {JavaScript: {}, TypeScript: {}}
+
+node-file-handle-unclosed:
+  kind: call-sequence
+  category: correctness
+  severity: warning
+  message: "Await or return close() on the opened FileHandle. Use finally when a preceding operation can fail."
+  contract:
+    mode: must-complete
+    import: "node:fs/promises"
+    methods: [open]
+    acquireAwaited: true
+    completeObserved: true
+    borrows: [read, readFile, write, writeFile, stat, sync, truncate, chmod]
+  unless: [{call: close}]
+  metadata:
+    references: ["https://nodejs.org/api/fs.html#class-filehandle"]
+    subcategory: [reliability.resource-lifecycle]
+  languages: {JavaScript: {}, TypeScript: {}}
+
+node-worker-outlives-owner:
+  category: correctness
+  severity: warning
+  semantic: true
+  kind: call-sequence
+  message: "A locally owned Worker can outlive this function. Await termination or hand the Worker off to code that owns its lifecycle."
+  contract:
+    mode: must-complete
+    import: "node:worker_threads"
+    methods: [Worker]
+    completeObserved: true
+    borrows: [postMessage, ref]
+  unless: [{call: terminate}]
+  metadata:
+    subcategory: [concurrency.task-lifecycle]
+    references: ["https://nodejs.org/api/worker_threads.html#class-worker"]
+  languages: {JavaScript: {}, TypeScript: {}}

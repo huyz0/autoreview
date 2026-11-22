@@ -52,6 +52,7 @@ pub(super) struct Syntax<'src> {
     bindings: Bindings<'src>,
     calls: Vec<(usize, String)>,
     guards: HashMap<String, usize>,
+    local_callables: HashSet<&'src str>,
     owner: usize,
     pub(super) unit: usize,
 }
@@ -73,9 +74,14 @@ impl<'src> Syntax<'src> {
             if unsupported_flow(node, source) {
                 return None;
             }
-            if matches!(node.kind(), "method_invocation" | "call_expression") {
+            if matches!(node.kind(), "method_invocation" | "call_expression" | "new_expression") {
                 if let Some(name) = name(node, source) {
                     syntax.calls.push((node.start_byte(), name));
+                }
+            }
+            if node != function && matches!(node.kind(), "function_item" | "function_declaration") {
+                if let Some(name) = node.child_by_field_name("name").and_then(|part| part.utf8_text(source).ok()) {
+                    syntax.local_callables.insert(name);
                 }
             }
             syntax
@@ -116,6 +122,10 @@ impl<'src> Syntax<'src> {
 
     pub(super) fn taken_name(&self, name: &str) -> bool {
         self.bindings.names().any(|binding| binding == name)
+    }
+
+    pub(super) fn shadows_api(&self, name: &str) -> bool {
+        self.taken_name(name) || self.local_callables.contains(name)
     }
 
     pub(super) fn repeated_guard(&self, name: &str) -> bool {

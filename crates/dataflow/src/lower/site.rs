@@ -18,31 +18,70 @@ pub(super) fn named(
 }
 
 pub(crate) fn capture(call: Node<'_>, source: &[u8]) -> Option<Box<CallSite>> {
-    let args = arguments(call)?;
+    let args = arguments(call);
+    let trailing_lambda = children(call).any(|node| node.kind() == "annotated_lambda");
+    if args.is_none() && !trailing_lambda {
+        return None;
+    }
     let receiver = receiver(call)
         .filter(|node| identifier(*node))
         .and_then(|node| node.utf8_text(source).ok())
         .map(str::to_owned);
-    if optional(call) || children(args).any(has_spread) {
+    if optional(call) || args.into_iter().flat_map(children).any(has_spread) {
         return None;
     }
-    let arguments = children(args)
+    let mut arguments: Vec<_> = args.into_iter().flat_map(children)
         .map(|node| operand(argument(node)?, source))
         .collect();
+    arguments.extend(trailing_lambda.then_some(None));
+    let (expression, awaited) = call_context(call);
+    let returned = expression.parent().is_some_and(|parent| matches!(parent.kind(), "return_statement" | "return_expression"));
     Some(Box::new(CallSite {
         start: call.start_byte(),
         end: call.end_byte(),
-        discarded: result_is_discarded(call, source),
+        discarded: !awaited && result_is_discarded(expression, source),
+        awaited,
+        observed: awaited || returned,
         receiver,
         arguments,
         local: local_call(call),
     }))
 }
 
+fn call_context(mut expression: Node<'_>) -> (Node<'_>, bool) {
+    let mut awaited = false;
+    while let Some(parent) = expression.parent() {
+        match parent.kind() {
+            "await_expression" => awaited = true,
+            "parenthesized_expression" | "as_expression" | "satisfies_expression" | "non_null_expression" => {}
+            _ => break,
+        }
+        expression = parent;
+    }
+    (expression, awaited)
+}
+
+pub(super) fn await_binding(node: Node<'_>, source: &[u8]) -> Option<Stmt> {
+    let value = super::keyed_syntax::expression_value(node.named_child(0)?)?;
+    let receiver = identifier(value).then(|| value.utf8_text(source).ok())??;
+    Some(Stmt::Call {
+        target: CallTarget::Named(format!("{receiver}.await")),
+        args: Vec::new(),
+        assigned_to: None,
+        site: Some(Box::new(CallSite {
+            start: node.start_byte(), end: node.end_byte(), discarded: false,
+            awaited: true, observed: true, receiver: Some(receiver.to_owned()),
+            arguments: Vec::new(), local: false,
+        })),
+    })
+}
+
 fn result_is_discarded(call: Node<'_>, source: &[u8]) -> bool {
     let Some(parent) = call.parent() else { return false };
     match parent.kind() {
         "expression_statement" => true,
+        "block" => parent.parent().is_some_and(|owner| owner.kind() == "function_body"),
+        "let_declaration" => parent.children(&mut parent.walk()).any(|part| part.kind() == "_"),
         "expression_list" => {
             let Some(assignment) = parent.parent().filter(|node| node.kind() == "assignment_statement") else {
                 return false;
@@ -93,13 +132,11 @@ pub(crate) fn name(call: Node<'_>, source: &[u8]) -> Option<String> {
     if call.kind() == "method_invocation" {
         return super::java::method_invocation_target_name(call, source);
     }
-    let callee = call
-        .child_by_field_name("function")
-        .or_else(|| call.named_child(0))?;
+    let callee = callee(call)?;
     match callee.kind() {
         "selector_expression" => super::go::call_target_name(call, source),
         "member_expression" => super::javascript::call_target_name(call, source),
-        "navigation_expression" => super::kotlin::call_target_name(call, source),
+        "navigation_expression" | "call_expression" => super::kotlin::call_target_name(call, source),
         "field_expression" => Some(format!(
             "{}.{}",
             callee
@@ -119,6 +156,12 @@ pub(crate) fn name(call: Node<'_>, source: &[u8]) -> Option<String> {
     }
 }
 
+fn callee(call: Node<'_>) -> Option<Node<'_>> {
+    call.child_by_field_name("function")
+        .or_else(|| call.child_by_field_name("constructor"))
+        .or_else(|| call.named_child(0))
+}
+
 fn arguments(call: Node<'_>) -> Option<Node<'_>> {
     call.child_by_field_name("arguments")
         .or_else(|| children(call).find(|node| node.kind() == "value_arguments"))
@@ -128,9 +171,7 @@ fn receiver(call: Node<'_>) -> Option<Node<'_>> {
     if call.kind() == "method_invocation" {
         return call.child_by_field_name("object");
     }
-    let callee = call
-        .child_by_field_name("function")
-        .or_else(|| call.named_child(0))?;
+    let callee = callee(call)?;
     let callee = if callee.kind() == "generic_function" {
         callee.child_by_field_name("function")?
     } else {
@@ -141,6 +182,7 @@ fn receiver(call: Node<'_>) -> Option<Node<'_>> {
         "selector_expression" => callee.child_by_field_name("operand"),
         "field_expression" => callee.child_by_field_name("value"),
         "navigation_expression" => callee.named_child(0),
+        "call_expression" => receiver(callee),
         _ => None,
     }
 }

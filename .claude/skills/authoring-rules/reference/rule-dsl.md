@@ -296,8 +296,7 @@ are outside this call-based DSL.
 
 ### Require a result or finish an owned handle
 
-A `contract` block selects known APIs by their Go import path or Java
-class. It replaces `after`, `before`, `identity`, and
+A `contract` block selects known APIs by package, module, or class. It replaces `after`, `before`, `identity`, and
 `checkBeforeReturn`. This mode uses the same control-flow and helper
 analysis as keyed cleanup.
 
@@ -331,18 +330,30 @@ satisfies its contract.
 
 Use `mode: must-use` for APIs such as `os.Rename` whose result carries an
 error. This mode requires `import` and a nonempty `methods` list. It checks
-bare call statements and Go's explicit `_ = call()` form. Returning the
+bare call statements, Go's explicit `_ = call()` form, and Rust's
+`let _ = call()` form. An awaited web promise already uses the result. Returning the
 result or assigning it to a named binding uses it for this rule. Tracking
 a named result until it is checked is a separate analysis. Omit `unless`
 and `borrows` for this mode.
 
-Go matches explicit imports and package aliases. For imports without an
-alias it uses the final segment of the package path. Java matches explicit
-class imports and fully qualified calls in supported top-level types.
-The resolver checks local bindings that shadow the qualifier. Dot imports,
-Java static imports, wildcard imports, and external type hierarchies are
-outside this contract resolver. The same control-flow limits as keyed
-cleanup apply.
+Go matches explicit package imports. Java matches explicit class imports and
+fully qualified calls in supported top-level types. Kotlin and Rust also
+recognize directly imported members and aliases. Web rules resolve named
+and namespace ES imports, including Node builtin default imports, and run on JavaScript, TypeScript, and TSX. Type-only
+imports supply no runtime binding. Dot imports, wildcard imports, CommonJS
+bindings, and dynamic dispatch are outside the contract resolver.
+
+For a web `must-complete` contract, `acquireAwaited: true` opens the
+obligation only after a direct await of the acquisition. Set
+`completeObserved: true` when completion returns a promise. An await or a
+direct return of that promise then discharges the obligation. Web constructor
+calls can acquire handles. Callables using automatic resource management
+are skipped when the engine cannot model the teardown.
+
+A Rust completion selector can use `unless: [{call: await}]` for a
+returned future or task handle. Awaiting the acquisition inline or awaiting
+a tracked handle satisfies this contract. The same control-flow limits as
+keyed cleanup apply.
 
 ## `semantic: true`
 

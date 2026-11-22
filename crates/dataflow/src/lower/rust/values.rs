@@ -10,6 +10,11 @@ impl Lower<'_> {
         names: &Bindings,
         target: Option<String>,
     ) -> NodeId {
+        if let Some(awaited) = expr.and_then(keyed_await).filter(|_| self.cfg.keyed_flow.is_some()) {
+            if let Some(await_call) = crate::lower::site::await_binding(awaited, self.source) {
+                self.cfg.emit(at, await_call, line(awaited));
+            }
+        }
         let Some(expr) = expr.map(unwrap_value) else {
             return at;
         };
@@ -105,6 +110,13 @@ impl Lower<'_> {
             _ => CallTarget::Unknown,
         }
     }
+}
+
+fn keyed_await(mut expression: Node<'_>) -> Option<Node<'_>> {
+    while expression.kind() == "parenthesized_expression" {
+        expression = expression.named_child(0)?;
+    }
+    (expression.kind() == "await_expression").then_some(expression)
 }
 
 pub(super) fn unwrap_value(mut expr: Node<'_>) -> Node<'_> {
