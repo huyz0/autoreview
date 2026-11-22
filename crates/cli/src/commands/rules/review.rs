@@ -237,16 +237,19 @@ mod tests {
         assert!(err.to_string().contains("not tracked"), "got: {err}");
     }
 
+    fn tracked_rule_fixture(status: &str) -> autoreview_test_support::TestRepo {
+        let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
+        write_rule_file(repo.path(), status, "go-example");
+        let store = HistoryStore::open(&history_dir_for(repo.path())).unwrap();
+        store.ensure_rule_tracked("go-example", "shadow", "2026-07-01T00:00:00Z").unwrap();
+        store.set_rule_status("go-example", status).unwrap();
+        repo
+    }
+
     #[test]
     fn rollback_demotes_a_promoted_rule_back_to_shadow() {
-        let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
-        write_rule_file(repo.path(), "promoted", "go-example");
+        let repo = tracked_rule_fixture("promoted");
         let history_dir = history_dir_for(repo.path());
-        let store = HistoryStore::open(&history_dir).unwrap();
-        store.ensure_rule_tracked("go-example", "shadow", "2026-07-01T00:00:00Z").unwrap();
-        store.set_rule_status("go-example", "promoted").unwrap();
-        drop(store);
-
         run_rules_rollback(repo.path(), "go-example").unwrap();
 
         let store = HistoryStore::open(&history_dir).unwrap();
@@ -258,13 +261,8 @@ mod tests {
 
     #[test]
     fn rollback_rejects_a_shadow_rule_and_moves_its_file_without_deleting_it() {
-        let repo = init_repo(&[("main.go", "package main\n\nfunc main() {}\n")]);
-        write_rule_file(repo.path(), "shadow", "go-example");
+        let repo = tracked_rule_fixture("shadow");
         let history_dir = history_dir_for(repo.path());
-        let store = HistoryStore::open(&history_dir).unwrap();
-        store.ensure_rule_tracked("go-example", "shadow", "2026-07-01T00:00:00Z").unwrap();
-        drop(store);
-
         run_rules_rollback(repo.path(), "go-example").unwrap();
 
         let store = HistoryStore::open(&history_dir).unwrap();

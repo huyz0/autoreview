@@ -6,13 +6,22 @@ import (
 )
 
 func finishReport(compressor *gzip.Writer) {
-    compressor.Close()
+    err := compressor.Close()
+    if err != nil {
+        panic(err)
+    }
 }
 
-func compressReport(payload []byte) {
+func CompressReport(payload []byte) error {
     var buffer bytes.Buffer
     compressor := gzip.NewWriter(&buffer)
     deferred := compressor
     defer finishReport(deferred)
-    compressor.Write(payload)
+    _, err := compressor.Write(payload)
+    return err
+}
+
+func WriterAndStatus(buffer *bytes.Buffer) (*gzip.Writer, error) {
+    compressor := gzip.NewWriter(buffer)
+    return compressor, nil
 }

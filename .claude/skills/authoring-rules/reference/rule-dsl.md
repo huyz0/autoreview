@@ -324,7 +324,8 @@ owner transfers the obligation to its caller. At an exit with a pending
 obligation, the finding links to the acquisition. The optional `borrows`
 list names receiver methods known to leave ownership with the caller.
 Unmodeled calls that receive the handle may transfer ownership. The analyzer
-skips callables with field, indexed, or channel writes it cannot model. Use this mode
+skips callables with unsupported field, indexed, or channel writes, and
+Go tuple returns. Use this mode
 when the acquisition returns one handle directly and a completion call
 satisfies its contract.
 

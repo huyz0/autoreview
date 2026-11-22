@@ -1,4 +1,6 @@
+use anyhow::Context;
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default)]
 struct RuleKindCounts {
@@ -18,37 +20,49 @@ fn default_rule_kind() -> String {
     "pattern".to_string()
 }
 
-/// Recursively counts a resolved pack's rule files by declared `kind:` —
-/// a small, standalone walk (not the shared `analyzers::ast_grep` machinery,
-/// which is private to `autoreview-core`) since this listing command only
-/// needs the count, not the parsed rule bodies themselves.
-fn count_rule_kinds(pack_root: &std::path::Path) -> RuleKindCounts {
-    let mut counts = RuleKindCounts::default();
-    count_rule_kinds_inner(pack_root, &mut counts);
-    counts
-}
-
-fn count_rule_kinds_inner(dir: &std::path::Path, counts: &mut RuleKindCounts) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.is_dir() {
-            count_rule_kinds_inner(&path, counts);
-            continue;
-        }
-        let is_yaml = path.extension().and_then(|e| e.to_str()).map(|e| e == "yml" || e == "yaml").unwrap_or(false);
-        if !is_yaml || path.file_name().and_then(|n| n.to_str()) == Some("rulepack.yaml") {
-            continue;
-        }
-        let Ok(contents) = std::fs::read_to_string(&path) else { continue };
-        let Ok(meta) = serde_yaml::from_str::<MinimalRuleMeta>(&contents) else { continue };
-        match meta.kind.as_str() {
-            "taint" => counts.taint += 1,
-            "threshold" => counts.threshold += 1,
-            "call-sequence" => counts.call_sequence += 1,
-            _ => counts.pattern += 1,
+impl RuleKindCounts {
+    fn record(&mut self, kind: &str) {
+        match kind {
+            "taint" => self.taint += 1,
+            "threshold" => self.threshold += 1,
+            "call-sequence" => self.call_sequence += 1,
+            _ => self.pattern += 1,
         }
     }
+}
+
+fn visit_rule_files(dir: &Path, visit: &mut impl FnMut(&Path, anyhow::Result<String>)) {
+    let entries = match std::fs::read_dir(dir).context("could not read directory") {
+        Ok(entries) => entries,
+        Err(error) => {
+            visit(dir, Err(error));
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            visit_rule_files(&path, visit);
+        } else if is_rule_file(&path) {
+            visit(&path, std::fs::read_to_string(&path).context("could not read file"));
+        }
+    }
+}
+
+fn is_rule_file(path: &Path) -> bool {
+    matches!(path.extension().and_then(|ext| ext.to_str()), Some("yml" | "yaml"))
+        && path.file_name().is_some_and(|name| name != "rulepack.yaml")
+}
+
+fn count_rule_kinds(pack_root: &Path) -> RuleKindCounts {
+    let mut counts = RuleKindCounts::default();
+    visit_rule_files(pack_root, &mut |_, contents| {
+        let meta = contents.ok().and_then(|text| serde_yaml::from_str::<MinimalRuleMeta>(&text).ok());
+        if let Some(meta) = meta {
+            counts.record(&meta.kind);
+        }
+    });
+    counts
 }
 
 /// Lists every pack registered in `.autoreview/rulepacks.yaml`: id, source
@@ -177,38 +191,23 @@ pub(in crate::commands) fn validate_rule_file(contents: &str) -> anyhow::Result<
     Ok((id_only.id, meta.kind))
 }
 
-fn validate_pack_dir(dir: &std::path::Path, errors: &mut Vec<String>, seen_ids: &mut std::collections::HashMap<String, std::path::PathBuf>, counts: &mut RuleKindCounts) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        errors.push(format!("{}: could not read directory", dir.display()));
-        return;
-    };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.is_dir() {
-            validate_pack_dir(&path, errors, seen_ids, counts);
-            continue;
-        }
-        let is_yaml = path.extension().and_then(|e| e.to_str()).map(|e| e == "yml" || e == "yaml").unwrap_or(false);
-        if !is_yaml || path.file_name().and_then(|n| n.to_str()) == Some("rulepack.yaml") {
-            continue;
-        }
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            errors.push(format!("{}: could not read file", path.display()));
-            continue;
-        };
-        match validate_rule_file(&contents) {
+#[derive(Default)]
+struct PackValidation {
+    errors: Vec<String>,
+    seen_ids: std::collections::HashMap<String, PathBuf>,
+    counts: RuleKindCounts,
+}
+
+impl PackValidation {
+    fn check(&mut self, path: &Path, contents: anyhow::Result<String>) {
+        match contents.and_then(|contents| validate_rule_file(&contents)) {
             Ok((id, kind)) => {
-                match kind.as_str() {
-                    "taint" => counts.taint += 1,
-                    "threshold" => counts.threshold += 1,
-                    "call-sequence" => counts.call_sequence += 1,
-                    _ => counts.pattern += 1,
-                }
-                if let Some(existing) = seen_ids.insert(id.clone(), path.clone()) {
-                    errors.push(format!("{}: duplicate id '{id}' (already declared in {})", path.display(), existing.display()));
+                self.counts.record(&kind);
+                if let Some(existing) = self.seen_ids.insert(id.clone(), path.to_owned()) {
+                    self.errors.push(format!("{}: duplicate id '{id}' (already declared in {})", path.display(), existing.display()));
                 }
             }
-            Err(err) => errors.push(format!("{}: {err}", path.display())),
+            Err(error) => self.errors.push(format!("{}: {error}", path.display())),
         }
     }
 }
@@ -230,10 +229,9 @@ pub fn run_rules_packs_validate(pack_path: &std::path::Path) -> anyhow::Result<(
         anyhow::bail!("{}: `id` field is empty", manifest_path.display());
     }
 
-    let mut errors = Vec::new();
-    let mut seen_ids = std::collections::HashMap::new();
-    let mut counts = RuleKindCounts::default();
-    validate_pack_dir(pack_path, &mut errors, &mut seen_ids, &mut counts);
+    let mut checks = PackValidation::default();
+    visit_rule_files(pack_path, &mut |path, contents| checks.check(path, contents));
+    let PackValidation { counts, errors, .. } = checks;
 
     let description = if manifest.description.is_empty() { String::new() } else { format!(" — {}", manifest.description) };
     println!("Pack '{}' (version {}){description}", manifest.id, manifest.version);
@@ -285,12 +283,17 @@ fn short_sha(sha: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{run_rules_packs_validate, validate_rule_file};
+
+    fn pack_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+        dir
+    }
 
     #[test]
     fn validate_succeeds_for_a_well_formed_pack() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+        let dir = pack_fixture();
         std::fs::write(dir.path().join("no-println.yml"), "id: acme-no-println\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\nrule:\n  pattern: println($$$ARGS)\n").unwrap();
         std::fs::write(
             dir.path().join("cmd-taint.yml"),
@@ -311,8 +314,7 @@ mod tests {
 
     #[test]
     fn validate_reports_a_pattern_rule_missing_its_rule_block() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+        let dir = pack_fixture();
         std::fs::write(dir.path().join("broken.yml"), "id: acme-broken\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\n").unwrap();
 
         let err = run_rules_packs_validate(dir.path()).unwrap_err();
@@ -321,8 +323,7 @@ mod tests {
 
     #[test]
     fn validate_reports_a_taint_rule_missing_sinks() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+        let dir = pack_fixture();
         std::fs::write(dir.path().join("broken.yml"), "id: acme-broken\nkind: taint\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\nsources:\n  - call: FormValue\n").unwrap();
 
         let err = run_rules_packs_validate(dir.path()).unwrap_err();
@@ -331,8 +332,7 @@ mod tests {
 
     #[test]
     fn validate_succeeds_for_a_call_sequence_rule() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+        let dir = pack_fixture();
         std::fs::write(
             dir.path().join("unreleased-lock.yml"),
             "id: acme-unreleased-lock\nkind: call-sequence\nlanguage: Java\ncategory: correctness\nseverity: error\nmessage: m\nafter:\n  - call: lock\nunless:\n  - call: unlock\ncheckBeforeReturn: true\n",
@@ -342,8 +342,7 @@ mod tests {
         run_rules_packs_validate(dir.path()).unwrap();
     }
 
-    /// Regression test for the exact seam `count_rule_kinds_inner`/
-    /// `validate_pack_dir` both switch on: a `kind: call-sequence` rule
+    /// A `kind: call-sequence` rule
     /// used to fall through their `_ => counts.pattern += 1` wildcard arm
     /// and get silently counted as a pattern rule in `rules packs`/
     /// `rules packs validate`'s printed breakdown. `validate_rule_file`'s
@@ -360,8 +359,7 @@ mod tests {
 
     #[test]
     fn validate_reports_a_call_sequence_rule_missing_unless() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+        let dir = pack_fixture();
         std::fs::write(dir.path().join("broken.yml"), "id: acme-broken\nkind: call-sequence\nlanguage: Java\ncategory: correctness\nseverity: error\nmessage: m\nafter:\n  - call: lock\nunless: []\ncheckBeforeReturn: true\n").unwrap();
 
         let err = run_rules_packs_validate(dir.path()).unwrap_err();
@@ -371,8 +369,7 @@ mod tests {
 
     #[test]
     fn validate_reports_an_unknown_kind_clearly() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+        let dir = pack_fixture();
         std::fs::write(dir.path().join("broken.yml"), "id: acme-broken\nkind: made-up-kind\nlanguage: Java\ncategory: correctness\nseverity: error\nmessage: m\n").unwrap();
 
         let err = run_rules_packs_validate(dir.path()).unwrap_err();
@@ -381,8 +378,7 @@ mod tests {
 
     #[test]
     fn validate_reports_a_duplicate_id_across_two_files() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("rulepack.yaml"), "id: acme-security\nversion: \"1.0.0\"\n").unwrap();
+        let dir = pack_fixture();
         std::fs::write(dir.path().join("a.yml"), "id: acme-dup\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\nrule:\n  pattern: println($$$ARGS)\n").unwrap();
         std::fs::write(dir.path().join("b.yml"), "id: acme-dup\nlanguage: Go\ncategory: security\nseverity: error\nmessage: m\nrule:\n  pattern: fmt.Println($$$ARGS)\n").unwrap();
 

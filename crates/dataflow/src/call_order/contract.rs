@@ -56,7 +56,7 @@ impl<'a> ApiMatcher<'a> {
         let owner = function.parent().and_then(|body| body.parent());
         let mut pending = vec![function];
         while let Some(node) = pending.pop() {
-            if may_store_handle(node, owner, source) {
+            if may_store_handle(node, owner, source) || returns_tuple(node) {
                 return false;
             }
             pending.extend(children(node));
@@ -79,6 +79,13 @@ impl<'a> ApiMatcher<'a> {
                 .any(|candidate| candidate == method)
             && !bound(root)
     }
+}
+
+fn returns_tuple(node: Node<'_>) -> bool {
+    node.kind() == "return_statement"
+        && children(node)
+            .find(|child| child.kind() == "expression_list")
+            .is_some_and(|list| children(list).nth(1).is_some())
 }
 
 fn may_store_handle(node: Node<'_>, owner: Option<Node<'_>>, source: &[u8]) -> bool {
