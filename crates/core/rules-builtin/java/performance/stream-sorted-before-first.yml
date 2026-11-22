@@ -1,0 +1,17 @@
+id: java-stream-sorted-before-first
+language: Java
+category: performance
+severity: warning
+semantic: true
+message: >-
+  This stream sorts its entire input before taking one result. Consider min()
+  if its comparator, tie handling, and evaluation behavior fit the result.
+metadata:
+  references:
+    - "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/stream/package-summary.html"
+rule:
+  pattern: $STREAM.sorted($$$ARGS).findFirst()
+constraints:
+  STREAM:
+    kind: method_invocation
+    regex: '\.stream\s*\(|^((java\.util\.stream\.)?Stream)\.(of|iterate|generate)\s*\('

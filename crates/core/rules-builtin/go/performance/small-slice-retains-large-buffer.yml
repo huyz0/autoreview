@@ -1,0 +1,25 @@
+id: go-small-slice-retains-large-buffer
+language: Go
+category: performance
+severity: warning
+semantic: true
+message: >-
+  This returned byte slice is a small view of a much larger local allocation.
+  Copy the bytes with slices.Clone if the caller only needs the small result.
+metadata:
+  references:
+    - "https://go.dev/blog/slices-intro"
+rule:
+  all:
+    - pattern: return $DATA[:$END]
+    - follows:
+        all:
+          - kind: short_var_declaration
+          - pattern: $DATA := make([]byte, $SIZE)
+constraints:
+  DATA:
+    regex: '^[a-zA-Z_][a-zA-Z0-9_]*$'
+  SIZE:
+    regex: '^[1-9][0-9]{5,}$'
+  END:
+    regex: '^[1-9][0-9]?$'

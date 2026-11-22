@@ -1,4 +1,5 @@
 mod basics;
+mod collections;
 mod design;
 mod mocking;
 mod panics;
@@ -40,6 +41,7 @@ pub fn rust_review_semantic_ids() -> impl Iterator<Item = &'static str> {
 fn rules() -> impl Iterator<Item = &'static RustReviewRule> {
     basics::RULES
         .iter()
+        .chain(collections::RULES)
         .chain(sql::RULES)
         .chain(mocking::RULES)
         .chain(panics::RULES)
@@ -135,6 +137,7 @@ fn analyze_file(path: &str, text: &str) -> Vec<AgentFinding> {
     };
     for node in descendants(root) {
         basics::check(&mut review, node);
+        collections::check(&mut review, node);
         sql::check(&mut review, node);
         mocking::check(&mut review, node);
         panics::check(&mut review, node);

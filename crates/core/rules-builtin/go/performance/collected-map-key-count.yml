@@ -1,0 +1,24 @@
+id: go-collected-map-key-count
+language: Go
+category: performance
+severity: warning
+message: >-
+  This builds a slice of map keys to count them. Use len on the map to avoid traversing the keys or allocating a slice.
+metadata:
+  references:
+    - "https://pkg.go.dev/slices#Collect"
+rule:
+  all:
+    - pattern: len(slices.Collect(maps.Keys($MAP)))
+    - inside:
+        kind: source_file
+        stopBy: end
+        all:
+          - has:
+              kind: import_spec
+              stopBy: end
+              regex: '^"slices"$'
+          - has:
+              kind: import_spec
+              stopBy: end
+              regex: '^"maps"$'

@@ -1,0 +1,56 @@
+id: java-weak-map-value-retains-key
+language: Java
+category: correctness
+severity: warning
+message: >-
+  This WeakHashMap stores its key as a strongly held value. A live map can keep that key reachable and prevent automatic eviction. Store independent metadata or a WeakReference to the value.
+metadata:
+  references:
+    - "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/WeakHashMap.html"
+rule:
+  all:
+    - pattern: $MAP.put($KEY, $KEY)
+    - inside:
+        kind: expression_statement
+        inside:
+          kind: block
+          inside:
+            kind: method_declaration
+            has:
+              field: parameters
+              has:
+                kind: formal_parameter
+                all:
+                  - has:
+                      field: name
+                      pattern: $MAP
+                  - has:
+                      field: type
+                      pattern: $TYPE
+    - any:
+        - inside:
+            kind: program
+            stopBy: end
+            has:
+              pattern: import java.util.WeakHashMap;
+        - inside:
+            kind: method_declaration
+            stopBy: end
+            has:
+              field: parameters
+              has:
+                kind: formal_parameter
+                all:
+                  - has:
+                      field: name
+                      pattern: $MAP
+                  - has:
+                      field: type
+                      regex: '^java\.util\.WeakHashMap\s*(<|$)'
+constraints:
+  MAP:
+    kind: identifier
+  KEY:
+    kind: identifier
+  TYPE:
+    regex: '^(java\.util\.)?WeakHashMap\s*(<|$)'

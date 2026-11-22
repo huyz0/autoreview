@@ -1,0 +1,32 @@
+id: ts-small-buffer-view-escapes
+language: TypeScript
+category: performance
+severity: warning
+semantic: true
+message: >-
+  This small Buffer view escapes while sharing a much larger backing allocation. Copy the bytes with Buffer.from(view) when the caller only needs the small result.
+metadata:
+  references:
+    - "https://nodejs.org/api/buffer.html#bufsubarraystart-end"
+rule:
+  all:
+    - any:
+        - pattern: $BUFFER.subarray(0, $END)
+        - pattern: $BUFFER.slice(0, $END)
+    - inside:
+        kind: return_statement
+        follows:
+          kind: lexical_declaration
+          regex: '^const\s+'
+          has:
+            kind: variable_declarator
+            pattern:
+              context: 'const $BUFFER = Buffer.alloc($SIZE);'
+              selector: variable_declarator
+constraints:
+  BUFFER:
+    kind: identifier
+  SIZE:
+    regex: '^[1-9][0-9]{5,}$'
+  END:
+    regex: '^[1-9][0-9]?$'
