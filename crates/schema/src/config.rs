@@ -511,6 +511,8 @@ pub struct ArtifactChecksConfig {
     pub transactional_postgres_migrations: Vec<String>,
     #[serde(default)]
     pub locale_catalogs: Vec<LocaleCatalogConfig>,
+    #[serde(default)]
+    pub protobuf_compatibility: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

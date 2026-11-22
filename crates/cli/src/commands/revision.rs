@@ -18,6 +18,20 @@ pub(super) fn resolve_commit(repo_root: &Path, reference: &str) -> anyhow::Resul
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
+pub(super) fn compare_protobuf(
+    repo: &Path, head_root: &Path, base: &str, head: &str, globs: &[String],
+) -> anyhow::Result<Vec<autoreview_schema::AgentFinding>> {
+    // Include both sides of renames so message identity survives a file move.
+    let paths = git_path_value(repo, &["diff", "--name-only", "--no-renames", "-z", &format!("{base}...{head}"), "--"])?;
+    let changed: Vec<_> = paths.split('\0').filter(|path| path.ends_with(".proto")).map(str::to_owned).collect();
+    if changed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let merge_base = git_path_value(repo, &["merge-base", base, head])?;
+    let snapshot = checkout_snapshot(repo, &merge_base)?;
+    autoreview_core::run_protobuf_policy(snapshot.path(), head_root, &changed, globs)
+}
+
 /// External analyzers need a filesystem, and some need Git history. Share
 /// the local object store but give the review its own HEAD, index and files.
 pub(super) fn checkout_snapshot(repo_root: &Path, head: &str) -> anyhow::Result<tempfile::TempDir> {

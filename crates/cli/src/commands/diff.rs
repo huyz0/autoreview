@@ -155,7 +155,7 @@ fn load_registered_packs(repo: &Path) -> Vec<ResolvedRulePack> {
 }
 
 fn run_static_analyzers(run: &ReviewRun<'_>) -> (Vec<Finding>, StaticFindings) {
-    let (findings, warnings) = super::static_review::collect(
+    let (mut findings, mut warnings) = super::static_review::collect(
         super::static_review::ReviewInput {
             repo_root: &run.options.repo_root,
             source_root: run.source_root,
@@ -170,6 +170,7 @@ fn run_static_analyzers(run: &ReviewRun<'_>) -> (Vec<Finding>, StaticFindings) {
         run.changed_files,
         run.packs,
     );
+    append_protobuf_findings(run, &mut findings, &mut warnings);
     let shadow: HashSet<_> = run
         .packs
         .iter()
@@ -209,6 +210,24 @@ fn run_static_analyzers(run: &ReviewRun<'_>) -> (Vec<Finding>, StaticFindings) {
             warnings,
         },
     )
+}
+
+fn append_protobuf_findings(run: &ReviewRun<'_>, findings: &mut Vec<AgentFinding>, warnings: &mut Vec<String>) {
+    let globs = &run.config.artifact_checks.protobuf_compatibility;
+    if globs.is_empty() || run.options.aspects.as_ref().is_some_and(|aspects| !aspects.iter().any(|aspect| aspect == "correctness")) {
+        return;
+    }
+    let result = super::revision::compare_protobuf(
+        &run.options.repo_root, run.source_root, &run.facts.base_ref, &run.facts.head_ref, globs,
+    );
+    match result {
+        Ok(compatibility) => findings.extend(compatibility),
+        Err(error) => {
+            let warning = format!("Protobuf compatibility policy failed: {error}");
+            println!("  [warn] {warning}");
+            warnings.push(warning);
+        }
+    }
 }
 
 /// Watch both resolved commits so edits with identical diff statistics

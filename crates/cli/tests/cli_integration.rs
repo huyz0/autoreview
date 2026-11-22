@@ -635,6 +635,71 @@ fn postgres_policy_tracks_changed_sql_and_transaction_sidecars() {
 }
 
 #[test]
+fn protobuf_policy_tracks_schema_compatibility_in_the_git_diff() {
+    use autoreview_schema::Side;
+
+    let path = "schemas/message.proto";
+    let previous = r#"
+syntax = "proto3";
+package example;
+message Envelope {
+  message Item {
+    string legacy = 1;
+    string remove_me = 2;
+    repeated int32 values = 3;
+    string safely_removed = 4;
+    reserved 40 to 49;
+  }
+}
+"#;
+    let current = r#"
+syntax = "proto3";
+package example;
+message Envelope {
+  message Item {
+    string replacement = 1;
+    int32 values = 3;
+    reserved 4, 41 to 49;
+    string added = 5 [(example.hint) = "{; }"];
+    string reused_reservation = 40;
+  }
+}
+"#;
+    let repo = init_repo(&[(path, previous), ("unconfigured.proto", previous)]);
+    repo.commit(&[(path, current), ("unconfigured.proto", current)], "change message fields");
+
+    let config = ".autoreview/config.yaml";
+    for enabled in [false, true] {
+        if enabled {
+            std::fs::create_dir_all(repo.path().join(".autoreview")).unwrap();
+            std::fs::write(repo.path().join(config), "artifactChecks:\n  protobufCompatibility: ['schemas/*.proto']\n").unwrap();
+        }
+        let output = Command::cargo_bin("autoreview").unwrap()
+            .current_dir(repo.path())
+            .args(["diff", "--base", "HEAD~1", "--static-only", "--changed-lines", "--subcategories", "compatibility"])
+            .assert().success().get_output().stdout.clone();
+        let path_to_report = report_path_from_stdout(&String::from_utf8(output).unwrap());
+        let report: autoreview_schema::ReviewReport = serde_json::from_slice(&std::fs::read(path_to_report).unwrap()).unwrap();
+        let expected = [
+            ("protobuf-field-tag-reused", 6, Side::New),
+            ("protobuf-incompatible-field-change", 7, Side::New),
+            ("protobuf-field-tag-reused", 10, Side::New),
+            ("protobuf-removed-field-tag-not-reserved", 7, Side::Old),
+        ];
+        assert_eq!(report.findings.len(), if enabled { expected.len() } else { 0 });
+        for finding in report.findings {
+            assert_eq!(finding.location.path, path);
+            assert!(finding.message.contains("example.Envelope.Item"));
+            assert!(expected.iter().any(|(rule, line, side)| {
+                finding.source.rule_id.as_deref() == Some(rule)
+                    && finding.location.range.start_line == *line
+                    && finding.location.side == *side
+            }), "{finding:?}");
+        }
+    }
+}
+
+#[test]
 fn workflow_pinning_policy_is_opt_in_and_points_to_the_changed_steps() {
     let workflow = ".github/workflows/checks.yml";
     let baseline = "jobs:\n  test:\n    steps: []\n";

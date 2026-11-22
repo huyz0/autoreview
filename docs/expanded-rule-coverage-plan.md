@@ -169,3 +169,16 @@ artifactChecks:
     - reference: locales/en.json
       translations: [locales/fr.json, locales/de.json]
 ```
+
+The Protobuf pack compares matching changed files in the review's merge
+base and head. It identifies messages by package and nesting, including
+moves between selected files. It reports reused or unreserved field
+numbers, type and cardinality changes, and changes that move a field into
+or out of a multi-field oneof. Whole-message removal, enum values, and
+compiler-specific options are outside the first version.
+
+```yaml
+artifactChecks:
+  protobufCompatibility:
+    - 'schemas/**/*.proto'
+```

@@ -5,7 +5,13 @@ use std::process::Command;
 
 use autoreview_schema::{AgentFinding, Location, Side};
 
-pub(super) struct ChangedLines(HashMap<String, Vec<RangeInclusive<u32>>>);
+type Ranges = HashMap<String, Vec<RangeInclusive<u32>>>;
+
+#[derive(Default)]
+pub(super) struct ChangedLines {
+    old: Ranges,
+    new: Ranges,
+}
 
 impl ChangedLines {
     pub(super) fn load(repo: &Path, base: &str, head: &str) -> anyhow::Result<Self> {
@@ -19,52 +25,70 @@ impl ChangedLines {
     }
 
     fn parse(patch: &[u8]) -> anyhow::Result<Self> {
-        let mut ranges: HashMap<String, Vec<RangeInclusive<u32>>> = HashMap::new();
+        let mut ranges = Self::default();
         // Source lines can contain arbitrary bytes. Only headers need to
         // be decoded, and filenames are already checked by diff facts.
         let mut path: Option<String> = None;
+        let mut old_path: Option<String> = None;
         let mut reading_headers = false;
         for line in patch.split(|byte| *byte == b'\n') {
             if line.starts_with(b"diff --git ") {
                 path = None;
+                old_path = None;
                 reading_headers = true;
             } else if let Some(header) = line.strip_prefix(b"@@ -") {
                 reading_headers = false;
-                let Some(path) = &path else { continue };
                 let header = std::str::from_utf8(header)?;
-                let new_range = header.split_ascii_whitespace().nth(1).and_then(|range| range.strip_prefix('+'))
+                let mut sides = header.split_ascii_whitespace();
+                let old_range = sides.next().ok_or_else(|| anyhow::anyhow!("missing old-side range in Git diff"))?;
+                let new_range = sides.next().and_then(|range| range.strip_prefix('+'))
                     .ok_or_else(|| anyhow::anyhow!("invalid new-side range in Git diff"))?;
-                let (start, count) = new_range.split_once(',').unwrap_or((new_range, "1"));
-                let start: u32 = start.parse()?;
-                let count: u32 = count.parse()?;
-                if count > 0 {
-                    ranges.entry(path.clone()).or_default().push(start..=start.saturating_add(count - 1));
-                }
+                insert_range(&mut ranges.old, old_path.as_ref(), old_range)?;
+                insert_range(&mut ranges.new, path.as_ref(), new_range)?;
             } else if reading_headers {
                 if let Some(new_path) = line.strip_prefix(b"+++ ") {
-                    path = decode_new_path(new_path)?;
+                    path = decode_path(new_path, b"b/")?;
+                }
+                if let Some(previous_path) = line.strip_prefix(b"--- ") {
+                    old_path = decode_path(previous_path, b"a/")?;
                 }
             }
         }
-        Ok(Self(ranges))
+        Ok(ranges)
     }
 
     pub(super) fn contains_finding(&self, finding: &AgentFinding) -> bool {
-        self.contains_location(&finding.location)
-            || finding.related_locations.iter().flatten().any(|location| self.contains_location(location))
-    }
-
-    fn contains_location(&self, location: &Location) -> bool {
-        let Side::New = location.side else { return false };
-        let start = location.range.start_line;
-        let end = location.range.end_line.unwrap_or(start);
-        self.0.get(&location.path).is_some_and(|ranges| {
-            ranges.iter().any(|range| *range.start() <= end && *range.end() >= start)
-        })
+        let primary_ranges = match finding.location.side {
+            Side::New => &self.new,
+            Side::Old => &self.old,
+        };
+        contains_location(primary_ranges, &finding.location)
+            || finding.related_locations.iter().flatten().any(|location| {
+                matches!(location.side, Side::New) && contains_location(&self.new, location)
+            })
     }
 }
 
-fn decode_new_path(path: &[u8]) -> anyhow::Result<Option<String>> {
+fn contains_location(ranges: &Ranges, location: &Location) -> bool {
+    let start = location.range.start_line;
+    let end = location.range.end_line.unwrap_or(start);
+    ranges.get(&location.path).is_some_and(|ranges| {
+        ranges.iter().any(|range| *range.start() <= end && *range.end() >= start)
+    })
+}
+
+fn insert_range(ranges: &mut Ranges, path: Option<&String>, hunk: &str) -> anyhow::Result<()> {
+    let Some(path) = path else { return Ok(()) };
+    let (start, count) = hunk.split_once(',').unwrap_or((hunk, "1"));
+    let start: u32 = start.parse()?;
+    let count: u32 = count.parse()?;
+    if count > 0 {
+        ranges.entry(path.clone()).or_default().push(start..=start.saturating_add(count - 1));
+    }
+    Ok(())
+}
+
+fn decode_path(path: &[u8], prefix: &[u8]) -> anyhow::Result<Option<String>> {
     if path == b"/dev/null" {
         return Ok(None);
     }
@@ -103,6 +127,6 @@ fn decode_new_path(path: &[u8]) -> anyhow::Result<Option<String>> {
     } else {
         path
     };
-    let path = path.strip_prefix(b"b/").ok_or_else(|| anyhow::anyhow!("invalid new-side path in Git diff"))?;
+    let path = path.strip_prefix(prefix).ok_or_else(|| anyhow::anyhow!("invalid path in Git diff"))?;
     Ok(Some(std::str::from_utf8(path)?.to_owned()))
 }

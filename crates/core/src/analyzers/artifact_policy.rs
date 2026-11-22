@@ -62,6 +62,9 @@ pub(super) fn rules() -> impl Iterator<Item = &'static Rule> {
         &super::postgres_migrations::RULE,
         &super::locale_catalogs::MISSING_PLACEHOLDER,
         &super::locale_catalogs::MISSING_OTHER,
+        &super::protobuf_schema::REUSED_TAG,
+        &super::protobuf_schema::UNRESERVED_TAG,
+        &super::protobuf_schema::INCOMPATIBLE_FIELD,
     ].into_iter()
 }
 
