@@ -5,14 +5,21 @@ use tree_sitter::Node;
 use crate::call_order::ContractLanguage;
 use crate::lower::site;
 
-pub(super) fn captured_names<'src>(function: Node<'_>, source: &'src [u8], language: ContractLanguage) -> HashSet<&'src str> {
+pub(super) fn captured_names<'src>(
+    function: Node<'_>,
+    source: &'src [u8],
+    language: ContractLanguage,
+    precise: impl Fn(Node<'_>) -> bool,
+) -> HashSet<&'src str> {
     let mut captured = HashSet::new();
     let mut pending: Vec<_> = site::children(function).collect();
     while let Some(node) = pending.pop() {
         if capture_scope(node) {
-            walk_names(node, source, language, |name, _| {
-                captured.insert(name);
-            });
+            if !precise(node) {
+                walk_names(node, source, language, |name, _| {
+                    captured.insert(name);
+                });
+            }
         } else {
             pending.extend(site::children(node));
         }
@@ -20,7 +27,7 @@ pub(super) fn captured_names<'src>(function: Node<'_>, source: &'src [u8], langu
     captured
 }
 
-fn capture_scope(node: Node<'_>) -> bool {
+pub(super) fn capture_scope(node: Node<'_>) -> bool {
     matches!(
         node.kind(),
         "func_literal"
@@ -59,7 +66,7 @@ pub(super) fn walk_names<'src>(
     }
 }
 
-fn string_references<'src>(
+pub(super) fn string_references<'src>(
     node: Node<'_>,
     source: &'src [u8],
     language: ContractLanguage,
@@ -73,9 +80,11 @@ fn string_references<'src>(
         // The Kotlin grammar emits $ and the short template name as
         // separate string_content nodes. ${...} has its own expression.
         ContractLanguage::Kotlin if text == "$" => {
-            if let Some(part) = node.next_named_sibling()
+            if let Some(part) = node
+                .next_named_sibling()
                 .filter(|sibling| sibling.kind() == "string_content" && sibling.start_byte() == node.end_byte())
-                .and_then(|sibling| sibling.utf8_text(source).ok()).and_then(identifier_prefix)
+                .and_then(|sibling| sibling.utf8_text(source).ok())
+                .and_then(identifier_prefix)
             {
                 visit(part);
             }
@@ -99,7 +108,7 @@ fn identifier_prefix(text: &str) -> Option<&str> {
     (end > 0).then(|| &text[..end])
 }
 
-fn reference(node: Node<'_>, source: &[u8]) -> bool {
+pub(super) fn reference(node: Node<'_>, source: &[u8]) -> bool {
     if matches!(node.kind(), "shorthand_property_identifier" | "shorthand_field_identifier") {
         return true;
     }

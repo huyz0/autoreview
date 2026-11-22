@@ -663,15 +663,15 @@ fn api_contract_rules_replay_on_bad_and_fixed_commits() {
     let fix_files = FIXTURES.map(|(_, path, _, fixed, _)| (path, fixed));
     repo.commit(&fix_files, "Satisfy API contracts");
     let after = current_commit(repo.path());
-    let cases = FIXTURES.map(|(id, path, _, _, line)| contract_replay_case(id, path, line, &before, &after));
+    let cases = FIXTURES.map(|(id, path, _, _, line)| contract_replay_case(id, path, &[line], &before, &after));
     assert_contract_replay(repo.path(), &cases);
 }
 
-fn contract_replay_case(id: &str, path: &str, line: u32, before: &str, after: &str) -> serde_json::Value {
+fn contract_replay_case(id: &str, path: &str, lines: &[u32], before: &str, after: &str) -> serde_json::Value {
     serde_json::json!({
         "name": format!("{id} ({path})"),
         "rule": { "tool": "autoreview-dataflow", "id": id },
-        "before": { "commit": before, "path": path, "lines": [line] },
+        "before": { "commit": before, "path": path, "lines": lines },
         "after": { "commit": after, "path": path, "lines": [] }
     })
 }
@@ -727,7 +727,7 @@ fn assigned_api_results_replay_in_every_supported_language() {
     let before = current_commit(repo.path());
     repo.commit(&fixtures.each_ref().map(|(_, path, _, fixed, _)| (*path, fixed.as_str())), "Use the original API results");
     let after = current_commit(repo.path());
-    let cases = fixtures.map(|(id, path, _, _, line)| contract_replay_case(id, path, line, &before, &after));
+    let cases = fixtures.map(|(id, path, _, _, line)| contract_replay_case(id, path, &[line], &before, &after));
     assert_contract_replay(repo.path(), &cases);
 }
 
@@ -765,8 +765,53 @@ export function Launch(path: string) {
         ("typescript-node-fs-discarded-promise", 5),
         ("typescript-node-file-handle-unclosed", 11),
         ("typescript-node-worker-outlives-owner", 15),
-    ].map(|(id, line)| contract_replay_case(id, path, line, &before, &after));
+    ].map(|(id, line)| contract_replay_case(id, path, &[line], &before, &after));
     assert_contract_replay(repo.path(), &cases);
+}
+
+#[test]
+fn closure_and_field_result_contracts_replay_across_all_languages() {
+    let web = include_str!("../../core/tests/fixtures/result-use/publish.js").replace("\r\n", "\n");
+    let tsx = web.replace("    await slot.pending;\n}", "    await slot.pending;\n    return <aside />;\n}");
+    let fixtures = [
+        ("go-os-rename-discarded-error", "storage/move.go", include_str!("../../core/tests/fixtures/result-use/storage.go")),
+        ("java-discarded-objects-comparison", "Comparison.java", include_str!("../../core/tests/fixtures/result-use/Comparison.java")),
+        ("kotlin-discarded-run-catching-result", "Parse.kt", include_str!("../../core/tests/fixtures/result-use/Parse.kt")),
+        ("rust-discarded-remove-file-result", "lib.rs", include_str!("../../core/tests/fixtures/result-use/removal.rs")),
+        ("javascript-node-fs-discarded-promise", "publish.js", &web),
+        ("typescript-node-fs-discarded-promise", "publish.ts", &web),
+        ("typescript-node-fs-discarded-promise", "PublishView.tsx", &tsx),
+    ];
+    let repo = init_repo(&fixtures.map(|(_, path, source)| (path, source)));
+    let before = current_commit(repo.path());
+    let fixed = fixtures.map(|(_, _, source)| fixture_result_edits(source));
+    let changes: Vec<_> = fixtures.iter().zip(&fixed).map(|((_, path, _), (_, source))| (*path, source.as_str())).collect();
+    repo.commit(&changes, "Observe the original closure and field results");
+    let after = current_commit(repo.path());
+    let cases: Vec<_> = fixtures.iter().zip(&fixed).map(|((id, path, _), (lines, _))| {
+        assert!(!lines.is_empty(), "{path}");
+        contract_replay_case(id, path, lines, &before, &after)
+    }).collect();
+    assert_contract_replay(repo.path(), &cases);
+}
+
+fn fixture_result_edits(source: &str) -> (Vec<u32>, String) {
+    let mut lines = Vec::new();
+    let mut fixed = String::new();
+    for (index, line) in source.lines().enumerate() {
+        if let Some((call, fix)) = line.split_once("// unused result; then ") {
+            lines.push(index as u32 + 1);
+            let indent = &line[..line.len() - line.trim_start().len()];
+            fixed.push_str(call.trim_end());
+            fixed.push('\n');
+            fixed.push_str(indent);
+            fixed.push_str(fix);
+        } else {
+            fixed.push_str(line);
+        }
+        fixed.push('\n');
+    }
+    (lines, fixed)
 }
 
 #[test]
