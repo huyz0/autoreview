@@ -1,0 +1,18 @@
+cases:
+  - name: jplag discards a trimmed filter line
+    rule: {tool: autoreview-frameworks, id: java-discarded-string-transformation}
+    evidence:
+      kind: historical
+      source: https://github.com/jplag/JPlag/commit/224f9d73d1d1250447fc700a8d553703afb91091
+      license: GPL-3.0
+      rationale: >-
+        String.trim returns a new value; the original code discarded it and
+        inserted the untrimmed line into the filter. The fix uses the trimmed value.
+    before:
+      commit: f6fd8af02722a4d3acb8d32cb410856ed4091b66
+      path: jplag.frontend.text/src/main/java/jplag/text/Parser.java
+      lines: [37]
+    after:
+      commit: 224f9d73d1d1250447fc700a8d553703afb91091
+      path: jplag.frontend.text/src/main/java/jplag/text/Parser.java
+      lines: []

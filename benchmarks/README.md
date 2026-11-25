@@ -34,6 +34,21 @@ accuracy scores. Incomplete and failed cases are excluded from precision and
 recall, and make replay exit unsuccessfully. These are case counts, not file
 or finding counts.
 
+`jplag-trim.yaml` is an independent GPL-3.0 Java fix pair from JPlag. A
+standalone `String.trim()` result was discarded before a filter entry was
+lowercased; the fix uses the trimmed string. Replay of the pinned parent and
+fix detects line 37 before the fix and no findings in the corrected file. This
+is one positive and one fixed-file example, not a general accuracy estimate.
+The manifest references the repository and does not redistribute its source.
+Reproduce it with:
+
+```sh
+git init jplag
+cd jplag
+git fetch --depth 2 https://github.com/jplag/JPlag.git 224f9d73d1d1250447fc700a8d553703afb91091
+autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/jplag-trim.yaml
+```
+
 `go-tools.yaml` is a historical negative case for a test backup rename whose
 error is explicitly ignored. The label treats this best-effort test operation
 as acceptable; teams may make a different policy choice. Before Go helper
