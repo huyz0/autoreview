@@ -230,12 +230,7 @@ fn review_keeps_clippy_findings_when_another_target_fails() {
     let repo = init_repo(&[("Cargo.toml", manifest), ("src/lib.rs", before), ("tests/broken.rs", "compile_error!(\"failing test target\");\n")]);
     let base = current_commit(repo.path());
     repo.commit(&[("src/lib.rs", after)], "discard a result");
-    let run = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
-        .env("CARGO_TARGET_DIR", repo.path().join("target"))
-        .args(["diff", "--base", &base, "--head", "HEAD", "--static-only"])
-        .assert().success();
-    let path = report_path_from_stdout(&String::from_utf8_lossy(&run.get_output().stdout));
-    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let report = static_review_report(&repo, &base, Some(&repo.path().join("target")));
     assert!(report["findings"].as_array().unwrap().iter().any(|finding|
         finding["source"]["tool"] == "clippy" && finding["source"]["ruleId"] == "unused_must_use"), "{report}");
     assert!(report["analysisCoverage"].as_array().unwrap().iter().any(|issue|
@@ -243,12 +238,17 @@ fn review_keeps_clippy_findings_when_another_target_fails() {
             && issue["detail"].as_str().unwrap().contains("additional targets failed")), "{report}");
 }
 
-fn assert_rust_helper_review(repo: &autoreview_test_support::TestRepo, base: &str, incomplete_reason: &str) {
-    let run = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
-        .args(["diff", "--base", base, "--head", "HEAD", "--static-only"])
-        .assert().success();
+fn static_review_report(repo: &autoreview_test_support::TestRepo, base: &str, target_dir: Option<&std::path::Path>) -> serde_json::Value {
+    let mut command = Command::cargo_bin("autoreview").unwrap();
+    command.current_dir(repo.path()).args(["diff", "--base", base, "--head", "HEAD", "--static-only"]);
+    if let Some(target) = target_dir { command.env("CARGO_TARGET_DIR", target); }
+    let run = command.assert().success();
     let path = report_path_from_stdout(&String::from_utf8_lossy(&run.get_output().stdout));
-    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+fn assert_rust_helper_review(repo: &autoreview_test_support::TestRepo, base: &str, incomplete_reason: &str) {
+    let report = static_review_report(repo, base, None);
     for (file, line) in [("src/worker.rs", 3), ("src/support.rs", 3)] {
         assert!(report["findings"].as_array().unwrap().iter().any(|finding|
             finding["source"]["ruleId"] == "rust-discarded-remove-file-result"
@@ -287,11 +287,7 @@ fn rust_review_finds_helper_after_many_unreferenced_modules() {
     let base = current_commit(repo.path());
     let after = format!("{modules}fn run() {{ zhelper::remove(\"file\"); }}\n");
     repo.commit(&[("src/lib.rs", &after)], "call helper");
-    let run = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
-        .args(["diff", "--base", &base, "--head", "HEAD", "--static-only"])
-        .assert().success();
-    let path = report_path_from_stdout(&String::from_utf8_lossy(&run.get_output().stdout));
-    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let report = static_review_report(&repo, &base, None);
     assert!(report["findings"].as_array().unwrap().iter().any(|finding|
         finding["source"]["ruleId"] == "rust-discarded-remove-file-result"
             && finding["location"]["path"] == "src/zhelper.rs"), "{report}");
