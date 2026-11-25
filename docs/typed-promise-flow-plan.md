@@ -25,8 +25,14 @@ checkouts of both pinned revisions, with lockfile dependencies installed using
 `npm ci --ignore-scripts`. It found the two discarded calls at lines 100 and
 126 in the before revision and no findings in the fixed file. Both runs reached
 the existing 64-dependency discovery limit, so they are incomplete and are not
-scored as benchmark results. The prototype is not yet connected to the normal
-review or replay entry points.
+scored as benchmark results. At that stage the prototype was not connected to
+the normal review or replay entry points.
+
+The normal replay subsequently passed for this pair with matching installed
+dependencies available to both isolated snapshots and the configured typed
+discovery budget. It matched lines 100 and 126 before the fix and no lines
+after it. See `benchmarks/sftp-promise.yaml` for labels and reproduction; this
+single pair is not a population-wide accuracy estimate.
 
 On the fixed revision, a local cold-cache loader experiment found 74 reachable
 files with a 256-dependency budget and reported no dependency-limit warning.

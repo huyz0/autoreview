@@ -43,3 +43,29 @@ autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/go-tools
 Coverage reporting is not exhaustive: unsupported expressions and unresolved
 imports can still escape the current diagnostics. A clean replay is evidence
 for this case, not a guarantee of complete analysis in general.
+
+`sftp-promise.yaml` labels two discarded promises in one TypeScript file and
+the fixed file. On the typed-promise branch, a replay found both before-fix
+lines and no findings after the fix, with no reported replay failures. This is
+one historical fix pair and cannot establish general precision or recall.
+
+The checker needs trusted, installed TypeScript dependencies. The two pinned
+revisions have identical `package.json`, `package-lock.json`, and
+`tsconfig.json`. One way to reproduce the run is to check out the fixed
+revision in an isolated SFTPresso clone, install its lockfile dependencies
+without running package scripts, and place replay snapshots beneath the clone
+so TypeScript can resolve those dependencies from their parent directory:
+
+```sh
+git checkout --detach 460fa47433bf6ed423cc84cb0939ce6b90246e6a
+npm ci --ignore-scripts --no-audit --no-fund
+mkdir -p .autoreview-replay-tmp
+TMPDIR="$PWD/.autoreview-replay-tmp" \
+AUTOREVIEW_TYPESCRIPT_MODULE="$PWD/node_modules/typescript" \
+  autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/sftp-promise.yaml
+```
+
+The configured TypeScript package executes as part of the check; use only a
+trusted installation. Replay rejects reported incomplete analysis rather than
+counting it as a clean result. Do not reuse this dependency setup for other
+revisions unless their dependency configuration also matches.

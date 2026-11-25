@@ -1,0 +1,19 @@
+cases:
+  - name: SFTPresso callbacks discard factory-created promises
+    rule: {tool: autoreview-dataflow, id: typescript-factory-promise-unobserved}
+    evidence:
+      kind: historical
+      source: https://github.com/jmwerk/SFTPresso/commit/460fa47433bf6ed423cc84cb0939ce6b90246e6a
+      license: MIT
+      rationale: >-
+        Both callbacks discard the promise returned by a factory-created
+        helper. The fix awaits each operation so Promise.all observes it.
+        Labels cover the entire reviewed file in both revisions.
+    before:
+      commit: be43f28401e0ba693e9bfe0a1b27476d9eb4117a
+      path: src/commands/commandUploadChangedFiles.ts
+      lines: [100, 126]
+    after:
+      commit: 460fa47433bf6ed423cc84cb0939ce6b90246e6a
+      path: src/commands/commandUploadChangedFiles.ts
+      lines: []
