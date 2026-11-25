@@ -36,13 +36,17 @@ pub struct TypeModule<'a> {
 }
 
 /// Resolve an immutable binding initialized by a directly imported factory.
-/// The import must come from the repository's verified module resolver.
+/// The import must come from the repository's verified module resolver. The
+/// result is syntactic evidence only: the caller must also resolve ambient
+/// type declarations before treating `Promise` as the standard type.
 pub fn imported_factory_return(
     caller: &TypeModule<'_>, binding: &FactoryBinding, import: &KeyedImport, provider: &TypeModule<'_>,
 ) -> Option<PromiseReturn> {
     if caller.root.has_error() || provider.root.has_error() || import.local != binding.callee
         || import.path != provider.path || !import.exported || import.owner.is_some()
+        || !binding_belongs_to(caller, binding)
         || may_reassign(caller.root, caller.source, &binding.callee)
+        || may_reassign(caller.root, caller.source, &binding.name)
         || !unshadowed_promise_name(provider.root, provider.source)
         || !unique_import(caller.root, caller.source, &binding.callee)
     {
@@ -62,6 +66,22 @@ pub fn imported_factory_return(
         shape @ PromiseReturn::FactoryAnnotation { .. } => Some(shape),
         _ => None,
     }
+}
+
+fn binding_belongs_to(module: &TypeModule<'_>, binding: &FactoryBinding) -> bool {
+    if module.root.kind() != "program" { return false; }
+    let Some(call) = module.root.named_descendant_for_byte_range(binding.call_start, binding.call_start.saturating_add(1)) else {
+        return false;
+    };
+    let declaration = std::iter::successors(Some(call), Node::parent)
+        .find(|node| node.kind() == "variable_declarator");
+    let Some(declaration) = declaration else { return false; };
+    let Some(group) = declaration.parent() else { return false; };
+    factory_binding(declaration, module.source).as_ref() == Some(binding)
+        && group.named_children(&mut group.walk()).filter(|node| node.kind() == "variable_declarator")
+            .all(|node| node == declaration || node.child_by_field_name("name")
+                .is_some_and(|name| name.kind() == "identifier" && name.utf8_text(module.source) != Ok(binding.name.as_str())))
+        && unique_provider_binding(module.root, module.source, group, &binding.name)
 }
 
 fn unique_provider_binding(root: Node<'_>, source: &[u8], selected: Node<'_>, name: &str) -> bool {
@@ -394,6 +414,31 @@ function nested() { const local = createHandler({}); }
             assert_eq!(shape.is_some(), expected, "{provider_source}: {shape:?}");
             let wrong_path = TypeModule { path: "other.ts", ..provider };
             assert!(imported_factory_return(&caller, &binding, &import, &wrong_path).is_none());
+            let forged = FactoryBinding { arguments: 0, ..FactoryBinding { name: binding.name.clone(), callee: binding.callee.clone(), arguments: binding.arguments, call_start: binding.call_start } };
+            assert!(imported_factory_return(&caller, &forged, &import, &provider).is_none());
+        }
+    }
+
+    #[test]
+    fn rejects_mutated_and_duplicate_factory_bindings() {
+        let provider_source = "export default function make(x: object): (ctx: string) => Promise<void> { throw 1; }";
+        let provider_tree = parser_for(Language::TypeScript).unwrap().parse(provider_source, None).unwrap();
+        let provider = TypeModule { path: "factory.ts", source: provider_source.as_bytes(), root: provider_tree.root_node() };
+        let import = KeyedImport { local: "create".into(), path: "factory.ts".into(), name: Some("default".into()), owner: None, exported: true };
+        for source in [
+            "import create from './factory'; export const upload = create({}); upload = other;",
+            "import create from './factory'; export const upload = create({}), upload = other;",
+            "import create from './factory'; export const upload = create({}); const upload = other;",
+        ] {
+            let tree = parser_for(Language::TypeScript).unwrap().parse(source, None).unwrap();
+            let caller = TypeModule { path: "caller.ts", source: source.as_bytes(), root: tree.root_node() };
+            let mut pending = vec![caller.root];
+            let mut binding = None;
+            while let Some(node) = pending.pop() {
+                binding = binding.or_else(|| factory_binding(node, caller.source));
+                pending.extend(node.named_children(&mut node.walk()));
+            }
+            assert!(imported_factory_return(&caller, &binding.unwrap(), &import, &provider).is_none(), "{source}");
         }
     }
 }
