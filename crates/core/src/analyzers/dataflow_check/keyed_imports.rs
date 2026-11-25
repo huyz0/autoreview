@@ -103,7 +103,23 @@ fn run_group(
     if entries.is_empty() { return (Vec::new(), Vec::new()); }
     let (sources, mut coverage) = if limit == UNIT_LIMIT { resolver.load(&entries) } else { resolver.load_with_limit(&entries, limit) };
     let findings = run_sources(&sources, &entries, rules, root, checker, &mut coverage);
-    (findings, coverage)
+    (findings, scope_coverage(coverage, rules, &entries))
+}
+
+fn scope_coverage(
+    coverage: Vec<AnalysisCoverageIssue>, rules: &[(&CallOrderRuleDef, Language)], entries: &BTreeSet<String>,
+) -> Vec<AnalysisCoverageIssue> {
+    let applicable: Vec<_> = rules.iter().filter(|(_, declared)| {
+        entries.iter().any(|path| language_for_path(Path::new(path)).is_some_and(|language| language.matches_rule_language(*declared)))
+    }).map(|(rule, _)| rule.id.as_str()).collect();
+    coverage.into_iter().flat_map(|issue| {
+        if issue.rule.is_some() || issue.reason != "dependency_limit" { return vec![issue]; }
+        applicable.iter().map(|rule| {
+            let mut scoped = issue.clone();
+            scoped.rule = Some((*rule).to_owned());
+            scoped
+        }).collect()
+    }).collect()
 }
 
 fn run_sources(
@@ -376,6 +392,17 @@ mod budget_tests {
             assert_eq!(complete.len(), 3);
             assert!(!issues.iter().any(|issue| issue.reason == "dependency_limit"));
         });
+    }
+
+    #[test]
+    fn dependency_limit_is_scoped_to_rules_in_its_graph() {
+        let rules = super::super::super::call_order_rules::load_call_order_rules(&[]);
+        let ordinary = rules.iter().find(|rule| rule.language == "TypeScript" && !rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory)).unwrap();
+        let entries = BTreeSet::from(["main.ts".to_owned()]);
+        let coverage = scope_coverage(vec![issue(Some("dependency.ts"), "dependency_limit", "dependency", "limit")], &[(ordinary, Language::TypeScript)], &entries);
+        assert_eq!(coverage.len(), 1);
+        assert_eq!(coverage[0].rule.as_deref(), Some(ordinary.id.as_str()));
+        assert_ne!(coverage[0].rule.as_deref(), Some("typescript-factory-promise-unobserved"));
     }
 
     #[test]
