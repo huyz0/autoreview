@@ -22,6 +22,13 @@ function run(request) {
     const awaited = checker.getAwaitedType(type);
     return !!awaited && awaited !== type;
   }
+  function definitelyNotPromise(type) {
+    if (type.isUnion()) return type.types.every(definitelyNotPromise);
+    const primitive = ts.TypeFlags.StringLike | ts.TypeFlags.NumberLike | ts.TypeFlags.BooleanLike |
+      ts.TypeFlags.BigIntLike | ts.TypeFlags.Void | ts.TypeFlags.Null | ts.TypeFlags.Undefined |
+      ts.TypeFlags.ESSymbolLike;
+    return !!(type.flags & primitive) && !checker.getPropertyOfType(type, 'then');
+  }
   const calls = request.calls.map(call => {
     const file = program.getSourceFile(call.path);
     if (!file) return { ...call, status: 'unavailable' };
@@ -34,7 +41,8 @@ function run(request) {
     }
     visit(file);
     if (!selected) return { ...call, status: 'unavailable' };
-    return { ...call, status: promiseLike(checker.getTypeAtLocation(selected)) ? 'promise_like' : 'not_proven' };
+    const type = checker.getTypeAtLocation(selected);
+    return { ...call, status: promiseLike(type) ? 'promise_like' : definitelyNotPromise(type) ? 'not_promise' : 'not_proven' };
   });
   return { status: 'ok', calls };
 }

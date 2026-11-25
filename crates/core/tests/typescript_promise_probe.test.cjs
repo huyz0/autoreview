@@ -41,11 +41,11 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
     }
     const checked = invoke();
     assert.equal(checked.status, 'ok');
-    assert.deepEqual(checked.calls.map(call => call.status), ['promise_like', 'not_proven', 'not_proven', 'not_proven', 'promise_like', 'not_proven']);
+    assert.deepEqual(checked.calls.map(call => call.status), ['promise_like', 'not_promise', 'not_proven', 'not_proven', 'promise_like', 'not_proven']);
     const shadowed = 'export {}; type Promise<T> = string; declare function fake(): Promise<void>; fake();';
     fs.writeFileSync(file, shadowed);
     calls = [{ path: file, start: Buffer.byteLength(shadowed.slice(0, shadowed.lastIndexOf('fake()'))), source_sha256: hash(shadowed) }];
-    assert.equal(invoke().calls[0].status, 'not_proven');
+    assert.equal(invoke().calls[0].status, 'not_promise');
     calls[0].source_sha256 = hash(source);
     assert.equal(invoke().calls[0].status, 'source_changed');
     fs.appendFileSync(file, '\nconst broken: number = "wrong";\n');

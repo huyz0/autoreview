@@ -87,7 +87,7 @@ fn valid_response(result: &TypeScriptResult, request: &TypeScriptRequest<'_>) ->
         "ok" if result.reason.is_none() && result.calls.as_ref().is_some_and(|calls| {
             calls.len() == request.calls.len() && calls.iter().zip(request.calls).all(|(actual, expected)| {
                 actual.path == expected.path && actual.start == expected.start && actual.source_sha256 == expected.source_sha256
-                    && matches!(actual.status.as_str(), "promise_like" | "not_proven" | "unavailable" | "source_changed")
+                    && matches!(actual.status.as_str(), "promise_like" | "not_promise" | "not_proven" | "unavailable" | "source_changed")
             })
         }) => true,
         _ => false,
@@ -134,22 +134,43 @@ mod tests {
     }
 
     #[test]
+    fn checker_distinguishes_known_primitive_results_from_unknown_types() {
+        let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("tsconfig.json");
+        let file = dir.path().join("sample.ts");
+        let source = "interface String { then: number }\ndeclare function text(): string;\ndeclare function number(): number;\ndeclare function uncertain(): unknown;\ntext(); number(); uncertain();\n";
+        std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true},"files":["sample.ts"]}"#).unwrap();
+        std::fs::write(&file, source).unwrap();
+        let digest = format!("{:x}", Sha256::digest(source.as_bytes()));
+        let calls: Vec<_> = ["text()", "number()", "uncertain()"].into_iter().map(|name| TypeScriptCall {
+            path: file.to_string_lossy().into_owned(), start: source.rfind(name).unwrap(), source_sha256: digest.clone(),
+        }).collect();
+        let config = config.to_string_lossy();
+        let request = TypeScriptRequest { typescript_module: &compiler, config: &config, calls: &calls };
+        let result = check("node", &request, Duration::from_secs(20)).unwrap();
+        let statuses: Vec<_> = result.calls.unwrap().into_iter().map(|call| call.status).collect();
+        assert_eq!(statuses, ["not_proven", "not_promise", "not_proven"]);
+    }
+
+    #[test]
     fn verified_candidates_keep_unresolved_locations_and_reject_changed_sources() {
         let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("tsconfig.json");
         let file = dir.path().join("sample.ts");
-        let source = "declare function pending(): Promise<void>;\ndeclare function sync(): string;\npending();\nsync();\n";
+        let source = "declare function pending(): Promise<void>;\ndeclare function sync(): string;\ndeclare function uncertain(): unknown;\npending();\nsync(); uncertain();\n";
         std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true},"files":["sample.ts"]}"#).unwrap();
         std::fs::write(&file, source).unwrap();
         let units = [KeyedUnit { path: "sample.ts", source: source.as_bytes(), functions: &[], imports: &[], exports: &[], entry: true }];
         let pending = source.rfind("pending()").unwrap();
         let sync = source.rfind("sync()").unwrap();
+        let uncertain = source.rfind("uncertain()").unwrap();
         let discovery = || FactorySourceDiscovery {
-            candidates: BTreeMap::from([(0, BTreeSet::from([pending, sync]))]),
+            candidates: BTreeMap::from([(0, BTreeSet::from([pending, sync, uncertain]))]),
             limitations: vec![
-                KeyedLimitation { reason: "promise_type_unresolved", path: Some("sample.ts".into()), line: Some(3) },
                 KeyedLimitation { reason: "promise_type_unresolved", path: Some("sample.ts".into()), line: Some(4) },
+                KeyedLimitation { reason: "promise_type_unresolved", path: Some("sample.ts".into()), line: Some(5) },
             ],
         };
         let config = config.to_str().unwrap();
@@ -157,7 +178,7 @@ mod tests {
         let result = verify_candidates(&options, &units, discovery());
         assert_eq!(result.candidates[&0], BTreeSet::from([pending]));
         assert_eq!(result.limitations.len(), 1);
-        assert_eq!(result.limitations[0].line, Some(4));
+        assert_eq!(result.limitations[0].line, Some(5));
         std::fs::write(&file, format!("{source}\n")).unwrap();
         let changed = verify_candidates(&options, &units, discovery());
         assert!(changed.candidates.is_empty());
