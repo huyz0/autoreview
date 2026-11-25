@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::{children, issue, text, AnalysisCoverageIssue, ImportSource, KeyedExport, KeyedImport, Language, Node, Path, PathBuf, Resolver};
 
 impl ImportSource<'_> {
@@ -7,6 +9,7 @@ impl ImportSource<'_> {
         let Some(dir) = module_dir(path) else {
             return Vec::new();
         };
+        let references = module_references(self.node, self.source);
         children(self.node)
             .into_iter()
             .flat_map(|node| match node.kind() {
@@ -14,7 +17,8 @@ impl ImportSource<'_> {
                     let name = node
                         .child_by_field_name("name")
                         .and_then(|name| text(name, self.source));
-                    name.and_then(|name| {
+                    name.filter(|name| references.as_ref().is_none_or(|refs| refs.contains(name)))
+                        .and_then(|name| {
                         let local = format!("{name}::");
                         let binding = (!has_attributes(node)).then(|| rust_module(resolver, &dir.join(name)))
                             .flatten().and_then(|file| resolver.binding(&file, &local, None, None, true));
@@ -27,6 +31,23 @@ impl ImportSource<'_> {
             })
             .collect()
     }
+}
+
+// External `mod` declarations do not themselves reference the module. Keep
+// every identifier elsewhere, including imports and macro arguments, as an
+// over-approximation of potential references. Do not prune malformed sources.
+fn module_references<'a>(root: Node<'_>, source: &'a str) -> Option<HashSet<&'a str>> {
+    if root.has_error() { return None; }
+    let mut names = HashSet::new();
+    let mut pending = children(root);
+    while let Some(node) = pending.pop() {
+        if node.kind() == "mod_item" && node.child_by_field_name("body").is_none() { continue; }
+        if matches!(node.kind(), "identifier" | "type_identifier" | "field_identifier") {
+            if let Some(name) = text(node, source) { names.insert(name); }
+        }
+        pending.extend(children(node));
+    }
+    Some(names)
 }
 
 impl ImportSource<'_> {
@@ -277,4 +298,22 @@ fn rust_module(resolver: &Resolver<'_>, base: &Path) -> Option<PathBuf> {
         .filter(|path| resolver.relative(path).is_some() && path.is_file());
     let file = files.next()?;
     files.next().is_none().then_some(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn module_references_keep_imports_and_macro_arguments_but_not_declarations() {
+        let source = "mod unused; mod called; mod imported; mod macro_arg; use crate::imported::run; fn f() { called::run(); macro_call!(macro_arg::run()); }";
+        let mut parser = autoreview_langsupport::parser_for(Language::Rust).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let names = module_references(tree.root_node(), source).unwrap();
+        assert!(!names.contains("unused"));
+        for name in ["called", "imported", "macro_arg"] { assert!(names.contains(name), "{name}"); }
+        let invalid = "mod unused; fn incomplete(";
+        let tree = parser.parse(invalid, None).unwrap();
+        assert!(module_references(tree.root_node(), invalid).is_none());
+    }
 }

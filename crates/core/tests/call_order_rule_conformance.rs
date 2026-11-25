@@ -628,6 +628,31 @@ fn rust_relative_modules_follow_mod_rs_layout() {
 }
 
 #[test]
+fn rust_unreferenced_modules_do_not_exhaust_helper_discovery() {
+    let root = tempfile::tempdir().unwrap();
+    let src = root.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    let mut source = String::new();
+    for index in 0..80 {
+        let name = format!("unused_{index:03}");
+        source.push_str(&format!("mod {name};\n"));
+        std::fs::write(src.join(format!("{name}.rs")), format!("pub fn spare_{index}() {{}}\n")).unwrap();
+    }
+    source.push_str("mod zhelper;\nfn run() { zhelper::remove(\"file\"); }\n");
+    std::fs::write(src.join("lib.rs"), source).unwrap();
+    std::fs::write(src.join("zhelper.rs"), "use std::fs::remove_file;\npub fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n").unwrap();
+    let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/lib.rs".into()], &[]);
+    assert!(result.findings.iter().any(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result")
+        && finding.location.path == "src/zhelper.rs" && finding.location.range.start_line == 2), "{:#?}", result.findings);
+    assert!(!result.coverage.iter().any(|issue| issue.reason == "dependency_limit"), "{:?}", result.coverage);
+    let declarations = (0..80).map(|index| format!("mod unused_{index:03};\n")).collect::<String>();
+    let calls = (0..80).map(|index| format!("unused_{index:03}::spare_{index}();\n")).collect::<String>();
+    std::fs::write(src.join("lib.rs"), format!("{declarations}fn run() {{\n{calls}}}\n")).unwrap();
+    let exceeded = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/lib.rs".into()], &[]);
+    assert!(exceeded.coverage.iter().any(|issue| issue.reason == "dependency_limit"), "{:?}", exceeded.coverage);
+}
+
+#[test]
 fn recursive_helpers_propagate_argument_use_and_returned_results() {
     let source = r#"package storage
 import "os"
