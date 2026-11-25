@@ -1,4 +1,4 @@
-use super::{children, issue, text, unquote, AnalysisCoverageIssue, ImportSource, KeyedImport, Node, Path, PathBuf, Resolver};
+use super::{children, issue, text, unquote, AnalysisCoverageIssue, ImportSource, KeyedExport, KeyedImport, Node, Path, PathBuf, Resolver};
 use autoreview_langsupport::{language_for_path, Language};
 
 impl ImportSource<'_> {
@@ -32,6 +32,88 @@ impl ImportSource<'_> {
             })
             .collect()
     }
+
+    pub(super) fn web_exports(&self, coverage: &mut Vec<AnalysisCoverageIssue>) -> Vec<KeyedExport> {
+        children(self.node).into_iter().filter(|node| node.kind() == "export_statement")
+            .flat_map(|node| self.web_export(node, coverage)).collect()
+    }
+
+    fn web_export(&self, node: Node<'_>, coverage: &mut Vec<AnalysisCoverageIssue>) -> Vec<KeyedExport> {
+        if node.children(&mut node.walk()).any(|child| child.kind() == "type") {
+            return Vec::new();
+        }
+        let clause = children(node).into_iter().find(|child| child.kind() == "export_clause");
+        let star = node.children(&mut node.walk()).any(|child| child.kind() == "*");
+        let namespace = children(node).into_iter().any(|child| child.kind() == "namespace_export");
+        if clause.is_none() && !star && !namespace {
+            let exports = declaration_exports(node, self.source);
+            if exports.contains(&KeyedExport::Unknown) {
+                self.reexport_issue(node, "unsupported_export_binding", "A runtime export binding could not be enumerated; helper analysis may be incomplete.", coverage);
+            }
+            return exports;
+        }
+        let names: Vec<_> = clause.into_iter().flat_map(children).filter_map(|item| {
+            if item.kind() != "export_specifier" || item.children(&mut item.walk()).any(|child| child.kind() == "type") {
+                return None;
+            }
+            let local = text(item.child_by_field_name("name")?, self.source)?;
+            let exported = item.child_by_field_name("alias").and_then(|alias| text(alias, self.source)).unwrap_or(local);
+            Some((local.to_owned(), exported.to_owned()))
+        }).collect();
+        if names.is_empty() && !star && !namespace {
+            return Vec::new();
+        }
+        let target = node.child_by_field_name("source").and_then(|value| text(value, self.source)).and_then(unquote);
+        let path = target.map(|target| self.reexport_path(node, target, coverage));
+        if namespace {
+            self.reexport_issue(node, "unsupported_reexport", "Namespace re-exports are not modeled by helper analysis.", coverage);
+            return children(node).into_iter().find(|child| child.kind() == "namespace_export")
+                .and_then(|namespace| namespace.named_child(0))
+                .and_then(|name| text(name, self.source))
+                .map(|name| vec![KeyedExport::Named { exported: name.to_owned(), local: String::new(), path: None }])
+                .unwrap_or_else(|| vec![KeyedExport::Unknown]);
+        }
+        if star {
+            return path.into_iter().map(|path| KeyedExport::Star { path }).collect();
+        }
+        names.into_iter().map(|(local, exported)| KeyedExport::Named { exported, local, path: path.clone() }).collect()
+    }
+
+    fn reexport_path(&self, node: Node<'_>, target: &str, coverage: &mut Vec<AnalysisCoverageIssue>) -> String {
+        if let Some(path) = self.path.parent().and_then(|parent| web_file(self.resolver, parent, target)).and_then(|file| self.resolver.relative(&file)) {
+            return path;
+        }
+        let detail = format!("The re-export {target:?} could not be resolved to supported source; helper analysis may be incomplete.");
+        self.reexport_issue(node, "unresolved_reexport", &detail, coverage);
+        String::new()
+    }
+
+    fn reexport_issue(&self, node: Node<'_>, reason: &str, detail: &str, coverage: &mut Vec<AnalysisCoverageIssue>) {
+        let path = self.resolver.relative(self.path);
+        let mut record = issue(path.as_deref(), reason, "dependency", detail);
+        record.line = Some(node.start_position().row as u32 + 1);
+        coverage.push(record);
+    }
+}
+
+fn declaration_exports(node: Node<'_>, source: &str) -> Vec<KeyedExport> {
+    let Some(declaration) = node.child_by_field_name("declaration") else { return Vec::new() };
+    if matches!(declaration.kind(), "interface_declaration" | "type_alias_declaration") {
+        return Vec::new();
+    }
+    let default = node.children(&mut node.walk()).any(|child| child.kind() == "default");
+    let names: Vec<_> = if matches!(declaration.kind(), "lexical_declaration" | "variable_declaration") {
+        children(declaration).into_iter().filter_map(|item| item.child_by_field_name("name")).collect()
+    } else {
+        declaration.child_by_field_name("name").into_iter().collect()
+    };
+    names.into_iter().map(|name| {
+        if !matches!(name.kind(), "identifier" | "type_identifier") {
+            return KeyedExport::Unknown;
+        }
+        let Some(local) = text(name, source).map(str::to_owned) else { return KeyedExport::Unknown };
+        KeyedExport::Named { exported: if default { "default".into() } else { local.clone() }, local, path: None }
+    }).collect()
 }
 
 fn may_be_local_code(target: &str) -> bool {

@@ -23,7 +23,7 @@ use places::Place;
 pub(super) fn check_units(
     spec: &CallOrderSpec,
     units: &[KeyedUnit<'_, '_, '_>],
-) -> (Vec<CallOrderHit>, bool) {
+) -> (Vec<CallOrderHit>, bool, Vec<super::keyed::KeyedLimitation>) {
     let mut hits = Vec::new();
     let program = Program::new(spec, units);
     if !program
@@ -32,7 +32,7 @@ pub(super) fn check_units(
         .filter_map(|frame| frame.plan.as_ref())
         .any(Plan::has_registration)
     {
-        return (hits, false);
+        return (hits, false, Vec::new());
     }
     let (summaries, summary_limit) = summaries::build(&program, units);
     let mut frame_index = 0;
@@ -91,7 +91,7 @@ pub(super) fn check_units(
             })
             .or_insert(hit);
     }
-    (combined.into_values().collect(), summary_limit)
+    (combined.into_values().collect(), summary_limit, program.resolution_limitations())
 }
 
 type Live = HashSet<Place>;

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, keyed_flow_exhausted, KeyedFunction, KeyedImport, KeyedUnit};
+use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, keyed_flow_exhausted, KeyedExport, KeyedFunction, KeyedImport, KeyedUnit};
 use autoreview_dataflow::lower;
 use autoreview_dataflow::cfg::{Cfg, Stmt};
 use autoreview_langsupport::{language_for_path, Language};
@@ -25,6 +25,7 @@ struct Source {
     language: Language,
     parsed: ParsedFile,
     imports: Vec<KeyedImport>,
+    exports: Vec<KeyedExport>,
 }
 
 type LoweredFile<'tree> = (usize, Vec<(Node<'tree>, Cfg<Stmt>)>);
@@ -125,6 +126,7 @@ fn run_sources(
                 source: file.parsed.0.as_bytes(),
                 functions: if rule.spec.tracks_result_use() { functions } else { &functions[..*ordinary] },
                 imports: &file.imports,
+                exports: &file.exports,
                 entry: entries.contains(path) && file.language.matches_rule_language(declared),
             })
             .collect();
@@ -173,6 +175,8 @@ fn record_rule_limits(coverage: &mut Vec<AnalysisCoverageIssue>, rule_id: &str, 
         let detail = match limitation.reason {
             "path_budget" => "The path-state budget was exhausted; this rule skipped the affected root.",
             "helper_summary_limit" => "Helper summaries did not converge within the analysis budget; cross-file result tracking was skipped.",
+            "unresolved_helper_target" => "The helper target is ambiguous or depends on unavailable exports; cross-file call-sequence analysis may be incomplete.",
+            "reexport_resolution_limit" => "The re-export resolution budget was exhausted; cross-file call-sequence analysis may be incomplete.",
             _ => "The rule could not model a path safely; analysis of the affected root was skipped.",
         };
         let mut record = issue(limitation.path.as_deref(), limitation.reason,
@@ -194,8 +198,13 @@ impl Resolver<'_> {
             }
             let Some((full, language, parsed)) = self.parse_dependency(&path, entries, &mut coverage) else { continue };
             let imports = self.imports(&full, language, &parsed, &mut coverage);
+            let exports = self.exports(&full, language, &parsed, &mut coverage);
             if sources.len() < entries.len().saturating_add(UNIT_LIMIT) {
                 pending.extend(imports.iter().map(|binding| binding.path.clone()));
+                pending.extend(exports.iter().filter_map(|export| match export {
+                    KeyedExport::Named { path: Some(path), .. } | KeyedExport::Star { path } if !path.is_empty() => Some(path.clone()),
+                    _ => None,
+                }));
             }
             sources.insert(
                 path,
@@ -203,6 +212,7 @@ impl Resolver<'_> {
                     language,
                     parsed,
                     imports,
+                    exports,
                 },
             );
             if sources.len() >= entries.len().saturating_add(UNIT_LIMIT) {
@@ -253,6 +263,13 @@ impl Resolver<'_> {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
+    }
+
+    fn exports(&self, path: &Path, language: Language, parsed: &ParsedFile, coverage: &mut Vec<AnalysisCoverageIssue>) -> Vec<KeyedExport> {
+        if !matches!(language, Language::JavaScript | Language::TypeScript | Language::Tsx) {
+            return Vec::new();
+        }
+        ImportSource { resolver: self, path, node: parsed.1.root_node(), source: &parsed.0 }.web_exports(coverage)
     }
 
     fn relative(&self, path: &Path) -> Option<String> {

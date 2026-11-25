@@ -515,6 +515,50 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_reexports_are_not_resolved_and_explicit_exports_take_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = tempfile::tempdir().unwrap();
+        std::fs::write(pack.path().join("pending.yml"), "id: pending-entry\nkind: call-sequence\nlanguage: JavaScript\ncategory: correctness\nseverity: warning\nmessage: Pending entry\nafter: [{call: register}]\nunless: [{call: remove}]\ncheckBeforeReturn: true\nidentity: {receiver: true, keyArgument: 0}\n").unwrap();
+        std::fs::write(dir.path().join("main.js"), "import { choose } from './index';\nfunction pending(root, key) { root.register(key); root.remove(choose(key)); }\n").unwrap();
+        std::fs::write(dir.path().join("a.js"), "export function choose(key) { return 'wrong'; }\n").unwrap();
+        std::fs::write(dir.path().join("b.js"), "export function choose(key) { return key; }\n").unwrap();
+        std::fs::write(dir.path().join("c.js"), "export const choose = 1;\n").unwrap();
+        std::fs::write(dir.path().join("d.js"), "export function choose(first, second) { return second; }\n").unwrap();
+        let packs = [ResolvedRulePack { id: "test".into(), local_path: pack.path().into(), trust: autoreview_schema::RulePackTrust::Full }];
+        for (barrel, incomplete, finding) in [
+            ("export * from './a'; export * from './b';", true, false),
+            ("export * from './a'; export * from './c';", true, false),
+            ("export * from './a'; export * from './d';", true, false),
+            ("export * from './a'; export { choose } from './b';", false, false),
+            ("export * from './b'; export { choose } from './a';", false, true),
+            ("export * from './a'; export const choose = 1;", true, false),
+            ("export * from './a'; export const { choose } = source;", true, false),
+            ("export * from './a'; export * as choose from './b';", true, false),
+            ("export * from './a'; export * from './missing';", true, false),
+            ("export * from './a'; export * from 'external-package';", true, false),
+        ] {
+            std::fs::write(dir.path().join("index.js"), barrel).unwrap();
+            let result = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["main.js".into()], &packs);
+            assert_eq!(result.coverage.iter().any(|item| item.reason == "unmodeled_path" && item.rule.as_deref() == Some("pending-entry")), incomplete, "{barrel}: {:?}", result.coverage);
+            assert_eq!(result.findings.iter().any(|item| item.source.rule_id.as_deref() == Some("pending-entry")), finding, "{barrel}: {:?}", result.findings);
+        }
+        for level in 0..15 {
+            let body = if level == 14 {
+                "export { choose } from './a';".to_owned()
+            } else {
+                format!("export * from './deep_a{}'; export * from './deep_b{}';", level + 1, level + 1)
+            };
+            for side in ["a", "b"] {
+                std::fs::write(dir.path().join(format!("deep_{side}{level}.js")), &body).unwrap();
+            }
+        }
+        std::fs::write(dir.path().join("index.js"), "export * from './deep_a0'; export * from './deep_b0';").unwrap();
+        let result = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["main.js".into()], &packs);
+        assert!(result.coverage.iter().any(|item| item.reason == "reexport_resolution_limit" && item.rule.as_deref() == Some("pending-entry")), "{:?}", result.coverage);
+        assert!(!result.findings.iter().any(|item| item.source.rule_id.as_deref() == Some("pending-entry")));
+    }
+
+    #[test]
     fn reports_unresolved_local_web_imports_without_flagging_packages_or_assets() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("present.ts"), "export function helper() {}\n").unwrap();
@@ -538,6 +582,18 @@ export function run() { helper(); missing(); absent(); external(); }
         assert!(unresolved.iter().any(|item| item.path.as_deref() == Some("main.ts") && item.line == Some(2) && item.detail.contains("./missing")));
         assert!(unresolved.iter().any(|item| item.path.as_deref() == Some("main.ts") && item.line == Some(3) && item.detail.contains("../absent")));
         assert!(unresolved.iter().any(|item| item.path.as_deref() == Some("main.ts") && item.line == Some(9) && item.detail.contains("./mixed")));
+    }
+
+    #[test]
+    fn reports_unresolved_and_unsupported_runtime_reexports() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.ts"), "import { run } from './index';\nfunction main() { run(); }\n").unwrap();
+        std::fs::write(dir.path().join("index.ts"), "export * from './missing';\nexport type { Shape } from './types';\nexport * as nested from './present';\n").unwrap();
+        std::fs::write(dir.path().join("present.ts"), "export function run() {}\n").unwrap();
+        let result = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["main.ts".into()], &[]);
+        assert!(result.coverage.iter().any(|item| item.reason == "unresolved_reexport" && item.path.as_deref() == Some("index.ts") && item.line == Some(1)), "{:?}", result.coverage);
+        assert!(result.coverage.iter().any(|item| item.reason == "unsupported_reexport" && item.path.as_deref() == Some("index.ts") && item.line == Some(3)), "{:?}", result.coverage);
+        assert!(!result.coverage.iter().any(|item| item.path.as_deref() == Some("index.ts") && item.line == Some(2)), "{:?}", result.coverage);
     }
 
     #[test]
