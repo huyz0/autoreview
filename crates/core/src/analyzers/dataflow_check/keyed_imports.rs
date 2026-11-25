@@ -73,6 +73,22 @@ pub(super) fn run(
         cache: caches.parse,
         packages: caches,
     };
+    let (typed, ordinary): (Vec<_>, Vec<_>) = rules.into_iter().partition(|(rule, _)| {
+        rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory)
+    });
+    let checker = TrustedTypeScript::from_environment(&source_root);
+    let (mut findings, mut coverage) = run_group(&resolver, paths, &ordinary, &source_root, None, UNIT_LIMIT);
+    let limit = if checker.is_some() { TYPED_UNIT_LIMIT } else { UNIT_LIMIT };
+    let (typed_findings, typed_coverage) = run_group(&resolver, paths, &typed, &source_root, checker.as_ref(), limit);
+    findings.extend(typed_findings);
+    coverage.extend(typed_coverage);
+    (findings, coverage)
+}
+
+fn run_group(
+    resolver: &Resolver<'_>, paths: &[String], rules: &[(&CallOrderRuleDef, Language)],
+    root: &Path, checker: Option<&TrustedTypeScript>, limit: usize,
+) -> (Vec<AgentFinding>, Vec<AnalysisCoverageIssue>) {
     let entries: BTreeSet<_> = paths
         .iter()
         .filter_map(|path| {
@@ -84,13 +100,9 @@ pub(super) fn run(
                 .flatten()
         })
         .collect();
-    let checker = TrustedTypeScript::from_environment(&source_root);
-    let needs_typed = checker.is_some() && rules.iter().any(|(rule, declared)| {
-        rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory)
-            && entries.iter().any(|path| language_for_path(Path::new(path)).is_some_and(|language| language.matches_rule_language(*declared)))
-    });
-    let (sources, mut coverage) = if needs_typed { resolver.load_with_limit(&entries, TYPED_UNIT_LIMIT) } else { resolver.load(&entries) };
-    let findings = run_sources(&sources, &entries, &rules, &source_root, checker.as_ref(), &mut coverage);
+    if entries.is_empty() { return (Vec::new(), Vec::new()); }
+    let (sources, mut coverage) = if limit == UNIT_LIMIT { resolver.load(&entries) } else { resolver.load_with_limit(&entries, limit) };
+    let findings = run_sources(&sources, &entries, rules, root, checker, &mut coverage);
     (findings, coverage)
 }
 
@@ -139,9 +151,11 @@ fn run_sources(
         .collect();
     let mut findings = Vec::new();
     for &(rule, declared) in rules {
+        let typed = rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory);
         let units: Vec<_> = sources
             .iter()
             .zip(&functions)
+            .filter(|((_, file), _)| !typed || matches!(file.language, Language::JavaScript | Language::TypeScript | Language::Tsx))
             .map(|((path, file), (ordinary, functions))| KeyedUnit {
                 path,
                 source: file.parsed.0.as_bytes(),
@@ -152,7 +166,7 @@ fn run_sources(
             })
             .collect();
         if !units.iter().any(|unit| unit.entry) { continue; }
-        let result = if rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory) {
+        let result = if typed {
             check_typed_rule(&rule.spec, &units, sources, root, checker)
         } else {
             check_keyed_units_with_coverage(&rule.spec, &units)
@@ -377,9 +391,10 @@ mod budget_tests {
             ("factory.ts", "export default function create(x: object): (ctx: string) => Promise<void> { throw new Error(); }"),
         ];
         for (path, source) in files { std::fs::write(dir.path().join(path), source).unwrap(); }
+        std::fs::write(dir.path().join("other.rs"), "fn other() {}\n").unwrap();
         let config = dir.path().join("tsconfig.json");
         std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true},"include":["*.ts"]}"#).unwrap();
-        let entries = BTreeSet::from(["main.ts".to_owned()]);
+        let entries = BTreeSet::from(["main.ts".to_owned(), "other.rs".to_owned()]);
         let (sources, issues) = with_resolver(dir.path(), |resolver| resolver.load(&entries));
         assert!(issues.is_empty());
         let rule = CallOrderRuleDef { id: "test-typed".into(), language: "TypeScript".into(), category: "correctness".into(), severity: Severity::Medium, message: "unused promise".into(), pack_id: None, metadata: None,
@@ -393,6 +408,10 @@ mod budget_tests {
         let findings = run_sources(&sources, &entries, &rules, dir.path(), Some(&checker), &mut coverage);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].source.rule_id.as_deref(), Some("test-typed"));
+        assert!(coverage.is_empty(), "{:?}", coverage.iter().map(|issue| &issue.reason).collect::<Vec<_>>());
+        let paths = ["main.ts".to_owned(), "other.rs".to_owned()];
+        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), Some(&checker), TYPED_UNIT_LIMIT));
+        assert_eq!(findings.len(), 1);
         assert!(coverage.is_empty(), "{:?}", coverage.iter().map(|issue| &issue.reason).collect::<Vec<_>>());
     }
 

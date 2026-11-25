@@ -25,7 +25,7 @@ pub(super) fn check_typed_rule(
     units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, root: &Path, checker: Option<&TrustedTypeScript>,
 ) -> KeyedCheckResult {
     let Some(checker) = checker else { return check_keyed_units_with_coverage(spec, units); };
-    let modules: Vec<_> = sources.iter().map(|(path, file)| TypeModule { path, source: file.parsed.0.as_bytes(), root: file.parsed.1.root_node() }).collect();
+    let modules: Vec<_> = units.iter().filter_map(|unit| sources.get(unit.path).map(|file| TypeModule { path: unit.path, source: file.parsed.0.as_bytes(), root: file.parsed.1.root_node() })).collect();
     let candidates = discover_factory_sources(spec, &modules, units);
     let options = crate::analyzers::typescript_checker::CheckerConfig { node: &checker.node, compiler: &checker.compiler, config: &checker.config, root, timeout: std::time::Duration::from_secs(30) };
     let verified = crate::analyzers::typescript_checker::verify_candidates(&options, units, candidates);
