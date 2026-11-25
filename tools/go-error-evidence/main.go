@@ -41,32 +41,47 @@ type response struct {
 }
 
 func analyze(req request) response {
-	if len(req.Files) == 0 {
-		return incomplete("no_files")
-	}
 	fset := token.NewFileSet()
-	files := make([]*ast.File, 0, len(req.Files))
-	byPath := make(map[string]*ast.File, len(req.Files))
-	sourceByPath := make(map[string]string, len(req.Files))
-	for _, file := range req.Files {
-		if file.Path == "" || byPath[file.Path] != nil {
-			return incomplete("invalid_files")
-		}
-		parsed, err := parser.ParseFile(fset, file.Path, file.Source, 0)
-		if err != nil {
-			return incomplete("syntax_errors")
-		}
-		byPath[file.Path] = parsed
-		sourceByPath[file.Path] = file.Source
-		files = append(files, parsed)
+	files, byPath, reason := parseFiles(fset, req.Files)
+	if reason != "" {
+		return incomplete(reason)
 	}
 	info := &types.Info{Types: make(map[ast.Expr]types.TypeAndValue)}
 	config := types.Config{Importer: importer.Default(), Error: func(error) {}}
 	if _, err := config.Check("autoreview.local/package", fset, files, info); err != nil {
 		return incomplete("type_errors")
 	}
+	indexes := indexCalls(fset, byPath)
+	result := response{Status: "ok", Calls: make([]callResult, 0, len(req.Calls))}
+	for _, call := range req.Calls {
+		result.Calls = append(result.Calls, callResult{Path: call.Path, Start: call.Start, Status: callStatus(indexes[call.Path][call.Start], info)})
+	}
+	return result
+}
+
+func parseFiles(fset *token.FileSet, sources []sourceFile) ([]*ast.File, map[string]*ast.File, string) {
+	if len(sources) == 0 {
+		return nil, nil, "no_files"
+	}
+	files := make([]*ast.File, 0, len(sources))
+	byPath := make(map[string]*ast.File, len(sources))
+	for _, file := range sources {
+		if file.Path == "" || byPath[file.Path] != nil {
+			return nil, nil, "invalid_files"
+		}
+		parsed, err := parser.ParseFile(fset, file.Path, file.Source, 0)
+		if err != nil {
+			return nil, nil, "syntax_errors"
+		}
+		byPath[file.Path] = parsed
+		files = append(files, parsed)
+	}
+	return files, byPath, ""
+}
+
+func indexCalls(fset *token.FileSet, files map[string]*ast.File) map[string]map[int]*ast.CallExpr {
 	indexes := make(map[string]map[int]*ast.CallExpr, len(files))
-	for path, file := range byPath {
+	for path, file := range files {
 		calls := make(map[int]*ast.CallExpr)
 		ast.Inspect(file, func(node ast.Node) bool {
 			if call, ok := node.(*ast.CallExpr); ok {
@@ -76,25 +91,22 @@ func analyze(req request) response {
 		})
 		indexes[path] = calls
 	}
-	result := response{Status: "ok", Calls: make([]callResult, 0, len(req.Calls))}
-	builtinError := types.Universe.Lookup("error").Type()
-	for _, call := range req.Calls {
-		status := "unavailable"
-		if call.Start >= 0 && call.Start < len(sourceByPath[call.Path]) {
-			if node := indexes[call.Path][call.Start]; node != nil {
-				status = "not_proven"
-				funType := info.TypeOf(node.Fun)
-				if funType != nil {
-					signature, ok := funType.Underlying().(*types.Signature)
-					if ok && signature.Results().Len() == 1 && types.Identical(signature.Results().At(0).Type(), builtinError) {
-						status = "error"
-					}
-				}
-			}
-		}
-		result.Calls = append(result.Calls, callResult{Path: call.Path, Start: call.Start, Status: status})
+	return indexes
+}
+
+func callStatus(node *ast.CallExpr, info *types.Info) string {
+	if node == nil {
+		return "unavailable"
 	}
-	return result
+	funType := info.TypeOf(node.Fun)
+	if funType == nil {
+		return "unavailable"
+	}
+	signature, ok := funType.Underlying().(*types.Signature)
+	if ok && signature.Results().Len() == 1 && types.Identical(signature.Results().At(0).Type(), types.Universe.Lookup("error").Type()) {
+		return "error"
+	}
+	return "not_proven"
 }
 
 func incomplete(reason string) response { return response{Status: "incomplete", Reason: reason} }
