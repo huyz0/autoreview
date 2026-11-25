@@ -9,62 +9,12 @@ use super::closures::{Closure, Closures};
 use super::places::{Place, Places};
 use super::references::captured_names;
 use super::syntax::{items as assignment_items, targets as assignment_targets, transparent};
-use super::{Analysis, Body, ContractLanguage, Flow, HelperSummary, Live, Plan};
+use super::{Analysis, Body, ContractLanguage, Flow, HelperSummary, Plan};
 
 mod reads;
 
-#[derive(Clone, PartialEq, Eq)]
-pub(super) struct Origin {
-    pub(super) call: String,
-    pub(super) start: usize,
-    pub(super) line: u32,
-    pub(super) path: Option<String>,
-    pub(super) calls: Vec<(usize, usize)>,
-}
-
-pub(super) enum Value {
-    Source(Origin),
-    Copy(Place),
-    Other,
-}
-
-pub(super) struct Write {
-    pub(super) target: Option<Place>,
-    pub(super) value: Value,
-}
-
-pub(super) enum Effect {
-    Read(Place),
-    Write(Vec<Write>),
-    Invoke(usize, Demand),
-    ApplyHelper(HelperCall),
-}
-
-pub(super) struct HelperCall {
-    pub(super) arguments: Vec<Option<Place>>,
-    pub(super) demand: Demand,
-    pub(super) when_discarded: Vec<bool>,
-    pub(super) when_observed: Vec<bool>,
-    pub(super) origins_discarded: Vec<(Origin, bool)>,
-    pub(super) origins_observed: Vec<(Origin, bool)>,
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum Demand {
-    Discarded,
-    Observed,
-    Slot(Place),
-}
-
-impl Demand {
-    pub(super) fn observed(self, live: &mut Live) -> bool {
-        match self {
-            Self::Discarded => false,
-            Self::Observed => true,
-            Self::Slot(slot) => live.remove(&slot),
-        }
-    }
-}
+mod model;
+pub(super) use model::{Demand, Effect, HelperCall, Origin, Value, Write};
 
 pub(super) fn lower<'src>(
     plan: &Plan<'_, 'src>,
@@ -76,8 +26,12 @@ pub(super) fn lower<'src>(
     let language = plan.spec.contract.as_ref().unwrap().language;
     let mut places = Places::new(plan, function.node, source);
     let closures = Closures::scan(function.node, language, &places, source);
-    places.exclude_captures(captured_names(function.node, source, language, |node| closures.literal(node).is_some()));
-    let return_tail = returns_to_caller.then(|| function_return_tail(function.node, language)).flatten();
+    places.exclude_captures(captured_names(function.node, source, language, |node| {
+        closures.literal(node).is_some()
+    }));
+    let return_tail = returns_to_caller
+        .then(|| function_return_tail(function.node, language))
+        .flatten();
     let lower = Lower {
         plan,
         source,
@@ -93,13 +47,23 @@ pub(super) fn lower<'src>(
     let bodies = closures
         .bodies
         .iter()
-        .map(|closure| Lower { inside: Some(closure), ..lower }.body(closure.node, &closure.graph))
+        .map(|closure| {
+            Lower {
+                inside: Some(closure),
+                ..lower
+            }
+            .body(closure.node, &closure.graph)
+        })
         .collect();
-    Analysis { owner, closures: bodies }
+    Analysis {
+        owner,
+        closures: bodies,
+    }
 }
 
 fn evaluation<'tree>(function: Node<'tree>, evaluation: &Evaluation) -> Option<Node<'tree>> {
-    let inner = function.named_descendant_for_byte_range(evaluation.span.start, evaluation.span.end)?;
+    let inner =
+        function.named_descendant_for_byte_range(evaluation.span.start, evaluation.span.end)?;
     // A wrapper and its only child can have identical spans.
     std::iter::successors(Some(inner), Node::parent)
         .take_while(|node| *node != function && node.byte_range() == evaluation.span)
@@ -128,7 +92,11 @@ impl Lower<'_, '_, '_> {
             .map(|(node, &reached)| {
                 let mut effects = Vec::new();
                 if reached {
-                    for syntax in node.evaluations.iter().filter_map(|range| evaluation(function, range)) {
+                    for syntax in node
+                        .evaluations
+                        .iter()
+                        .filter_map(|range| evaluation(function, range))
+                    {
                         self.statement(syntax, &mut effects);
                     }
                 }
@@ -144,7 +112,9 @@ impl Lower<'_, '_, '_> {
         } else if self.returns_to_caller {
             return_value(node).or_else(|| {
                 self.return_tail
-                    .filter(|tail| tail.byte_range() == node.byte_range() && tail.kind() == node.kind())
+                    .filter(|tail| {
+                        tail.byte_range() == node.byte_range() && tail.kind() == node.kind()
+                    })
                     .map(|_| node)
             })
         } else {
@@ -152,7 +122,10 @@ impl Lower<'_, '_, '_> {
         };
         if let Some(value) = value {
             let value = self.value(value, effects);
-            effects.push(Effect::Write(vec![Write { target: Some(Place::Return), value }]));
+            effects.push(Effect::Write(vec![Write {
+                target: Some(Place::Return),
+                value,
+            }]));
             return;
         }
         match node.kind() {
@@ -173,7 +146,9 @@ impl Lower<'_, '_, '_> {
                 }
             }
             _ => match assignment_parts(node, self.source) {
-                Some((target, value, reassignment)) => self.assignment(node, target, value, reassignment, effects),
+                Some((target, value, reassignment)) => {
+                    self.assignment(node, target, value, reassignment, effects)
+                }
                 None => self.expression(node, effects),
             },
         }
@@ -189,9 +164,9 @@ impl Lower<'_, '_, '_> {
     ) {
         if value.is_none()
             && self.language == ContractLanguage::Web
-            && node
-                .parent()
-                .is_some_and(|parent| node.kind() == "variable_declarator" && parent.kind() == "variable_declaration")
+            && node.parent().is_some_and(|parent| {
+                node.kind() == "variable_declarator" && parent.kind() == "variable_declaration"
+            })
         {
             return;
         }
@@ -214,7 +189,10 @@ impl Lower<'_, '_, '_> {
             })
             .collect();
         if !reassignment {
-            let initialized = writes.iter().flat_map(|write| self.allocation_fields(write.target)).collect::<Vec<_>>();
+            let initialized = writes
+                .iter()
+                .flat_map(|write| self.allocation_fields(write.target))
+                .collect::<Vec<_>>();
             writes.extend(initialized);
         }
         effects.push(Effect::Write(writes));
@@ -265,7 +243,9 @@ impl Lower<'_, '_, '_> {
     }
 
     fn place(&self, node: Node<'_>, defining: bool) -> Option<Place> {
-        self.places.place(node, defining).map(|place| self.remap(place))
+        self.places
+            .place(node, defining)
+            .map(|place| self.remap(place))
     }
 
     fn remap(&self, place: Place) -> Place {
@@ -280,13 +260,18 @@ impl Lower<'_, '_, '_> {
                 _ => None,
             })
             .flat_map(|binding| self.places.initialized_fields(binding))
-            .map(|target| Write { target: Some(target), value: Value::Other })
+            .map(|target| Write {
+                target: Some(target),
+                value: Value::Other,
+            })
     }
 
     fn expression(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
         let call = transparent(node);
         if self.place(call, false).is_some()
-            && node.parent().is_some_and(|parent| parent.kind() == "expression_statement")
+            && node
+                .parent()
+                .is_some_and(|parent| parent.kind() == "expression_statement")
         {
             return;
         }
@@ -304,12 +289,18 @@ impl Lower<'_, '_, '_> {
             return;
         };
         if let Some(origin) = self.origin(call) {
-            effects.push(Effect::Write(vec![Write { target: None, value: Value::Source(origin) }]));
+            effects.push(Effect::Write(vec![Write {
+                target: None,
+                value: Value::Source(origin),
+            }]));
         }
     }
 
     fn origin(&self, node: Node<'_>) -> Option<Origin> {
-        if !matches!(node.kind(), "method_invocation" | "call_expression" | "new_expression") {
+        if !matches!(
+            node.kind(),
+            "method_invocation" | "call_expression" | "new_expression"
+        ) {
             return None;
         }
         let call = site::name(node, self.source)?;
@@ -328,8 +319,13 @@ fn closure_result<'tree>(node: Node<'tree>, closure: &Closure<'_>) -> Option<Nod
     if let Some(value) = return_value(node) {
         return Some(value);
     }
-    if closure.tail.is_some_and(|tail| tail.byte_range() == node.byte_range() && tail.kind() == node.kind())
-        && !matches!(node.kind(), "assignment" | "assignment_expression" | "property_declaration")
+    if closure
+        .tail
+        .is_some_and(|tail| tail.byte_range() == node.byte_range() && tail.kind() == node.kind())
+        && !matches!(
+            node.kind(),
+            "assignment" | "assignment_expression" | "property_declaration"
+        )
     {
         return Some(node);
     }

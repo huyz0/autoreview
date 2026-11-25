@@ -240,6 +240,16 @@ func mixed(a, b string) error {
         "a used call must not hide a discarded call in the same function: {found:#?}");
 }
 
+fn assert_helper_locations(root: &Path, caller: &str, rule: &str, expected: &[(&str, u32)]) {
+    let found = run_dataflow_check(root, &[caller.into()], &[]);
+    let mut locations: Vec<_> = found.iter()
+        .filter(|finding| finding.source.rule_id.as_deref() == Some(rule))
+        .map(|finding| (finding.location.path.as_str(), finding.location.range.start_line))
+        .collect();
+    locations.sort_unstable();
+    assert_eq!(locations, expected, "{rule}: {found:#?}");
+}
+
 #[test]
 fn imported_web_helpers_track_unused_promises_in_all_web_grammars() {
     for (extension, rule) in [
@@ -269,13 +279,7 @@ export function discardedReturn(a, b) {
   move(a, b);
 }
 "#).unwrap();
-        let found = run_dataflow_check(root.path(), std::slice::from_ref(&caller), &[]);
-        let mut locations: Vec<_> = found.iter()
-            .filter(|finding| finding.source.rule_id.as_deref() == Some(rule))
-            .map(|finding| (finding.location.path.as_str(), finding.location.range.start_line))
-            .collect();
-        locations.sort_unstable();
-        assert_eq!(locations, [(helper.as_str(), 4), (caller.as_str(), 4)], "{extension}: {found:#?}");
+        assert_helper_locations(root.path(), &caller, rule, &[(helper.as_str(), 4), (caller.as_str(), 4)]);
     }
 }
 
@@ -335,20 +339,14 @@ fun dropped(text: String) { parse(text) }
             7, 5,
         ),
     ];
-    for (language, rule, caller, helper, helper_source, caller_source, caller_line, helper_line) in cases {
+    for (_language, rule, caller, helper, helper_source, caller_source, caller_line, helper_line) in cases {
         let root = tempfile::tempdir().unwrap();
         for (path, source) in [(caller, caller_source), (helper, helper_source)] {
             let file = root.path().join(path);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(file, source).unwrap();
         }
-        let found = run_dataflow_check(root.path(), &[caller.into()], &[]);
-        let mut locations: Vec<_> = found.iter()
-            .filter(|finding| finding.source.rule_id.as_deref() == Some(rule))
-            .map(|finding| (finding.location.path.as_str(), finding.location.range.start_line))
-            .collect();
-        locations.sort_unstable();
-        assert_eq!(locations, [(caller, caller_line), (helper, helper_line)], "{language}: {found:#?}");
+        assert_helper_locations(root.path(), caller, rule, &[(caller, caller_line), (helper, helper_line)]);
     }
 }
 
@@ -375,13 +373,7 @@ fn dropped(path: &str) {
     support::remove(path);
 }
 "#).unwrap();
-    let found = run_dataflow_check(root.path(), &["src/lib.rs".into()], &[]);
-    let mut locations: Vec<_> = found.iter()
-        .filter(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result"))
-        .map(|finding| (finding.location.path.as_str(), finding.location.range.start_line))
-        .collect();
-    locations.sort_unstable();
-    assert_eq!(locations, [("src/lib.rs", 4), ("src/support.rs", 4)], "{found:#?}");
+    assert_helper_locations(root.path(), "src/lib.rs", "rust-discarded-remove-file-result", &[("src/lib.rs", 4), ("src/support.rs", 4)]);
 }
 
 #[test]

@@ -27,28 +27,7 @@ pub(super) fn build(
     let mut converged = false;
     for _ in 0..budget {
         let previous = summaries.clone();
-        let mut index = 0;
-        for unit in units {
-            for function in unit.functions {
-                let frame = &program.frames[index];
-                if let Some(plan) = &frame.plan {
-                    let calls = program
-                        .resolved_calls(index, function.graph, plan)
-                        .into_iter()
-                        .filter_map(|(site, target)| {
-                            previous
-                                .get(&target)
-                                .cloned()
-                                .map(|summary| (site, summary))
-                        })
-                        .collect();
-                    let mut summary = summarize(plan, function, unit, &frame.params, &calls);
-                    set_origin_paths(&mut summary, unit.path);
-                    summaries.insert(index, summary);
-                }
-                index += 1;
-            }
-        }
+        summaries = round(program, units, &previous);
         if summaries == previous {
             converged = true;
             break;
@@ -56,6 +35,37 @@ pub(super) fn build(
     }
     if !converged {
         summaries.clear();
+    }
+    summaries
+}
+
+fn round(
+    program: &Program<'_, '_, '_>,
+    units: &[KeyedUnit<'_, '_, '_>],
+    previous: &BTreeMap<usize, HelperSummary>,
+) -> BTreeMap<usize, HelperSummary> {
+    let mut summaries = BTreeMap::new();
+    let mut index = 0;
+    for unit in units {
+        for function in unit.functions {
+            let frame = &program.frames[index];
+            if let Some(plan) = &frame.plan {
+                let calls = program
+                    .resolved_calls(index, function.graph, plan)
+                    .into_iter()
+                    .filter_map(|(site, target)| {
+                        previous
+                            .get(&target)
+                            .cloned()
+                            .map(|summary| (site, summary))
+                    })
+                    .collect();
+                let mut summary = summarize(plan, function, unit, &frame.params, &calls);
+                set_origin_paths(&mut summary, unit.path);
+                summaries.insert(index, summary);
+            }
+            index += 1;
+        }
     }
     summaries
 }
