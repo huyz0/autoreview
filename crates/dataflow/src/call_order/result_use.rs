@@ -37,7 +37,8 @@ pub(super) fn check_units(
             let Some(plan) = frame.plan.as_ref() else {
                 continue;
             };
-            let calls = resolved_helpers(&program, current, function.graph, plan, &summaries);
+            let calls =
+                summaries::resolved_helpers(&program, current, function.graph, plan, &summaries);
             if !plan.has_registration() && calls.is_empty() {
                 continue;
             }
@@ -81,25 +82,6 @@ pub(super) fn check_units(
             .or_insert(hit);
     }
     combined.into_values().collect()
-}
-
-fn resolved_helpers(
-    program: &Program<'_, '_, '_>,
-    index: usize,
-    graph: &Cfg<Stmt>,
-    plan: &Plan<'_, '_>,
-    summaries: &BTreeMap<usize, HelperSummary>,
-) -> BTreeMap<usize, HelperSummary> {
-    program
-        .resolved_calls(index, graph, plan)
-        .into_iter()
-        .filter_map(|(site, target)| {
-            summaries
-                .get(&target)
-                .cloned()
-                .map(|summary| (site, summary))
-        })
-        .collect()
 }
 
 type Live = HashSet<Place>;

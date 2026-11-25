@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
+use crate::cfg::{Cfg, Stmt};
+
 use super::super::KeyedFunction;
-use super::{effects, HelperOutcome, HelperSummary, KeyedUnit, Place, Program};
+use super::{effects, HelperOutcome, HelperSummary, KeyedUnit, Place, Plan, Program};
 
 pub(super) fn build(
     program: &Program<'_, '_, '_>,
@@ -50,7 +52,7 @@ fn round(
         for function in unit.functions {
             let frame = &program.frames[index];
             if let Some(plan) = &frame.plan {
-                let calls = super::resolved_helpers(program, index, function.graph, plan, previous);
+                let calls = resolved_helpers(program, index, function.graph, plan, previous);
                 let mut summary = summarize(plan, function, unit, &frame.params, &calls);
                 set_origin_paths(&mut summary, unit.path);
                 summaries.insert(index, summary);
@@ -93,4 +95,23 @@ fn set_origin_paths(summary: &mut HelperSummary, path: &str) {
             }
         }
     }
+}
+
+pub(super) fn resolved_helpers(
+    program: &Program<'_, '_, '_>,
+    index: usize,
+    graph: &Cfg<Stmt>,
+    plan: &Plan<'_, '_>,
+    summaries: &BTreeMap<usize, HelperSummary>,
+) -> BTreeMap<usize, HelperSummary> {
+    program
+        .resolved_calls(index, graph, plan)
+        .into_iter()
+        .filter_map(|(site, target)| {
+            summaries
+                .get(&target)
+                .cloned()
+                .map(|summary| (site, summary))
+        })
+        .collect()
 }
