@@ -44,6 +44,7 @@ struct EvidenceScore {
 pub(super) struct CaseFailure {
     name: String,
     rule: Rule,
+    language: String,
     before_path: String,
     after_path: String,
     error: String,
@@ -75,6 +76,7 @@ pub(super) fn replay_report(repo: &Path, suite: &Suite) -> anyhow::Result<Replay
             Ok(result) => cases.push(result),
             Err(error) => failures.push(CaseFailure {
                 name: case.name.clone(), rule: case.rule.clone(),
+                language: case_language(&case.before.path, &case.after.path),
                 before_path: case.before.path.clone(), after_path: case.after.path.clone(),
                 error: format!("{error:#}"),
             }),
@@ -83,13 +85,7 @@ pub(super) fn replay_report(repo: &Path, suite: &Suite) -> anyhow::Result<Replay
     let mut groups: BTreeMap<String, Vec<CaseResult>> = BTreeMap::new();
     let mut evidence_groups: BTreeMap<String, Vec<CaseResult>> = BTreeMap::new();
     for case in &cases {
-        let before = language_for_path(Path::new(&case.before.path));
-        let after = language_for_path(Path::new(&case.after.path));
-        let language = if before == after {
-            before.map_or_else(|| "unknown".to_owned(), |language| format!("{language:?}"))
-        } else {
-            "mixed".to_owned()
-        };
+        let language = case_language(&case.before.path, &case.after.path);
         groups.entry(language).or_default().push(case.clone());
         let kind = match case.evidence.as_ref().map(|evidence| &evidence.kind) {
             Some(EvidenceKind::Historical) => "historical",
@@ -105,5 +101,15 @@ pub(super) fn replay_report(repo: &Path, suite: &Suite) -> anyhow::Result<Replay
         kind, rules: scores(&cases),
     }).collect();
     Ok(ReplayReport { rules: scores(&cases), languages, evidence_kinds, cases, failures })
+}
+
+fn case_language(before: &str, after: &str) -> String {
+    let before = language_for_path(Path::new(before));
+    let after = language_for_path(Path::new(after));
+    if before == after {
+        before.map_or_else(|| "unknown".to_owned(), |language| format!("{language:?}"))
+    } else {
+        "mixed".to_owned()
+    }
 }
 

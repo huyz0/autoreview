@@ -49,6 +49,7 @@ fn replay_reports_analysis_failures_without_losing_successful_cases() {
     assert_eq!(report["cases"][0]["evidence"]["kind"], "synthetic");
     assert_eq!(report["evidenceKinds"][0]["kind"], "synthetic");
     assert_eq!(report["failures"][0]["name"], "missing revision");
+    assert_eq!(report["failures"][0]["language"], "Go");
     assert_eq!(report["cases"].as_array().unwrap().len(), 1);
 }
 
