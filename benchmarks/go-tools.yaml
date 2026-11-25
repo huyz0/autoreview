@@ -1,0 +1,19 @@
+cases:
+  - name: go tools test intentionally ignores a best-effort backup rename
+    rule: {tool: autoreview-dataflow, id: go-os-rename-discarded-error}
+    evidence:
+      kind: historical
+      source: https://github.com/golang/tools/commit/c6f2f8edba4a9d5be665bb151d141365e03eeb6e
+      license: BSD-3-Clause
+      rationale: >-
+        This test explicitly documents the backup rename as best-effort.
+        The label treats that intentional diagnostic-only backup failure as
+        acceptable; it does not generalize to ordinary file moves.
+    before:
+      commit: 8b6849d85a7e3684220093888ff9ee071594c76b
+      path: refactor/eg/eg_test.go
+      lines: []
+    after:
+      commit: c6f2f8edba4a9d5be665bb151d141365e03eeb6e
+      path: refactor/eg/eg_test.go
+      lines: []

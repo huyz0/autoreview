@@ -24,3 +24,19 @@ autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/iceberg-
 The fix commit and its immediate parent must both be available. Use the
 report's historical and synthetic breakdowns separately, inspect failures,
 and do not interpret an unrepresentative sample as population-wide accuracy.
+
+`go-tools.yaml` is a historical negative case for a test backup rename whose
+error is explicitly ignored. The label treats this best-effort test operation
+as acceptable; teams may make a different policy choice. On the current
+analyzer, replay reports incomplete cross-file analysis because it reaches the
+dependency limit, so the case is **not scored**. Reproduce it with:
+
+```sh
+git init go-tools
+cd go-tools
+git fetch --depth 2 https://github.com/golang/tools.git c6f2f8edba4a9d5be665bb151d141365e03eeb6e
+autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/go-tools.yaml
+```
+
+The incomplete result is useful evidence about coverage; it must not be
+treated as either a clean result or a measured false positive.
