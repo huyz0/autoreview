@@ -589,6 +589,8 @@ func test(t interface{}) {
         "item = 3; check.Equal(t, item, values[i])",
         "alias := values; alias[i] = 3; check.Equal(t, item, values[i])",
         "modify(&values[i]); check.Equal(t, item, values[i])",
+        "item.Mutate(); check.Equal(t, item, values[i])",
+        "values[i].Mutate(); check.Equal(t, item, values[i])",
         "check.Equal(t, item, expected[i])",
     ] {
         let bad = good.replace("check.Equal(t, item, values[i])", replacement);

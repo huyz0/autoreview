@@ -22,9 +22,10 @@ pub(super) fn findings(file: &File, peers: &[&File]) -> Vec<AgentFinding> {
         .flat_map(|node| inspect_loop(file, node, &imports, &types)).collect()
 }
 
-fn inspect_loop(file: &File, loop_node: Node<'_>, imports: &BTreeSet<String>, types: &BTreeSet<String>) -> Vec<AgentFinding> {
+fn inspect_loop(file: &File, loop_node: Node<'_>, imports: &BTreeSet<String>, types: &BTreeMap<String, bool>) -> Vec<AgentFinding> {
     let Some((names, owner, body)) = range_parts(loop_node, &file.source) else { return Vec::new() };
-    if !local_slice(owner, loop_node, names[2], types, &file.source) || unsafe_loop(body, &names, &file.source) {
+    let Some(shared) = local_slice(owner, loop_node, names[2], types, &file.source) else { return Vec::new() };
+    if unsafe_loop(body, &names, shared, &file.source) {
         return Vec::new();
     }
     descendants(body).filter(|node| node.kind() == "call_expression").filter_map(|call| {
@@ -61,30 +62,40 @@ fn testify_imports(file: &File) -> BTreeSet<String> {
     }).collect()
 }
 
-fn slice_types(peers: &[&File]) -> BTreeSet<String> {
-    let mut types = BTreeMap::new();
+fn slice_types(peers: &[&File]) -> BTreeMap<String, bool> {
+    let mut declarations = BTreeMap::new();
     for file in peers {
         for node in descendants(file.root()).filter(|node| node.kind() == "type_spec") {
             let Some(name) = node.child_by_field_name("name") else { continue };
             let Some(kind) = node.child_by_field_name("type") else { continue };
-            let name = text(name, &file.source).to_owned();
-            let is_slice = kind.kind() == "slice_type";
-            types.entry(name).and_modify(|valid| *valid = false).or_insert(is_slice);
+            let element = kind.child_by_field_name("element").map(|element| (element.kind().to_owned(), text(element, &file.source).to_owned()));
+            let value = Some((kind.kind().to_owned(), element));
+            declarations.entry(text(name, &file.source).to_owned()).and_modify(|entry| *entry = None).or_insert(value);
         }
     }
-    types.into_iter().filter_map(|(name, valid)| valid.then_some(name)).collect()
+    let interfaces: BTreeSet<_> = declarations.iter().filter_map(|(name, declaration)|
+        declaration.as_ref().filter(|(kind, _)| kind == "interface_type").map(|_| name.as_str())).collect();
+    declarations.iter().filter_map(|(name, declaration)| {
+        let (kind, element) = declaration.as_ref()?;
+        if kind != "slice_type" { return None; }
+        let shared = element.as_ref().is_some_and(|(kind, name)| matches!(kind.as_str(), "pointer_type" | "interface_type") || interfaces.contains(name.as_str()));
+        Some((name.clone(), shared))
+    }).collect()
 }
 
-fn local_slice(owner: Node<'_>, loop_node: Node<'_>, collection: &str, types: &BTreeSet<String>, source: &str) -> bool {
+fn local_slice(owner: Node<'_>, loop_node: Node<'_>, collection: &str, types: &BTreeMap<String, bool>, source: &str) -> Option<bool> {
     let declarations: Vec<_> = descendants(owner).filter(|node| node.kind() == "var_spec")
         .filter(|node| node.children_by_field_name("name", &mut node.walk()).any(|name| text(name, source) == collection))
         .collect();
-    let [declaration] = declarations.as_slice() else { return false };
-    if declaration.start_byte() >= loop_node.start_byte() || collection_rebound(owner, collection, source) { return false; }
-    declaration.child_by_field_name("type").is_some_and(|kind| kind.kind() == "slice_type"
-        || (kind.kind() == "type_identifier" && types.contains(text(kind, source))
-            && !descendants(owner).any(|node| node.kind() == "type_spec"
-                && node.child_by_field_name("name").is_some_and(|name| text(name, source) == text(kind, source)))))
+    let [declaration] = declarations.as_slice() else { return None };
+    if declaration.start_byte() >= loop_node.start_byte() || collection_rebound(owner, collection, source) { return None; }
+    let kind = declaration.child_by_field_name("type")?;
+    if kind.kind() == "slice_type" {
+        return Some(kind.child_by_field_name("element").is_some_and(|element| matches!(element.kind(), "pointer_type" | "interface_type")));
+    }
+    if kind.kind() != "type_identifier" || descendants(owner).any(|node| node.kind() == "type_spec"
+        && node.child_by_field_name("name").is_some_and(|name| text(name, source) == text(kind, source))) { return None; }
+    types.get(text(kind, source)).copied()
 }
 
 fn collection_rebound(owner: Node<'_>, collection: &str, source: &str) -> bool {
@@ -120,7 +131,7 @@ fn shadowed(owner: Node<'_>, name: &str, source: &str) -> bool {
     })
 }
 
-fn unsafe_loop(body: Node<'_>, names: &[&str; 3], source: &str) -> bool {
+fn unsafe_loop(body: Node<'_>, names: &[&str; 3], shared: bool, source: &str) -> bool {
     descendants(body).any(|node| {
         if matches!(node.kind(), "go_statement" | "defer_statement" | "func_literal") { return true; }
         if node.kind() == "identifier" && text(node, source) == names[2]
@@ -131,6 +142,10 @@ fn unsafe_loop(body: Node<'_>, names: &[&str; 3], source: &str) -> bool {
             return descendants(left).any(|part| part.kind() == "identifier" && names.contains(&text(part, source)));
         }
         if node.kind() == "call_expression" {
+            if node.child_by_field_name("function").filter(|part| part.kind() == "selector_expression")
+                .and_then(|selector| selector.child_by_field_name("operand"))
+                .is_some_and(|receiver| (receiver.kind() == "identifier" && text(receiver, source) == names[1] && !shared)
+                    || (receiver.kind() != "identifier" && descendants(receiver).any(|part| part.kind() == "identifier" && names.contains(&text(part, source))))) { return true; }
             return node.child_by_field_name("arguments").is_some_and(|arguments| children(arguments).any(|argument| {
                 (argument.kind() == "identifier" && text(argument, source) == names[2])
                     || (argument.kind() == "unary_expression" && text(argument, source).starts_with('&')
