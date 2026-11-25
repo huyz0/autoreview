@@ -50,6 +50,84 @@ pub fn factory_binding(node: Node<'_>, source: &[u8]) -> Option<FactoryBinding> 
     })
 }
 
+/// Resolve a direct module-local factory declaration using only syntax.
+///
+/// The returned shape is evidence from an annotation, not proof of the
+/// project-wide meaning of `Promise`; callers must account for ambient types.
+pub fn local_factory_return(root: Node<'_>, source: &[u8], binding: &FactoryBinding) -> Option<PromiseReturn> {
+    if root.kind() != "program" || root.has_error() || !unshadowed_promise_name(root, source)
+        || may_reassign(root, source, &binding.callee)
+    {
+        return None;
+    }
+    let mut selected = None;
+    for statement in root.named_children(&mut root.walk()) {
+        let declaration = if statement.kind() == "export_statement" {
+            statement.child_by_field_name("declaration").unwrap_or(statement)
+        } else {
+            statement
+        };
+        if declaration.kind() == "function_declaration"
+            && declaration.child_by_field_name("name").is_some_and(|name| name.utf8_text(source) == Ok(binding.callee.as_str()))
+        {
+            if selected.replace(declaration).is_some() { return None; }
+        } else if top_level_may_bind(declaration, source, &binding.callee) {
+            return None;
+        }
+    }
+    let function = selected?;
+    let (minimum, maximum) = parameter_bounds(function, source)?;
+    if !(minimum..=maximum).contains(&binding.arguments) { return None; }
+    match declared_return(function, source)? {
+        shape @ PromiseReturn::FactoryAnnotation { .. } => Some(shape),
+        _ => None,
+    }
+}
+
+fn may_reassign(root: Node<'_>, source: &[u8], name: &str) -> bool {
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        let target = match node.kind() {
+            "assignment_expression" | "augmented_assignment_expression" => node.child_by_field_name("left"),
+            "update_expression" => node.child_by_field_name("argument").or_else(|| node.named_child(0)),
+            "for_in_statement" => node.child_by_field_name("left"),
+            _ => None,
+        };
+        if node.kind() == "call_expression" && node.child_by_field_name("function")
+            .is_some_and(|function| function.kind() == "identifier" && function.utf8_text(source) == Ok("eval"))
+        {
+            return true;
+        }
+        if target.is_some_and(|target| contains_identifier(target, source, name)) { return true; }
+        pending.extend(node.named_children(&mut node.walk()));
+    }
+    false
+}
+
+fn top_level_may_bind(node: Node<'_>, source: &[u8], name: &str) -> bool {
+    if node.kind() == "import_statement" {
+        let source_node = node.child_by_field_name("source");
+        return node.named_children(&mut node.walk()).filter(|child| Some(*child) != source_node)
+            .any(|child| contains_identifier(child, source, name));
+    }
+    if matches!(node.kind(), "class_declaration" | "function_declaration") {
+        return node.child_by_field_name("name").is_some_and(|value| value.utf8_text(source) == Ok(name));
+    }
+    if !matches!(node.kind(), "lexical_declaration" | "variable_declaration") { return false; }
+    node.named_children(&mut node.walk()).filter(|item| item.kind() == "variable_declarator").any(|item| {
+        item.child_by_field_name("name").is_none_or(|pattern| pattern.kind() != "identifier" || pattern.utf8_text(source) == Ok(name))
+    })
+}
+
+fn contains_identifier(node: Node<'_>, source: &[u8], name: &str) -> bool {
+    let mut pending = vec![node];
+    while let Some(node) = pending.pop() {
+        if matches!(node.kind(), "identifier" | "type_identifier") && node.utf8_text(source) == Ok(name) { return true; }
+        pending.extend(node.named_children(&mut node.walk()));
+    }
+    false
+}
+
 /// Inspect a callable declaration without resolving its type names.
 pub fn declared_return(node: Node<'_>, source: &[u8]) -> Option<PromiseReturn> {
     if !matches!(node.kind(), "function_declaration" | "function_expression" | "function_signature" | "arrow_function" | "method_definition" | "method_signature")
@@ -183,5 +261,31 @@ function nested() { const local = createHandler({}); }
         assert_eq!(bindings[0].name, "upload");
         assert_eq!(bindings[0].callee, "createHandler");
         assert_eq!(bindings[0].arguments, 1);
+    }
+
+    #[test]
+    fn resolves_only_unambiguous_local_factory_annotations() {
+        for (prefix, expected) in [
+            ("function createHandler<T>(option: T): (ctx: string, next?: string) => Promise<void> { throw 1; }", true),
+            ("async function createHandler<T>(option: T) { return option; }", false),
+            ("function createHandler<T>(option: T): (ctx: string) => string { throw 1; }", false),
+            ("type Promise<T> = T; function createHandler<T>(option: T): (ctx: string) => Promise<void> { throw 1; }", false),
+            ("import { createHandler } from './lib'; function createHandler<T>(option: T): (ctx: string) => Promise<void> { throw 1; }", false),
+            ("function createHandler<T>(first: T, second: T): (ctx: string) => Promise<void> { throw 1; }", false),
+            ("function createHandler<T>(option: T): (ctx: string) => Promise<void> { throw 1; }\nfunction replace() { createHandler = other; }", false),
+            ("function createHandler<T>(option: T): (ctx: string) => Promise<void> { throw 1; }\nfunction replace() { for (createHandler of values) {} }", false),
+            ("function createHandler<T>(option: T): (ctx: string) => Promise<void> { throw 1; }\nfunction replace() { eval(code); }", false),
+        ] {
+            let source = format!("{prefix}\nexport const upload = createHandler({{}});\n");
+            let tree = parser_for(Language::TypeScript).unwrap().parse(&source, None).unwrap();
+            let mut pending = vec![tree.root_node()];
+            let mut binding = None;
+            while let Some(node) = pending.pop() {
+                binding = binding.or_else(|| factory_binding(node, source.as_bytes()));
+                pending.extend(node.named_children(&mut node.walk()));
+            }
+            let shape = local_factory_return(tree.root_node(), source.as_bytes(), &binding.unwrap());
+            assert_eq!(shape.is_some(), expected, "{source}: {shape:?}");
+        }
     }
 }
