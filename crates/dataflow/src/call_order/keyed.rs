@@ -69,12 +69,7 @@ fn check_with_budget(spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], budg
         return KeyedCheckResult { hits, limitations };
     }
     let program = Program::new(spec, units);
-    if !program
-        .frames
-        .iter()
-        .filter_map(|frame| frame.plan.as_ref())
-        .any(Plan::has_registration)
-    {
+    if !program.has_registration() {
         return KeyedCheckResult { hits: Vec::new(), limitations: Vec::new() };
     }
     let mut hits = Vec::new();

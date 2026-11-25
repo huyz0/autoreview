@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use super::{effects, summaries, CallOrderHit, CallOrderSpec, HelperSummary, KeyedUnit, Origin, Plan, Program};
+use super::{effects, summaries, CallOrderHit, CallOrderSpec, HelperSummary, KeyedUnit, Origin, Program};
 
 pub(in crate::call_order) fn check_units(
     spec: &CallOrderSpec,
@@ -19,12 +19,7 @@ pub(in crate::call_order) fn check_units_with_sources(
             plan.extra_sources.clone_from(offsets);
         }
     }
-    if !program
-        .frames
-        .iter()
-        .filter_map(|frame| frame.plan.as_ref())
-        .any(Plan::has_registration)
-    {
+    if !program.has_registration() {
         return (Vec::new(), false, Vec::new());
     }
     let (summaries, summary_limit) = summaries::build(&program, units);

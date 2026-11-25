@@ -15,12 +15,8 @@ pub(super) fn imported_factory_return(
         let name = local.utf8_text(provider.source).ok()?;
         if !valid_factory_declaration(provider, function, name) { return None; }
     }
-    let (minimum, maximum) = parameter_bounds(function, provider.source)?;
-    if !(minimum..=maximum).contains(&binding.arguments) { return None; }
-    match declared_return(function, provider.source)? {
-        shape @ PromiseReturn::FactoryAnnotation { .. } => Some(shape),
-        _ => None,
-    }
+    let (minimum, maximum) = factory_result_bounds(function, provider.source, binding.arguments)?;
+    Some(PromiseReturn::FactoryAnnotation { minimum, maximum })
 }
 
 fn valid_import(caller: &TypeModule<'_>, binding: &FactoryBinding, import: &KeyedImport, provider: &TypeModule<'_>) -> bool {

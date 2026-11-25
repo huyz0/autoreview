@@ -146,6 +146,7 @@ fn run_sources(
                 entry: entries.contains(path) && file.language.matches_rule_language(declared),
             })
             .collect();
+        if !units.iter().any(|unit| unit.entry) { continue; }
         let result = if rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory) {
             check_typed_rule(&rule.spec, &units, sources, root, checker)
         } else {

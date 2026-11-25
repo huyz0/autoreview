@@ -52,6 +52,7 @@ fn typed_detail(reason: &str) -> Option<&'static str> {
             "factory_module_graph_incomplete" => "The module graph does not match the parsed sources; typed promise analysis was skipped.",
             "promise_type_unresolved" => "The promise type could not be verified at this call; typed promise analysis may be incomplete.",
             "typescript_checker_incomplete" => "The configured TypeScript checker failed or could not complete; typed promise analysis may be incomplete.",
+            "factory_flow_unmodeled" => "An enclosing function contains unsupported control flow and an imported call; typed promise analysis may be incomplete.",
             _ => return None,
     })
 }

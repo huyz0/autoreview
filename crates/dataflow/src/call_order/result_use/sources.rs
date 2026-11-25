@@ -30,8 +30,11 @@ pub fn discover_factory_sources(
     let mut scan = CandidateScan { modules, units, cache: BTreeMap::new(), discovery: FactorySourceDiscovery { candidates: BTreeMap::new(), limitations: inventory_limitations(modules) } };
     for (index, (function, frame)) in functions.iter().zip(&program.frames).enumerate() {
         if !reachable.contains(&index) { continue; }
-        let Some(plan) = &frame.plan else { continue };
-        scan.frame(frame.unit, function.node, plan);
+        if let Some(plan) = &frame.plan {
+            scan.frame(frame.unit, function.node, plan);
+        } else {
+            scan.unmodeled(frame.unit, function.node);
+        }
     }
     scan.discovery
 }
@@ -44,6 +47,21 @@ struct CandidateScan<'a, 'm, 's, 't, 'g> {
 }
 
 impl CandidateScan<'_, '_, '_, '_, '_> {
+    fn unmodeled(&mut self, unit_index: usize, function: tree_sitter::Node<'_>) {
+        let unit = &self.units[unit_index];
+        let mut pending = vec![function];
+        while let Some(node) = pending.pop() {
+            if direct_call(node, unit.source).is_some_and(|(name, _)| unit.imports.iter().any(|binding| binding.local == name)) {
+                self.discovery.limitations.push(KeyedLimitation {
+                    reason: "factory_flow_unmodeled", path: Some(unit.path.to_owned()),
+                    line: Some(function.start_position().row as u32 + 1),
+                });
+                return;
+            }
+            pending.extend(node.named_children(&mut node.walk()));
+        }
+    }
+
     fn frame(&mut self, unit_index: usize, function: tree_sitter::Node<'_>, plan: &super::Plan<'_, '_>) {
         let unit = &self.units[unit_index];
         let mut pending = vec![function];

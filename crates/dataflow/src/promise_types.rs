@@ -79,13 +79,15 @@ fn module_binding(unit: usize, name: Node<'_>, start: usize, source: &[u8]) -> O
 }
 
 fn has_hoisted_var(node: Node<'_>) -> bool {
-    let mut pending = vec![node];
-    while let Some(node) = pending.pop() {
-        if matches!(node.kind(), "variable_declaration" | "internal_module" | "module" | "ambient_declaration") { return true; }
-        if matches!(node.kind(), "function_declaration" | "function_expression" | "arrow_function" | "method_definition" | "class_declaration" | "class") { continue; }
-        pending.extend(node.named_children(&mut node.walk()));
-    }
-    false
+    walk_nodes(node, |node| {
+        if matches!(node.kind(), "variable_declaration" | "internal_module" | "module" | "ambient_declaration") {
+            Visit::Matched
+        } else if matches!(node.kind(), "function_declaration" | "function_expression" | "arrow_function" | "method_definition" | "class_declaration" | "class") {
+            Visit::Skip
+        } else {
+            Visit::Descend
+        }
+    })
 }
 
 /// Syntactic evidence for an imported callable produced by a factory.
@@ -143,9 +145,7 @@ fn factory_signature(
     let provider = modules.get(factory_decl.unit)?;
     let factory = declaration_at(provider, factory_decl.start, "function_declaration")?;
     if !valid_factory_declaration(provider, factory, &factory_decl.name) { return None; }
-    let (args_min, args_max) = parameter_bounds(factory, provider.source)?;
-    if !(args_min..=args_max).contains(&binding.arguments) { return None; }
-    let PromiseReturn::FactoryAnnotation { minimum, maximum } = declared_return(factory, provider.source)? else { return None; };
+    let (minimum, maximum) = factory_result_bounds(factory, provider.source, binding.arguments)?;
     Some((factory_decl.unit, factory_decl.start, minimum, maximum))
 }
 
@@ -243,10 +243,15 @@ pub fn local_factory_return(root: Node<'_>, source: &[u8], binding: &FactoryBind
         return None;
     }
     let function = unique_local_factory(root, source, &binding.callee)?;
+    let (minimum, maximum) = factory_result_bounds(function, source, binding.arguments)?;
+    Some(PromiseReturn::FactoryAnnotation { minimum, maximum })
+}
+
+fn factory_result_bounds(function: Node<'_>, source: &[u8], arguments: usize) -> Option<(usize, usize)> {
     let (minimum, maximum) = parameter_bounds(function, source)?;
-    if !(minimum..=maximum).contains(&binding.arguments) { return None; }
+    if !(minimum..=maximum).contains(&arguments) { return None; }
     match declared_return(function, source)? {
-        shape @ PromiseReturn::FactoryAnnotation { .. } => Some(shape),
+        PromiseReturn::FactoryAnnotation { minimum, maximum } => Some((minimum, maximum)),
         _ => None,
     }
 }
@@ -307,10 +312,19 @@ fn contains_identifier(node: Node<'_>, source: &[u8], name: &str) -> bool {
 }
 
 fn any_node(node: Node<'_>, predicate: impl Fn(Node<'_>) -> bool) -> bool {
+    walk_nodes(node, |node| if predicate(node) { Visit::Matched } else { Visit::Descend })
+}
+
+enum Visit { Matched, Skip, Descend }
+
+fn walk_nodes(node: Node<'_>, visit: impl Fn(Node<'_>) -> Visit) -> bool {
     let mut pending = vec![node];
     while let Some(node) = pending.pop() {
-        if predicate(node) { return true; }
-        pending.extend(node.named_children(&mut node.walk()));
+        match visit(node) {
+            Visit::Matched => return true,
+            Visit::Skip => continue,
+            Visit::Descend => pending.extend(node.named_children(&mut node.walk())),
+        }
     }
     false
 }

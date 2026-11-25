@@ -138,6 +138,10 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         (!path.is_empty()).then(|| path.to_owned())
     }
 
+    pub(in crate::call_order) fn has_registration(&self) -> bool {
+        self.frames.iter().filter_map(|frame| frame.plan.as_ref()).any(Plan::has_registration)
+    }
+
     pub(in crate::call_order) fn target(&self, from: usize, name: &str, site: &CallSite) -> Option<usize> {
         let frame = &self.frames[from];
         let root = name.split(['.', ':']).next()?;

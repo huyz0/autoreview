@@ -361,8 +361,8 @@ mod tests {
         test_support::with_program((Language::TypeScript, ContractLanguage::Web), "function dummy() {}", ("unused", "missing"), |dummy, _| {
             let spec = dummy.frames[0].plan.as_ref().unwrap().spec;
             let discovery = discover_factory_sources(spec, &modules, &units);
-            assert_eq!(discovery.limitations.len(), 1);
-            assert_eq!(discovery.limitations[0].reason, "promise_type_unresolved");
+            assert!(discovery.limitations.iter().any(|issue| issue.reason == "promise_type_unresolved"));
+            assert!(discovery.limitations.iter().any(|issue| issue.reason == "factory_flow_unmodeled"));
             let offsets = discovery.candidates.get(&0).unwrap().clone();
             assert_eq!(offsets.len(), 1);
             let (hits, exhausted, _) = check_units_with_sources(spec, &units, &BTreeMap::from([(0, offsets)]));
