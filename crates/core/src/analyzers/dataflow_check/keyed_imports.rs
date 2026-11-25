@@ -279,10 +279,12 @@ impl Resolver<'_> {
     }
 
     fn exports(&self, path: &Path, language: Language, parsed: &ParsedFile, coverage: &mut Vec<AnalysisCoverageIssue>) -> Vec<KeyedExport> {
-        if !matches!(language, Language::JavaScript | Language::TypeScript | Language::Tsx) {
-            return Vec::new();
+        let input = ImportSource { resolver: self, path, node: parsed.1.root_node(), source: &parsed.0 };
+        match language {
+            Language::Rust => input.rust_exports(),
+            Language::JavaScript | Language::TypeScript | Language::Tsx => input.web_exports(coverage),
+            _ => Vec::new(),
         }
-        ImportSource { resolver: self, path, node: parsed.1.root_node(), source: &parsed.0 }.web_exports(coverage)
     }
 
     fn relative(&self, path: &Path) -> Option<String> {

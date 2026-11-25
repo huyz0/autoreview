@@ -1,4 +1,4 @@
-use super::{children, issue, text, AnalysisCoverageIssue, ImportSource, KeyedImport, Language, Node, Path, PathBuf, Resolver};
+use super::{children, issue, text, AnalysisCoverageIssue, ImportSource, KeyedExport, KeyedImport, Language, Node, Path, PathBuf, Resolver};
 
 impl ImportSource<'_> {
     pub(super) fn rust(&self, coverage: &mut Vec<AnalysisCoverageIssue>) -> Vec<KeyedImport> {
@@ -27,6 +27,52 @@ impl ImportSource<'_> {
             })
             .collect()
     }
+}
+
+impl ImportSource<'_> {
+    pub(super) fn rust_exports(&self) -> Vec<KeyedExport> {
+        children(self.node).into_iter().filter(|node| node.kind() == "use_declaration")
+            .flat_map(|node| self.reexports(node)).collect()
+    }
+
+    fn reexports(&self, node: Node<'_>) -> Vec<KeyedExport> {
+        let visibility = children(node).into_iter().find(|part| part.kind() == "visibility_modifier")
+            .and_then(|part| text(part, self.source));
+        let Some(visibility) = visibility else { return Vec::new() };
+        if !matches!(visibility, "pub" | "pub(crate)") || has_attributes(node) { return vec![KeyedExport::Unknown]; }
+        let Some(usage) = node.child_by_field_name("argument").and_then(|part| text(part, self.source)) else { return vec![KeyedExport::Unknown] };
+        let paths = rust_paths(usage.trim());
+        if paths.is_empty() { return vec![KeyedExport::Unknown]; }
+        paths.into_iter().map(|path| self.reexport(&path)).collect()
+    }
+
+    fn reexport(&self, usage: &str) -> KeyedExport {
+        let (qualified, alias) = usage.split_once(" as ").map_or((usage, None), |(path, alias)| (path.trim(), Some(alias.trim())));
+        let Some((module, member)) = qualified.rsplit_once("::") else { return KeyedExport::Unknown };
+        if member == "self" || member.contains(['{', '}']) { return KeyedExport::Unknown; }
+        let Some(path) = reexport_module(self.resolver, self.path, module).and_then(|file| self.resolver.relative(&file)) else {
+            return KeyedExport::Unknown;
+        };
+        if member == "*" && alias.is_none() { KeyedExport::Star { path } }
+        else if valid_name(member) && alias.is_none_or(valid_name) {
+            KeyedExport::Named { exported: alias.unwrap_or(member).to_owned(), local: member.to_owned(), path: Some(path) }
+        } else { KeyedExport::Unknown }
+    }
+}
+
+fn valid_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+}
+
+fn reexport_module(resolver: &Resolver<'_>, path: &Path, module: &str) -> Option<PathBuf> {
+    if module.starts_with("crate::") { return verified_namespace(resolver, path, module); }
+    let suffix = module.strip_prefix("self::")?;
+    let mut current = path.to_path_buf();
+    for name in suffix.split("::") {
+        if !valid_name(name) { return None; }
+        current = declared_module(resolver, &current, name)?;
+    }
+    Some(current)
 }
 
 fn rust_uses(
