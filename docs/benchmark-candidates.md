@@ -35,3 +35,31 @@ The typed factory rule now detects this case with an explicitly configured,
 trusted TypeScript compiler. The normal replay and its limits are documented in
 `benchmarks/sftp-promise.yaml` and `benchmarks/README.md`. One fix pair cannot
 establish general precision or recall.
+
+## Ordinary TypeScript promise-returning calls
+
+- Repository: https://github.com/actions/checkout, MIT license at both revisions.
+- Before: `c952173edf28a2bd22e1a4926590c1ac39630461`.
+- Fix: `5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f`.
+- Labels: `src/github-api-helper.ts:50` and `:73` discard the promises from
+  `io.rmRF`; `src/git-auth-helper.ts:151` discards the promise from a class
+  method. The fix awaits all three. The commit explains the practical race
+  caused by the discarded class-method result.
+- The two revisions have identical `package.json`, `package-lock.json`, and
+  `tsconfig.json`. A local experiment installed the fixed revision's locked
+  dependencies with `npm ci --ignore-scripts --no-audit --no-fund` and used a
+  separately configured trusted TypeScript compiler. Snapshots were placed
+  beneath the checkout so their imports could resolve the installed packages.
+- The experimental factory-promise rule reported no findings on either file.
+  This is expected from its documented factory-only scope and must not be
+  counted as a false-negative score for that rule. The cases are candidates
+  for a general typed promise-result rule, not completed benchmark cases.
+
+To turn these into scored cases, the general rule needs to prove the return
+type of ordinary imported functions and class methods, track the particular
+returned promise through the existing result-use engine, and report missing
+type evidence rather than infer from a method name. Verify both fixed files
+and unrelated synchronous or intentionally observed calls as negatives;
+preserve compiler and source-snapshot checks, bounded execution, and coverage
+reporting. Add the pinned files as separate replay cases only when that rule
+exists, and check all findings in each entire file before accepting its labels.
