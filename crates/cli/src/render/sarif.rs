@@ -78,12 +78,7 @@ pub fn render_sarif(report: &ReviewReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    use autoreview_schema::{
-        CostEntry, DiffStats, Finding, FindingFingerprints, FindingSource, FindingSourceKind, Location, LocationRange, PlanBudgets, ReviewPlan,
-        ReviewSummary, ReviewTarget, RunCosts, Side, Tier,
-    };
+    use autoreview_schema::{Finding, FindingFingerprints, FindingSource, FindingSourceKind, Location, LocationRange, Side};
 
     fn make_finding(severity: Severity, rule_id: Option<&str>, path: &str, line: u32) -> Finding {
         Finding {
@@ -104,20 +99,7 @@ mod tests {
     }
 
     fn make_report(findings: Vec<Finding>) -> ReviewReport {
-        ReviewReport {
-            schema_version: "1".into(),
-            run_id: "run-1".into(),
-            created_at: "2026-01-01T00:00:00Z".into(),
-            target: ReviewTarget { repo_root: "/repo".into(), base_ref: "main~1".into(), head_ref: "main".into(), commits: None, diff_stats: DiffStats { files: 1, additions: 1, deletions: 0, languages: HashMap::new() } },
-            plan: ReviewPlan { tier: Tier::Quick, score: 1.0, signals: vec![], specialists: vec![], budgets: PlanBudgets { max_agents: 1, total_token_cap: 1, wall_clock_sec: 1 }, overrides: vec![] },
-            findings,
-            suppressed: vec![],
-            costs: RunCosts { total: CostEntry { input_tokens: 0, output_tokens: 0, usd: None, wall_ms: 0 }, per_stage: HashMap::new() },
-            summary: ReviewSummary { by_severity: HashMap::new(), by_category: HashMap::new(), gate: None },
-            analyzer_warnings: vec![],
-            analysis_coverage: vec![],
-            spec_verdicts: vec![],
-        }
+        ReviewReport { created_at: "2026-01-01T00:00:00Z".into(), findings, ..autoreview_test_support::sample_review_report() }
     }
 
     #[test]

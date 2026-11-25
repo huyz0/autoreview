@@ -10,7 +10,7 @@ mod identity;
 mod plan;
 mod keyed;
 
-pub use keyed::{check_keyed, check_keyed_file, check_keyed_units, check_keyed_units_with_coverage, KeyedCheckResult, KeyedFunction, KeyedImport, KeyedLimitation, KeyedUnit};
+pub use keyed::{check_keyed, check_keyed_file, check_keyed_units, check_keyed_units_with_coverage, keyed_flow_exhausted, KeyedCheckResult, KeyedFunction, KeyedImport, KeyedLimitation, KeyedUnit};
 
 use crate::cfg::{Cfg, CfgNode, NodeId, Stmt};
 use crate::lattice::Lattice;

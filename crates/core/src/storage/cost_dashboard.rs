@@ -119,28 +119,18 @@ pub fn summarize(records: &[&RunCostRecord]) -> CostDashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use autoreview_schema::{DiffStats, PlanBudgets, ReviewPlan, ReviewSummary, ReviewTarget, RunCosts, Tier};
-    use std::collections::HashMap as StdHashMap;
+    use autoreview_schema::RunCosts;
 
     fn write_report(dir: &Path, run_id: &str, created_at: &str, total_usd: Option<f64>, per_stage: Vec<(&str, f64)>) {
         let run_dir = dir.join("runs").join(run_id);
         std::fs::create_dir_all(&run_dir).unwrap();
         let report = ReviewReport {
-            schema_version: "1".into(),
-            run_id: run_id.into(),
-            created_at: created_at.into(),
-            target: ReviewTarget { repo_root: "/repo".into(), base_ref: "main~1".into(), head_ref: "main".into(), commits: None, diff_stats: DiffStats { files: 1, additions: 1, deletions: 0, languages: StdHashMap::new() } },
-            plan: ReviewPlan { tier: Tier::Quick, score: 1.0, signals: vec![], specialists: vec![], budgets: PlanBudgets { max_agents: 1, total_token_cap: 1, wall_clock_sec: 1 }, overrides: vec![] },
-            findings: vec![],
-            suppressed: vec![],
+            run_id: run_id.into(), created_at: created_at.into(),
             costs: RunCosts {
                 total: CostEntry { input_tokens: 100, output_tokens: 50, usd: total_usd, wall_ms: 1000 },
                 per_stage: per_stage.into_iter().map(|(name, usd)| (name.to_string(), CostEntry { input_tokens: 10, output_tokens: 5, usd: Some(usd), wall_ms: 100 })).collect(),
             },
-            summary: ReviewSummary { by_severity: StdHashMap::new(), by_category: StdHashMap::new(), gate: None },
-            analyzer_warnings: vec![],
-            analysis_coverage: vec![],
-            spec_verdicts: vec![],
+            ..autoreview_test_support::sample_review_report()
         };
         std::fs::write(run_dir.join("report.json"), serde_json::to_string(&report).unwrap()).unwrap();
     }

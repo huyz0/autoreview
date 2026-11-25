@@ -24,7 +24,7 @@ mod tests {
 
     use autoreview_schema::{
         DiffStats, Finding, FindingFingerprints, FindingSource, FindingSourceKind, Location, LocationRange, PlanBudgets, ReviewPlan, ReviewReport,
-        ReviewSummary, ReviewTarget, RunCosts, Severity, Side, SuppressedFinding, SuppressedReason, Tier, TriageSignalScore,
+        ReviewTarget, Severity, Side, SuppressedFinding, SuppressedReason, Tier, TriageSignalScore,
     };
 
     fn make_finding(severity: Severity, category: &str, title: &str, path: &str, line: u32) -> Finding {
@@ -47,7 +47,6 @@ mod tests {
 
     fn make_report(findings: Vec<Finding>, suppressed: Vec<SuppressedFinding>) -> ReviewReport {
         ReviewReport {
-            schema_version: "1".into(),
             run_id: "run-123".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
             target: ReviewTarget {
@@ -67,11 +66,7 @@ mod tests {
             },
             findings,
             suppressed,
-            costs: RunCosts { total: autoreview_schema::CostEntry { input_tokens: 0, output_tokens: 0, usd: None, wall_ms: 0 }, per_stage: HashMap::new() },
-            summary: ReviewSummary { by_severity: HashMap::new(), by_category: HashMap::new(), gate: None },
-            analyzer_warnings: vec![],
-            analysis_coverage: vec![],
-            spec_verdicts: vec![],
+            ..autoreview_test_support::sample_review_report()
         }
     }
 

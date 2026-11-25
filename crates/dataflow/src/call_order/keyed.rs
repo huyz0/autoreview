@@ -9,6 +9,8 @@ use super::plan::Plan;
 use super::{CallOrderHit, CallOrderSpec, EntryHit};
 
 mod contracts;
+mod coverage;
+pub use coverage::{check_keyed_units, check_keyed_units_with_coverage, keyed_flow_exhausted, KeyedCheckResult, KeyedLimitation};
 mod helpers;
 pub(super) mod program;
 mod state;
@@ -52,33 +54,6 @@ pub fn check_keyed_file(
             entry: true,
         }],
     )
-}
-
-/// Follow direct helper calls across the supplied source units.
-pub fn check_keyed_units(
-    spec: &CallOrderSpec,
-    units: &[KeyedUnit<'_, '_, '_>],
-) -> Vec<CallOrderHit> {
-    check_keyed_units_with_coverage(spec, units).hits
-}
-
-/// Findings and scopes that were declined or exhausted during analysis.
-pub struct KeyedCheckResult {
-    pub hits: Vec<CallOrderHit>,
-    pub limitations: Vec<KeyedLimitation>,
-}
-
-pub struct KeyedLimitation {
-    pub reason: &'static str,
-    pub path: Option<String>,
-    pub line: Option<u32>,
-}
-
-pub fn check_keyed_units_with_coverage(
-    spec: &CallOrderSpec,
-    units: &[KeyedUnit<'_, '_, '_>],
-) -> KeyedCheckResult {
-    check_with_budget(spec, units, PATH_BUDGET)
 }
 
 fn check_with_budget(spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], budget: usize) -> KeyedCheckResult {

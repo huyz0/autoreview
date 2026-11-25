@@ -363,6 +363,7 @@ dependencies = [
 name = "autoreview-test-support"
 version = "0.1.0"
 dependencies = [
+ "autoreview-schema",
  "tempfile",
 ]
 
