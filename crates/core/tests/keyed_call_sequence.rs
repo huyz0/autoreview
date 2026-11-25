@@ -1072,6 +1072,30 @@ func pending(root *Registry, key string) {
 }
 
 #[test]
+fn go_helper_discovery_skips_unrelated_files_but_follows_transitive_calls() {
+    let mut owned = vec![
+        ("go.mod".to_owned(), "module example.test/worker\n\ngo 1.22".to_owned()),
+        ("worker.go".to_owned(), r#"package app
+import tools "example.test/worker/lookup"
+func pending(root *Registry, key string) {
+    root.register(key)
+    chosen := tools.Choose(key)
+    root.remove(chosen)
+}"#.to_owned()),
+        ("lookup/z_choose.go".to_owned(), "package lookup\nfunc Choose(key string) string { return forward(key) }".to_owned()),
+        ("lookup/z_forward.go".to_owned(), "package lookup\nfunc forward(key string) string { return key }".to_owned()),
+    ];
+    for index in 0..80 {
+        owned.push((format!("lookup/a_unused_{index:03}.go"), format!("package lookup\nfunc Unused{index:03}() {{}}")));
+    }
+    let files: Vec<_> = owned.iter().map(|(path, source)| (path.as_str(), source.as_str())).collect();
+    assert!(workspace_findings("Go", &files, &["worker.go"], RECEIVER, true).is_empty());
+    owned[3].1 = "package lookup\nfunc forward(key string) string { return \"other\" }".to_owned();
+    let files: Vec<_> = owned.iter().map(|(path, source)| (path.as_str(), source.as_str())).collect();
+    assert_key_pending_on_fallthrough(&workspace_findings("Go", &files, &["worker.go"], RECEIVER, true));
+}
+
+#[test]
 fn java_static_imports_and_kotlin_aliases_follow_returned_keys() {
     let cases = [
         ("Java", "app/Worker.java", "support/Picker.java",

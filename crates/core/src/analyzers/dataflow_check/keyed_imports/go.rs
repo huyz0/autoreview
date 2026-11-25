@@ -11,7 +11,9 @@ impl ImportSource<'_> {
         let mut imports = Vec::new();
         let package = go_package(node, source);
         for file in go_files(resolver, parent) {
-            if file != path && resolver.go_package_of(&file).as_deref() == package {
+            if file != path && resolver.go_package_of(&file).as_deref() == package
+                && resolver.go_may_supply_helper(&file, source)
+            {
                 imports.extend(resolver.binding(&file, "", None, None, false));
             }
         }
@@ -34,6 +36,25 @@ impl Resolver<'_> {
     fn go_package_of(&self, file: &Path) -> Option<String> {
         let parsed = self.cache.get(file, Language::Go)?;
         go_package(parsed.1.root_node(), &parsed.0).map(str::to_owned)
+    }
+
+    // The keyed program resolves Go helpers by their declared function name.
+    // Searching the entire importing source (including comments and strings)
+    // deliberately over-approximates references, while avoiding unrelated
+    // package files. Keep files with syntax errors so coverage can report them.
+    fn go_may_supply_helper(&self, file: &Path, referring_source: &str) -> bool {
+        let Some(parsed) = self.cache.get(file, Language::Go) else {
+            return true;
+        };
+        let root = parsed.1.root_node();
+        if root.has_error() {
+            return true;
+        }
+        children(root).into_iter().filter(|node| node.kind() == "function_declaration").any(|node| {
+            node.child_by_field_name("name")
+                .and_then(|name| text(name, &parsed.0))
+                .is_none_or(|name| referring_source.contains(name))
+        })
     }
 }
 
@@ -66,6 +87,9 @@ fn go_import(
         .into_iter()
         .filter_map(|file| {
             let package = resolver.go_package_of(&file)?;
+            if !resolver.go_may_supply_helper(&file, source) {
+                return None;
+            }
             let prefix = format!("{}.", alias.unwrap_or(&package));
             resolver.binding(&file, &prefix, None, None, true)
         })
