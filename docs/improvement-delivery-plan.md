@@ -73,7 +73,8 @@ containment limits.
 The experimental rule tracks single-error calls and independent error positions
 in supported multi-result assignments; a used non-error result does not hide a
 discarded error. Continue preserving source identities through callers and
-helper summaries, including unsupported multi-result argument contexts. Model explicit `_`,
+helper summaries. Sole multi-result arguments are tracked through uniquely resolved helpers;
+unknown receiving helpers are reported as incomplete. Model explicit `_`,
 `defer`, `go`, aliases, reassignment, shadowing, generics, method and interface
 dispatch conservatively. Record incomplete type checking and unsupported call
 shapes against the affected rule and file, rather than counting them as clean.

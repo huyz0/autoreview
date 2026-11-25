@@ -27,7 +27,7 @@ pub(in crate::call_order) fn check_units_with_components(
             if let Some(shapes) = components.get(&frame.unit) { plan.result_components.clone_from(shapes); }
         }
     }
-    let mut limitations = unmodeled_sources(&program, units, sources);
+    let mut limitations = unmodeled_sources(&program, units, sources, components);
     if !program.has_registration() {
         return (Vec::new(), false, limitations);
     }
@@ -51,6 +51,7 @@ pub(in crate::call_order) fn check_units_with_components(
 
 fn unmodeled_sources(
     program: &Program<'_, '_, '_>, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<usize, BTreeSet<usize>>,
+    components: &BTreeMap<usize, BTreeMap<usize, super::super::ResultComponents>>,
 ) -> Vec<super::super::keyed::KeyedLimitation> {
     let mut limitations = Vec::new();
     let functions: Vec<_> = units.iter().flat_map(|unit| unit.functions.iter()).collect();
@@ -59,29 +60,66 @@ fn unmodeled_sources(
         limitations.push(super::super::keyed::KeyedLimitation { reason: "verified_source_unmodeled", path: None, line: None });
     }
     let mut base = 0;
+    let mut resolved_by_frame = BTreeMap::new();
     for (unit_index, unit) in units.iter().enumerate() {
-        if let Some(offsets) = sources.get(&unit_index) {
-            for &start in offsets {
-                let owner = unit.functions.iter().enumerate()
-                    .filter(|(_, function)| function.node.start_byte() <= start && start < function.node.end_byte())
-                    .min_by_key(|(_, function)| function.node.end_byte() - function.node.start_byte());
-                if owner.is_some_and(|(index, _)| !reachable.contains(&(base + index))) || (owner.is_none() && !unit.entry) { continue; }
-                let modeled = owner.is_some_and(|(index, function)| {
-                    let frame = &program.frames[base + index];
-                    let call = function.node.descendant_for_byte_range(start, start.saturating_add(1))
-                        .and_then(|node| std::iter::successors(Some(node), |node| node.parent())
-                            .find(|node| node.start_byte() == start && matches!(node.kind(), "call_expression" | "method_invocation" | "new_expression")));
-                    frame.plan.is_some() && call.is_some_and(|node| crate::lower::site::name(node, unit.source).is_some())
-                        && frame.graph.nodes.iter().flat_map(|node| &node.evaluations).any(|item| item.span.start <= start && start < item.span.end)
-                });
-                if modeled { continue; }
-                let line = unit.source.get(..start).map(|source| source.iter().filter(|byte| **byte == b'\n').count() as u32 + 1);
-                limitations.push(super::super::keyed::KeyedLimitation { reason: "verified_source_unmodeled", path: Some(unit.path.to_owned()), line });
+        for &start in sources.get(&unit_index).into_iter().flatten() {
+            if source_modeled(program, (unit, base), start, &reachable) != Some(false) { continue; }
+            limitations.push(source_limitation(unit, start, "verified_source_unmodeled"));
+        }
+        for &start in components.get(&unit_index).into_iter().flat_map(|items| items.keys()) {
+            if component_helper_unmodeled(program, (unit, base), start, &reachable, &mut resolved_by_frame) {
+                limitations.push(source_limitation(unit, start, "go_multi_result_unmodeled"));
             }
         }
         base += unit.functions.len();
     }
     limitations
+}
+
+fn source_modeled(
+    program: &Program<'_, '_, '_>, context: (&KeyedUnit<'_, '_, '_>, usize), start: usize,
+    reachable: &BTreeSet<usize>,
+) -> Option<bool> {
+    let (unit, base) = context;
+    let owner = unit.functions.iter().enumerate()
+        .filter(|(_, function)| function.node.start_byte() <= start && start < function.node.end_byte())
+        .min_by_key(|(_, function)| function.node.end_byte() - function.node.start_byte());
+    if owner.is_some_and(|(index, _)| !reachable.contains(&(base + index))) || (owner.is_none() && !unit.entry) { return None; }
+    Some(owner.is_some_and(|(index, function)| {
+        let frame = &program.frames[base + index];
+        let call = function.node.descendant_for_byte_range(start, start.saturating_add(1))
+            .and_then(|node| std::iter::successors(Some(node), |node| node.parent())
+                .find(|node| node.start_byte() == start && matches!(node.kind(), "call_expression" | "method_invocation" | "new_expression")));
+        frame.plan.is_some() && call.is_some_and(|node| crate::lower::site::name(node, unit.source).is_some())
+            && frame.graph.nodes.iter().flat_map(|node| &node.evaluations).any(|item| item.span.start <= start && start < item.span.end)
+    }))
+}
+
+// Multi-result arguments need a uniquely resolved, modeled receiving helper.
+fn component_helper_unmodeled(
+    program: &Program<'_, '_, '_>, context: (&KeyedUnit<'_, '_, '_>, usize), start: usize,
+    reachable: &BTreeSet<usize>, calls: &mut BTreeMap<usize, BTreeSet<(usize, usize)>>,
+) -> bool {
+    let (unit, base) = context;
+    let owner = unit.functions.iter().enumerate()
+        .filter(|(_, function)| function.node.start_byte() <= start && start < function.node.end_byte())
+        .min_by_key(|(_, function)| function.node.end_byte() - function.node.start_byte());
+    let Some((index, function)) = owner else { return false; };
+    if !reachable.contains(&(base + index)) { return false; }
+    let Some(mut call) = function.node.descendant_for_byte_range(start, start.saturating_add(1))
+        .and_then(|node| std::iter::successors(Some(node), |node| node.parent())
+            .find(|node| node.start_byte() == start && node.kind() == "call_expression")) else { return false; };
+    while let Some(parent) = call.parent().filter(|node| node.kind() == "parenthesized_expression") { call = parent; }
+    let Some(outer) = call.parent().filter(|node| node.kind() == "argument_list").and_then(|node| node.parent()) else { return false; };
+    let frame = &program.frames[base + index];
+    let calls = calls.entry(base + index).or_insert_with(|| frame.plan.as_ref()
+        .map(|plan| program.resolved_calls(base + index, frame.graph, plan)).unwrap_or_default());
+    !calls.iter().any(|(position, target)| *position == outer.start_byte() && program.frames[*target].plan.is_some())
+}
+
+fn source_limitation(unit: &KeyedUnit<'_, '_, '_>, start: usize, reason: &'static str) -> super::super::keyed::KeyedLimitation {
+    let line = unit.source.get(..start).map(|source| source.iter().filter(|byte| **byte == b'\n').count() as u32 + 1);
+    super::super::keyed::KeyedLimitation { reason, path: Some(unit.path.to_owned()), line }
 }
 
 fn collect_hits(

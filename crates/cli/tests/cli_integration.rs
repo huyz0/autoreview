@@ -182,9 +182,9 @@ fn diff_reports_dataflow_syntax_limitations_without_warning_on_clean_files() {
 #[test]
 fn changed_lines_include_verified_project_error_results() {
     let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
-    let helper = "package helper\nfunc Work() (int, error) { return 1, nil }\n";
+    let helper = "package helper\nfunc Work() (int, error) { return 1, nil }\nfunc Ignore(n int, err error) {}\nfunc Check(n int, err error) { if err != nil { return } }\n";
     let before = "package main\nimport \"example.test/review/helper\"\nfunc run() error { _, err := helper.Work(); return err }\n";
-    let after = "package main\nimport \"example.test/review/helper\"\nfunc run() { value, _ := helper.Work(); _ = value }\n";
+    let after = "package main\nimport \"example.test/review/helper\"\nfunc run() { value, _ := helper.Work(); _ = value }\nfunc nested() { helper.Ignore(helper.Work()) }\nfunc checked() { helper.Check(helper.Work()) }\n";
     let repo = init_repo(&[("go.mod", "module example.test/review\n\ngo 1.22\n"), ("helper/helper.go", helper), ("main.go", before)]);
     let base = current_commit(repo.path());
     repo.commit(&[("main.go", after)], "discard project error");
@@ -196,6 +196,10 @@ fn changed_lines_include_verified_project_error_results() {
     let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
     assert!(report["findings"].as_array().unwrap().iter().any(|finding|
         finding["source"]["ruleId"] == "go-project-error-result-unobserved" && finding["location"]["range"]["startLine"] == 3), "{report}");
+    assert!(report["findings"].as_array().unwrap().iter().any(|finding|
+        finding["source"]["ruleId"] == "go-project-error-result-unobserved" && finding["location"]["range"]["startLine"] == 4), "{report}");
+    assert!(!report["findings"].as_array().unwrap().iter().any(|finding|
+        finding["source"]["ruleId"] == "go-project-error-result-unobserved" && finding["location"]["range"]["startLine"] == 5), "{report}");
     assert!(!report.get("analysisCoverage").and_then(|items| items.as_array()).is_some_and(|items|
         items.iter().any(|issue| issue["rule"] == "go-project-error-result-unobserved")), "{report}");
 }

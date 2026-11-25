@@ -3,6 +3,7 @@ use tree_sitter::Node;
 use crate::lower::site;
 
 use super::super::references::{reference, string_references};
+use super::super::syntax::transparent;
 use super::{Demand, Effect, HelperCall, Lower, Place, Value, Write};
 
 enum Visit<'tree> {
@@ -16,7 +17,11 @@ impl Lower<'_, '_, '_> {
         let arguments = site::arguments(node)?;
         let arguments: Option<Vec<_>> = site::children(arguments).map(site::argument).collect();
         let arguments = arguments?;
-        (arguments.len() == summary.when_discarded.parameters.len()).then_some((arguments, summary))
+        let arity = if arguments.len() == 1 {
+            self.plan.result_components.get(&transparent(arguments[0]).start_byte())
+                .map_or(1, |shape| shape.count)
+        } else { arguments.len() };
+        (arity == summary.when_discarded.parameters.len()).then_some((arguments, summary))
     }
 
     pub(super) fn closure_call(&self, node: Node<'_>) -> Option<usize> {
@@ -39,7 +44,22 @@ impl Lower<'_, '_, '_> {
 
     fn visit<'tree>(&self, node: Node<'tree>, demand: Demand, todo: &mut Vec<Visit<'tree>>, effects: &mut Vec<Effect>) {
         if let Some((arguments, summary)) = self.helper_call(node) {
-            let arguments = arguments
+            let multi = (arguments.len() == 1).then(|| transparent(arguments[0]))
+                .and_then(|call| self.plan.result_components.get(&call.start_byte()).map(|shape| (call, shape)));
+            let arguments = if let Some((call, shape)) = multi {
+                let Some(origin) = self.origin(call) else { return; };
+                self.reads(call, effects);
+                (0..shape.count).map(|index| {
+                    let place = Place::CallComponent(call.start_byte(), index);
+                    let value = if shape.indices.contains(&index) {
+                        let mut component = origin.clone();
+                        component.component = Some(index);
+                        Value::Source(component)
+                    } else { Value::Other };
+                    effects.push(Effect::Write(vec![Write { target: Some(place), value }]));
+                    Some(place)
+                }).collect()
+            } else { arguments
                 .into_iter()
                 .map(|argument| {
                     if let Some(place) = self.place(argument, false) {
@@ -50,7 +70,7 @@ impl Lower<'_, '_, '_> {
                     effects.push(Effect::Write(vec![Write { target: Some(temporary), value }]));
                     Some(temporary)
                 })
-                .collect();
+                .collect() };
             let origins = |values: &[(super::Origin, bool)]| {
                 values
                     .iter()

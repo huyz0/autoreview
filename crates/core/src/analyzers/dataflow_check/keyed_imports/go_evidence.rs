@@ -169,6 +169,8 @@ fn multi_supported(file: &Source, start: usize, count: usize) -> bool {
     call.parent().is_some_and(|parent| match parent.kind() {
         "expression_statement" | "defer_statement" | "go_statement" => true,
         "expression_list" => multi_list_supported(parent, count),
+        "argument_list" => parent.named_children(&mut parent.walk()).filter(|node| node.kind() != "comment").count() == 1
+            && parent.parent().is_some_and(|outer| outer.kind() == "call_expression"),
         _ => false,
     })
 }
@@ -243,10 +245,10 @@ mod tests {
     fn go_multi_result_components_are_tracked_independently() {
         let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
         let checker = TrustedGo { probe: probe.into(), go: go.into() };
-        let source = "package sample\nfunc pair() (int, error) { return 1, nil }\nfunc two() (error, error) { return nil, nil }\nfunc sink(n int, err error) {}\nfunc ignored() { v, _ := pair(); _ = v }\nfunc checked() { v, err := pair(); if err != nil { return }; _ = v }\nfunc overwritten() { v, err := pair(); err = nil; if err != nil { return }; _ = v }\nfunc both() { a, b := two(); if a != nil { return }; _ = b }\nfunc forwarded() (int, error) { return pair() }\nfunc nested() { sink(pair()) }\nfunc bare() { pair() }\nfunc declared() { var v, e = pair(); _ = v; if e != nil { return } }\nfunc reassigned() { var v int; var e error; v, e = pair(); e = nil; _ = v; if e != nil { return } }\n";
+        let source = "package sample\nfunc pair() (int, error) { return 1, nil }\nfunc two() (error, error) { return nil, nil }\nfunc sink(n int, err error) {}\nfunc ignored() { v, _ := pair(); _ = v }\nfunc checked() { v, err := pair(); if err != nil { return }; _ = v }\nfunc overwritten() { v, err := pair(); err = nil; if err != nil { return }; _ = v }\nfunc both() { a, b := two(); if a != nil { return }; _ = b }\nfunc forwarded() (int, error) { return pair() }\nfunc nested() { sink(pair()) }\nfunc bare() { pair() }\nfunc declared() { var v, e = pair(); _ = v; if e != nil { return } }\nfunc reassigned() { var v int; var e error; v, e = pair(); e = nil; _ = v; if e != nil { return } }\nfunc use(n int, err error) { if err != nil { return } }\nfunc nestedUsed() { use(pair()) }\nfunc unresolved(s func(int, error)) { s(pair()) }\nfunc one(a, b error) { if a != nil { return } }\nfunc twoUsed(a, b error) { if a != nil || b != nil { return } }\nfunc nestedOne() { one(two()) }\nfunc nestedBoth() { twoUsed(two()) }\n";
         let result = analyze_source(source, &checker);
-        assert_eq!(result.hits.iter().map(|hit| hit.source_line).collect::<Vec<_>>(), [5, 7, 8, 11, 13], "limitations: {:?}", result.limitations.iter().map(|item| (item.reason, item.line)).collect::<Vec<_>>());
-        assert!(result.limitations.iter().any(|item| item.reason == "go_multi_result_unmodeled" && item.line == Some(10)));
+        assert_eq!(result.hits.iter().map(|hit| hit.source_line).collect::<Vec<_>>(), [5, 7, 8, 10, 11, 13, 19], "limitations: {:?}", result.limitations.iter().map(|item| (item.reason, item.line)).collect::<Vec<_>>());
+        assert!(result.limitations.iter().any(|item| item.reason == "go_multi_result_unmodeled" && item.line == Some(16)));
     }
 
     fn analyze_source(source: &str, checker: &TrustedGo) -> KeyedCheckResult {
