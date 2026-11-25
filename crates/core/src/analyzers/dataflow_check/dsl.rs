@@ -179,6 +179,15 @@ pub(super) fn call_order_finding(
             side: Side::New,
         }]);
     }
+    if !hit.related_calls.is_empty() {
+        let related = finding.related_locations.get_or_insert_with(Vec::new);
+        related.extend(hit.related_calls.iter().map(|(path, line)| Location {
+            path: path.clone(),
+            range: LocationRange { start_line: *line, ..Default::default() },
+            snippet: String::new(),
+            side: Side::New,
+        }));
+    }
     finding
 }
 

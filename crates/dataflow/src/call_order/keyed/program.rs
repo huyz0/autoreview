@@ -33,20 +33,20 @@ pub struct KeyedImport {
     pub exported: bool,
 }
 
-pub(super) struct Program<'spec, 'src, 'graph> {
+pub(in crate::call_order) struct Program<'spec, 'src, 'graph> {
     pub frames: Vec<Frame<'spec, 'src, 'graph>>,
     targets: BTreeMap<(Scope, String, usize), Option<usize>>,
     units: Vec<Unit<'src, 'graph>>,
     paths: BTreeMap<&'src str, usize>,
 }
 
-pub(super) struct Frame<'spec, 'src, 'graph> {
+pub(in crate::call_order) struct Frame<'spec, 'src, 'graph> {
     pub graph: &'graph Cfg<Stmt>,
     pub unit: usize,
     export: Option<Export>,
     pub plan: Option<Plan<'spec, 'src>>,
     scope: Scope,
-    params: Vec<String>,
+    pub(in crate::call_order) params: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -63,7 +63,7 @@ struct Unit<'src, 'graph> {
 }
 
 impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
-    pub(super) fn new(spec: &'spec CallOrderSpec, inputs: &[KeyedUnit<'src, '_, 'graph>]) -> Self {
+    pub(in crate::call_order) fn new(spec: &'spec CallOrderSpec, inputs: &[KeyedUnit<'src, '_, 'graph>]) -> Self {
         let mut program = Self {
             frames: Vec::new(),
             targets: BTreeMap::new(),
@@ -114,12 +114,12 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         });
     }
 
-    pub(super) fn path(&self, unit: usize) -> Option<String> {
+    pub(in crate::call_order) fn path(&self, unit: usize) -> Option<String> {
         let path = self.units[unit].path;
         (!path.is_empty()).then(|| path.to_owned())
     }
 
-    pub(super) fn target(&self, from: usize, name: &str, site: &CallSite) -> Option<usize> {
+    pub(in crate::call_order) fn target(&self, from: usize, name: &str, site: &CallSite) -> Option<usize> {
         let frame = &self.frames[from];
         let root = name.split(['.', ':']).next()?;
         if frame.plan.as_ref()?.syntax.taken_name(root) {
@@ -178,8 +178,9 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             if seen.insert(from) {
                 let frame = &self.frames[from];
                 if let Some(plan) = &frame.plan {
-                    let mut targets = BTreeSet::new();
-                    self.called(from, frame.graph, plan, &mut targets);
+                    let targets = self.resolved_calls(from, frame.graph, plan);
+                    let targets: BTreeSet<_> = targets.into_iter()
+                        .map(|(_, target)| target).filter(|target| *target != from).collect();
                     pending.extend(targets.iter().copied());
                     incoming.extend(targets);
                 }
@@ -191,17 +192,19 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             .collect()
     }
 
-    fn called(
+    /// Return reachable modeled calls with their source positions and unique
+    /// target frames. The frame identifies the source file for each position.
+    pub(in crate::call_order) fn resolved_calls(
         &self,
         from: usize,
         cfg: &Cfg<Stmt>,
         plan: &Plan<'_, '_>,
-        incoming: &mut BTreeSet<usize>,
-    ) {
+    ) -> BTreeSet<(usize, usize)> {
+        let mut resolved = BTreeSet::new();
         let nodes = reachable_nodes(cfg);
         for call in nodes.iter().filter_map(|node| node.throwing_call.as_ref()) {
             if let Some(site) = &call.site {
-                self.record_target(from, &call.name, site, plan, incoming);
+                self.record_target(from, &call.name, site, plan, &mut resolved);
             }
         }
         for stmt in nodes.iter().flat_map(|node| &node.stmts) {
@@ -216,13 +219,14 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
                     site: Some(site),
                 } => (name, site),
                 Stmt::DeferredBlock(body) => {
-                    self.called(from, body, plan, incoming);
+                    resolved.extend(self.resolved_calls(from, body, plan));
                     continue;
                 }
                 _ => continue,
             };
-            self.record_target(from, name, site, plan, incoming);
+            self.record_target(from, name, site, plan, &mut resolved);
         }
+        resolved
     }
 
     fn record_target(
@@ -231,14 +235,11 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         name: &str,
         site: &CallSite,
         plan: &Plan<'_, '_>,
-        incoming: &mut BTreeSet<usize>,
+        resolved: &mut BTreeSet<(usize, usize)>,
     ) {
         if plan.may_throw(name, site.start, &Values::new()) {
-            if let Some(callee) = self
-                .target(from, name, site)
-                .filter(|callee| *callee != from)
-            {
-                incoming.insert(callee);
+            if let Some(callee) = self.target(from, name, site) {
+                resolved.insert((site.start, callee));
             }
         }
     }
