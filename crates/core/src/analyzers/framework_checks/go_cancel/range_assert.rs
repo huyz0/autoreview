@@ -18,28 +18,34 @@ pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
 pub(super) fn findings(file: &File, peers: &[&File]) -> Vec<AgentFinding> {
     let imports = testify_imports(file);
     let types = slice_types(peers);
-    let mut found = Vec::new();
-    for loop_node in descendants(file.root()).filter(|node| node.kind() == "for_statement") {
-        let Some(range) = children(loop_node).find(|node| node.kind() == "range_clause") else { continue };
-        if !text(range, &file.source).contains(":=") { continue; }
-        let Some(left) = range.child_by_field_name("left") else { continue };
-        let vars: Vec<_> = children(left).filter(|node| node.kind() == "identifier").collect();
-        let Some(collection) = range.child_by_field_name("right").filter(|node| node.kind() == "identifier") else { continue };
-        if vars.len() != 2 { continue; }
-        let names = [text(vars[0], &file.source), text(vars[1], &file.source), text(collection, &file.source)];
-        let Some(owner) = std::iter::successors(loop_node.parent(), |node| node.parent())
-            .find(|node| matches!(node.kind(), "function_declaration" | "method_declaration" | "func_literal")) else { continue };
-        if names.iter().any(|name| *name == "_" || name.is_empty()) || !local_slice(owner, loop_node, names[2], &types, &file.source) { continue; }
-        let Some(body) = loop_node.child_by_field_name("body") else { continue };
-        if unsafe_loop(body, &names, &file.source) { continue; }
-        for call in descendants(body).filter(|node| node.kind() == "call_expression") {
-            let Some(receiver) = assertion_receiver(call, &names, &file.source) else { continue };
-            if imports.contains(receiver) && !shadowed(owner, receiver, &file.source) {
-                found.push(RULE.finding(location(&file.path, call, &file.source), Vec::new()));
-            }
-        }
+    descendants(file.root()).filter(|node| node.kind() == "for_statement")
+        .flat_map(|node| inspect_loop(file, node, &imports, &types)).collect()
+}
+
+fn inspect_loop(file: &File, loop_node: Node<'_>, imports: &BTreeSet<String>, types: &BTreeSet<String>) -> Vec<AgentFinding> {
+    let Some((names, owner, body)) = range_parts(loop_node, &file.source) else { return Vec::new() };
+    if !local_slice(owner, loop_node, names[2], types, &file.source) || unsafe_loop(body, &names, &file.source) {
+        return Vec::new();
     }
-    found
+    descendants(body).filter(|node| node.kind() == "call_expression").filter_map(|call| {
+        let receiver = assertion_receiver(call, &names, &file.source)?;
+        (imports.contains(receiver) && !shadowed(owner, receiver, &file.source))
+            .then(|| RULE.finding(location(&file.path, call, &file.source), Vec::new()))
+    }).collect()
+}
+
+fn range_parts<'tree, 'src>(loop_node: Node<'tree>, source: &'src str) -> Option<([&'src str; 3], Node<'tree>, Node<'tree>)> {
+    let range = children(loop_node).find(|node| node.kind() == "range_clause")?;
+    if !text(range, source).contains(":=") { return None; }
+    let left = range.child_by_field_name("left")?;
+    let vars: Vec<_> = children(left).filter(|node| node.kind() == "identifier").collect();
+    let [index, value] = vars.as_slice() else { return None };
+    let collection = range.child_by_field_name("right").filter(|node| node.kind() == "identifier")?;
+    let names = [text(*index, source), text(*value, source), text(collection, source)];
+    if names.iter().any(|name| *name == "_" || name.is_empty()) { return None; }
+    let owner = std::iter::successors(loop_node.parent(), |node| node.parent())
+        .find(|node| matches!(node.kind(), "function_declaration" | "method_declaration" | "func_literal"))?;
+    Some((names, owner, loop_node.child_by_field_name("body")?))
 }
 
 fn testify_imports(file: &File) -> BTreeSet<String> {
