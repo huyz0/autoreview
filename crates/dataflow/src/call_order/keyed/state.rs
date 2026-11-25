@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use crate::cfg::{BindingWrite, CfgNode};
 
-use super::{BTreeMap, Cfg, EdgeKind, Entry, IdentityOperand, Plan, Stmt, Values};
+use super::{BTreeMap, CallSite, Cfg, EdgeKind, Entry, IdentityOperand, Plan, Stmt, Values};
 
 #[derive(Clone)]
 pub(super) enum Deferred<'graph> {
@@ -53,7 +53,7 @@ pub(super) struct State<'graph> {
     pub(super) deferred: Vec<Deferred<'graph>>,
     conditions: BTreeMap<IdentityOperand, bool>,
     pub(super) executed_call: Option<usize>,
-    pub(super) result: Option<(usize, Option<IdentityOperand>)>,
+    pub(super) results: BTreeMap<usize, Option<IdentityOperand>>,
     pub(super) returned: Option<IdentityOperand>,
     allocations: Allocations,
 }
@@ -70,18 +70,28 @@ pub(super) struct Suspended<'graph> {
     values: Values,
     deferred: Vec<Deferred<'graph>>,
     executed_call: Option<usize>,
-    result: Option<(usize, Option<IdentityOperand>)>,
+    results: BTreeMap<usize, Option<IdentityOperand>>,
     returned: Option<IdentityOperand>,
     allocations: Allocations,
 }
 
 impl<'graph> State<'graph> {
+    pub(super) fn resolve_call_arguments(&self, plan: &Plan<'_, '_>, site: &CallSite) -> CallSite {
+        let mut resolved = site.clone();
+        for argument in &mut resolved.arguments {
+            if let Some(value @ IdentityOperand::CallResult { .. }) = argument.as_ref() {
+                *argument = self.operand(plan, value, site.start);
+            }
+        }
+        resolved
+    }
+
     pub(super) fn rebind(&mut self, plan: &Plan<'_, '_>, write: &BindingWrite) {
         let value = match &write.value {
             Some(IdentityOperand::CallResult {
                 start,
                 fallback: true,
-            }) if self.result.as_ref().is_none_or(|(site, _)| site != start) => return,
+            }) if !self.results.contains_key(start) => return,
             Some(operand) => self.materialize(plan, operand, write.start),
             None => None,
         };
@@ -95,7 +105,7 @@ impl<'graph> State<'graph> {
         location: usize,
     ) -> Option<IdentityOperand> {
         if let IdentityOperand::Fresh { start, name, .. } = operand {
-            if let Some((_, Some(value))) = self.result.as_ref().filter(|(site, _)| site == start) {
+            if let Some(Some(value)) = self.results.get(start) {
                 return Some(value.clone());
             }
             return Some(self.allocate(plan, name, *start));
@@ -116,11 +126,7 @@ impl<'graph> State<'graph> {
         location: usize,
     ) -> Option<IdentityOperand> {
         if let IdentityOperand::CallResult { start, .. } = value {
-            return self
-                .result
-                .as_ref()
-                .filter(|(site, _)| site == start)
-                .and_then(|(_, value)| value.clone());
+            return self.results.get(start).cloned().flatten();
         }
         plan.syntax.value(&self.values, value, location)
     }
@@ -130,7 +136,7 @@ impl<'graph> State<'graph> {
             values: std::mem::replace(&mut self.values, parameters),
             deferred: std::mem::take(&mut self.deferred),
             executed_call: self.executed_call.take(),
-            result: self.result.take(),
+            results: std::mem::take(&mut self.results),
             returned: self.returned.take(),
             allocations: std::mem::take(&mut self.allocations),
         }
@@ -142,7 +148,7 @@ impl<'graph> State<'graph> {
         self.values = caller.values.clone();
         self.deferred = caller.deferred.clone();
         self.executed_call = caller.executed_call;
-        self.result = caller.result.clone();
+        self.results = caller.results.clone();
         for ((unit, site), count) in allocations {
             self.record_generations(unit, site, count);
             for _ in 0..count {
@@ -189,7 +195,7 @@ impl<'graph> State<'graph> {
         {
             advance(value, unit, site);
         }
-        if let Some((_, Some(value))) = &mut self.result {
+        for value in self.results.values_mut().flatten() {
             advance(value, unit, site);
         }
         for action in &mut self.deferred {

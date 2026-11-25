@@ -19,13 +19,15 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
         else {
             return Some(None);
         };
-        let outcomes = self.invoke(target, values, state.clone())?;
+        let mut input = state.clone();
+        input.results.remove(&call.start);
+        let outcomes = self.invoke(target, values, input)?;
         Some(Some(
             outcomes
                 .into_iter()
                 .map(|(threw, returned, mut state)| {
                     state.executed_call = (!threw).then_some(call.start);
-                    state.result = Some((call.start, returned));
+                    state.results.insert(call.start, returned);
                     (threw, state)
                 })
                 .collect(),
@@ -47,12 +49,17 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
         {
             return Some(None);
         }
+        if let Some(site) = site {
+            state.results.remove(&site.start);
+        }
         if let Some((target, arguments)) = self.helper(frame, name, site, state) {
             let outcomes = self.invoke(target, arguments, state.clone())?;
             let normal = outcomes
                 .into_iter()
                 .map(|(threw, returned, mut state)| {
-                    state.result = site.map(|site| (site.start, returned));
+                    if let Some(site) = site {
+                        state.results.insert(site.start, returned);
+                    }
                     (!threw).then_some(state)
                 })
                 .collect::<Option<Vec<_>>>()?;
@@ -65,7 +72,8 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
                 return Some(None);
             }
         }
-        let call = plan.call(name, site, &state.values)?;
+        let resolved = site.map(|site| state.resolve_call_arguments(plan, site));
+        let call = plan.call(name, resolved.as_ref(), &state.values)?;
         self.allow_opaque_transfer(frame, name, site, state);
         if let Some(entry) = call.entry {
             if let Some(&registration) = state.pending.get(&entry).filter(|_| call.trigger) {
@@ -92,7 +100,8 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
             return state.schedule(Deferred::Helper(target, arguments));
         }
         let plan = self.program.frames[frame].plan.as_ref()?;
-        let call = plan.call(name, site, &state.values)?;
+        let resolved = site.map(|site| state.resolve_call_arguments(plan, site));
+        let call = plan.call(name, resolved.as_ref(), &state.values)?;
         if call.registered || call.trigger {
             return None;
         }
@@ -119,8 +128,7 @@ impl<'graph> Engine<'_, '_, '_, 'graph> {
             .arguments
             .iter()
             .map(|value| {
-                plan.syntax
-                    .value(&state.values, value.as_ref()?, site.start)
+                state.operand(plan, value.as_ref()?, site.start)
             })
             .collect();
         Some((index, self.program.frames[index].bind(arguments)))

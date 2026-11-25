@@ -21,7 +21,7 @@ impl Engine<'_, '_, '_, '_> {
                 Entry::handle(handle.clone()),
                 self.registration(frame, location.line),
             );
-            state.result = Some((site.start, Some(handle)));
+            state.results.insert(site.start, Some(handle));
         }
         Some(true)
     }

@@ -207,9 +207,12 @@ impl<'src> Syntax<'src> {
         site: &CallSite,
         values: &Values,
     ) -> Option<Entry> {
-        let (collection, key) = selector.operands(site)?;
-        let collection = self.resolve(values, collection, site.start)?;
+        let collection = match selector.collection {
+            CollectionSelector::Receiver => self.resolve(values, site.receiver.as_deref()?, site.start)?,
+            CollectionSelector::Argument(index) => self.value(values, site.arguments.get(index)?.as_ref()?, site.start)?,
+        };
         binding_name(&collection)?;
+        let key = site.arguments.get(selector.key_argument)?.as_ref()?;
         let key = self.value(values, key, site.start)?;
         Some(Entry { collection, key: Some(key) })
     }
@@ -224,20 +227,6 @@ impl<'src> Syntax<'src> {
             IdentityOperand::Binding(name) => self.resolve(values, name, start),
             literal => Some(literal.clone()),
         }
-    }
-}
-
-impl EntryIdentity {
-    fn operands(self, site: &CallSite) -> Option<(&str, &IdentityOperand)> {
-        let collection = match self.collection {
-            CollectionSelector::Receiver => site.receiver.as_ref()?,
-            CollectionSelector::Argument(index) => match site.arguments.get(index)?.as_ref()? {
-                IdentityOperand::Binding(name) => name,
-                _ => return None,
-            },
-        };
-        let key = site.arguments.get(self.key_argument)?.as_ref()?;
-        Some((collection.as_str(), key))
     }
 }
 
