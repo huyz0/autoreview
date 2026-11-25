@@ -20,6 +20,14 @@ manually restricted to that route and omitted other barrel exports, so this is
 not evidence that automatic dependency discovery resolves the real project or
 that the bug is detected. The case remains unscored.
 
+A subsequent exploratory run used the normal dependency loader on complete
+checkouts of both pinned revisions, with lockfile dependencies installed using
+`npm ci --ignore-scripts`. It found the two discarded calls at lines 100 and
+126 in the before revision and no findings in the fixed file. Both runs reached
+the existing 64-dependency discovery limit, so they are incomplete and are not
+scored as benchmark results. The prototype is not yet connected to the normal
+review or replay entry points.
+
 ## Deliverables
 
 1. Represent proven promise-returning callable signatures as reusable facts.

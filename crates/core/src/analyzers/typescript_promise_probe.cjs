@@ -8,7 +8,7 @@ function run(request) {
   const ts = require(request.typescriptModule);
   const config = ts.readConfigFile(request.config, ts.sys.readFile);
   if (config.error) return { status: 'incomplete', reason: 'config_unreadable' };
-  const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, path.dirname(request.config));
+  const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, path.dirname(request.config), undefined, request.config);
   if (parsed.errors.length) return { status: 'incomplete', reason: 'config_invalid' };
   const program = ts.createProgram(parsed.fileNames, { ...parsed.options, noEmit: true });
   if (ts.getPreEmitDiagnostics(program).some(diagnostic => diagnostic.category === ts.DiagnosticCategory.Error)) {

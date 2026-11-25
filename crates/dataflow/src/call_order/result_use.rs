@@ -53,12 +53,12 @@ pub fn discover_factory_sources(
     let mut cache = BTreeMap::<(usize, String, usize), bool>::new();
     for (function, frame) in units.iter().flat_map(|unit| unit.functions.iter()).zip(&program.frames) {
         let Some(plan) = &frame.plan else { continue };
-        if std::iter::successors(function.node.parent(), |node| node.parent()).any(|node| matches!(node.kind(), "function_declaration" | "function_expression" | "arrow_function" | "method_definition")) { continue; }
         let unit = &units[frame.unit];
         let mut pending = vec![function.node];
         while let Some(node) = pending.pop() {
             if let Some((name, arity)) = direct_call(node, unit.source) {
-                if !plan.syntax.shadows_api(name) && unit.imports.iter().any(|binding| binding.local == name && binding.name.is_some() && binding.owner.is_none() && binding.exported) {
+                if !plan.syntax.shadows_api(name) && !enclosing_scope_shadows(function.node, unit.source, name)
+                    && unit.imports.iter().any(|binding| binding.local == name && binding.name.is_some() && binding.owner.is_none() && binding.exported) {
                     let valid = *cache.entry((frame.unit, name.to_owned(), arity)).or_insert_with(|| {
                         crate::promise_types::imported_factory_evidence(modules, units, frame.unit, name, arity).is_some()
                     });
@@ -75,6 +75,12 @@ pub fn discover_factory_sources(
         }
     }
     FactorySourceDiscovery { candidates: result, limitations }
+}
+
+fn enclosing_scope_shadows(function: tree_sitter::Node<'_>, source: &[u8], name: &str) -> bool {
+    std::iter::successors(function.parent(), |node| node.parent())
+        .filter(|node| matches!(node.kind(), "function_declaration" | "function_expression" | "arrow_function" | "method_definition"))
+        .any(|node| super::identity::Syntax::may_shadow(node, source, name))
 }
 
 fn direct_call<'a>(node: tree_sitter::Node<'_>, source: &'a [u8]) -> Option<(&'a str, usize)> {
@@ -487,12 +493,17 @@ mod tests {
     fn imported_factory_evidence_can_feed_result_use_without_shadowed_calls() {
         use crate::call_order::{KeyedExport, KeyedFunction, KeyedImport};
         use crate::promise_types::TypeModule;
-        let source = "import { upload } from './barrel'; function run() { upload('x'); upload(); upload(...args); upload?.('x'); } function shadow(upload: () => string) { upload(); }";
+        let source = "import { upload } from './barrel'; function run() { switch (1) { case 1: break; } [1].map(() => { upload('x'); upload(); upload(...args); upload?.('x'); }); } function shadow(upload: (x: string) => string) { [1].map(() => upload('x')); }";
         let texts = [source, "export * from './binding';", "import create from './factory'; export const upload = create({});", "export default function create(x: object): (ctx: string) => Promise<void> { throw 1; }"];
         let paths = ["caller", "barrel", "binding", "factory"];
         let trees: Vec<_> = texts.iter().map(|source| autoreview_langsupport::parser_for(Language::TypeScript).unwrap().parse(source, None).unwrap()).collect();
         let modules: Vec<_> = texts.iter().zip(&trees).zip(paths).map(|((source, tree), path)| TypeModule { path, source: source.as_bytes(), root: tree.root_node() }).collect();
-        let nodes: Vec<_> = trees[0].root_node().named_children(&mut trees[0].root_node().walk()).filter(|node| node.kind() == "function_declaration").collect();
+        let mut nodes: Vec<_> = trees[0].root_node().named_children(&mut trees[0].root_node().walk()).filter(|node| node.kind() == "function_declaration").collect();
+        let mut pending = vec![trees[0].root_node()];
+        while let Some(node) = pending.pop() {
+            if node.kind() == "arrow_function" { nodes.push(node); }
+            pending.extend(node.named_children(&mut node.walk()));
+        }
         let graphs: Vec<_> = nodes.iter().map(|node| crate::lower::keyed_variant(Language::TypeScript, source.as_bytes(), *node)).collect();
         let functions: Vec<_> = nodes.iter().zip(&graphs).map(|(node, graph)| KeyedFunction { node: *node, graph }).collect();
         let imports = [vec![KeyedImport { local: "upload".into(), path: "barrel".into(), name: Some("upload".into()), owner: None, exported: true }], vec![], vec![KeyedImport { local: "create".into(), path: "factory".into(), name: Some("default".into()), owner: None, exported: true }], vec![]];

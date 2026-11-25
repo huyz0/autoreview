@@ -14,6 +14,9 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
   try {
     const config = path.join(directory, 'tsconfig.json');
     const file = path.join(directory, 'sample.ts');
+    const types = path.join(directory, 'node_modules', '@types', 'local');
+    fs.mkdirSync(types, { recursive: true });
+    fs.writeFileSync(path.join(types, 'index.d.ts'), 'declare const LOCAL_GLOBAL: number;');
     fs.writeFileSync(config, JSON.stringify({ compilerOptions: { target: 'ES2022', strict: true }, files: ['sample.ts'] }));
     const source = [
       'declare function promise(): Promise<void>;',
@@ -22,6 +25,7 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
       'declare function mixed(): Promise<void> | string;',
       'declare function thenable(): PromiseLike<number>;',
       "const accent = 'é';",
+      'const localGlobal = LOCAL_GLOBAL;',
       'promise(); sync(); anything(); mixed(); thenable();',
       'function generic<T>(value: T) { return identity(value); }',
       'declare function identity<T>(value: T): T;',
