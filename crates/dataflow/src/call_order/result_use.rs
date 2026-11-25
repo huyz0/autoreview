@@ -342,7 +342,7 @@ mod tests {
     fn imported_factory_evidence_can_feed_result_use_without_shadowed_calls() {
         use crate::call_order::{KeyedExport, KeyedFunction, KeyedImport};
         use crate::promise_types::TypeModule;
-        let source = "import { upload } from './barrel'; function run() { switch (1) { case 1: break; } upload('outside'); [1].map(() => { upload('x'); upload(); upload(...args); upload?.('x'); }); } function shadow(upload: (x: string) => string) { [1].map(() => upload('x')); }";
+        let source = "import { upload, unrelated } from './barrel'; function run() { unrelated?.('x'); switch (1) { case 1: break; } upload('outside'); [1].map(() => { upload('x'); upload(); upload(...args); upload?.('x'); }); } function shadow(upload: (x: string) => string) { [1].map(() => { upload('x'); upload?.('x'); upload(...args); }); }";
         let texts = [source, "export * from './binding';", "import create from './factory'; export const upload = create({});", "export default function create(x: object): (ctx: string) => Promise<void> { throw 1; }"];
         let paths = ["caller", "barrel", "binding", "factory"];
         let trees: Vec<_> = texts.iter().map(|source| autoreview_langsupport::parser_for(Language::TypeScript).unwrap().parse(source, None).unwrap()).collect();
@@ -355,7 +355,7 @@ mod tests {
         }
         let graphs: Vec<_> = nodes.iter().map(|node| crate::lower::keyed_variant(Language::TypeScript, source.as_bytes(), *node)).collect();
         let functions: Vec<_> = nodes.iter().zip(&graphs).map(|(node, graph)| KeyedFunction { node: *node, graph }).collect();
-        let imports = [vec![KeyedImport { local: "upload".into(), path: "barrel".into(), name: Some("upload".into()), owner: None, exported: true }], vec![], vec![KeyedImport { local: "create".into(), path: "factory".into(), name: Some("default".into()), owner: None, exported: true }], vec![]];
+        let imports = [vec![KeyedImport { local: "upload".into(), path: "barrel".into(), name: Some("upload".into()), owner: None, exported: true }, KeyedImport { local: "unrelated".into(), path: "barrel".into(), name: Some("unrelated".into()), owner: None, exported: true }], vec![], vec![KeyedImport { local: "create".into(), path: "factory".into(), name: Some("default".into()), owner: None, exported: true }], vec![]];
         let exports = [vec![], vec![KeyedExport::Star { path: "binding".into() }], vec![KeyedExport::Named { exported: "upload".into(), local: "upload".into(), path: None }], vec![KeyedExport::Named { exported: "default".into(), local: "create".into(), path: None }]];
         let units: Vec<_> = modules.iter().enumerate().map(|(i, module)| KeyedUnit { path: module.path, source: module.source, functions: if i == 0 { &functions } else { &[] }, imports: &imports[i], exports: &exports[i], entry: i == 0 }).collect();
         test_support::with_program((Language::TypeScript, ContractLanguage::Web), "function dummy() {}", ("unused", "missing"), |dummy, _| {
@@ -363,6 +363,7 @@ mod tests {
             let discovery = discover_factory_sources(spec, &modules, &units);
             assert!(discovery.limitations.iter().any(|issue| issue.reason == "promise_type_unresolved"));
             assert!(discovery.limitations.iter().any(|issue| issue.reason == "factory_flow_unmodeled"));
+            assert_eq!(discovery.limitations.iter().filter(|issue| issue.reason == "factory_call_unmodeled").count(), 2);
             let offsets = discovery.candidates.get(&0).unwrap().clone();
             assert_eq!(offsets.len(), 1);
             let (hits, exhausted, _) = check_units_with_sources(spec, &units, &BTreeMap::from([(0, offsets)]));

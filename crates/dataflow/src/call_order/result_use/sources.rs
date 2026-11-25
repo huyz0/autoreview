@@ -27,7 +27,7 @@ pub fn discover_factory_sources(
     let program = Program::new(spec, units);
     let functions: Vec<_> = units.iter().flat_map(|unit| unit.functions.iter()).collect();
     let reachable = reachable_frames(&program, units, &functions);
-    let mut scan = CandidateScan { modules, units, cache: BTreeMap::new(), discovery: FactorySourceDiscovery { candidates: BTreeMap::new(), limitations: inventory_limitations(modules) } };
+    let mut scan = CandidateScan { modules, units, cache: BTreeMap::new(), unsupported_factories: BTreeMap::new(), unsupported: BTreeSet::new(), discovery: FactorySourceDiscovery { candidates: BTreeMap::new(), limitations: inventory_limitations(modules) } };
     for (index, (function, frame)) in functions.iter().zip(&program.frames).enumerate() {
         if !reachable.contains(&index) { continue; }
         if let Some(plan) = &frame.plan {
@@ -43,15 +43,34 @@ struct CandidateScan<'a, 'm, 's, 't, 'g> {
     modules: &'a [crate::promise_types::TypeModule<'m>],
     units: &'a [KeyedUnit<'s, 't, 'g>],
     cache: BTreeMap<(usize, String, usize), bool>,
+    unsupported_factories: BTreeMap<(usize, String), bool>,
+    unsupported: BTreeSet<(usize, usize)>,
     discovery: FactorySourceDiscovery,
 }
 
 impl CandidateScan<'_, '_, '_, '_, '_> {
+    fn record_unsupported(&mut self, unit_index: usize, node: tree_sitter::Node<'_>, function: tree_sitter::Node<'_>, plan: Option<&super::Plan<'_, '_>>) {
+        let unit = &self.units[unit_index];
+        let Some(name) = unsupported_call(node, unit.source) else { return; };
+        if !unit.imports.iter().any(|binding| binding.local == name && binding.name.is_some() && binding.owner.is_none() && binding.exported)
+            || plan.is_some_and(|plan| plan.syntax.shadows_api(name))
+            || enclosing_scope_shadows(function, unit.source, name) { return; }
+        let factory = *self.unsupported_factories.entry((unit_index, name.to_owned())).or_insert_with(|| {
+            crate::promise_types::imported_factory_evidence_any_arity(self.modules, self.units, unit_index, name).is_some()
+        });
+        if !factory || !self.unsupported.insert((unit_index, node.start_byte())) { return; }
+        self.discovery.limitations.push(KeyedLimitation {
+            reason: "factory_call_unmodeled", path: Some(unit.path.to_owned()),
+            line: Some(node.start_position().row as u32 + 1),
+        });
+    }
+
     fn unmodeled(&mut self, unit_index: usize, function: tree_sitter::Node<'_>) {
         let unit = &self.units[unit_index];
         let mut pending = vec![function];
         while let Some(node) = pending.pop() {
             if node != function && matches!(node.kind(), "function_declaration" | "function_expression" | "arrow_function" | "method_definition") { continue; }
+            self.record_unsupported(unit_index, node, function, None);
             let candidate = direct_call(node, unit.source).filter(|(name, _)| unit.imports.iter().any(|binding| binding.local == *name));
             if candidate.is_some_and(|(name, arity)| crate::promise_types::imported_factory_evidence(self.modules, self.units, unit_index, name, arity).is_some()) {
                 self.discovery.limitations.push(KeyedLimitation {
@@ -68,6 +87,7 @@ impl CandidateScan<'_, '_, '_, '_, '_> {
         let unit = &self.units[unit_index];
         let mut pending = vec![function];
         while let Some(node) = pending.pop() {
+            self.record_unsupported(unit_index, node, function, Some(plan));
             let candidate = direct_call(node, unit.source).filter(|(name, _)| {
                 !plan.syntax.shadows_api(name) && !enclosing_scope_shadows(function, unit.source, name)
                     && unit.imports.iter().any(|binding| binding.local == *name && binding.name.is_some() && binding.owner.is_none() && binding.exported)
@@ -134,3 +154,12 @@ fn direct_call<'a>(node: tree_sitter::Node<'_>, source: &'a [u8]) -> Option<(&'a
     Some((name, args.len()))
 }
 
+
+fn unsupported_call<'a>(node: tree_sitter::Node<'_>, source: &'a [u8]) -> Option<&'a str> {
+    if node.kind() != "call_expression" { return None; }
+    let name = node.child_by_field_name("function").filter(|node| node.kind() == "identifier")?.utf8_text(source).ok()?;
+    let optional = node.children(&mut node.walk()).any(|child| matches!(child.kind(), "optional_chain" | "?."));
+    let arguments = node.child_by_field_name("arguments")?;
+    let spread = arguments.named_children(&mut arguments.walk()).any(|arg| matches!(arg.kind(), "spread_element" | "spread_expression"));
+    (optional || spread).then_some(name)
+}
