@@ -35,30 +35,3 @@ fn make_group(repo: &Path, context: Option<PathBuf>, files: Vec<String>) -> Grou
 pub(super) fn normalize(path: &Path) -> String {
     path.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/")
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn separates_module_workspace_and_nonmodule_directories() {
-        let dir = tempfile::tempdir().unwrap();
-        for path in ["mod/pkg/file.go", "workspace/pkg/file.go", "loose/a.go", "loose/b.go", "other/c.go"] {
-            let full = dir.path().join(path);
-            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
-            std::fs::write(full, "package p\n").unwrap();
-        }
-        std::fs::write(dir.path().join("mod/go.mod"), "module example.test/mod\n").unwrap();
-        std::fs::write(dir.path().join("workspace/go.work"), "go 1.22\n").unwrap();
-        let input = ["mod/pkg/file.go", "workspace/pkg/file.go", "loose/a.go", "loose/b.go", "other/c.go", "missing.go", "../escape.go"];
-        let groups = groups(dir.path(), &input.map(str::to_owned));
-        assert_eq!(groups.len(), 4);
-        let module = groups.iter().find(|group| group.prefix == Path::new("mod")).unwrap();
-        assert_eq!(module.files, ["pkg/file.go"]);
-        assert_eq!(module.targets, ["./pkg"]);
-        let workspace = groups.iter().find(|group| group.prefix == Path::new("workspace")).unwrap();
-        assert_eq!(workspace.targets, ["./pkg"]);
-        let loose = groups.iter().find(|group| group.targets.len() == 2).unwrap();
-        assert_eq!(loose.prefix, Path::new(""));
-        assert_eq!(loose.targets, ["loose/a.go", "loose/b.go"]);
-    }
-}

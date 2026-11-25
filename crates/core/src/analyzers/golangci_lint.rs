@@ -282,6 +282,29 @@ mod tests {
     }
 
     #[test]
+    fn separates_module_workspace_and_nonmodule_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        for path in ["mod/pkg/file.go", "workspace/pkg/file.go", "loose/a.go", "loose/b.go", "other/c.go"] {
+            let full = dir.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, "package p\n").unwrap();
+        }
+        std::fs::write(dir.path().join("mod/go.mod"), "module example.test/mod\n").unwrap();
+        std::fs::write(dir.path().join("workspace/go.work"), "go 1.22\n").unwrap();
+        let input = ["mod/pkg/file.go", "workspace/pkg/file.go", "loose/a.go", "loose/b.go", "other/c.go", "missing.go", "../escape.go"];
+        let groups = targets::groups(dir.path(), &input.map(str::to_owned));
+        assert_eq!(groups.len(), 4);
+        let module = groups.iter().find(|group| group.prefix == Path::new("mod")).unwrap();
+        assert_eq!(module.files, ["pkg/file.go"]);
+        assert_eq!(module.targets, ["./pkg"]);
+        let workspace = groups.iter().find(|group| group.prefix == Path::new("workspace")).unwrap();
+        assert_eq!(workspace.targets, ["./pkg"]);
+        let loose = groups.iter().find(|group| group.targets.len() == 2).unwrap();
+        assert_eq!(loose.prefix, Path::new(""));
+        assert_eq!(loose.targets, ["loose/a.go", "loose/b.go"]);
+    }
+
+    #[test]
     fn returns_empty_without_invoking_when_no_go_files() {
         let result = run_golangci_lint(Path::new("/nonexistent"), &["README.md".to_string()]).unwrap();
         assert!(result.is_empty());
@@ -393,6 +416,26 @@ mod tests {
         std::fs::remove_file(dir.path().join("go.mod")).unwrap();
         let findings = run_golangci_lint(dir.path(), &["tool/main.go".into()]).unwrap();
         assert!(findings.iter().any(|finding| finding.location.path == "tool/main.go" && finding.source.rule_id.as_deref() == Some("errcheck")), "{findings:#?}");
+    }
+
+    #[test]
+    fn reviews_modules_selected_by_go_workspace() {
+        if !golangci_lint_available() { return; }
+        let dir = write_go_module(&[
+            ("go.work", "go 1.21\nuse (\n ./one\n ./two\n)\n"),
+            ("one/go.mod", "module example.com/one\n\ngo 1.21\n"),
+            ("one/main.go", "package one\nfunc Check() { helper() }\n"),
+            ("one/helper.go", "package one\nfunc helper() error { return nil }\n"),
+            ("two/go.mod", "module example.com/two\n\ngo 1.21\n"),
+            ("two/main.go", "package two\nfunc Check() { helper() }\n"),
+            ("two/helper.go", "package two\nfunc helper() error { return nil }\n"),
+        ]);
+        std::fs::remove_file(dir.path().join("go.mod")).unwrap();
+        let findings = run_golangci_lint(dir.path(), &["one/main.go".into(), "two/main.go".into()]).unwrap();
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+        for path in ["one/main.go", "two/main.go"] {
+            assert!(findings.iter().any(|finding| finding.location.path == path && finding.source.rule_id.as_deref() == Some("errcheck")), "{findings:#?}");
+        }
     }
 
     #[test]
