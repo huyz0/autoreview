@@ -222,6 +222,28 @@ fn review_reports_missing_external_tools_as_structured_coverage() {
 }
 
 #[test]
+fn review_keeps_clippy_findings_when_another_target_fails() {
+    if !StdCommand::new("cargo").args(["clippy", "--version"]).output().is_ok_and(|output| output.status.success()) { return; }
+    let manifest = "[package]\nname = \"coverage_clippy_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+    let before = "pub fn f() -> Result<(), ()> { Ok(()) }\n#[cfg(test)] mod tests {}\n";
+    let after = "pub fn f() -> Result<(), ()> { Ok(()) }\npub fn run() { f(); }\n#[cfg(test)] mod tests {}\n";
+    let repo = init_repo(&[("Cargo.toml", manifest), ("src/lib.rs", before), ("tests/broken.rs", "compile_error!(\"failing test target\");\n")]);
+    let base = current_commit(repo.path());
+    repo.commit(&[("src/lib.rs", after)], "discard a result");
+    let run = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .env("CARGO_TARGET_DIR", repo.path().join("target"))
+        .args(["diff", "--base", &base, "--head", "HEAD", "--static-only"])
+        .assert().success();
+    let path = report_path_from_stdout(&String::from_utf8_lossy(&run.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert!(report["findings"].as_array().unwrap().iter().any(|finding|
+        finding["source"]["tool"] == "clippy" && finding["source"]["ruleId"] == "unused_must_use"), "{report}");
+    assert!(report["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["analyzer"] == "clippy" && issue["reason"] == "tool_failed"
+            && issue["detail"].as_str().unwrap().contains("additional targets failed")), "{report}");
+}
+
+#[test]
 fn changed_lines_include_verified_project_error_results() {
     let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
     let helper = "package helper\nfunc Work() (int, error) { return 1, nil }\nfunc Ignore(n int, err error) {}\nfunc Check(n int, err error) { if err != nil { return } }\n";

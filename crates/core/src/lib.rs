@@ -31,7 +31,7 @@ pub use analyzers::workflow_policy::run_workflow_policy;
 pub use analyzers::postgres_migrations::run_postgres_migration_policy;
 pub use analyzers::protobuf_schema::run_protobuf_policy;
 pub use analyzers::locale_catalogs::run_locale_catalog_policy;
-pub use analyzers::clippy::run_clippy;
+pub use analyzers::clippy::{run_clippy, run_clippy_with_status, ClippyRun};
 pub use analyzers::rust_review::{run_rust_review, rust_review_rule, rust_review_semantic_ids};
 pub use analyzers::churn::{detect_shotgun_surgery, run_divergent_change_check};
 pub use analyzers::complexity::run_complexity_check;

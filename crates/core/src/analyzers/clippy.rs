@@ -157,12 +157,28 @@ fn additional_targets(repo_root: &Path, relevant: &HashSet<&str>) -> Vec<&'stati
     targets
 }
 
+/// Findings and incomplete invocations are reported independently: a compiler
+/// error in one target does not invalidate diagnostics from another target.
+#[derive(Default)]
+pub struct ClippyRun {
+    pub findings: Vec<AgentFinding>,
+    pub failures: Vec<String>,
+}
+
 pub fn run_clippy(repo_root: &Path, changed_files: &[String]) -> anyhow::Result<Vec<AgentFinding>> {
+    let result = run_clippy_with_status(repo_root, changed_files)?;
+    if result.findings.is_empty() && !result.failures.is_empty() {
+        anyhow::bail!("{}", result.failures.join("; "));
+    }
+    Ok(result.findings)
+}
+
+pub fn run_clippy_with_status(repo_root: &Path, changed_files: &[String]) -> anyhow::Result<ClippyRun> {
     let relevant: HashSet<&str> = changed_files.iter().map(String::as_str)
         .filter(|p| is_relevant_source_file(p) && repo_root.join(p).is_file())
         .collect();
     if relevant.is_empty() || !repo_root.join("Cargo.toml").exists() {
-        return Ok(vec![]);
+        return Ok(ClippyRun::default());
     }
 
     let mut command = Command::new("cargo");
@@ -175,30 +191,28 @@ pub fn run_clippy(repo_root: &Path, changed_files: &[String]) -> anyhow::Result<
         }
         None => { command.arg("--workspace"); }
     }
-    // Keep the default build so production lints still run when the test
-    // build omits that target or fails in a development dependency.
+    // Keep production findings even when an additional target fails to start.
     let production = command.output()?;
+    let mut result = ClippyRun::default();
+    collect_output(&mut result, production, "production", &relevant);
     let extra = additional_targets(repo_root, &relevant);
-    let additional = (!extra.is_empty()).then(|| command.args(extra).output()).transpose()?;
-    let mut stdout = production.stdout;
-    if let Some(output) = additional.as_ref() {
-        stdout.push(b'\n');
-        stdout.extend_from_slice(&output.stdout);
+    if !extra.is_empty() {
+        match command.args(extra).output() {
+            Ok(output) => collect_output(&mut result, output, "additional targets", &relevant),
+            Err(error) => result.failures.push(format!("cargo clippy additional targets could not start: {error}")),
+        }
     }
-    let findings = parse_clippy_output(&String::from_utf8_lossy(&stdout), &relevant);
-    let failed = if production.status.success() {
-        additional.as_ref().filter(|output| !output.status.success())
-            .map(|output| (output.status, &output.stderr))
-    } else {
-        Some((production.status, &production.stderr))
-    };
-    // A nonzero exit can carry a diagnostic for changed code.
-    if let Some((status, stderr)) = failed.filter(|_| findings.is_empty()) {
-        let stderr = String::from_utf8_lossy(stderr);
+    Ok(result)
+}
+
+fn collect_output(result: &mut ClippyRun, output: std::process::Output, phase: &str, relevant: &HashSet<&str>) {
+    result.findings.extend(parse_clippy_output(&String::from_utf8_lossy(&output.stdout), relevant));
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         let excerpt = stderr.lines().take(20).collect::<Vec<_>>().join("\n");
-        anyhow::bail!("cargo clippy failed ({status}): {}", excerpt.trim());
+        result.failures.push(format!("cargo clippy {phase} failed ({}): {}", output.status, excerpt.trim()));
     }
-    Ok(findings)
+
 }
 
 #[cfg(test)]
@@ -297,20 +311,23 @@ mod tests {
     fn ignores_outcome() { super::outcome(); }
 }
 "#).unwrap();
-        let findings = run_clippy(dir.path(), &["src/lib.rs".to_owned()]).unwrap();
-        assert_eq!(findings.iter().filter(|finding| {
+        let clean_run = run_clippy_with_status(dir.path(), &["src/lib.rs".to_owned()]).unwrap();
+        assert!(clean_run.failures.is_empty(), "{:?}", clean_run.failures);
+        assert_eq!(clean_run.findings.iter().filter(|finding| {
             finding.source.rule_id.as_deref() == Some("unused_must_use") && finding.category == "correctness"
-        }).count(), 2, "{findings:#?}");
+        }).count(), 2, "{:#?}", clean_run.findings);
 
         std::fs::create_dir_all(dir.path().join("tests")).unwrap();
         std::fs::write(
             dir.path().join("tests/unrelated.rs"),
             "compile_error!(\"unrelated integration test\");",
         ).unwrap();
-        let findings = run_clippy(dir.path(), &["src/lib.rs".to_owned()]).unwrap();
-        assert!(findings.iter().any(|finding| {
+        let result = run_clippy_with_status(dir.path(), &["src/lib.rs".to_owned()]).unwrap();
+        assert!(result.findings.iter().any(|finding| {
             finding.source.rule_id.as_deref() == Some("unused_must_use")
                 && finding.location.snippet.contains("ignores_production_outcome")
-        }), "{findings:#?}");
+        }), "{:#?}", result.findings);
+        assert_eq!(result.failures.len(), 1);
+        assert!(result.failures[0].contains("additional targets failed"), "{:?}", result.failures);
     }
 }

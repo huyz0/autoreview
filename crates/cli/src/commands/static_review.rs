@@ -140,7 +140,6 @@ fn lint(
     let results = [
         ("ast-grep", run_ast_grep(root, files, packs)),
         ("golangci-lint", run_golangci_lint(root, files)),
-        ("clippy", autoreview_core::run_clippy(root, files)),
     ];
     let mut findings = Vec::new();
     for (tool, result) in results {
@@ -148,6 +147,15 @@ fn lint(
             Ok(items) => findings.extend(items),
             Err(err) => record_tool_issue(warnings, coverage, tool, "tool_failed", format!("{tool} run failed: {err}")),
         }
+    }
+    match autoreview_core::run_clippy_with_status(root, files) {
+        Ok(result) => {
+            findings.extend(result.findings);
+            for failure in result.failures {
+                record_tool_issue(warnings, coverage, "clippy", "tool_failed", failure);
+            }
+        }
+        Err(error) => record_tool_issue(warnings, coverage, "clippy", "tool_failed", format!("clippy run failed: {error}")),
     }
     findings.extend(autoreview_core::run_rust_review(root, files));
     findings
