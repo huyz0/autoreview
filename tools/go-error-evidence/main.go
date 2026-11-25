@@ -26,8 +26,11 @@ type callSite struct {
 	Start int    `json:"start"`
 }
 type request struct {
-	Files []sourceFile `json:"files"`
-	Calls []callSite   `json:"calls"`
+	Files           []sourceFile      `json:"files,omitempty"`
+	Calls           []callSite        `json:"calls"`
+	PackageDir      string            `json:"packageDir,omitempty"`
+	GoBinary        string            `json:"goBinary,omitempty"`
+	ExpectedSources map[string]string `json:"expectedSources,omitempty"`
 }
 type callResult struct {
 	Path   string `json:"path"`
@@ -42,13 +45,29 @@ type response struct {
 
 func analyze(req request) response {
 	fset := token.NewFileSet()
+	config := types.Config{Importer: importer.Default(), Error: func(error) {}}
+	packagePath := "autoreview.local/package"
+	if req.PackageDir != "" || req.GoBinary != "" {
+		if len(req.Files) != 0 {
+			return incomplete("invalid_request")
+		}
+		loaded, reason := loadPackage(fset, req.PackageDir, req.GoBinary)
+		if reason != "" {
+			return incomplete(reason)
+		}
+		req.Files = loaded.files
+		config.Importer = loaded.importer
+		packagePath = loaded.path
+		if !matchesExpectedSources(req.Files, req.Calls, req.ExpectedSources) {
+			return incomplete("source_mismatch")
+		}
+	}
 	files, byPath, reason := parseFiles(fset, req.Files)
 	if reason != "" {
 		return incomplete(reason)
 	}
 	info := &types.Info{Types: make(map[ast.Expr]types.TypeAndValue)}
-	config := types.Config{Importer: importer.Default(), Error: func(error) {}}
-	if _, err := config.Check("autoreview.local/package", fset, files, info); err != nil {
+	if _, err := config.Check(packagePath, fset, files, info); err != nil {
 		return incomplete("type_errors")
 	}
 	indexes := indexCalls(fset, byPath)
