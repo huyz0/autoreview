@@ -77,6 +77,18 @@ shadowing and different calls with the same spelling cannot share a fact.
 Keep the existing API-contract path unchanged and add end-to-end tests through
 the normal core rule and replay entry points before claiming coverage.
 
+An isolated TypeScript 5.9.3 probe uses the documented `getAwaitedType` checker
+API and rejects `any`, unknown, generic, and mixed promise/synchronous unions.
+The prototype in `crates/core/src/analyzers/typescript_promise_probe.cjs` also
+declines projects with compiler errors and reports missing call locations. It
+is not invoked by Autoreview, bundled in releases, or a complete type-safety
+proof. Before integration, define how a compiler is located and trusted, bound
+time and output, preserve UTF-8 byte offsets, report checker failures, and
+measure cost. Its project-wide error gate is conservative and may skip valid
+calls in projects with unrelated errors. The Node test uses
+`AUTOREVIEW_TEST_TYPESCRIPT` to select an installed compiler and skips without
+one; it must be included explicitly in CI before relying on it.
+
 ## Evidence and release gate
 
 - Add positive, negative, ambiguity, shadowing, and regression fixtures for
