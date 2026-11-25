@@ -191,7 +191,7 @@ impl<'tree, 'text> Source<'tree, 'text> {
         if let Some(imported) = scope.imports.get(head) {
             return Some(imported.as_ref().and_then(|imported| self.imported_path(scope_node, reference, imported)));
         }
-        scope.glob.then_some(None)
+        self.glob_may_shadow(scope_node, head).then_some(None)
     }
 
     fn imported_path(&self, scope_node: Node<'tree>, reference: &Path, imported: &Path) -> Option<String> {

@@ -383,6 +383,13 @@ mod tests {{
             assert!(ids(&fixture).is_empty(), "{prefix}");
         }
         assert!(ids(r#"
+mod tokio {}
+mod tests {
+    use super::*;
+    #[tokio::test] async fn shadowed() { matches!(1, 1); }
+}
+"#).is_empty());
+        assert!(ids(r#"
 #[test_case(1)] fn unknown(value: i32) { matches!(value, 1); }
 mod test_case { pub fn test_case() {} }
 #[test_case::test_case(2)] fn shadowed(value: i32) { matches!(value, 2); }
