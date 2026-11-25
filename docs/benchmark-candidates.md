@@ -7,10 +7,11 @@ contribute to accuracy scores. They are not counted as detected findings.
 
 - Repository: https://github.com/taigrr/yq, MIT license at the pinned revisions.
 - Before: `f8a700e4005dbf47528eaee3060e90ae5d41b5e4`,
-  `pkg/yqlib/operator_explode.go:21`.
+  `pkg/yqlib/operator_explode.go:21`, `:68`, and `:72`.
 - Fix: `af39fc737dc49317dafe3adf99fb24749f759482`.
 - Evidence: the earlier code calls `explodeNode` without using its error;
-  the fix propagates that error. The function is declared in the same file.
+  the fix propagates that error. Two further calls discard `applyAlias` errors;
+  the same fix propagates those too. Both functions are declared in the file.
 
 This is a candidate for checking discarded error returns from resolved Go
 functions, rather than only APIs named by a contract. A future case should
@@ -30,8 +31,7 @@ confirm the expected behavior against both revisions before scoring it.
   The helpers are exposed through a barrel export and created by a factory
   whose return type is `Promise<void>`.
 
-The helper resolver now follows named and wildcard re-exports. This case still
-needs type-aware promise tracking for functions returned by factories. Validate
-the complete file and safe alternatives before using it to score a rule;
-matching the helper names alone is not evidence that arbitrary calls return
-promises.
+The typed factory rule now detects this case with an explicitly configured,
+trusted TypeScript compiler. The normal replay and its limits are documented in
+`benchmarks/sftp-promise.yaml` and `benchmarks/README.md`. One fix pair cannot
+establish general precision or recall.

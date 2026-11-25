@@ -25,6 +25,15 @@ The fix commit and its immediate parent must both be available. Use the
 report's historical and synthetic breakdowns separately, inspect failures,
 and do not interpret an unrepresentative sample as population-wide accuracy.
 
+The replay report's `coverage` entries group cases by rule and language.
+`attempted` counts all cases, `completed` counts cases whose two revisions were
+analyzed, `incomplete` counts cases rejected because dataflow reported a
+coverage limitation, and `failed` counts other errors such as missing commits.
+A mismatch between findings and labels is a completed case and appears in the
+accuracy scores. Incomplete and failed cases are excluded from precision and
+recall, and make replay exit unsuccessfully. These are case counts, not file
+or finding counts.
+
 `go-tools.yaml` is a historical negative case for a test backup rename whose
 error is explicitly ignored. The label treats this best-effort test operation
 as acceptable; teams may make a different policy choice. Before Go helper
