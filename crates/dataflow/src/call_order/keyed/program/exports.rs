@@ -46,50 +46,107 @@ impl<T: Ord> Resolution<T> {
     }
 }
 
-impl Program<'_, '_, '_> {
-    pub(super) fn resolve_import(
-        &self, unit: usize, name: &str, arity: usize, context: &mut ResolutionContext,
-    ) -> Resolution {
+/// Declaration-specific lookups used by the common module traversal.
+/// A local lookup returns `None` only when the name is not locally bound;
+/// an incomplete result represents a binding that cannot be modeled.
+trait ExportTargets {
+    type Target: Ord;
+    fn imports(&self, unit: usize) -> &[super::KeyedImport];
+    fn exports(&self, unit: usize) -> &[KeyedExport];
+    fn provider(&self, path: &str) -> Option<usize>;
+    fn direct(&self, unit: usize, name: &str, arity: usize) -> (bool, Resolution<Self::Target>);
+    fn local(&self, unit: usize, name: &str, arity: usize) -> Option<Resolution<Self::Target>>;
+    fn owned(&self, unit: usize, binding: &super::KeyedImport, name: &str, arity: usize) -> Resolution<Self::Target>;
+}
+
+struct ExportTraversal<'a, T> {
+    targets: &'a T,
+}
+
+impl<T: ExportTargets> ExportTraversal<'_, T> {
+    fn import(&self, unit: usize, name: &str, arity: usize, context: &mut ResolutionContext) -> Resolution<T::Target> {
         let mut result = Resolution::default();
-        for binding in self.units[unit].imports {
-            let Some(target) = binding.target(name) else { continue };
-            let Some(&provider) = self.paths.get(binding.path.as_str()) else {
+        for binding in self.targets.imports(unit) {
+            let Some(name) = binding.target(name) else { continue };
+            let Some(provider) = self.targets.provider(&binding.path) else {
                 result.incomplete = true;
                 continue;
             };
             if binding.exported && binding.owner.is_none() {
-                result.merge(self.resolve_export(provider, target, arity, context));
+                result.merge(self.export(provider, name, arity, context));
             } else {
-                result.targets.extend(self.units[provider].frames.iter().copied()
-                    .filter(|index| self.frames[*index].matches_export(binding, target, arity)));
+                result.merge(self.targets.owned(provider, binding, name, arity));
             }
         }
         result
     }
 
-    fn resolve_export(
-        &self, unit: usize, name: &str, arity: usize, context: &mut ResolutionContext,
-    ) -> Resolution {
+    fn export(&self, unit: usize, name: &str, arity: usize, context: &mut ResolutionContext) -> Resolution<T::Target> {
         let key = (unit, name.to_owned());
-        if context.seen.contains(&key) {
-            return Resolution::default();
-        }
+        if context.seen.contains(&key) { return Resolution::default(); }
         if context.remaining == 0 || context.seen.len() >= EXPORT_DEPTH_LIMIT {
             return Resolution { incomplete: true, limit: true, ..Resolution::default() };
         }
         context.remaining -= 1;
         context.seen.insert(key.clone());
-        let (explicit, mut result) = self.explicit_exports(unit, name, arity, context);
+        let (mut explicit, mut result) = self.targets.direct(unit, name, arity);
+        for export in self.targets.exports(unit) {
+            if let KeyedExport::Named { exported, local, path } = export {
+                if exported == name {
+                    explicit = true;
+                    result.merge(self.named(unit, local, path.as_deref(), arity, context));
+                }
+            }
+        }
         if !explicit && name != "default" {
-            result.merge(self.star_exports(unit, name, arity, context));
+            for export in self.targets.exports(unit) {
+                match export {
+                    KeyedExport::Star { path } => result.merge(self.reexport(path, name, arity, context)),
+                    KeyedExport::Unknown => result.incomplete = true,
+                    _ => {}
+                }
+            }
         }
         context.seen.remove(&key);
         result
     }
 
-    fn explicit_exports(
+    fn named(&self, unit: usize, local: &str, path: Option<&str>, arity: usize, context: &mut ResolutionContext) -> Resolution<T::Target> {
+        let mut result = if let Some(path) = path {
+            self.reexport(path, local, arity, context)
+        } else if let Some(local) = self.targets.local(unit, local, arity) {
+            return local;
+        } else {
+            self.import(unit, local, arity, context)
+        };
+        result.incomplete |= result.targets.is_empty();
+        result
+    }
+
+    fn reexport(&self, path: &str, name: &str, arity: usize, context: &mut ResolutionContext) -> Resolution<T::Target> {
+        match self.targets.provider(path) {
+            Some(provider) => self.export(provider, name, arity, context),
+            None => Resolution { incomplete: true, ..Resolution::default() },
+        }
+    }
+}
+
+impl Program<'_, '_, '_> {
+    pub(super) fn resolve_import(
         &self, unit: usize, name: &str, arity: usize, context: &mut ResolutionContext,
-    ) -> (bool, Resolution) {
+    ) -> Resolution {
+        ExportTraversal { targets: self }.import(unit, name, arity, context)
+    }
+}
+
+impl ExportTargets for Program<'_, '_, '_> {
+    type Target = usize;
+
+    fn imports(&self, unit: usize) -> &[super::KeyedImport] { self.units[unit].imports }
+    fn exports(&self, unit: usize) -> &[KeyedExport] { self.units[unit].exports }
+    fn provider(&self, path: &str) -> Option<usize> { self.paths.get(path).copied() }
+
+    fn direct(&self, unit: usize, name: &str, arity: usize) -> (bool, Resolution) {
         let mut result = Resolution::default();
         let mut explicit = false;
         for &index in &self.units[unit].frames {
@@ -97,61 +154,23 @@ impl Program<'_, '_, '_> {
             if frame.export.as_ref().is_some_and(|export| export.visible && export.owner.is_none()
                 && (export.name == name || (name == "default" && export.default))) {
                 explicit = true;
-                if frame.params.len() == arity {
-                    result.targets.insert(index);
-                }
-            }
-        }
-        for export in self.units[unit].exports {
-            if let KeyedExport::Named { exported, local, path } = export {
-                if exported == name {
-                    explicit = true;
-                    result.merge(self.resolve_named_export(unit, local, path.as_deref(), arity, context));
-                }
+                if frame.params.len() == arity { result.targets.insert(index); }
             }
         }
         (explicit, result)
     }
 
-    fn star_exports(
-        &self, unit: usize, name: &str, arity: usize, context: &mut ResolutionContext,
-    ) -> Resolution {
-        let mut result = Resolution::default();
-        for export in self.units[unit].exports {
-            match export {
-                KeyedExport::Star { path } => result.merge(self.resolve_reexport(path, name, arity, context)),
-                KeyedExport::Unknown => result.incomplete = true,
-                _ => {}
-            }
-        }
-        result
+    fn local(&self, unit: usize, name: &str, arity: usize) -> Option<Resolution> {
+        self.targets.get(&(Scope::File(unit), name.to_owned(), arity)).map(|target| Resolution {
+            targets: target.iter().copied().collect(), incomplete: target.is_none(), limit: false,
+        })
     }
 
-    fn resolve_named_export(
-        &self, unit: usize, local: &str, path: Option<&str>, arity: usize,
-        context: &mut ResolutionContext,
-    ) -> Resolution {
-        if let Some(path) = path {
-            let mut result = self.resolve_reexport(path, local, arity, context);
-            result.incomplete |= result.targets.is_empty();
-            return result;
-        }
-        if let Some(target) = self.targets.get(&(Scope::File(unit), local.to_owned(), arity)) {
-            return Resolution { targets: target.iter().copied().collect(), incomplete: target.is_none(), limit: false };
-        }
-        let mut result = self.resolve_import(unit, local, arity, context);
-        // A named export exists even if it is not a modeled callable or its
-        // signature differs. It must still shadow or conflict with a star.
-        result.incomplete |= result.targets.is_empty();
-        result
-    }
-
-    fn resolve_reexport(
-        &self, path: &str, name: &str, arity: usize, context: &mut ResolutionContext,
-    ) -> Resolution {
-        match self.paths.get(path) {
-            Some(&provider) => self.resolve_export(provider, name, arity, context),
-            None => Resolution { incomplete: true, ..Resolution::default() },
+    fn owned(&self, unit: usize, binding: &super::KeyedImport, name: &str, arity: usize) -> Resolution {
+        Resolution {
+            targets: self.units[unit].frames.iter().copied()
+                .filter(|index| self.frames[*index].matches_export(binding, name, arity)).collect(),
+            ..Resolution::default()
         }
     }
 }
