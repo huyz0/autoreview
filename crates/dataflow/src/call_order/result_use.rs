@@ -401,6 +401,45 @@ mod tests {
     }
 
     #[test]
+    fn imported_factory_evidence_can_feed_result_use_without_shadowed_calls() {
+        use crate::call_order::{KeyedExport, KeyedFunction, KeyedImport};
+        use crate::promise_types::{imported_factory_evidence, TypeModule};
+        let source = "import { upload } from './barrel'; function run() { upload('x'); } function shadow(upload: () => string) { upload(); }";
+        let texts = [source, "export * from './binding';", "import create from './factory'; export const upload = create({});", "export default function create(x: object): (ctx: string) => Promise<void> { throw 1; }"];
+        let paths = ["caller", "barrel", "binding", "factory"];
+        let trees: Vec<_> = texts.iter().map(|source| autoreview_langsupport::parser_for(Language::TypeScript).unwrap().parse(source, None).unwrap()).collect();
+        let modules: Vec<_> = texts.iter().zip(&trees).zip(paths).map(|((source, tree), path)| TypeModule { path, source: source.as_bytes(), root: tree.root_node() }).collect();
+        let nodes: Vec<_> = trees[0].root_node().named_children(&mut trees[0].root_node().walk()).filter(|node| node.kind() == "function_declaration").collect();
+        let graphs: Vec<_> = nodes.iter().map(|node| crate::lower::keyed_variant(Language::TypeScript, source.as_bytes(), *node)).collect();
+        let functions: Vec<_> = nodes.iter().zip(&graphs).map(|(node, graph)| KeyedFunction { node: *node, graph }).collect();
+        let imports = [vec![KeyedImport { local: "upload".into(), path: "barrel".into(), name: Some("upload".into()), owner: None, exported: true }], vec![], vec![KeyedImport { local: "create".into(), path: "factory".into(), name: Some("default".into()), owner: None, exported: true }], vec![]];
+        let exports = [vec![], vec![KeyedExport::Star { path: "binding".into() }], vec![KeyedExport::Named { exported: "upload".into(), local: "upload".into(), path: None }], vec![KeyedExport::Named { exported: "default".into(), local: "create".into(), path: None }]];
+        let units: Vec<_> = modules.iter().enumerate().map(|(i, module)| KeyedUnit { path: module.path, source: module.source, functions: if i == 0 { &functions } else { &[] }, imports: &imports[i], exports: &exports[i], entry: i == 0 }).collect();
+        test_support::with_program((Language::TypeScript, ContractLanguage::Web), "function dummy() {}", ("unused", "missing"), |dummy, _| {
+            let spec = dummy.frames[0].plan.as_ref().unwrap().spec;
+            let program = Program::new(spec, &units);
+            let mut offsets = BTreeSet::new();
+            for (function, frame) in functions.iter().zip(&program.frames) {
+                let Some(plan) = &frame.plan else { continue };
+                let mut pending = vec![function.node];
+                while let Some(node) = pending.pop() {
+                    if node.kind() == "call_expression" && node.child_by_field_name("function").is_some_and(|callee| callee.kind() == "identifier" && callee.utf8_text(source.as_bytes()) == Ok("upload"))
+                        && !plan.syntax.shadows_api("upload")
+                        && imported_factory_evidence(&modules, &units, 0, "upload", 1).is_some() {
+                        offsets.insert(node.start_byte());
+                    }
+                    pending.extend(node.named_children(&mut node.walk()));
+                }
+            }
+            assert_eq!(offsets.len(), 1);
+            let (hits, exhausted, _) = check_units_with_sources(spec, &units, &BTreeMap::from([(0, offsets)]));
+            assert!(!exhausted);
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].trigger_call, "upload");
+        });
+    }
+
+    #[test]
     fn helper_effect_propagates_only_the_arguments_required_by_the_caller() {
         let output = Place::CallResult(50);
         let effects = [Effect::ApplyHelper(HelperCall {
