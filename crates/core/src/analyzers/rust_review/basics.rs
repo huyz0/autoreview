@@ -383,6 +383,15 @@ mod tests {{
             assert!(ids(&fixture).is_empty(), "{prefix}");
         }
         assert!(ids(r#"
+use other::matches;
+mod tests {
+    use test_case::test_case;
+    #[test_case(1)] fn example(value: i32) {
+        { use super::*; matches!(value, 1); }
+    }
+}
+"#).is_empty());
+        assert!(ids(r#"
 mod tokio {}
 mod tests {
     use super::*;

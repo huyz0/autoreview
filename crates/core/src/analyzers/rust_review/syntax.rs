@@ -248,8 +248,9 @@ impl<'tree, 'text> Source<'tree, 'text> {
         match self.scopes.get(&scope_node.id()) {
             None => true,
             Some(scope) if scope.glob => true,
-            Some(scope) if scope.parent_glob => ancestors(scope_node)
-                .find(|node| self.scopes.contains_key(&node.id()))
+            Some(scope) if scope.parent_glob => std::iter::once(scope_node).chain(ancestors(scope_node))
+                .find(|node| is_module_boundary(*node))
+                .and_then(|module| ancestors(module).find(|node| node.kind() == "source_file" || is_module_boundary(*node)))
                 .and_then(|parent| self.scopes.get(&parent.id()).map(|scope| (parent, scope)))
                 .is_none_or(|(parent, scope)| scope.items.contains(name) || scope.imports.contains_key(name)
                     || scope.opaque_macros || self.glob_may_shadow(parent, name)),
