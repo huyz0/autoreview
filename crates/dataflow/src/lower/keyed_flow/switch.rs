@@ -17,7 +17,8 @@ pub(crate) fn supports_go_switch(node: Node<'_>) -> bool {
 }
 
 fn pure(node: Node<'_>) -> bool {
-    matches!(node.kind(), "expression_list" | "identifier" | "selector_expression" | "field_identifier" | "int_literal" | "float_literal" | "imaginary_literal" | "rune_literal" | "raw_string_literal" | "interpreted_string_literal" | "true" | "false" | "nil")
+    if matches!(node.kind(), "int_literal" | "float_literal" | "imaginary_literal" | "rune_literal" | "raw_string_literal" | "interpreted_string_literal" | "true" | "false" | "nil") { return true; }
+    matches!(node.kind(), "expression_list" | "identifier" | "selector_expression" | "field_identifier")
         && site::children(node).all(pure)
 }
 
@@ -41,5 +42,33 @@ impl Flow<'_> {
         }
         if !has_default { cfg.edges.push((start, after, EdgeKind::False)); }
         after
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use autoreview_langsupport::Language;
+
+    #[test]
+    fn supports_pure_literal_switches_but_not_jumps_or_calls() {
+        let examples = [
+            (r#"package p
+func f(x string) { switch x { case "p\n", "q": return; default: return } }"#, true),
+            ("package p\nfunc f(x int) { switch x { case 1: fallthrough; default: return } }", false),
+            ("package p\nfunc f(x int) { switch x { case call(): return } }", false),
+            ("package p\nfunc f(x int) { switch x { case 1: break } }", false),
+            ("package p\nfunc f() { switch x := call(); x { case 1: return } }", false),
+        ];
+        for (source, expected) in examples {
+            let tree = autoreview_langsupport::parser_for(Language::Go).unwrap().parse(source, None).unwrap();
+            let mut nodes = vec![tree.root_node()];
+            let found = loop {
+                let node = nodes.pop().unwrap();
+                if node.kind() == "expression_switch_statement" { break node; }
+                nodes.extend(node.named_children(&mut node.walk()));
+            };
+            assert_eq!(supports_go_switch(found), expected, "{source}");
+        }
     }
 }

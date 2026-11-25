@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use tree_sitter::Node;
 
 use crate::cfg::{CallSite, Cfg, Stmt};
@@ -12,6 +12,7 @@ pub(super) struct Plan<'a, 'src> {
     pub syntax: Syntax<'src>,
     api: Option<ApiMatcher<'a>>,
     pub(super) extra_sources: BTreeSet<usize>,
+    pub(super) result_components: BTreeMap<usize, super::ResultComponents>,
 }
 
 pub(super) struct Call {
@@ -43,6 +44,7 @@ impl<'a, 'src> Plan<'a, 'src> {
                 syntax,
                 api,
                 extra_sources: BTreeSet::new(),
+                result_components: BTreeMap::new(),
             })
     }
 

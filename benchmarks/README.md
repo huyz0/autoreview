@@ -103,3 +103,11 @@ GOPROXY=off GOSUMDB=off \
 The Go checker can execute build tools and requires a trusted project and
 compiler. It does not yet support test variants, cgo target packages, explicit
 build tags, full snapshot verification, or process-tree containment.
+
+`yq-multi-error.yaml` labels five calls that discard both the byte count and
+error returned by `Write`, plus the corrected file. With the version 2 Go
+probe, the replay detects all five before the fix and none after it. Its two
+revisions have identical Go dependency manifests. Use the same isolated-cache
+procedure as `yq-error.yaml`, checking out commit
+`25293a6894a8bcbec0fca3acc8eda2171fd72ecc` and its parent, and selecting this
+suite. This is one additional fix pair, not a population-wide accuracy estimate.

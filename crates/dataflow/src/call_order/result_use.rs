@@ -26,7 +26,7 @@ mod sources;
 pub use sources::{discover_factory_sources, FactorySourceDiscovery};
 
 mod checks;
-pub(super) use checks::{check_units, check_units_with_sources};
+pub(super) use checks::{check_units, check_units_with_sources, check_units_with_components};
 
 type Live = HashSet<Place>;
 
@@ -59,7 +59,7 @@ impl Analysis {
         self.record(&seed, &mut |node, origin, used| {
             // A finally block or a closure called twice has multiple CFG paths to its site.
             origins
-                .entry((origin.path.clone(), origin.start, origin.calls.clone()))
+                .entry((origin.path.clone(), origin.start, origin.component, origin.calls.clone()))
                 .and_modify(|(_, _, live)| *live |= used)
                 .or_insert_with(|| (node, origin.clone(), used));
         });
@@ -89,7 +89,7 @@ impl Analysis {
         let mut origins = BTreeMap::new();
         let live = self.record(&seed, &mut |_, origin, used| {
             origins
-                .entry((origin.path.clone(), origin.start, origin.calls.clone()))
+                .entry((origin.path.clone(), origin.start, origin.component, origin.calls.clone()))
                 .and_modify(|(_, previous)| *previous |= used)
                 .or_insert_with(|| (origin.clone(), used));
         });
@@ -318,6 +318,53 @@ mod tests {
             let spec = program.frames[0].plan.as_ref().unwrap().spec;
             let sources = BTreeMap::from([(0, BTreeSet::from([source.find("acquire()").unwrap()]))]);
             assert!(check_units_with_sources(spec, units, &sources).0.is_empty());
+        });
+    }
+
+    #[test]
+    fn verified_go_tuple_components_track_the_error_independently() {
+        let source = "package p\nfunc dropped() { value, _ := acquire(); _ = value }\nfunc used() { _, err := acquire(); if err != nil { return } }\nfunc overwritten() { _, err := acquire(); err = nil; if err != nil { return } }\nfunc both() { _, first, second := two(); if first != nil { return }; _ = second }\n";
+        test_support::with_program((Language::Go, ContractLanguage::Go), source, ("unused", "missing"), |program, units| {
+            let spec = program.frames[0].plan.as_ref().unwrap().spec;
+            let mut offsets = BTreeSet::new();
+            let mut shapes = BTreeMap::new();
+            for (start, _) in source.match_indices("acquire()") {
+                offsets.insert(start);
+                shapes.insert(start, super::super::ResultComponents { count: 2, indices: vec![1] });
+            }
+            let start = source.find("two()").unwrap();
+            offsets.insert(start);
+            shapes.insert(start, super::super::ResultComponents { count: 3, indices: vec![1, 2] });
+            let (hits, exhausted, limits) = check_units_with_components(spec, units, &BTreeMap::from([(0, offsets)]), &BTreeMap::from([(0, shapes)]));
+            assert!(!exhausted && limits.is_empty());
+            assert_eq!(hits.iter().map(|hit| hit.source_line).collect::<Vec<_>>(), [2, 4, 5]);
+            let invalid = FactorySourceDiscovery { candidates: BTreeMap::from([(0, BTreeSet::from([start]))]), limitations: Vec::new() };
+            let bad = BTreeMap::from([(0, BTreeMap::from([(start, super::super::ResultComponents { count: 2, indices: vec![2] })]))]);
+            let result = super::super::check_keyed_units_with_verified_components(spec, units, invalid, &bad);
+            assert!(result.hits.is_empty());
+            assert!(result.limitations.iter().any(|item| item.reason == "invalid_result_components"));
+        });
+    }
+
+    #[test]
+    fn verified_sources_in_unreachable_dependency_frames_do_not_block_entries() {
+        use crate::call_order::KeyedFunction;
+        let texts = ["package p\nfunc root() { unrelated() }\n", "package p\nfunc unrelated() { switch dynamic() { case 1: acquire() } }\n"];
+        let trees: Vec<_> = texts.iter().map(|source| autoreview_langsupport::parser_for(Language::Go).unwrap().parse(source, None).unwrap()).collect();
+        let nodes: Vec<_> = trees.iter().map(|tree| tree.root_node().named_children(&mut tree.root_node().walk()).find(|node| node.kind() == "function_declaration").unwrap()).collect();
+        let graphs: Vec<_> = nodes.iter().zip(texts).map(|(node, source)| crate::lower::keyed_variant(Language::Go, source.as_bytes(), *node)).collect();
+        let functions: Vec<_> = nodes.iter().zip(&graphs).map(|(node, graph)| [KeyedFunction { node: *node, graph }]).collect();
+        let units = [KeyedUnit { path: "root.go", source: texts[0].as_bytes(), functions: &functions[0], imports: &[], exports: &[], entry: true }, KeyedUnit { path: "dependency.go", source: texts[1].as_bytes(), functions: &functions[1], imports: &[], exports: &[], entry: false }];
+        test_support::with_program((Language::Go, ContractLanguage::Go), "package p\nfunc dummy() {}", ("unused", "missing"), |program, _| {
+            let spec = program.frames[0].plan.as_ref().unwrap().spec;
+            let offsets = BTreeMap::from([(1, BTreeSet::from([texts[1].find("acquire()").unwrap()]))]);
+            assert!(check_units_with_sources(spec, &units, &offsets).2.is_empty());
+            let imports = [crate::call_order::KeyedImport { local: String::new(), path: "dependency.go".into(), name: None, owner: None, exported: false }];
+            let connected = [KeyedUnit { path: "root.go", source: texts[0].as_bytes(), functions: &functions[0], imports: &imports, exports: &[], entry: true }, KeyedUnit { path: "dependency.go", source: texts[1].as_bytes(), functions: &functions[1], imports: &[], exports: &[], entry: false }];
+            assert!(check_units_with_sources(spec, &connected, &offsets).2.iter().any(|issue| issue.reason == "verified_source_unmodeled"));
+            let entries = [KeyedUnit { entry: true, ..units[1] }];
+            let root_offsets = BTreeMap::from([(0, BTreeSet::from([texts[1].find("acquire()").unwrap()]))]);
+            assert!(check_units_with_sources(spec, &entries, &root_offsets).2.iter().any(|issue| issue.reason == "verified_source_unmodeled"));
         });
     }
 

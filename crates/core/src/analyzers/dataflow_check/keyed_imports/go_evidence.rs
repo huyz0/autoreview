@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, check_keyed_units_with_verified_sources, CallOrderSpec, FactorySourceDiscovery, KeyedCheckResult, KeyedLimitation, KeyedUnit};
+use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, check_keyed_units_with_verified_components, CallOrderSpec, FactorySourceDiscovery, KeyedCheckResult, KeyedLimitation, KeyedUnit, ResultComponents};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use super::Source;
@@ -41,16 +41,22 @@ struct Call {
 
 #[derive(Deserialize)]
 struct Response {
+    version: u32,
     status: String,
     reason: Option<String>,
     calls: Option<Vec<CallResult>>,
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CallResult {
     path: String,
     start: usize,
     status: String,
+    #[serde(default)]
+    result_count: usize,
+    #[serde(default)]
+    error_indexes: Vec<usize>,
 }
 
 struct Group {
@@ -70,6 +76,7 @@ fn check_with_probe(
     spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, root: &Path, checker: &TrustedGo,
 ) -> KeyedCheckResult {
     let mut discovery = FactorySourceDiscovery { candidates: BTreeMap::new(), limitations: Vec::new() };
+    let mut components = BTreeMap::<usize, BTreeMap<usize, ResultComponents>>::new();
     let groups = collect_groups(units, sources, root, &mut discovery.limitations);
     for (index, (dir, group)) in groups.into_iter().filter(|(_, group)| !group.calls.is_empty()).enumerate() {
         if index >= PACKAGE_LIMIT || group.calls.len() > CALL_LIMIT {
@@ -78,9 +85,17 @@ fn check_with_probe(
         }
         let request = Request { package_dir: &dir, go_binary: &checker.go, expected_sources: group.expected, calls: group.calls };
         match verify(&checker.probe, &request) {
-            Some(results) => for ((unit, start), status) in group.indices.into_iter().zip(results) {
-                match status.as_str() {
+            Some(results) => for ((unit, start), result) in group.indices.into_iter().zip(results) {
+                match result.status.as_str() {
                     "error" => { discovery.candidates.entry(unit).or_default().insert(start); }
+                    "multi_error" => {
+                        if multi_supported(&sources[units[unit].path], start, result.result_count) {
+                            discovery.candidates.entry(unit).or_default().insert(start);
+                            components.entry(unit).or_default().insert(start, ResultComponents { count: result.result_count, indices: result.error_indexes });
+                        } else {
+                            discovery.limitations.push(multi_limitation(&units[unit], start));
+                        }
+                    }
                     "not_proven" => {}
                     _ => discovery.limitations.push(limitation(Some(units[unit].path))),
                 }
@@ -88,7 +103,7 @@ fn check_with_probe(
             None => discovery.limitations.push(limitation(None)),
         }
     }
-    check_keyed_units_with_verified_sources(spec, units, discovery)
+    check_keyed_units_with_verified_components(spec, units, discovery, &components)
 }
 
 fn collect_groups(
@@ -123,18 +138,52 @@ fn collect_unit(unit: &KeyedUnit<'_, '_, '_>, sources: &BTreeMap<String, Source>
     Some((dir, name, calls))
 }
 
-fn verify(probe: &Path, request: &Request<'_>) -> Option<Vec<String>> {
+fn verify(probe: &Path, request: &Request<'_>) -> Option<Vec<CallResult>> {
     let input = serde_json::to_vec(request).ok()?;
     let mut command = Command::new(probe);
     let output = crate::analyzers::typescript_checker::run_bounded(&mut command, input, Duration::from_secs(75))?;
     let result: Response = serde_json::from_slice(&output).ok()?;
-    if result.status != "ok" || result.reason.is_some() { return None; }
+    if result.version != 2 || result.status != "ok" || result.reason.is_some() { return None; }
     let calls = result.calls?;
     if calls.len() != request.calls.len() { return None; }
     calls.into_iter().zip(&request.calls).map(|(actual, expected)| {
-        (actual.path == expected.path && actual.start == expected.start && matches!(actual.status.as_str(), "error" | "not_proven" | "unavailable"))
-            .then_some(actual.status)
+        (actual.path == expected.path && actual.start == expected.start && valid_call_result(&actual))
+            .then_some(actual)
     }).collect()
+}
+
+fn multi_supported(file: &Source, start: usize, count: usize) -> bool {
+    let root = file.parsed.1.root_node();
+    let Some(inner) = root.descendant_for_byte_range(start, start.saturating_add(1)) else { return false; };
+    let Some(mut call) = std::iter::successors(Some(inner), |node| node.parent())
+        .find(|node| node.kind() == "call_expression" && node.start_byte() == start) else { return false; };
+    while let Some(parent) = call.parent().filter(|node| node.kind() == "parenthesized_expression") { call = parent; }
+    let Some(parent) = call.parent() else { return false; };
+    if matches!(parent.kind(), "expression_statement" | "defer_statement" | "go_statement") { return true; }
+    if parent.kind() != "expression_list" || parent.named_children(&mut parent.walk()).filter(|node| node.kind() != "comment").count() != 1 { return false; }
+    let Some(owner) = parent.parent() else { return false; };
+    match owner.kind() {
+        "return_statement" => true,
+        "short_var_declaration" | "assignment_statement" => owner.child_by_field_name("left")
+            .is_some_and(|left| left.named_children(&mut left.walk()).filter(|node| node.kind() != "comment").count() == count),
+        "var_spec" => owner.children_by_field_name("name", &mut owner.walk()).count() == count,
+        _ => false,
+    }
+}
+
+fn valid_call_result(result: &CallResult) -> bool {
+    match result.status.as_str() {
+        "error" | "not_proven" | "unavailable" => result.result_count == 0 && result.error_indexes.is_empty(),
+        "multi_error" => result.result_count > 1 && !result.error_indexes.is_empty()
+            && result.error_indexes.iter().all(|index| *index < result.result_count)
+            && result.error_indexes.windows(2).all(|pair| pair[0] < pair[1]),
+        _ => false,
+    }
+}
+
+fn multi_limitation(unit: &KeyedUnit<'_, '_, '_>, start: usize) -> KeyedLimitation {
+    let line = unit.source.get(..start).map(|source| source.iter().filter(|byte| **byte == b'\n').count() as u32 + 1);
+    KeyedLimitation { reason: "go_multi_result_unmodeled", path: Some(unit.path.to_owned()), line }
 }
 
 fn limitation(path: Option<&str>) -> KeyedLimitation {
@@ -162,6 +211,28 @@ mod tests {
             assert_eq!(result.hits.len(), count);
             assert!(result.limitations.is_empty());
         }
+    }
+
+    #[test]
+    fn rejects_inconsistent_multi_result_evidence() {
+        let item = |count, indexes| CallResult { path: "main.go".into(), start: 1, status: "multi_error".into(), result_count: count, error_indexes: indexes };
+        assert!(valid_call_result(&item(3, vec![1, 2])));
+        assert!(!valid_call_result(&item(1, vec![0])));
+        assert!(!valid_call_result(&item(2, vec![])));
+        assert!(!valid_call_result(&item(2, vec![2])));
+        assert!(!valid_call_result(&item(3, vec![1, 1])));
+        assert!(!valid_call_result(&item(3, vec![2, 1])));
+        assert!(serde_json::from_str::<Response>(r#"{"status":"ok","calls":[]}"#).is_err());
+    }
+
+    #[test]
+    fn go_multi_result_components_are_tracked_independently() {
+        let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
+        let checker = TrustedGo { probe: probe.into(), go: go.into() };
+        let source = "package sample\nfunc pair() (int, error) { return 1, nil }\nfunc two() (error, error) { return nil, nil }\nfunc sink(n int, err error) {}\nfunc ignored() { v, _ := pair(); _ = v }\nfunc checked() { v, err := pair(); if err != nil { return }; _ = v }\nfunc overwritten() { v, err := pair(); err = nil; if err != nil { return }; _ = v }\nfunc both() { a, b := two(); if a != nil { return }; _ = b }\nfunc forwarded() (int, error) { return pair() }\nfunc nested() { sink(pair()) }\nfunc bare() { pair() }\nfunc declared() { var v, e = pair(); _ = v; if e != nil { return } }\nfunc reassigned() { var v int; var e error; v, e = pair(); e = nil; _ = v; if e != nil { return } }\n";
+        let result = analyze_source(source, &checker);
+        assert_eq!(result.hits.iter().map(|hit| hit.source_line).collect::<Vec<_>>(), [5, 7, 8, 11, 13], "limitations: {:?}", result.limitations.iter().map(|item| (item.reason, item.line)).collect::<Vec<_>>());
+        assert!(result.limitations.iter().any(|item| item.reason == "go_multi_result_unmodeled" && item.line == Some(10)));
     }
 
     fn analyze_source(source: &str, checker: &TrustedGo) -> KeyedCheckResult {

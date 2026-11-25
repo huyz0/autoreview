@@ -182,9 +182,9 @@ fn diff_reports_dataflow_syntax_limitations_without_warning_on_clean_files() {
 #[test]
 fn changed_lines_include_verified_project_error_results() {
     let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
-    let helper = "package helper\nfunc Work() error { return nil }\n";
-    let before = "package main\nimport \"example.test/review/helper\"\nfunc run() error { return helper.Work() }\n";
-    let after = "package main\nimport \"example.test/review/helper\"\nfunc run() { helper.Work() }\n";
+    let helper = "package helper\nfunc Work() (int, error) { return 1, nil }\n";
+    let before = "package main\nimport \"example.test/review/helper\"\nfunc run() error { _, err := helper.Work(); return err }\n";
+    let after = "package main\nimport \"example.test/review/helper\"\nfunc run() { value, _ := helper.Work(); _ = value }\n";
     let repo = init_repo(&[("go.mod", "module example.test/review\n\ngo 1.22\n"), ("helper/helper.go", helper), ("main.go", before)]);
     let base = current_commit(repo.path());
     repo.commit(&[("main.go", after)], "discard project error");

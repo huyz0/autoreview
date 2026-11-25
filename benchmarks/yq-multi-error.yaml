@@ -1,0 +1,18 @@
+cases:
+  - name: yq writes discard returned errors
+    rule: {tool: autoreview-dataflow, id: go-project-error-result-unobserved}
+    evidence:
+      kind: historical
+      source: https://github.com/taigrr/yq/commit/25293a6894a8bcbec0fca3acc8eda2171fd72ecc
+      license: MIT
+      rationale: >-
+        Calls to Write discard both the byte count and the error; the fix
+        propagates write errors. Labels cover the entire file.
+    before:
+      commit: d828b214cc2af2685c0714c796963879e79ce7cc
+      path: cmd/utils.go
+      lines: [70, 107, 115, 117, 135]
+    after:
+      commit: 25293a6894a8bcbec0fca3acc8eda2171fd72ecc
+      path: cmd/utils.go
+      lines: []
