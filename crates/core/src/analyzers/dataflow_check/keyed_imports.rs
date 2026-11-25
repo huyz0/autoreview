@@ -197,6 +197,10 @@ fn record_rule_limits(coverage: &mut Vec<AnalysisCoverageIssue>, rule_id: &str, 
 
 impl Resolver<'_> {
     fn load(&self, entries: &BTreeSet<String>) -> (BTreeMap<String, Source>, Vec<AnalysisCoverageIssue>) {
+        self.load_with_limit(entries, UNIT_LIMIT)
+    }
+
+    fn load_with_limit(&self, entries: &BTreeSet<String>, limit: usize) -> (BTreeMap<String, Source>, Vec<AnalysisCoverageIssue>) {
         let mut pending: VecDeque<_> = entries.iter().cloned().collect();
         let mut sources = BTreeMap::new();
         let mut coverage = Vec::new();
@@ -207,7 +211,7 @@ impl Resolver<'_> {
             let Some((full, language, parsed)) = self.parse_dependency(&path, entries, &mut coverage) else { continue };
             let imports = self.imports(&full, language, &parsed, &mut coverage);
             let exports = self.exports(&full, language, &parsed, &mut coverage);
-            if sources.len() < entries.len().saturating_add(UNIT_LIMIT) {
+            if sources.len() < entries.len().saturating_add(limit) {
                 pending.extend(imports.iter().map(|binding| binding.path.clone()));
                 pending.extend(exports.iter().filter_map(|export| match export {
                     KeyedExport::Named { path: Some(path), .. } | KeyedExport::Star { path } if !path.is_empty() => Some(path.clone()),
@@ -223,7 +227,7 @@ impl Resolver<'_> {
                     exports,
                 },
             );
-            if sources.len() >= entries.len().saturating_add(UNIT_LIMIT) {
+            if sources.len() >= entries.len().saturating_add(limit) {
                 if let Some(skipped) = pending.iter().find(|path| !sources.contains_key(*path)) {
                     coverage.push(issue(Some(skipped), "dependency_limit", "dependency", "The cross-file call-sequence source limit was reached; remaining dependencies were not analyzed."));
                 }
@@ -348,3 +352,30 @@ fn unquote(value: &str) -> Option<&str> {
     let content = value.strip_prefix(delimiter)?.strip_suffix(delimiter)?;
     (!content.contains(['\\', '\n', '\r'])).then_some(content)
 }
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use super::super::cache::PersistentSummaryCache;
+
+    #[test]
+    fn dependency_budget_reports_only_unvisited_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.ts"), "import { b } from './b'; b();").unwrap();
+        std::fs::write(dir.path().join("b.ts"), "import { c } from './c'; export function b() { c(); }").unwrap();
+        std::fs::write(dir.path().join("c.ts"), "export function c() {}").unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let parse = ParseCache::new();
+        let persistent = PersistentSummaryCache::load(&root, &root);
+        let caches = SummaryCaches { parse: &parse, persistent: &persistent, java_kotlin_packages: Default::default() };
+        let resolver = Resolver { root, cache: &parse, packages: &caches };
+        let entries = BTreeSet::from(["a.ts".to_owned()]);
+        let (limited, issues) = resolver.load_with_limit(&entries, 1);
+        assert_eq!(limited.len(), 2);
+        assert!(issues.iter().any(|issue| issue.reason == "dependency_limit"));
+        let (complete, issues) = resolver.load_with_limit(&entries, 2);
+        assert_eq!(complete.len(), 3);
+        assert!(!issues.iter().any(|issue| issue.reason == "dependency_limit"));
+    }
+}
+

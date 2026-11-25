@@ -28,6 +28,13 @@ the existing 64-dependency discovery limit, so they are incomplete and are not
 scored as benchmark results. The prototype is not yet connected to the normal
 review or replay entry points.
 
+On the fixed revision, a local cold-cache loader experiment found 74 reachable
+files with a 256-dependency budget and reported no dependency-limit warning.
+It took approximately 202 ms, versus 180 ms for the current 64-dependency
+budget, which stopped at 65 files. These are single-machine measurements of
+source discovery only, not full-analysis benchmarks. The normal budget remains
+64 until broader performance and completeness checks justify a change.
+
 ## Deliverables
 
 1. Represent proven promise-returning callable signatures as reusable facts.
