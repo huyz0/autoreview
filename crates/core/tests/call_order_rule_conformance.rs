@@ -538,6 +538,96 @@ fn rust_reexported_helpers_preserve_result_usage() {
 }
 
 #[test]
+fn rust_super_module_paths_preserve_helper_result_usage() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::write(root.path().join("src/lib.rs"), "mod support; mod api; mod worker;\n").unwrap();
+    std::fs::write(root.path().join("src/support.rs"), RUST_RESULT_HELPERS).unwrap();
+    let worker = RUST_WORKER.replace("crate::support", "super::support");
+    std::fs::write(root.path().join("src/worker.rs"), &worker).unwrap();
+    let expected = &[("src/support.rs", 4), ("src/worker.rs", 4)];
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", expected);
+    let direct = worker.replace("use super::support as tasks;", "use super::support::{discard as ignore, forward, remove};")
+        .replace("tasks::discard", "ignore").replace("tasks::forward", "forward").replace("tasks::remove", "remove");
+    std::fs::write(root.path().join("src/worker.rs"), direct).unwrap();
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", expected);
+    std::fs::write(root.path().join("src/api.rs"), "pub(crate) use super::support::{discard as ignore, forward, remove};\n").unwrap();
+    let reexported = RUST_WORKER.replace("crate::support", "crate::api").replace("tasks::discard", "tasks::ignore");
+    std::fs::write(root.path().join("src/worker.rs"), reexported).unwrap();
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", expected);
+}
+
+#[test]
+fn rust_nested_relative_modules_and_reexports_follow_verified_parents() {
+    let root = tempfile::tempdir().unwrap();
+    let src = root.path().join("src");
+    std::fs::create_dir_all(src.join("group/sub")).unwrap();
+    std::fs::write(src.join("lib.rs"), "mod group;\n").unwrap();
+    std::fs::write(src.join("group.rs"), "mod support; mod sub;\n").unwrap();
+    std::fs::write(src.join("group/support.rs"), RUST_RESULT_HELPERS).unwrap();
+    std::fs::write(src.join("group/sub.rs"), "mod api; mod worker;\n").unwrap();
+    let worker = RUST_WORKER.replace("crate::support", "super::super::support");
+    std::fs::write(src.join("group/sub/worker.rs"), &worker).unwrap();
+    let expected = &[("src/group/sub/worker.rs", 4), ("src/group/support.rs", 4)];
+    assert_helper_locations(root.path(), "src/group/sub/worker.rs", "rust-discarded-remove-file-result", expected);
+    std::fs::write(src.join("group/sub/api.rs"), "pub(crate) use super::super::support::{discard as ignore, forward, remove};\n").unwrap();
+    let via_api = RUST_WORKER.replace("crate::support", "super::api").replace("tasks::discard", "tasks::ignore");
+    std::fs::write(src.join("group/sub/worker.rs"), via_api).unwrap();
+    assert_helper_locations(root.path(), "src/group/sub/worker.rs", "rust-discarded-remove-file-result", expected);
+}
+
+#[test]
+fn rust_self_alias_and_ambiguous_parents_are_handled_conservatively() {
+    let root = tempfile::tempdir().unwrap();
+    let src = root.path().join("src");
+    std::fs::create_dir_all(src.join("worker")).unwrap();
+    std::fs::write(src.join("lib.rs"), "mod worker;\n").unwrap();
+    std::fs::write(src.join("worker/support.rs"), RUST_RESULT_HELPERS).unwrap();
+    let worker = format!("mod support;\n{}", RUST_WORKER.replace("crate::support", "self::support"));
+    std::fs::write(src.join("worker.rs"), &worker).unwrap();
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", &[("src/worker.rs", 5), ("src/worker/support.rs", 4)]);
+    std::fs::write(src.join("lib.rs"), "mod support; mod worker;\n").unwrap();
+    std::fs::write(src.join("main.rs"), "mod support; mod worker;\n").unwrap();
+    std::fs::write(src.join("support.rs"), RUST_RESULT_HELPERS).unwrap();
+    std::fs::write(src.join("worker.rs"), RUST_WORKER.replace("crate::support", "super::support")).unwrap();
+    let ambiguous = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
+    assert!(ambiguous.coverage.iter().any(|issue| issue.reason == "unresolved_rust_module_import"), "{:?}", ambiguous.coverage);
+    assert!(!ambiguous.findings.iter().any(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result")), "{:#?}", ambiguous.findings);
+    std::fs::write(src.join("main.rs"), "#[path = \"worker.rs\"] mod renamed;\n").unwrap();
+    let alternate = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
+    assert!(alternate.coverage.iter().any(|issue| issue.reason == "unresolved_rust_module_import"), "{:?}", alternate.coverage);
+    assert!(!alternate.findings.iter().any(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result")), "{:#?}", alternate.findings);
+    let direct = RUST_WORKER.replace("use crate::support as tasks;", "use super::support::{discard as ignore, forward, remove};")
+        .replace("tasks::discard", "ignore").replace("tasks::forward", "forward").replace("tasks::remove", "remove");
+    std::fs::write(src.join("worker.rs"), direct).unwrap();
+    let unavailable = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
+    assert!(unavailable.coverage.iter().any(|issue| issue.reason == "unresolved_rust_module_import"), "{:?}", unavailable.coverage);
+}
+
+#[test]
+fn rust_super_reexport_can_target_parent_module_function() {
+    let root = tempfile::tempdir().unwrap();
+    let src = root.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(src.join("lib.rs"), "use std::fs::remove_file;\npub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\nmod api; mod worker;\n").unwrap();
+    std::fs::write(src.join("api.rs"), "pub(crate) use super::remove as cleanup;\n").unwrap();
+    std::fs::write(src.join("worker.rs"), "use super::api as tasks;\nfn run(path: &str) { tasks::cleanup(path); }\n").unwrap();
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", &[("src/lib.rs", 2)]);
+}
+
+#[test]
+fn rust_relative_modules_follow_mod_rs_layout() {
+    let root = tempfile::tempdir().unwrap();
+    let src = root.path().join("src");
+    std::fs::create_dir_all(src.join("group")).unwrap();
+    std::fs::write(src.join("lib.rs"), "mod group;\n").unwrap();
+    std::fs::write(src.join("group/mod.rs"), "mod support; mod worker;\n").unwrap();
+    std::fs::write(src.join("group/support.rs"), RUST_RESULT_HELPERS).unwrap();
+    std::fs::write(src.join("group/worker.rs"), RUST_WORKER.replace("crate::support", "super::support")).unwrap();
+    assert_helper_locations(root.path(), "src/group/worker.rs", "rust-discarded-remove-file-result", &[("src/group/support.rs", 4), ("src/group/worker.rs", 4)]);
+}
+
+#[test]
 fn recursive_helpers_propagate_argument_use_and_returned_results() {
     let source = r#"package storage
 import "os"

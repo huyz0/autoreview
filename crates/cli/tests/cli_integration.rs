@@ -271,6 +271,18 @@ fn rust_module_alias_results_reach_the_review_report() {
 }
 
 #[test]
+fn rust_relative_module_results_reach_the_review_report() {
+    let root = "mod support; mod worker;\n";
+    let support = "use std::fs::remove_file;\npub(crate) fn discard(value: std::io::Result<()>) {}\npub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n";
+    let before = "use super::support as tasks;\nfn run(path: &str) { let _ = path; }\n";
+    let after = "use super::support as tasks;\nuse std::fs::remove_file;\nfn run(path: &str) { let result = remove_file(path); tasks::discard(result); }\nfn other(path: &str) { tasks::remove(path); }\n";
+    let repo = init_repo(&[("src/lib.rs", root), ("src/support.rs", support), ("src/worker.rs", before)]);
+    let base = current_commit(repo.path());
+    repo.commit(&[("src/worker.rs", after)], "discard relative helper results");
+    assert_rust_helper_review(&repo, &base, "unresolved_rust_module_import");
+}
+
+#[test]
 fn rust_reexported_results_reach_the_review_report() {
     let root = "mod support; mod api; mod worker;\n";
     let support = "use std::fs::remove_file;\npub(crate) fn discard(value: std::io::Result<()>) {}\npub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n";

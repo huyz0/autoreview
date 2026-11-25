@@ -175,7 +175,7 @@ mod tests {
         std::fs::write(root.path().join("src/lib.rs"), "use crate::missing as helpers;\nfn run() { helpers::discard(std::fs::remove_file(\"file\")); }\n").unwrap();
         let error = Tool::AutoreviewDataflow.scan(root.path(), &["src/lib.rs".into()],
             &BTreeSet::from(["rust-discarded-remove-file-result".into()])).unwrap_err();
-        assert!(error.to_string().contains("Rust module import"), "{error}");
+        assert!(error.to_string().contains("Rust import or associated call"), "{error}");
         assert!(error.to_string().contains("incomplete"), "{error}");
     }
 
@@ -189,6 +189,17 @@ mod tests {
         let error = Tool::AutoreviewDataflow.scan(root.path(), &["src/worker.rs".into()],
             &BTreeSet::from(["rust-discarded-remove-file-result".into()])).unwrap_err();
         assert!(error.to_string().contains("incomplete"), "{error}");
+    }
+
+    #[test]
+    fn dataflow_replay_rejects_unresolved_rust_relative_function() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join("src/lib.rs"), "mod worker;\n").unwrap();
+        std::fs::write(root.path().join("src/worker.rs"), "use super::missing::discard;\nfn run() { discard(std::fs::remove_file(\"file\")); }\n").unwrap();
+        let error = Tool::AutoreviewDataflow.scan(root.path(), &["src/worker.rs".into()],
+            &BTreeSet::from(["rust-discarded-remove-file-result".into()])).unwrap_err();
+        assert!(error.to_string().contains("Rust import or associated call"), "{error}");
     }
 
     #[test]

@@ -65,14 +65,45 @@ fn valid_name(name: &str) -> bool {
 }
 
 fn reexport_module(resolver: &Resolver<'_>, path: &Path, module: &str) -> Option<PathBuf> {
-    if module.starts_with("crate::") { return verified_namespace(resolver, path, module); }
-    let suffix = module.strip_prefix("self::")?;
-    let mut current = path.to_path_buf();
-    for name in suffix.split("::") {
-        if !valid_name(name) { return None; }
-        current = declared_module(resolver, &current, name)?;
+    if module == "crate" { crate_root(resolver, path) }
+    else if module.starts_with("crate::") { verified_namespace(resolver, path, module) }
+    else { relative_module(resolver, path, module) }
+}
+
+fn relative_module(resolver: &Resolver<'_>, path: &Path, module: &str) -> Option<PathBuf> {
+    crate_root(resolver, path)?;
+    let mut parts = module.split("::");
+    let mut current = match parts.next()? {
+        "self" => path.to_path_buf(),
+        "super" => parent_module(resolver, path)?,
+        _ => return None,
+    };
+    for name in parts {
+        current = match name {
+            "super" => parent_module(resolver, &current)?,
+            "self" | "crate" => return None,
+            _ if valid_name(name) => declared_module(resolver, &current, name)?,
+            _ => return None,
+        };
     }
     Some(current)
+}
+
+// Walk a unique declared module edge backwards; filenames alone do not
+// establish a Rust module relationship or select among crate roots.
+fn parent_module(resolver: &Resolver<'_>, path: &Path) -> Option<PathBuf> {
+    let stem = path.file_stem()?.to_str()?;
+    if matches!(stem, "lib" | "main") { return None; }
+    let name = if stem == "mod" { path.parent()?.file_name()?.to_str()? } else { stem };
+    let module_directory = module_dir(path)?;
+    let parent = module_directory.parent()?;
+    let candidates = [parent.join("lib.rs"), parent.join("main.rs"), parent.with_extension("rs"), parent.join("mod.rs")];
+    let existing: Vec<_> = candidates.into_iter().filter(|candidate|
+        candidate.is_file() && resolver.relative(candidate).is_some()).collect();
+    let [candidate] = existing.as_slice() else { return None };
+    let current = resolver.relative(path)?;
+    (declared_module(resolver, candidate, name).and_then(|child| resolver.relative(&child)).as_deref() == Some(&current))
+        .then(|| candidate.clone())
 }
 
 fn rust_uses(
@@ -92,7 +123,7 @@ fn rust_uses(
             .map_or((usage.as_str(), None), |(path, alias)| (path.trim(), Some(alias.trim())));
         let Some((module, member)) = qualified.rsplit_once("::") else { return Vec::new() };
         let mut bindings = Vec::new();
-        if let Some(file) = (!conditional).then(|| rust_use_file(resolver, path, dir, module)).flatten() {
+        if let Some(file) = (!conditional).then(|| resolve_use_module(resolver, path, dir, module)).flatten() {
             if let Some(binding) = resolver.binding(&file, alias.unwrap_or(member), Some(member), None, true) {
                 bindings.push(binding);
             }
@@ -101,30 +132,45 @@ fn rust_uses(
             (module, module.rsplit("::").next().unwrap_or(module))
         } else { (qualified, member) };
         let local = format!("{}::", alias.unwrap_or(default));
-        let namespace = (!conditional).then(|| verified_namespace(resolver, path, module_path)).flatten();
+        let namespace = (!conditional).then(|| reexport_module(resolver, path, module_path)).flatten();
         if let Some(file) = namespace {
             if let Some(binding) = resolver.binding(&file, &local, None, None, true) { bindings.push(binding); }
-        } else if module_path.starts_with("crate::") {
+        } else if is_relative(module_path) {
             record_unresolved(input, node, &local, coverage);
+        }
+        if bindings.is_empty() && is_relative(module_path) && member != "self" {
+            record_unresolved(input, node, alias.unwrap_or(member), coverage);
         }
         bindings
     }).collect()
 
 }
 
+fn is_relative(path: &str) -> bool {
+    matches!(path.split("::").next(), Some("crate" | "self" | "super"))
+}
+
+fn resolve_use_module(resolver: &Resolver<'_>, path: &Path, dir: &Path, module: &str) -> Option<PathBuf> {
+    if is_relative(module) { reexport_module(resolver, path, module) }
+    else { rust_use_file(resolver, path, dir, module) }
+}
+
 fn record_unresolved(input: &ImportSource<'_>, node: Node<'_>, local: &str, coverage: &mut Vec<AnalysisCoverageIssue>) {
     if !namespace_called(input.node, local, input.source) { return; }
     let mut record = issue(input.resolver.relative(input.path).as_deref(), "unresolved_rust_module_import", "dependency",
-        "A used Rust module import could not be resolved safely; cross-file call-sequence analysis may be incomplete.");
+        "A used Rust import or associated call could not be resolved safely; cross-file call-sequence analysis may be incomplete.");
     record.line = Some(node.start_position().row as u32 + 1);
-    coverage.push(record);
+    if !coverage.contains(&record) { coverage.push(record); }
 }
 
 fn namespace_called(root: Node<'_>, prefix: &str, source: &str) -> bool {
     let mut pending = vec![root];
     while let Some(node) = pending.pop() {
         if node.kind() == "call_expression" && node.child_by_field_name("function")
-            .and_then(|function| text(function, source)).is_some_and(|name| name.starts_with(prefix)) { return true; }
+            .and_then(|function| text(function, source)).is_some_and(|name| {
+                if prefix.ends_with("::") { name.starts_with(prefix) }
+                else { name == prefix || name.strip_prefix(prefix).is_some_and(|tail| tail.starts_with("::<")) }
+            }) { return true; }
         pending.extend(children(node));
     }
     false
@@ -136,13 +182,23 @@ fn verified_namespace(resolver: &Resolver<'_>, path: &Path, qualified: &str) -> 
     let suffix = qualified.strip_prefix("crate::")?;
     let parts: Vec<_> = suffix.split("::").collect();
     if parts.is_empty() || parts.iter().any(|part| part.is_empty() || !part.chars().all(|ch| ch.is_alphanumeric() || ch == '_')) { return None; }
+    let mut current = crate_root(resolver, path)?;
+    for name in parts { current = declared_module(resolver, &current, name)?; }
+    Some(current)
+}
+
+fn crate_root(resolver: &Resolver<'_>, path: &Path) -> Option<PathBuf> {
     let dir = path.ancestors().skip(1).find(|parent| parent.starts_with(&resolver.root)
         && (parent.join("lib.rs").is_file() || parent.join("main.rs").is_file()))?;
     let roots: Vec<_> = [dir.join("lib.rs"), dir.join("main.rs")].into_iter().filter(|file| file.is_file()).collect();
     let [root] = roots.as_slice() else { return None };
-    let mut current = root.clone();
-    for name in parts { current = declared_module(resolver, &current, name)?; }
-    Some(current)
+    let root_relative = resolver.relative(root)?;
+    let mut current = path.to_path_buf();
+    for _ in 0..128 {
+        if resolver.relative(&current).as_deref() == Some(&root_relative) { return Some(root.clone()); }
+        current = parent_module(resolver, &current)?;
+    }
+    None
 }
 
 fn declared_module(resolver: &Resolver<'_>, current: &Path, name: &str) -> Option<PathBuf> {
