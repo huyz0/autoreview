@@ -1,4 +1,7 @@
 mod rule;
+mod report;
+
+use report::{replay_report, Evidence};
 
 use rule::{Rule, Tool};
 
@@ -26,17 +29,19 @@ struct Suite {
     gate: BTreeSet<Rule>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Case {
     name: String,
     rule: Rule,
+    #[serde(default)]
+    evidence: Option<Evidence>,
     base: Option<String>,
     before: Label,
     after: Label,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Label {
     commit: String,
@@ -44,7 +49,7 @@ struct Label {
     lines: Vec<u32>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SnapshotResult {
     commit: String,
@@ -54,10 +59,12 @@ struct SnapshotResult {
     missed_lines: Vec<u32>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct CaseResult {
     name: String,
     rule: Rule,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evidence: Option<Evidence>,
     before: SnapshotResult,
     after: SnapshotResult,
 }
@@ -185,8 +192,16 @@ fn replay_side(
 }
 
 fn replay(repo: &Path, suite: &Suite, gate_only: bool) -> anyhow::Result<Vec<CaseResult>> {
+    replay_with_cache(repo, suite, gate_only, &mut BTreeMap::new())
+}
+
+fn replay_with_cache(
+    repo: &Path,
+    suite: &Suite,
+    gate_only: bool,
+    snapshots: &mut BTreeMap<String, tempfile::TempDir>,
+) -> anyhow::Result<Vec<CaseResult>> {
     let mut cases = Vec::new();
-    let mut snapshots = BTreeMap::new();
     let mut names = BTreeSet::new();
     let mut labelled_snapshots = BTreeSet::new();
     for case in &suite.cases {
@@ -198,6 +213,12 @@ fn replay(repo: &Path, suite: &Suite, gate_only: bool) -> anyhow::Result<Vec<Cas
             "case names must be unique and nonempty: '{}'",
             case.name
         );
+        if let Some(evidence) = &case.evidence {
+            ensure!(
+                [&evidence.source, &evidence.license, &evidence.rationale].iter().all(|value| !value.trim().is_empty()),
+                "case '{}' has incomplete evidence", case.name
+            );
+        }
         case.rule
             .check_replay_support()
             .with_context(|| format!("case '{}'", case.name))?;
@@ -207,9 +228,9 @@ fn replay(repo: &Path, suite: &Suite, gate_only: bool) -> anyhow::Result<Vec<Cas
             "case '{}' must specify base only for a rule that compares revisions", case.name
         );
         let base = base.map(|reference| resolve_commit(repo, reference)).transpose()?;
-        let before = replay_side(repo, &mut snapshots, &case.rule, &case.before, base.as_deref(), gate_only)
+        let before = replay_side(repo, snapshots, &case.rule, &case.before, base.as_deref(), gate_only)
             .with_context(|| format!("case '{}' before", case.name))?;
-        let after = replay_side(repo, &mut snapshots, &case.rule, &case.after, base.as_deref(), gate_only)
+        let after = replay_side(repo, snapshots, &case.rule, &case.after, base.as_deref(), gate_only)
             .with_context(|| format!("case '{}' after", case.name))?;
         ensure!(
             before.commit != after.commit,
@@ -239,6 +260,7 @@ fn replay(repo: &Path, suite: &Suite, gate_only: bool) -> anyhow::Result<Vec<Cas
         cases.push(CaseResult {
             name: case.name.clone(),
             rule: case.rule.clone(),
+            evidence: case.evidence.clone(),
             before,
             after,
         });
@@ -288,22 +310,13 @@ fn scores(cases: &[CaseResult]) -> Vec<RuleScore> {
         .collect()
 }
 
-#[derive(Serialize)]
-struct ReplayReport {
-    rules: Vec<RuleScore>,
-    cases: Vec<CaseResult>,
-}
 
 pub(crate) fn run_replay(repo: &Path, suite: &Path) -> anyhow::Result<()> {
     let suite: Suite = serde_yaml::from_slice(&std::fs::read(repo.join(suite))?)?;
-    let cases = replay(repo, &suite, false)?;
-    let report = ReplayReport {
-        rules: scores(&cases),
-        cases,
-    };
+    let report = replay_report(repo, &suite)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     ensure!(
-        report
+        report.failures.is_empty() && report
             .rules
             .iter()
             .all(|entry| entry.score.false_negatives == 0 && entry.score.false_positives == 0),

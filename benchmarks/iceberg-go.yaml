@@ -1,0 +1,18 @@
+cases:
+  - name: iceberg test compares aliases of the same value
+    rule: {tool: ast-grep, id: go-tautological-testify-assertion}
+    evidence:
+      kind: historical
+      source: https://github.com/apache/iceberg-go/commit/b66585bfee314c8676ad1bff30b5162de4314338
+      license: Apache-2.0
+      rationale: >-
+        The range value and indexed actual value refer to the same element;
+        the fix compares the actual value against the independent expected slice.
+    before:
+      commit: e964df7a48f9942b3e9894c938b8126d0d05617d
+      path: table/updates_test.go
+      lines: [535]
+    after:
+      commit: b66585bfee314c8676ad1bff30b5162de4314338
+      path: table/updates_test.go
+      lines: []

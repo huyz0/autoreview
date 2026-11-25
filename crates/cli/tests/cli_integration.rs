@@ -25,6 +25,35 @@ fn current_commit(repo: &std::path::Path) -> String {
 }
 
 #[test]
+fn replay_reports_analysis_failures_without_losing_successful_cases() {
+    let bad = "package main\nimport \"os\"\nfunc move(a, b string) { os.Rename(a, b) }\n";
+    let fixed = "package main\nimport \"os\"\nfunc move(a, b string) error { return os.Rename(a, b) }\n";
+    let repo = init_repo(&[("move.go", bad)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("move.go", fixed)], "check rename error");
+    let after = current_commit(repo.path());
+    let rule = serde_json::json!({"tool": "autoreview-dataflow", "id": "go-os-rename-discarded-error"});
+    let suite = serde_json::json!({"cases": [
+        {"name": "valid", "rule": rule, "evidence": {"kind": "synthetic", "source": "test fixture", "license": "MIT", "rationale": "The return value is discarded."},
+         "before": {"commit": before, "path": "move.go", "lines": [3]},
+         "after": {"commit": after, "path": "move.go", "lines": []}},
+        {"name": "missing revision", "rule": rule, "before": {"commit": "missing-revision", "path": "move.go", "lines": [3]},
+         "after": {"commit": after, "path": "move.go", "lines": []}}
+    ]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
+    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(report["rules"][0]["truePositives"], 1);
+    assert_eq!(report["languages"][0]["language"], "Go");
+    assert_eq!(report["cases"][0]["evidence"]["kind"], "synthetic");
+    assert_eq!(report["evidenceKinds"][0]["kind"], "synthetic");
+    assert_eq!(report["failures"][0]["name"], "missing revision");
+    assert_eq!(report["failures"][0]["language"], "Go");
+    assert_eq!(report["cases"].as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn commit_replay_measures_rule_precision_and_gates_only_qualified_changed_lines() {
     if !ast_grep_available() {
         return;
