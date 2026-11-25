@@ -1,7 +1,7 @@
 mod rule;
 mod report;
 
-use report::{replay_report, Evidence};
+use report::{replay_report, Evidence, GateReport};
 
 use rule::{Rule, Tool};
 
@@ -357,16 +357,6 @@ fn validate_gate_rule(rule: &Rule) -> anyhow::Result<Vec<Language>> {
         "Rust" => Ok(vec![Language::Rust]),
         _ => anyhow::bail!("gate rule '{}' has an unsupported language", rule.id),
     }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GateReport {
-    base: String,
-    head: String,
-    evidence: Vec<RuleScore>,
-    passed: bool,
-    findings: Vec<AgentFinding>,
 }
 
 fn gate_paths(snapshot: &Path, root: &Path, files: &[autoreview_core::FileChange], languages: &[Language]) -> anyhow::Result<Vec<String>> {
