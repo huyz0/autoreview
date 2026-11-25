@@ -26,6 +26,7 @@ pub mod call_order;
 pub mod cfg;
 pub mod lattice;
 pub mod lower;
+pub mod promise_types;
 pub mod rules;
 pub mod solver;
 pub mod taint;
