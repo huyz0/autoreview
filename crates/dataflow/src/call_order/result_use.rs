@@ -7,6 +7,8 @@ mod places;
 mod references;
 mod summaries;
 mod syntax;
+#[cfg(test)]
+mod test_support;
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
@@ -358,7 +360,6 @@ fn transfer_writes(writes: &[Write], live: &mut Live, mut observe: Option<&mut O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::call_order::{ContractMode, ResultContract};
     use autoreview_langsupport::Language;
 
     #[test]
@@ -390,45 +391,13 @@ mod tests {
         api: (&str, &str),
         check: impl FnOnce(&Analysis, &Plan<'_, '_>, tree_sitter::Node<'_>),
     ) {
-        let (language, contract_language) = languages;
-        let (import, method) = api;
-        let mut parser = autoreview_langsupport::parser_for(language).unwrap();
-        let tree = parser.parse(source, None).unwrap();
-        let root = tree.root_node();
-        let function = root
-            .named_children(&mut root.walk())
-            .find(|node| matches!(node.kind(), "function_item" | "function_declaration"))
-            .unwrap();
-        let graph = crate::lower::keyed_variant(language, source.as_bytes(), function);
-        let spec = CallOrderSpec {
-            rule_id: "test".into(),
-            after: vec![],
-            unless: vec![],
-            before: vec![],
-            check_before_return: false,
-            identity: None,
-            contract: Some(ResultContract {
-                mode: ContractMode::MustUse,
-                language: contract_language,
-                import: import.into(),
-                methods: vec![method.into()],
-                borrows: vec![],
-                acquire_awaited: false,
-                complete_observed: false,
-            }),
-        };
-        let plan = Plan::new(&spec, &graph, function, source.as_bytes(), 0).unwrap();
-        let analysis = effects::lower(
-            &plan,
-            &super::super::KeyedFunction {
-                node: function,
-                graph: &graph,
-            },
-            source.as_bytes(),
-            true,
-            &BTreeMap::new(),
-        );
-        check(&analysis, &plan, function);
+        test_support::with_program(languages, source, api, |program, units| {
+            let function = &units[0].functions[0];
+            let plan = program.frames[0].plan.as_ref().unwrap();
+            let analysis =
+                effects::lower(plan, function, source.as_bytes(), true, &BTreeMap::new());
+            check(&analysis, plan, function.node);
+        });
     }
 
     #[test]

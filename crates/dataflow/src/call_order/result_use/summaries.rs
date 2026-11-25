@@ -28,28 +28,11 @@ fn build_with_budget(
         .iter()
         .flat_map(|unit| unit.functions.iter().map(move |function| (unit, function)))
         .collect();
-    let mut summaries = BTreeMap::new();
-    let mut calls = vec![BTreeSet::new(); functions.len()];
-    let mut callers = vec![Vec::new(); functions.len()];
-    for (index, (_, function)) in functions.iter().enumerate() {
-        let frame = &program.frames[index];
-        let Some(plan) = &frame.plan else { continue };
-        let empty = HelperOutcome {
-            parameters: vec![false; frame.params.len()],
-            origins: Vec::new(),
-        };
-        summaries.insert(
-            index,
-            HelperSummary {
-                when_discarded: empty.clone(),
-                when_observed: empty,
-            },
-        );
-        calls[index] = program.resolved_calls(index, function.graph, plan);
-        for &(_, target) in &calls[index] {
-            callers[target].push(index);
-        }
-    }
+    let SummaryGraph {
+        mut summaries,
+        calls,
+        callers,
+    } = SummaryGraph::new(program);
     let mut queued: Vec<_> = program
         .frames
         .iter()
@@ -86,6 +69,44 @@ fn build_with_budget(
         }
     }
     (summaries, false)
+}
+
+struct SummaryGraph {
+    summaries: BTreeMap<usize, HelperSummary>,
+    calls: Vec<BTreeSet<(usize, usize)>>,
+    callers: Vec<Vec<usize>>,
+}
+
+impl SummaryGraph {
+    fn new(program: &Program<'_, '_, '_>) -> Self {
+        let mut summaries = BTreeMap::new();
+        let mut calls = vec![BTreeSet::new(); program.frames.len()];
+        let mut callers = vec![Vec::new(); program.frames.len()];
+        for (index, frame) in program.frames.iter().enumerate() {
+            let Some(plan) = &frame.plan else { continue };
+            summaries.insert(index, empty_summary(frame.params.len()));
+            calls[index] = program.resolved_calls(index, frame.graph, plan);
+            for &(_, target) in &calls[index] {
+                callers[target].push(index);
+            }
+        }
+        Self {
+            summaries,
+            calls,
+            callers,
+        }
+    }
+}
+
+fn empty_summary(parameters: usize) -> HelperSummary {
+    let empty = HelperOutcome {
+        parameters: vec![false; parameters],
+        origins: Vec::new(),
+    };
+    HelperSummary {
+        when_discarded: empty.clone(),
+        when_observed: empty,
+    }
 }
 
 fn summarize(
@@ -150,52 +171,22 @@ fn select_summaries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::call_order::{CallOrderSpec, ContractLanguage, ContractMode, ResultContract};
+    use crate::call_order::ContractLanguage;
     use autoreview_langsupport::Language;
 
     #[test]
     fn reports_summary_budget_exhaustion() {
         let source = "package main\nimport \"os\"\nfunc move(a, b string) error { return os.Rename(a, b) }\n";
-        let mut parser = autoreview_langsupport::parser_for(Language::Go).unwrap();
-        let tree = parser.parse(source, None).unwrap();
-        let root = tree.root_node();
-        let function = root
-            .named_children(&mut root.walk())
-            .find(|node| node.kind() == "function_declaration")
-            .unwrap();
-        let graph = crate::lower::keyed_variant(Language::Go, source.as_bytes(), function);
-        let functions = [KeyedFunction {
-            node: function,
-            graph: &graph,
-        }];
-        let units = [KeyedUnit {
-            path: "main.go",
-            source: source.as_bytes(),
-            functions: &functions,
-            imports: &[],
-            entry: true,
-        }];
-        let spec = CallOrderSpec {
-            rule_id: "test".into(),
-            after: vec![],
-            unless: vec![],
-            before: vec![],
-            check_before_return: false,
-            identity: None,
-            contract: Some(ResultContract {
-                mode: ContractMode::MustUse,
-                language: ContractLanguage::Go,
-                import: "os".into(),
-                methods: vec!["Rename".into()],
-                borrows: vec![],
-                acquire_awaited: false,
-                complete_observed: false,
-            }),
-        };
-        let program = Program::new(&spec, &units);
-        let (summaries, exhausted) = build_with_budget(&program, &units, 0);
-        assert!(exhausted && summaries.is_empty());
-        assert!(!build(&program, &units).1);
+        super::super::test_support::with_program(
+            (Language::Go, ContractLanguage::Go),
+            source,
+            ("os", "Rename"),
+            |program, units| {
+                let (summaries, exhausted) = build_with_budget(program, units, 0);
+                assert!(exhausted && summaries.is_empty());
+                assert!(!build(program, units).1);
+            },
+        );
     }
 
     #[test]
@@ -271,47 +262,12 @@ func drop(p string) { recur(p, 3) }
         source: &str,
         check: impl FnOnce(&Program<'_, '_, '_>, &[KeyedUnit<'_, '_, '_>]),
     ) {
-        let mut parser = autoreview_langsupport::parser_for(Language::Go).unwrap();
-        let tree = parser.parse(source, None).unwrap();
-        let root = tree.root_node();
-        let nodes: Vec<_> = root
-            .named_children(&mut root.walk())
-            .filter(|node| node.kind() == "function_declaration")
-            .collect();
-        let graphs: Vec<_> = nodes
-            .iter()
-            .map(|node| crate::lower::keyed_variant(Language::Go, source.as_bytes(), *node))
-            .collect();
-        let functions: Vec<_> = nodes
-            .iter()
-            .zip(&graphs)
-            .map(|(node, graph)| KeyedFunction { node: *node, graph })
-            .collect();
-        let units = [KeyedUnit {
-            path: "main.go",
-            source: source.as_bytes(),
-            functions: &functions,
-            imports: &[],
-            entry: true,
-        }];
-        let spec = CallOrderSpec {
-            rule_id: "test".into(),
-            after: vec![],
-            unless: vec![],
-            before: vec![],
-            check_before_return: false,
-            identity: None,
-            contract: Some(ResultContract {
-                mode: ContractMode::MustUse,
-                language: ContractLanguage::Go,
-                import: "os".into(),
-                methods: vec!["Remove".into()],
-                borrows: vec![],
-                acquire_awaited: false,
-                complete_observed: false,
-            }),
-        };
-        check(&Program::new(&spec, &units), &units);
+        super::super::test_support::with_program(
+            (Language::Go, ContractLanguage::Go),
+            source,
+            ("os", "Remove"),
+            check,
+        );
     }
 
     fn reference_rounds(
@@ -321,17 +277,7 @@ func drop(p string) { recur(p, 3) }
         let mut previous = BTreeMap::new();
         for (index, frame) in program.frames.iter().enumerate() {
             if frame.plan.is_some() {
-                let empty = HelperOutcome {
-                    parameters: vec![false; frame.params.len()],
-                    origins: Vec::new(),
-                };
-                previous.insert(
-                    index,
-                    HelperSummary {
-                        when_discarded: empty.clone(),
-                        when_observed: empty,
-                    },
-                );
+                previous.insert(index, empty_summary(frame.params.len()));
             }
         }
         for _ in 0..program.frames.len() * 16 {
