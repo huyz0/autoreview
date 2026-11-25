@@ -52,6 +52,13 @@ jobs:
         with:
           go-version: stable
 
+      - name: Test Go type-evidence prototype
+        working-directory: tools/go-error-evidence
+        env:
+          GOPROXY: 'off'
+          GOSUMDB: 'off'
+        run: go test ./...
+
       # The `/v2` in the module path is load-bearing. Go requires a `/vN`
       # suffix for major version 2 and above, so the un-suffixed path
       # resolves to the newest *v1* release — which has no
