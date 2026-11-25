@@ -37,16 +37,7 @@ pub(super) fn check_units(
             let Some(plan) = frame.plan.as_ref() else {
                 continue;
             };
-            let calls: BTreeMap<_, _> = program
-                .resolved_calls(current, function.graph, plan)
-                .into_iter()
-                .filter_map(|(site, target)| {
-                    summaries
-                        .get(&target)
-                        .cloned()
-                        .map(|summary| (site, summary))
-                })
-                .collect();
+            let calls = resolved_helpers(&program, current, function.graph, plan, &summaries);
             if !plan.has_registration() && calls.is_empty() {
                 continue;
             }
@@ -90,6 +81,25 @@ pub(super) fn check_units(
             .or_insert(hit);
     }
     combined.into_values().collect()
+}
+
+fn resolved_helpers(
+    program: &Program<'_, '_, '_>,
+    index: usize,
+    graph: &Cfg<Stmt>,
+    plan: &Plan<'_, '_>,
+    summaries: &BTreeMap<usize, HelperSummary>,
+) -> BTreeMap<usize, HelperSummary> {
+    program
+        .resolved_calls(index, graph, plan)
+        .into_iter()
+        .filter_map(|(site, target)| {
+            summaries
+                .get(&target)
+                .cloned()
+                .map(|summary| (site, summary))
+        })
+        .collect()
 }
 
 type Live = HashSet<Place>;
@@ -385,13 +395,13 @@ mod tests {
     }
 
     fn with_helper_analysis(
-        language: Language,
-        contract_language: ContractLanguage,
+        languages: (Language, ContractLanguage),
         source: &str,
-        import: &str,
-        method: &str,
+        api: (&str, &str),
         check: impl FnOnce(&Analysis, &Plan<'_, '_>, tree_sitter::Node<'_>),
     ) {
+        let (language, contract_language) = languages;
+        let (import, method) = api;
         let mut parser = autoreview_langsupport::parser_for(language).unwrap();
         let tree = parser.parse(source, None).unwrap();
         let root = tree.root_node();
@@ -446,17 +456,12 @@ mod tests {
         ];
         for (language, contract_language, source, import, method) in examples {
             with_helper_analysis(
-                language,
-                contract_language,
+                (language, contract_language),
                 source,
-                import,
-                method,
+                (import, method),
                 |analysis, _, _| {
                     for observed in [false, true] {
-                        let mut seed = Live::new();
-                        if observed {
-                            seed.insert(Place::Return);
-                        }
+                        let seed = return_seed(observed);
                         let mut found = Vec::new();
                         analysis.record(&seed, &mut |_, _, used| found.push(used));
                         assert_eq!(found, [observed], "{language:?}");
@@ -470,11 +475,9 @@ mod tests {
     fn helper_parameter_liveness_distinguishes_use_from_forwarding() {
         let source = "package p\nimport \"os\"\nfunc forward(err error) error { return err }\n";
         with_helper_analysis(
-            Language::Go,
-            ContractLanguage::Go,
+            (Language::Go, ContractLanguage::Go),
             source,
-            "os",
-            "Rename",
+            ("os", "Rename"),
             |analysis, plan, function| {
                 let body = function.child_by_field_name("body").unwrap();
                 let parameter = plan
@@ -482,10 +485,7 @@ mod tests {
                     .local_result_binding("err", body.start_byte(), false)
                     .unwrap();
                 for observed in [false, true] {
-                    let mut seed = Live::new();
-                    if observed {
-                        seed.insert(Place::Return);
-                    }
+                    let seed = return_seed(observed);
                     let entry = analysis.record(&seed, &mut |_, _, _| {});
                     assert_eq!(entry.contains(&Place::Local(parameter)), observed);
                 }
@@ -495,5 +495,12 @@ mod tests {
                 assert!(summary.when_discarded.origins.is_empty());
             },
         );
+    }
+    fn return_seed(observed: bool) -> Live {
+        if observed {
+            Live::from([Place::Return])
+        } else {
+            Live::new()
+        }
     }
 }

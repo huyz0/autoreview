@@ -50,16 +50,7 @@ fn round(
         for function in unit.functions {
             let frame = &program.frames[index];
             if let Some(plan) = &frame.plan {
-                let calls = program
-                    .resolved_calls(index, function.graph, plan)
-                    .into_iter()
-                    .filter_map(|(site, target)| {
-                        previous
-                            .get(&target)
-                            .cloned()
-                            .map(|summary| (site, summary))
-                    })
-                    .collect();
+                let calls = super::resolved_helpers(program, index, function.graph, plan, previous);
                 let mut summary = summarize(plan, function, unit, &frame.params, &calls);
                 set_origin_paths(&mut summary, unit.path);
                 summaries.insert(index, summary);
