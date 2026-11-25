@@ -175,9 +175,137 @@ impl ExportTargets for Program<'_, '_, '_> {
     }
 }
 
+/// A module-local callable binding and its accepted argument counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyedDeclaration {
+    pub unit: usize,
+    pub name: String,
+    pub start: usize,
+    pub minimum: usize,
+    pub maximum: usize,
+}
+
+/// The unique declaration index, or a reason why resolution was incomplete.
+pub struct DeclarationResolution {
+    pub declaration: Option<usize>,
+    pub limitation: Option<&'static str>,
+}
+
+struct DeclarationTargets<'a, 'src, 'tree, 'graph> {
+    units: &'a [super::KeyedUnit<'src, 'tree, 'graph>],
+    declarations: &'a [KeyedDeclaration],
+}
+
+impl ExportTargets for DeclarationTargets<'_, '_, '_, '_> {
+    type Target = usize;
+    fn imports(&self, unit: usize) -> &[super::KeyedImport] { self.units[unit].imports }
+    fn exports(&self, unit: usize) -> &[KeyedExport] { self.units[unit].exports }
+    fn provider(&self, path: &str) -> Option<usize> {
+        let mut matches = self.units.iter().enumerate().filter(|(_, unit)| unit.path == path);
+        let (index, _) = matches.next()?;
+        matches.next().is_none().then_some(index)
+    }
+    fn direct(&self, _: usize, _: &str, _: usize) -> (bool, Resolution) { (false, Resolution::default()) }
+    fn local(&self, unit: usize, name: &str, arity: usize) -> Option<Resolution> {
+        let matches: Vec<_> = self.declarations.iter().enumerate()
+            .filter(|(_, declaration)| declaration.unit == unit && declaration.name == name).collect();
+        if matches.is_empty() { return None; }
+        let mut result = Resolution::default();
+        if matches.len() == 1 && (matches[0].1.minimum..=matches[0].1.maximum).contains(&arity) {
+            result.targets.insert(matches[0].0);
+        } else {
+            result.incomplete = true;
+        }
+        Some(result)
+    }
+    fn owned(&self, _: usize, _: &super::KeyedImport, _: &str, _: usize) -> Resolution {
+        Resolution { incomplete: true, ..Resolution::default() }
+    }
+}
+
+/// Resolve an imported callable declaration through the verified module graph.
+/// The caller supplies all relevant local bindings, including untyped ones;
+/// omitted bindings can otherwise conceal shadowing or ambiguity.
+pub fn resolve_declaration_import(
+    units: &[super::KeyedUnit<'_, '_, '_>], declarations: &[KeyedDeclaration], unit: usize, name: &str, arity: usize,
+) -> DeclarationResolution {
+    if unit >= units.len() {
+        return DeclarationResolution { declaration: None, limitation: Some("unresolved_helper_target") };
+    }
+    let targets = DeclarationTargets { units, declarations };
+    let result = ExportTraversal { targets: &targets }.import(unit, name, arity, &mut ResolutionContext::default());
+    let limitation = result.limitation();
+    DeclarationResolution { declaration: result.unique(), limitation }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Resolution;
+    use super::{resolve_declaration_import, ExportTargets, ExportTraversal, KeyedDeclaration, KeyedExport, Resolution, ResolutionContext};
+    use super::super::{KeyedImport, KeyedUnit};
+
+    struct Declarations {
+        imports: Vec<Vec<KeyedImport>>,
+        exports: Vec<Vec<KeyedExport>>,
+        names: Vec<&'static str>,
+        locals: Vec<Vec<(&'static str, usize)>>,
+    }
+
+    impl ExportTargets for Declarations {
+        type Target = (usize, usize);
+        fn imports(&self, unit: usize) -> &[KeyedImport] { &self.imports[unit] }
+        fn exports(&self, unit: usize) -> &[KeyedExport] { &self.exports[unit] }
+        fn provider(&self, path: &str) -> Option<usize> { self.names.iter().position(|name| *name == path) }
+        fn direct(&self, _: usize, _: &str, _: usize) -> (bool, Resolution<Self::Target>) { (false, Resolution::default()) }
+        fn local(&self, unit: usize, name: &str, _: usize) -> Option<Resolution<Self::Target>> {
+            self.locals[unit].iter().find(|(local, _)| *local == name).map(|(_, offset)| {
+                let mut result = Resolution::default();
+                result.targets.insert((unit, *offset));
+                result
+            })
+        }
+        fn owned(&self, _: usize, _: &KeyedImport, _: &str, _: usize) -> Resolution<Self::Target> {
+            Resolution { incomplete: true, ..Resolution::default() }
+        }
+    }
+
+    fn named(exported: &str, local: &str, path: Option<&str>) -> KeyedExport {
+        KeyedExport::Named { exported: exported.into(), local: local.into(), path: path.map(str::to_owned) }
+    }
+
+    #[test]
+    fn declaration_identity_follows_barrels_and_preserves_conflicts() {
+        let mut graph = Declarations {
+            names: vec!["caller", "barrel", "factory", "other"],
+            imports: vec![vec![KeyedImport { local: "useIt".into(), path: "barrel".into(), name: Some("upload".into()), owner: None, exported: true }], vec![], vec![], vec![]],
+            exports: vec![vec![], vec![KeyedExport::Star { path: "factory".into() }], vec![named("upload", "binding", None)], vec![named("upload", "otherBinding", None)]],
+            locals: vec![vec![], vec![], vec![("binding", 42)], vec![("otherBinding", 19)]],
+        };
+        let resolve = |graph: &Declarations| ExportTraversal { targets: graph }.import(0, "useIt", 1, &mut ResolutionContext::default());
+        assert_eq!(resolve(&graph).unique(), Some((2, 42)));
+        graph.exports[1].push(KeyedExport::Star { path: "other".into() });
+        assert_eq!(resolve(&graph).limitation(), Some("unresolved_helper_target"));
+        graph.exports[1].push(named("upload", "upload", Some("factory")));
+        assert_eq!(resolve(&graph).unique(), Some((2, 42)));
+        graph.exports[1].push(named("upload", "missing", Some("absent")));
+        assert!(resolve(&graph).unique().is_none());
+    }
+
+    #[test]
+    fn declaration_adapter_resolves_actual_units_and_optional_arity() {
+        let imports = [KeyedImport { local: "run".into(), path: "barrel".into(), name: Some("upload".into()), owner: None, exported: true }];
+        let barrel = [KeyedExport::Star { path: "factory".into() }];
+        let factory = [named("upload", "binding", None)];
+        let units = [
+            KeyedUnit { path: "caller", source: b"", functions: &[], imports: &imports, exports: &[], entry: true },
+            KeyedUnit { path: "barrel", source: b"", functions: &[], imports: &[], exports: &barrel, entry: false },
+            KeyedUnit { path: "factory", source: b"", functions: &[], imports: &[], exports: &factory, entry: false },
+        ];
+        let declaration = KeyedDeclaration { unit: 2, name: "binding".into(), start: 42, minimum: 1, maximum: 2 };
+        assert_eq!(resolve_declaration_import(&units, std::slice::from_ref(&declaration), 0, "run", 1).declaration, Some(0));
+        assert_eq!(resolve_declaration_import(&units, std::slice::from_ref(&declaration), 0, "run", 2).declaration, Some(0));
+        assert!(resolve_declaration_import(&units, std::slice::from_ref(&declaration), 0, "run", 3).declaration.is_none());
+        assert!(resolve_declaration_import(&units, &[declaration.clone(), declaration], 0, "run", 1).declaration.is_none());
+    }
 
     #[test]
     fn resolution_distinguishes_declaration_identities_and_incomplete_paths() {

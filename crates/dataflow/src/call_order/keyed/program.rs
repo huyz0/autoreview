@@ -5,6 +5,7 @@ use tree_sitter::Node;
 use crate::cfg::{CallSite, CallTarget, Cfg, IdentityOperand, Stmt};
 mod signature;
 mod exports;
+pub use exports::{resolve_declaration_import, DeclarationResolution, KeyedDeclaration};
 use signature::{candidate, export, parameters, Export};
 
 use super::{CallOrderSpec, Plan, Values};
