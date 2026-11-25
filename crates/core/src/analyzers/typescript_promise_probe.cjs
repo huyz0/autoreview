@@ -2,6 +2,7 @@
 // The caller must provide the TypeScript package path explicitly.
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 
 function run(request) {
   const ts = require(request.typescriptModule);
@@ -24,6 +25,8 @@ function run(request) {
   const calls = request.calls.map(call => {
     const file = program.getSourceFile(call.path);
     if (!file) return { ...call, status: 'unavailable' };
+    const digest = crypto.createHash('sha256').update(file.text, 'utf8').digest('hex');
+    if (digest !== call.source_sha256) return { ...call, status: 'source_changed' };
     let selected;
     function visit(node) {
       if (ts.isCallExpression(node) && Buffer.byteLength(file.text.slice(0, node.getStart(file)), 'utf8') === call.start) selected = node;
