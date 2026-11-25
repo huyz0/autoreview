@@ -1,10 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 
 use serde::Deserialize;
 
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
+
+mod targets;
 
 #[derive(Debug, Deserialize)]
 struct GolangciOutput {
@@ -147,7 +149,11 @@ fn run_golangci_lint_once(repo_root: &Path, go_files: &[&str], targets: &[&str])
         Err(_) => return Err(GolangciRunError::Retryable(String::from_utf8_lossy(&output.stderr).to_string())),
     };
 
-    let mut parsed: GolangciOutput = serde_json::from_str(&json_text).map_err(|err| GolangciRunError::Other(err.into()))?;
+    process_output(repo_root, go_files, &output, &json_text).map(Some)
+}
+
+fn process_output(repo_root: &Path, go_files: &[&str], output: &std::process::Output, json_text: &str) -> Result<Vec<AgentFinding>, GolangciRunError> {
+    let mut parsed: GolangciOutput = serde_json::from_str(json_text).map_err(|err| GolangciRunError::Other(err.into()))?;
     let report_error = parsed.report.as_ref().and_then(|r| r.error.as_ref());
     if let Some(report_error) = report_error {
         // Newer versions put compiler diagnostics under Report.Error.
@@ -158,14 +164,31 @@ fn run_golangci_lint_once(repo_root: &Path, go_files: &[&str], targets: &[&str])
     }
     let changed_set: HashSet<&str> = go_files.iter().copied().collect();
 
-    let findings: Vec<_> = parsed.issues.iter()
-        .map(|issue| issue_to_finding(repo_root, issue))
-        .filter(|f| changed_set.contains(f.location.path.as_str()))
-        .collect();
+    let (findings, unreported_typecheck) = filter_findings(repo_root, &parsed.issues, &changed_set);
+    if let Some(diagnostic) = unreported_typecheck {
+        return Err(GolangciRunError::Other(anyhow::anyhow!("golangci-lint reported a type-check error outside the changed files; package analysis is incomplete: {diagnostic}")));
+    }
     if let Some(report_error) = report_error.filter(|_| findings.is_empty()) {
         return Err(GolangciRunError::Other(anyhow::anyhow!("golangci-lint reported a package-level error: {report_error}")));
     }
-    Ok(Some(findings))
+    if !output.status.success() && parsed.issues.is_empty() {
+        return Err(GolangciRunError::Other(anyhow::anyhow!("golangci-lint failed without reporting issues: {}", String::from_utf8_lossy(&output.stderr))));
+    }
+    Ok(findings)
+}
+
+fn filter_findings(repo_root: &Path, issues: &[GolangciIssue], changed: &HashSet<&str>) -> (Vec<AgentFinding>, Option<String>) {
+    let mut findings = Vec::new();
+    let mut unreported_typecheck = None;
+    for issue in issues {
+        let finding = issue_to_finding(repo_root, issue);
+        if changed.contains(finding.location.path.as_str()) {
+            findings.push(finding);
+        } else if issue.from_linter == "typecheck" {
+            unreported_typecheck.get_or_insert_with(|| format!("{}:{}: {}", finding.location.path, finding.location.range.start_line, finding.message));
+        }
+    }
+    (findings, unreported_typecheck)
 }
 
 /// Runs golangci-lint against the given changed Go files and normalizes its
@@ -177,33 +200,15 @@ fn run_golangci_lint_once(repo_root: &Path, go_files: &[&str], targets: &[&str])
 /// other failure (a real config/compile problem) surfaces immediately,
 /// unretried.
 pub fn run_golangci_lint(repo_root: &Path, changed_files: &[String]) -> anyhow::Result<Vec<AgentFinding>> {
-    // A deleted file's path still shows up in `git diff --numstat`, but
-    // passing a nonexistent path to golangci-lint doesn't just skip that one
-    // file — it fails typechecking for the *whole package* and silently
-    // reports zero issues everywhere, burying the real cause in `Report.Error`.
-    // Filtering to files that still exist avoids that failure mode entirely.
-    let go_files: Vec<&str> = changed_files.iter().map(String::as_str).filter(|p| p.ends_with(".go") && repo_root.join(p).exists()).collect();
-    if go_files.is_empty() {
-        return Ok(vec![]);
-    }
-
-    if repo_root.join("go.mod").is_file() || repo_root.join("go.work").is_file() {
-        // Named-file mode omits unchanged siblings and fails across packages.
-        let packages: BTreeSet<String> = go_files.iter().map(|file| {
-            file.rsplit_once('/').map_or_else(|| ".".to_string(), |(directory, _)| format!("./{directory}"))
-        }).collect();
-        let targets: Vec<_> = packages.iter().map(String::as_str).collect();
-        return run_with_retries(repo_root, &go_files, &targets);
-    }
-
-    // Keep named-file mode for repositories that have no Go module.
-    let mut groups: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for file in go_files {
-        groups.entry(file.rsplit_once('/').map_or("", |(directory, _)| directory)).or_default().push(file);
-    }
     let mut findings = Vec::new();
-    for files in groups.values() {
-        findings.extend(run_with_retries(repo_root, files, files)?);
+    for group in targets::groups(repo_root, changed_files) {
+        let files: Vec<_> = group.files.iter().map(String::as_str).collect();
+        let targets: Vec<_> = group.targets.iter().map(String::as_str).collect();
+        let mut found = run_with_retries(&group.root, &files, &targets)?;
+        for finding in &mut found {
+            finding.location.path = targets::normalize(&group.prefix.join(&finding.location.path));
+        }
+        findings.extend(found);
     }
     Ok(findings)
 }
@@ -298,6 +303,44 @@ mod tests {
     }
 
     #[test]
+    fn separates_module_workspace_and_nonmodule_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        for path in ["mod/pkg/file.go", "workspace/pkg/file.go", "loose/a.go", "loose/b.go", "other/c.go"] {
+            let full = dir.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, "package p\n").unwrap();
+        }
+        std::fs::write(dir.path().join("mod/go.mod"), "module example.test/mod\n").unwrap();
+        std::fs::write(dir.path().join("workspace/go.work"), "go 1.22\n").unwrap();
+        let input = ["mod/pkg/file.go", "workspace/pkg/file.go", "loose/a.go", "loose/b.go", "other/c.go", "missing.go", "../escape.go"];
+        let groups = targets::groups(dir.path(), &input.map(str::to_owned));
+        assert_eq!(groups.len(), 4);
+        let module = groups.iter().find(|group| group.prefix == Path::new("mod")).unwrap();
+        assert_eq!(module.files, ["pkg/file.go"]);
+        assert_eq!(module.targets, ["./pkg"]);
+        let workspace = groups.iter().find(|group| group.prefix == Path::new("workspace")).unwrap();
+        assert_eq!(workspace.targets, ["./pkg"]);
+        let loose = groups.iter().find(|group| group.targets.len() == 2).unwrap();
+        assert_eq!(loose.prefix, Path::new(""));
+        assert_eq!(loose.targets, ["loose/a.go", "loose/b.go"]);
+    }
+
+    #[test]
+    fn distinguishes_sibling_type_errors_from_unrelated_lint_findings() {
+        let issue = |linter: &str, path: &str| GolangciIssue {
+            from_linter: linter.into(), text: "diagnostic".into(),
+            pos: GolangciPos { filename: path.into(), line: 1, column: 1 }, source_lines: None,
+        };
+        let changed = HashSet::from(["main.go"]);
+        let (findings, incomplete) = filter_findings(Path::new("/repo"), &[issue("typecheck", "helper.go")], &changed);
+        assert!(findings.is_empty());
+        assert!(incomplete.as_deref().is_some_and(|detail| detail.contains("helper.go")));
+        let (findings, incomplete) = filter_findings(Path::new("/repo"), &[issue("errcheck", "helper.go"), issue("typecheck", "main.go")], &changed);
+        assert_eq!(findings.len(), 1);
+        assert!(incomplete.is_none());
+    }
+
+    #[test]
     fn returns_empty_without_invoking_when_no_go_files() {
         let result = run_golangci_lint(Path::new("/nonexistent"), &["README.md".to_string()]).unwrap();
         assert!(result.is_empty());
@@ -378,6 +421,79 @@ mod tests {
         assert_eq!(findings.len(), 2, "got: {findings:#?}");
         for file in ["example.go", "child/child.go"] {
             assert!(findings.iter().any(|finding| finding.location.path == file && finding.source.rule_id.as_deref() == Some("errcheck")));
+        }
+    }
+
+    #[test]
+    fn reviews_nested_modules_with_unchanged_siblings_and_repo_relative_paths() {
+        if !golangci_lint_available() { return; }
+        let dir = write_go_module(&[
+            ("root.go", "package root\nfunc Check() { helper() }\n"),
+            ("helper.go", "package root\nfunc helper() error { return nil }\n"),
+            ("nested/go.mod", "module example.com/nested\n\ngo 1.21\n"),
+            ("nested/child/changed.go", "package child\nfunc Check() { helper() }\n"),
+            ("nested/child/helper.go", "package child\nfunc helper() error { return nil }\n"),
+        ]);
+        let findings = run_golangci_lint(dir.path(), &["root.go".into(), "nested/child/changed.go".into()]).unwrap();
+        assert_errcheck_paths(&findings, &["root.go", "nested/child/changed.go"]);
+    }
+
+    #[test]
+    fn nested_module_with_no_root_go_module_uses_full_package() {
+        if !golangci_lint_available() { return; }
+        let dir = write_go_module(&[
+            ("tool/go.mod", "module example.com/tool\n\ngo 1.21\n"),
+            ("tool/main.go", "package tool\nfunc Check() { helper() }\n"),
+            ("tool/helper.go", "package tool\nfunc helper() error { return nil }\n"),
+        ]);
+        std::fs::remove_file(dir.path().join("go.mod")).unwrap();
+        let findings = run_golangci_lint(dir.path(), &["tool/main.go".into()]).unwrap();
+        assert!(findings.iter().any(|finding| finding.location.path == "tool/main.go" && finding.source.rule_id.as_deref() == Some("errcheck")), "{findings:#?}");
+    }
+
+    #[test]
+    fn reviews_modules_selected_by_go_workspace() {
+        if !golangci_lint_available() { return; }
+        let dir = write_go_module(&[
+            ("go.work", "go 1.21\nuse (\n ./one\n ./two\n)\n"),
+            ("one/go.mod", "module example.com/one\n\ngo 1.21\n"),
+            ("one/main.go", "package one\nfunc Check() { helper() }\n"),
+            ("one/helper.go", "package one\nfunc helper() error { return nil }\n"),
+            ("two/go.mod", "module example.com/two\n\ngo 1.21\n"),
+            ("two/main.go", "package two\nfunc Check() { helper() }\n"),
+            ("two/helper.go", "package two\nfunc helper() error { return nil }\n"),
+        ]);
+        std::fs::remove_file(dir.path().join("go.mod")).unwrap();
+        let findings = run_golangci_lint(dir.path(), &["one/main.go".into(), "two/main.go".into()]).unwrap();
+        assert_errcheck_paths(&findings, &["one/main.go", "two/main.go"]);
+    }
+
+    fn assert_errcheck_paths(findings: &[AgentFinding], paths: &[&str]) {
+        assert_eq!(findings.len(), paths.len(), "{findings:#?}");
+        for path in paths {
+            assert!(findings.iter().any(|finding| finding.location.path == *path && finding.source.rule_id.as_deref() == Some("errcheck")), "{findings:#?}");
+        }
+    }
+
+    #[test]
+    fn nested_module_reports_type_errors_in_unchanged_siblings() {
+        if !golangci_lint_available() { return; }
+        let dir = write_go_module(&[
+            ("tool/go.mod", "module example.com/tool\n\ngo 1.21\n"),
+            ("tool/main.go", "package tool\nfunc Check() { helper() }\n"),
+            ("tool/helper.go", "package tool\nfunc helper() { missing() }\n"),
+        ]);
+        std::fs::remove_file(dir.path().join("go.mod")).unwrap();
+        let result = run_golangci_lint(dir.path(), &["tool/main.go".into()]);
+        match result {
+            Err(error) => assert!(error.to_string().contains("typecheck") || error.to_string().contains("type-check"), "{error:#}"),
+            Ok(findings) => {
+                let json = dir.path().join("diagnostic.json");
+                let output = Command::new("golangci-lint").args(["run", "--output.json.path"]).arg(&json)
+                    .args(["--", "."]).current_dir(dir.path().join("tool")).output().unwrap();
+                panic!("expected an incomplete-analysis error, got {findings:#?}; status: {}; stderr: {}; json: {}", output.status,
+                    String::from_utf8_lossy(&output.stderr), std::fs::read_to_string(json).unwrap_or_default());
+            }
         }
     }
 
