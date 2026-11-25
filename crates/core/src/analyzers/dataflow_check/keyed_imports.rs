@@ -24,6 +24,7 @@ use coverage::{record_flow_limits, record_rule_limits};
 use typed::{check_typed_rule, TrustedTypeScript};
 
 const UNIT_LIMIT: usize = 64;
+const TYPED_UNIT_LIMIT: usize = 128;
 
 struct Source {
     language: Language,
@@ -83,8 +84,12 @@ pub(super) fn run(
                 .flatten()
         })
         .collect();
-    let (sources, mut coverage) = resolver.load(&entries);
     let checker = TrustedTypeScript::from_environment(&source_root);
+    let needs_typed = checker.is_some() && rules.iter().any(|(rule, declared)| {
+        rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory)
+            && entries.iter().any(|path| language_for_path(Path::new(path)).is_some_and(|language| language.matches_rule_language(*declared)))
+    });
+    let (sources, mut coverage) = if needs_typed { resolver.load_with_limit(&entries, TYPED_UNIT_LIMIT) } else { resolver.load(&entries) };
     let findings = run_sources(&sources, &entries, &rules, &source_root, checker.as_ref(), &mut coverage);
     (findings, coverage)
 }

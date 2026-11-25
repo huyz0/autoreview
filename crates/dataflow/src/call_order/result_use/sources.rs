@@ -51,7 +51,9 @@ impl CandidateScan<'_, '_, '_, '_, '_> {
         let unit = &self.units[unit_index];
         let mut pending = vec![function];
         while let Some(node) = pending.pop() {
-            if direct_call(node, unit.source).is_some_and(|(name, _)| unit.imports.iter().any(|binding| binding.local == name)) {
+            if node != function && matches!(node.kind(), "function_declaration" | "function_expression" | "arrow_function" | "method_definition") { continue; }
+            let candidate = direct_call(node, unit.source).filter(|(name, _)| unit.imports.iter().any(|binding| binding.local == *name));
+            if candidate.is_some_and(|(name, arity)| crate::promise_types::imported_factory_evidence(self.modules, self.units, unit_index, name, arity).is_some()) {
                 self.discovery.limitations.push(KeyedLimitation {
                     reason: "factory_flow_unmodeled", path: Some(unit.path.to_owned()),
                     line: Some(function.start_position().row as u32 + 1),

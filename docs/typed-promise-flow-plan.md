@@ -32,8 +32,10 @@ On the fixed revision, a local cold-cache loader experiment found 74 reachable
 files with a 256-dependency budget and reported no dependency-limit warning.
 It took approximately 202 ms, versus 180 ms for the current 64-dependency
 budget, which stopped at 65 files. These are single-machine measurements of
-source discovery only, not full-analysis benchmarks. The normal budget remains
-64 until broader performance and completeness checks justify a change.
+source discovery only, not full-analysis benchmarks. Normal reviews retain the
+64-dependency budget; reviews with a configured typed-promise rule use a
+128-dependency budget and still report exhaustion. Broader performance and
+completeness checks remain necessary.
 
 ## Deliverables
 

@@ -342,7 +342,7 @@ mod tests {
     fn imported_factory_evidence_can_feed_result_use_without_shadowed_calls() {
         use crate::call_order::{KeyedExport, KeyedFunction, KeyedImport};
         use crate::promise_types::TypeModule;
-        let source = "import { upload } from './barrel'; function run() { switch (1) { case 1: break; } [1].map(() => { upload('x'); upload(); upload(...args); upload?.('x'); }); } function shadow(upload: (x: string) => string) { [1].map(() => upload('x')); }";
+        let source = "import { upload } from './barrel'; function run() { switch (1) { case 1: break; } upload('outside'); [1].map(() => { upload('x'); upload(); upload(...args); upload?.('x'); }); } function shadow(upload: (x: string) => string) { [1].map(() => upload('x')); }";
         let texts = [source, "export * from './binding';", "import create from './factory'; export const upload = create({});", "export default function create(x: object): (ctx: string) => Promise<void> { throw 1; }"];
         let paths = ["caller", "barrel", "binding", "factory"];
         let trees: Vec<_> = texts.iter().map(|source| autoreview_langsupport::parser_for(Language::TypeScript).unwrap().parse(source, None).unwrap()).collect();
