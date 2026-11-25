@@ -266,7 +266,7 @@ pub fn factory_binding(node: Node<'_>, source: &[u8]) -> Option<FactoryBinding> 
     }
     let name = node.child_by_field_name("name").filter(|name| name.kind() == "identifier")?;
     let call = node.child_by_field_name("value").filter(|value| value.kind() == "call_expression")?;
-    if call.child_by_field_name("optional_chain").is_some() { return None; }
+    if call.children(&mut call.walk()).any(|child| matches!(child.kind(), "optional_chain" | "?.")) { return None; }
     let callee = call.child_by_field_name("function").filter(|callee| callee.kind() == "identifier")?;
     let arguments = call.child_by_field_name("arguments")?;
     let args: Vec<_> = arguments.named_children(&mut arguments.walk()).filter(|arg| arg.kind() != "comment").collect();
@@ -479,6 +479,7 @@ function union(): Promise<void> | undefined { throw 1; }
         let source = r#"export const upload = createHandler<Options>({ name: 'upload' });
 let mutable = createHandler({});
 const spread = createHandler(...options);
+const optional = createHandler?.({});
 const indirect = registry.createHandler({});
 function nested() { const local = createHandler({}); }
 "#;

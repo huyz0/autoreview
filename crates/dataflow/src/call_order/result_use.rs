@@ -20,6 +20,48 @@ use super::{
 use effects::{Demand, Effect, HelperCall, Origin, Value, Write};
 use places::Place;
 
+/// Discover direct imported calls with factory-return annotation evidence.
+/// This returns syntactic candidates only: callers must independently prove
+/// that `Promise` denotes the intended project type before treating them as
+/// result-use sources. Nested scopes are scanned from their outermost frame so
+/// any local shadowing in that frame conservatively excludes the name.
+pub fn discover_factory_sources(
+    spec: &CallOrderSpec,
+    modules: &[crate::promise_types::TypeModule<'_>],
+    units: &[KeyedUnit<'_, '_, '_>],
+) -> BTreeMap<usize, BTreeSet<usize>> {
+    let program = Program::new(spec, units);
+    let mut result = BTreeMap::<usize, BTreeSet<usize>>::new();
+    let mut cache = BTreeMap::<(usize, String, usize), bool>::new();
+    for (function, frame) in units.iter().flat_map(|unit| unit.functions.iter()).zip(&program.frames) {
+        let Some(plan) = &frame.plan else { continue };
+        if std::iter::successors(function.node.parent(), |node| node.parent()).any(|node| matches!(node.kind(), "function_declaration" | "function_expression" | "arrow_function" | "method_definition")) { continue; }
+        let unit = &units[frame.unit];
+        let mut pending = vec![function.node];
+        while let Some(node) = pending.pop() {
+            if let Some((name, arity)) = direct_call(node, unit.source) {
+                if !plan.syntax.shadows_api(name) && unit.imports.iter().any(|binding| binding.local == name && binding.name.is_some() && binding.owner.is_none() && binding.exported) {
+                    let valid = *cache.entry((frame.unit, name.to_owned(), arity)).or_insert_with(|| {
+                        crate::promise_types::imported_factory_evidence(modules, units, frame.unit, name, arity).is_some()
+                    });
+                    if valid { result.entry(frame.unit).or_default().insert(node.start_byte()); }
+                }
+            }
+            pending.extend(node.named_children(&mut node.walk()));
+        }
+    }
+    result
+}
+
+fn direct_call<'a>(node: tree_sitter::Node<'_>, source: &'a [u8]) -> Option<(&'a str, usize)> {
+    if node.kind() != "call_expression" || node.children(&mut node.walk()).any(|child| matches!(child.kind(), "optional_chain" | "?.")) { return None; }
+    let name = node.child_by_field_name("function").filter(|node| node.kind() == "identifier")?.utf8_text(source).ok()?;
+    let arguments = node.child_by_field_name("arguments")?;
+    let args: Vec<_> = arguments.named_children(&mut arguments.walk()).filter(|arg| arg.kind() != "comment").collect();
+    if args.iter().any(|arg| matches!(arg.kind(), "spread_element" | "spread_expression")) { return None; }
+    Some((name, args.len()))
+}
+
 pub(super) fn check_units(
     spec: &CallOrderSpec,
     units: &[KeyedUnit<'_, '_, '_>],
@@ -403,8 +445,8 @@ mod tests {
     #[test]
     fn imported_factory_evidence_can_feed_result_use_without_shadowed_calls() {
         use crate::call_order::{KeyedExport, KeyedFunction, KeyedImport};
-        use crate::promise_types::{imported_factory_evidence, TypeModule};
-        let source = "import { upload } from './barrel'; function run() { upload('x'); } function shadow(upload: () => string) { upload(); }";
+        use crate::promise_types::TypeModule;
+        let source = "import { upload } from './barrel'; function run() { upload('x'); upload(); upload(...args); upload?.('x'); } function shadow(upload: () => string) { upload(); }";
         let texts = [source, "export * from './binding';", "import create from './factory'; export const upload = create({});", "export default function create(x: object): (ctx: string) => Promise<void> { throw 1; }"];
         let paths = ["caller", "barrel", "binding", "factory"];
         let trees: Vec<_> = texts.iter().map(|source| autoreview_langsupport::parser_for(Language::TypeScript).unwrap().parse(source, None).unwrap()).collect();
@@ -417,20 +459,7 @@ mod tests {
         let units: Vec<_> = modules.iter().enumerate().map(|(i, module)| KeyedUnit { path: module.path, source: module.source, functions: if i == 0 { &functions } else { &[] }, imports: &imports[i], exports: &exports[i], entry: i == 0 }).collect();
         test_support::with_program((Language::TypeScript, ContractLanguage::Web), "function dummy() {}", ("unused", "missing"), |dummy, _| {
             let spec = dummy.frames[0].plan.as_ref().unwrap().spec;
-            let program = Program::new(spec, &units);
-            let mut offsets = BTreeSet::new();
-            for (function, frame) in functions.iter().zip(&program.frames) {
-                let Some(plan) = &frame.plan else { continue };
-                let mut pending = vec![function.node];
-                while let Some(node) = pending.pop() {
-                    if node.kind() == "call_expression" && node.child_by_field_name("function").is_some_and(|callee| callee.kind() == "identifier" && callee.utf8_text(source.as_bytes()) == Ok("upload"))
-                        && !plan.syntax.shadows_api("upload")
-                        && imported_factory_evidence(&modules, &units, 0, "upload", 1).is_some() {
-                        offsets.insert(node.start_byte());
-                    }
-                    pending.extend(node.named_children(&mut node.walk()));
-                }
-            }
+            let offsets = discover_factory_sources(spec, &modules, &units).remove(&0).unwrap();
             assert_eq!(offsets.len(), 1);
             let (hits, exhausted, _) = check_units_with_sources(spec, &units, &BTreeMap::from([(0, offsets)]));
             assert!(!exhausted);

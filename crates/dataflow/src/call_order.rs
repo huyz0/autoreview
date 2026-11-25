@@ -5,6 +5,7 @@
 mod bindings;
 mod contract;
 mod result_use;
+pub use result_use::discover_factory_sources;
 pub use contract::{ContractLanguage, ContractMode, ResultContract};
 mod identity;
 mod plan;
