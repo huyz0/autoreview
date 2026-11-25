@@ -407,15 +407,17 @@ fun dropped(text: String) { parse(text) }
     }
 }
 
+const RUST_RESULT_HELPERS: &str = r#"use std::fs::remove_file;
+pub(crate) fn discard(value: std::io::Result<()>) {}
+pub(crate) fn forward(value: std::io::Result<()>) -> std::io::Result<()> { value }
+pub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }
+"#;
+
 #[test]
 fn imported_rust_helpers_preserve_result_usage() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("src")).unwrap();
-    std::fs::write(root.path().join("src/support.rs"), r#"use std::fs::remove_file;
-pub(crate) fn discard(value: std::io::Result<()>) {}
-pub(crate) fn forward(value: std::io::Result<()>) -> std::io::Result<()> { value }
-pub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }
-"#).unwrap();
+    std::fs::write(root.path().join("src/support.rs"), RUST_RESULT_HELPERS).unwrap();
     std::fs::write(root.path().join("src/lib.rs"), r#"mod support;
 use std::fs::remove_file;
 fn unused(path: &str) {
@@ -438,11 +440,7 @@ fn rust_module_aliases_preserve_helper_result_usage() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("src")).unwrap();
     std::fs::write(root.path().join("src/lib.rs"), "mod support; mod worker;\n").unwrap();
-    std::fs::write(root.path().join("src/support.rs"), r#"use std::fs::remove_file;
-pub(crate) fn discard(value: std::io::Result<()>) {}
-pub(crate) fn forward(value: std::io::Result<()>) -> std::io::Result<()> { value }
-pub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }
-"#).unwrap();
+    std::fs::write(root.path().join("src/support.rs"), RUST_RESULT_HELPERS).unwrap();
     std::fs::write(root.path().join("src/worker.rs"), r#"use crate::support as tasks;
 use std::fs::remove_file;
 fn unused(path: &str) {
@@ -480,6 +478,15 @@ fn dropped(path: &str) { tasks::remove(path); }
     std::fs::copy(root.path().join("src/support.rs"), root.path().join("src/group/support.rs")).unwrap();
     std::fs::write(root.path().join("src/worker.rs"), worker.replace("crate::support", "crate::group::support")).unwrap();
     assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", &[("src/group/support.rs", 4), ("src/worker.rs", 4)]);
+    std::fs::create_dir(root.path().join("src/group/support")).unwrap();
+    std::fs::write(root.path().join("src/group/support/mod.rs"), RUST_RESULT_HELPERS).unwrap();
+    let ambiguous = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
+    assert!(ambiguous.coverage.iter().any(|issue| issue.reason == "unresolved_rust_module_import"), "{:?}", ambiguous.coverage);
+    assert!(!ambiguous.findings.iter().any(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result")), "{:#?}", ambiguous.findings);
+    std::fs::write(root.path().join("src/lib.rs"), "#[path = \"alternate.rs\"]\nmod support;\nfn run() { support::remove(\"x\"); }\n").unwrap();
+    let custom = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/lib.rs".into()], &[]);
+    assert!(custom.coverage.iter().any(|issue| issue.reason == "unresolved_rust_module_import" && issue.path.as_deref() == Some("src/lib.rs")), "{:?}", custom.coverage);
+    assert!(!custom.findings.iter().any(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result")), "{:#?}", custom.findings);
 }
 
 #[test]

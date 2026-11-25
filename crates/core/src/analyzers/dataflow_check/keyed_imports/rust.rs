@@ -15,12 +15,12 @@ impl ImportSource<'_> {
                         .child_by_field_name("name")
                         .and_then(|name| text(name, self.source));
                     name.and_then(|name| {
-                        rust_module(resolver, &dir.join(name)).and_then(|file| {
-                            resolver.binding(&file, &format!("{name}::"), None, None, true)
-                        })
-                    })
-                    .into_iter()
-                    .collect()
+                        let local = format!("{name}::");
+                        let binding = (!has_attributes(node)).then(|| rust_module(resolver, &dir.join(name)))
+                            .flatten().and_then(|file| resolver.binding(&file, &local, None, None, true));
+                        if binding.is_none() { record_unresolved(self, node, &local, coverage); }
+                        binding
+                    }).into_iter().collect()
                 }
                 "use_declaration" => rust_uses(self, &dir, node, coverage),
                 _ => Vec::new(),
@@ -58,15 +58,20 @@ fn rust_uses(
         let namespace = (!conditional).then(|| verified_namespace(resolver, path, module_path)).flatten();
         if let Some(file) = namespace {
             if let Some(binding) = resolver.binding(&file, &local, None, None, true) { bindings.push(binding); }
-        } else if module_path.starts_with("crate::") && namespace_called(input.node, &local, source) {
-            let mut record = issue(resolver.relative(path).as_deref(), "unresolved_rust_module_import", "dependency",
-                "A used Rust module import could not be resolved safely; cross-file call-sequence analysis may be incomplete.");
-            record.line = Some(node.start_position().row as u32 + 1);
-            coverage.push(record);
+        } else if module_path.starts_with("crate::") {
+            record_unresolved(input, node, &local, coverage);
         }
         bindings
     }).collect()
 
+}
+
+fn record_unresolved(input: &ImportSource<'_>, node: Node<'_>, local: &str, coverage: &mut Vec<AnalysisCoverageIssue>) {
+    if !namespace_called(input.node, local, input.source) { return; }
+    let mut record = issue(input.resolver.relative(input.path).as_deref(), "unresolved_rust_module_import", "dependency",
+        "A used Rust module import could not be resolved safely; cross-file call-sequence analysis may be incomplete.");
+    record.line = Some(node.start_position().row as u32 + 1);
+    coverage.push(record);
 }
 
 fn namespace_called(root: Node<'_>, prefix: &str, source: &str) -> bool {
@@ -90,18 +95,18 @@ fn verified_namespace(resolver: &Resolver<'_>, path: &Path, qualified: &str) -> 
     let roots: Vec<_> = [dir.join("lib.rs"), dir.join("main.rs")].into_iter().filter(|file| file.is_file()).collect();
     let [root] = roots.as_slice() else { return None };
     let mut current = root.clone();
-    for name in parts {
-        let parsed = resolver.cache.get(&current, Language::Rust)?;
-        if parsed.1.root_node().has_error() { return None; }
-        let modules: Vec<_> = children(parsed.1.root_node()).into_iter().filter(|node| node.kind() == "mod_item"
-            && node.child_by_field_name("body").is_none()
-            && node.child_by_field_name("name").and_then(|part| text(part, &parsed.0)) == Some(name)).collect();
-        let [module] = modules.as_slice() else { return None };
-        if has_attributes(*module) { return None; }
-        let next = rust_module(resolver, &module_dir(&current)?.join(name))?;
-        current = next;
-    }
+    for name in parts { current = declared_module(resolver, &current, name)?; }
     Some(current)
+}
+
+fn declared_module(resolver: &Resolver<'_>, current: &Path, name: &str) -> Option<PathBuf> {
+    let parsed = resolver.cache.get(current, Language::Rust)?;
+    if parsed.1.root_node().has_error() { return None; }
+    let modules: Vec<_> = children(parsed.1.root_node()).into_iter().filter(|node| node.kind() == "mod_item"
+        && node.child_by_field_name("body").is_none()
+        && node.child_by_field_name("name").and_then(|part| text(part, &parsed.0)) == Some(name)).collect();
+    let [module] = modules.as_slice() else { return None };
+    (!has_attributes(*module)).then(|| rust_module(resolver, &module_dir(current)?.join(name))).flatten()
 }
 
 fn has_attributes(node: Node<'_>) -> bool {
