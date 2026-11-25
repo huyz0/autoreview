@@ -1,11 +1,10 @@
 # Typed promise flow: implementation plan
 
-The historical SFTPresso case in `benchmark-candidates.md` remains unscored.
-Its `uploadFile` and `removeRemote` bindings are produced by a factory whose
-TypeScript return annotation is a function returning `Promise<void>`. The
-barrel re-exports are resolvable, but the returned function type and discarded
-calls are not yet modeled. The implementation must establish those facts from
-the source; matching the names of the factory or helpers is insufficient.
+The historical SFTPresso case in `benchmark-candidates.md` now has a passing
+replay for one fix pair. Its `uploadFile` and `removeRemote` bindings are
+produced by a factory whose TypeScript return annotation is a function
+returning `Promise<void>`. The implemented rule resolves these bindings and
+uses the configured TypeScript checker to verify discarded calls.
 
 An exploratory parse of the pinned before revision confirms that
 `createFileHandler` declares a returned callable with one required and one
@@ -38,10 +37,11 @@ On the fixed revision, a local cold-cache loader experiment found 74 reachable
 files with a 256-dependency budget and reported no dependency-limit warning.
 It took approximately 202 ms, versus 180 ms for the current 64-dependency
 budget, which stopped at 65 files. These are single-machine measurements of
-source discovery only, not full-analysis benchmarks. Normal reviews retain the
-64-dependency budget; reviews with a configured typed-promise rule use a
-128-dependency budget and still report exhaustion. Broader performance and
-completeness checks remain necessary.
+source discovery only, not full-analysis benchmarks. Ordinary rules retain
+the 64-dependency budget. Configured typed-promise rules use a separate
+web-language graph with a 128-dependency budget; exhaustion is reported against
+the rules that used the affected graph. Broader performance and completeness
+checks remain necessary.
 
 ## Deliverables
 
@@ -109,9 +109,9 @@ proof. The Rust
 prototype embeds the script, limits request and response sizes and process
 time, and requires an explicitly supplied trusted compiler path. It does not
 yet contain descendant processes or resolve the compiler automatically; do
-not invoke an untrusted project's package as part of a review. Before
-integration, decide how to supply and trust the compiler, handle subprocess
-containment, report checker failures, and measure cost. Its project-wide error
+not invoke an untrusted project's package as part of a review. Compiler
+selection is explicit and checker failures are reported; subprocess containment
+and representative performance measurements remain open. Its project-wide error
 gate is conservative and may skip valid calls in projects with unrelated
 errors. The Node and Rust tests use `AUTOREVIEW_TEST_TYPESCRIPT` to select an
 installed compiler; the Linux CI job installs a pinned version for them. A
@@ -120,8 +120,8 @@ path to a trusted TypeScript installation. `AUTOREVIEW_TYPESCRIPT_CONFIG` can
 select an absolute config path; otherwise the repository-root `tsconfig.json`
 is used. `AUTOREVIEW_NODE_BINARY` optionally selects Node. Without the trusted
 compiler configuration the typed contract is reported as skipped. This is an
-experimental interface; compiler selection, descendant-process containment,
-and normal review and replay coverage still require validation.
+experimental interface; compiler distribution, descendant-process containment,
+and broader review and replay coverage still require work.
 
 ## Evidence and release gate
 

@@ -1,5 +1,6 @@
-use std::collections::BTreeMap;
-use autoreview_langsupport::Language;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+use autoreview_langsupport::{language_for_path, Language};
 use autoreview_schema::AnalysisCoverageIssue;
 use autoreview_dataflow::call_order::keyed_flow_exhausted;
 use super::{issue, CallOrderRuleDef, LoweredFile, Source};
@@ -55,5 +56,22 @@ fn typed_detail(reason: &str) -> Option<&'static str> {
             "factory_flow_unmodeled" => "An enclosing function contains unsupported control flow and an imported call; typed promise analysis may be incomplete.",
             _ => return None,
     })
+}
+
+
+pub(super) fn scope_coverage(
+    coverage: Vec<AnalysisCoverageIssue>, rules: &[(&CallOrderRuleDef, Language)], entries: &BTreeSet<String>,
+) -> Vec<AnalysisCoverageIssue> {
+    let applicable: Vec<_> = rules.iter().filter(|(_, declared)| {
+        entries.iter().any(|path| language_for_path(Path::new(path)).is_some_and(|language| language.matches_rule_language(*declared)))
+    }).map(|(rule, _)| rule.id.as_str()).collect();
+    coverage.into_iter().flat_map(|issue| {
+        if issue.rule.is_some() || issue.reason != "dependency_limit" { return vec![issue]; }
+        applicable.iter().map(|rule| {
+            let mut scoped = issue.clone();
+            scoped.rule = Some((*rule).to_owned());
+            scoped
+        }).collect()
+    }).collect()
 }
 

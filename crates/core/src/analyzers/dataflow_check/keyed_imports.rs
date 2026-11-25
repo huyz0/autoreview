@@ -20,7 +20,7 @@ mod rust;
 mod web;
 mod typed;
 mod coverage;
-use coverage::{record_flow_limits, record_rule_limits};
+use coverage::{record_flow_limits, record_rule_limits, scope_coverage};
 use typed::{check_typed_rule, TrustedTypeScript};
 
 const UNIT_LIMIT: usize = 64;
@@ -77,9 +77,9 @@ pub(super) fn run(
         rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory)
     });
     let checker = TrustedTypeScript::from_environment(&source_root);
-    let (mut findings, mut coverage) = run_group(&resolver, paths, &ordinary, &source_root, None, UNIT_LIMIT);
+    let (mut findings, mut coverage) = run_group(&resolver, paths, &ordinary, &source_root, (None, UNIT_LIMIT));
     let limit = if checker.is_some() { TYPED_UNIT_LIMIT } else { UNIT_LIMIT };
-    let (typed_findings, typed_coverage) = run_group(&resolver, paths, &typed, &source_root, checker.as_ref(), limit);
+    let (typed_findings, typed_coverage) = run_group(&resolver, paths, &typed, &source_root, (checker.as_ref(), limit));
     findings.extend(typed_findings);
     coverage.extend(typed_coverage);
     (findings, coverage)
@@ -87,8 +87,9 @@ pub(super) fn run(
 
 fn run_group(
     resolver: &Resolver<'_>, paths: &[String], rules: &[(&CallOrderRuleDef, Language)],
-    root: &Path, checker: Option<&TrustedTypeScript>, limit: usize,
+    root: &Path, options: (Option<&TrustedTypeScript>, usize),
 ) -> (Vec<AgentFinding>, Vec<AnalysisCoverageIssue>) {
+    let (checker, limit) = options;
     let entries: BTreeSet<_> = paths
         .iter()
         .filter_map(|path| {
@@ -106,21 +107,6 @@ fn run_group(
     (findings, scope_coverage(coverage, rules, &entries))
 }
 
-fn scope_coverage(
-    coverage: Vec<AnalysisCoverageIssue>, rules: &[(&CallOrderRuleDef, Language)], entries: &BTreeSet<String>,
-) -> Vec<AnalysisCoverageIssue> {
-    let applicable: Vec<_> = rules.iter().filter(|(_, declared)| {
-        entries.iter().any(|path| language_for_path(Path::new(path)).is_some_and(|language| language.matches_rule_language(*declared)))
-    }).map(|(rule, _)| rule.id.as_str()).collect();
-    coverage.into_iter().flat_map(|issue| {
-        if issue.rule.is_some() || issue.reason != "dependency_limit" { return vec![issue]; }
-        applicable.iter().map(|rule| {
-            let mut scoped = issue.clone();
-            scoped.rule = Some((*rule).to_owned());
-            scoped
-        }).collect()
-    }).collect()
-}
 
 fn run_sources(
     sources: &BTreeMap<String, Source>,
@@ -437,7 +423,7 @@ mod budget_tests {
         assert_eq!(findings[0].source.rule_id.as_deref(), Some("test-typed"));
         assert!(coverage.is_empty(), "{:?}", coverage.iter().map(|issue| &issue.reason).collect::<Vec<_>>());
         let paths = ["main.ts".to_owned(), "other.rs".to_owned()];
-        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), Some(&checker), TYPED_UNIT_LIMIT));
+        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
         assert_eq!(findings.len(), 1);
         assert!(coverage.is_empty(), "{:?}", coverage.iter().map(|issue| &issue.reason).collect::<Vec<_>>());
     }
