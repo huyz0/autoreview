@@ -79,9 +79,9 @@ fn every_call_order_rule_fires_on_its_positive_fixture_and_stays_silent_on_its_n
             continue;
         };
 
-        // Typed sources require a multi-file TypeScript project and a trusted
-        // compiler; keyed_imports tests run these fixtures with that setup.
-        if rule.contract.as_ref().and_then(|contract| contract.source.as_deref()) == Some("typed-promise-factory") {
+        // Typed sources require a configured trusted checker and project setup;
+        // keyed_imports tests run these fixtures with that setup.
+        if matches!(rule.contract.as_ref().and_then(|contract| contract.source.as_deref()), Some("typed-promise-factory" | "typed-go-error")) {
             continue;
         }
 

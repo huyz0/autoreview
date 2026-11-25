@@ -5,6 +5,8 @@ use crate::cfg::{CallTarget, Cfg, EdgeKind, NodeId, Stmt, ThrowingCall};
 use super::{keyed_syntax, line, site, StatementLowerer};
 
 mod handlers;
+mod switch;
+pub(crate) use switch::supports_go_switch;
 pub(crate) mod loops;
 
 pub(super) const EXIT_PATH_LIMIT: usize = 128;
@@ -31,6 +33,7 @@ impl Flow<'_> {
             _ if loops::jump_kind(node, self.source).is_some() => {
                 self.loop_jump(cfg, node, current)
             }
+            "expression_switch_statement" if supports_go_switch(node) => self.go_switch(cfg, node, current),
             "try_statement" | "try_expression" => self.protected(cfg, node, current),
             "throw_statement" | "throw_expression" => {
                 super::record_evaluation(cfg, current, node);

@@ -48,7 +48,7 @@ pub(super) fn with_program(
             borrows: vec![],
             acquire_awaited: false,
             complete_observed: false,
-            typed_promise_factory: false,
+            typed_promise_factory: false, typed_go_error: false,
         }),
     };
     check(&Program::new(&spec, &units), &units);

@@ -1,10 +1,11 @@
 # Experimental Go error type evidence
 
-This standalone prototype uses `go/types` to check whether specified call
-expressions return exactly one predeclared `error`. It does not run Autoreview
-or report discarded results. It has two input modes: caller-supplied source
-files and experimental package loading. Both use JSON on standard input,
-limited to 1 MiB.
+This experimental probe uses `go/types` to check whether specified calls
+return exactly one predeclared `error`. Autoreview can invoke package mode when
+explicitly configured with trusted probe and Go executable paths; the probe
+itself does not decide whether a result is discarded. It has two input modes:
+caller-supplied source files and experimental package loading. Both use JSON on
+standard input, limited to 1 MiB.
 
 In source-file mode the caller supplies every build-selected source file:
 
@@ -21,12 +22,12 @@ Call paths are package-relative file names:
 ```
 
 Package mode runs `go list -deps -export -json .` with module downloads and
-toolchain downloads disabled and `GOFLAGS` cleared. It uses the Go environment's
+toolchain downloads disabled and `GOFLAGS=-mod=readonly`. It uses the Go environment's
 platform, workspace, and cache, applies default build tags, loads dependency
 types, and reads the
 selected ordinary Go files. Cached dependencies are required. It rejects a
-package with cgo files and does not load test variants. Missing or mismatched
-call-file hashes fail the whole request. A Go command and its build tools can
+package with cgo files and does not load test variants. Missing call-file hashes or mismatches for any supplied source hash fail the
+whole request. A Go command and its build tools can
 execute processes and read project configuration; use only trusted tools and
 projects in an appropriately contained environment. The 60-second direct
 child timeout does not yet contain descendant processes.
@@ -43,13 +44,16 @@ calls.
 The caller must analyze an immutable package snapshot: other package files and
 cached dependency exports can change during or after loading. Source-file mode
 still relies on the caller to provide the complete build-selected package.
-Before integration, explicit build tags, test variants, cgo, dependency and source snapshot identity,
-process-tree containment, response limits, and coverage diagnostics need
-explicit handling. Unavailable evidence must not be treated as clean.
+Explicit build tags, test variants, cgo, full dependency and source snapshot
+identity, and process-tree containment remain unsupported. Autoreview bounds
+requests and responses and reports unavailable evidence as a coverage limit;
+it does not treat that evidence as a clean result.
 
 With the pinned yq revision and its dependencies installed in an isolated
 cache, package mode classified the three candidate calls as returning `error`.
-That experiment does not run result-use analysis or count as a replay score.
+The integrated experimental rule's historical replay also finds the three
+labeled discarded results and no findings after the fix. This single fix pair
+is not an estimate of general precision or recall.
 
 Run the tests with a Go toolchain:
 

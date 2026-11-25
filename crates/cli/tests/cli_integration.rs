@@ -175,7 +175,28 @@ fn diff_reports_dataflow_syntax_limitations_without_warning_on_clean_files() {
         warning.as_str().is_some_and(|text| text.contains("main.go") && text.contains("incomplete"))));
     repo.commit(&[("main.go", "package main\nfunc main() { println(1) }\n")], "fix syntax");
     let clean = run(&current_commit(repo.path()));
-    assert!(clean.get("analysisCoverage").is_none(), "{clean}");
+    assert!(!clean.get("analysisCoverage").and_then(|items| items.as_array()).is_some_and(|items|
+        items.iter().any(|issue| issue["analyzer"] == "dataflow" && issue["reason"] == "syntax_errors")), "{clean}");
+}
+
+#[test]
+fn changed_lines_include_verified_project_error_results() {
+    let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
+    let before = "package main\nfunc work() error { return nil }\nfunc run() error { return work() }\n";
+    let after = "package main\nfunc work() error { return nil }\nfunc run() { work() }\n";
+    let repo = init_repo(&[("go.mod", "module example.test/review\n\ngo 1.22\n"), ("main.go", before)]);
+    let base = current_commit(repo.path());
+    repo.commit(&[("main.go", after)], "discard project error");
+    let run = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .env("AUTOREVIEW_GO_ERROR_PROBE", probe).env("AUTOREVIEW_GO_BINARY", go)
+        .args(["diff", "--base", &base, "--head", "HEAD", "--static-only", "--changed-lines"])
+        .assert().success();
+    let report = report_path_from_stdout(&String::from_utf8_lossy(&run.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    assert!(report["findings"].as_array().unwrap().iter().any(|finding|
+        finding["source"]["ruleId"] == "go-project-error-result-unobserved" && finding["location"]["range"]["startLine"] == 3), "{report}");
+    assert!(!report.get("analysisCoverage").and_then(|items| items.as_array()).is_some_and(|items|
+        items.iter().any(|issue| issue["rule"] == "go-project-error-result-unobserved")), "{report}");
 }
 
 #[test]

@@ -329,7 +329,7 @@ when the acquisition returns one handle directly and a completion call
 satisfies its contract.
 
 Use `mode: must-use` for APIs such as `os.Rename` whose result carries an
-error. This mode requires `import` and a nonempty `methods` list. It checks
+error. API contracts require `import` and a nonempty `methods` list. It checks
 bare call statements, explicit wildcard assignments, and assigned results
 that no reachable path reads. Reassignment replaces the value on that path.
 The analysis follows copies through locals and statically named fields of
@@ -342,6 +342,14 @@ it to the caller, where it can be read or discarded. Rust `move` closures
 capture the value at creation. Escaped callbacks, dynamic receivers, and
 objects with unknown accessors count as possible uses. A directly awaited
 web promise satisfies the contract. Omit `unless` and `borrows` for this mode.
+
+Experimental typed sources use `source` instead of API names. A Go `must-use`
+contract may specify `source: typed-go-error` to use independently verified
+single-`error` call results. It requires a trusted configured Go evidence probe
+and reports unavailable or unmodeled analysis; it does not cover every Go
+package or result shape. A TypeScript or TSX contract may use
+`source: typed-promise-factory` for verified factory-created promise calls.
+Do not mix a typed source with `import`, `methods`, or `borrows`.
 
 Go matches explicit package imports. Java matches explicit class imports and
 fully qualified calls in supported top-level types. Kotlin and Rust also

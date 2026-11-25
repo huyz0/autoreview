@@ -45,8 +45,14 @@ pub struct TypeScriptCallResult {
 /// Any failure returns `None` and must be reported as incomplete analysis.
 pub fn check(node: &str, request: &TypeScriptRequest<'_>, timeout: Duration) -> Option<TypeScriptResult> {
     let input = serde_json::to_vec(request).ok()?;
+    let output = run_bounded(Command::new(node).args(["-e", SCRIPT]), input, timeout)?;
+    let result: TypeScriptResult = serde_json::from_slice(&output).ok()?;
+    valid_response(&result, request).then_some(result)
+}
+
+pub(super) fn run_bounded(command: &mut Command, input: Vec<u8>, timeout: Duration) -> Option<Vec<u8>> {
     if input.len() > MAX_BYTES { return None; }
-    let mut child = Command::new(node).args(["-e", SCRIPT]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
     let mut stdin = child.stdin.take()?;
     let mut stdout = child.stdout.take()?;
     let (written_tx, written_rx) = mpsc::sync_channel(1);
@@ -62,8 +68,7 @@ pub fn check(node: &str, request: &TypeScriptRequest<'_>, timeout: Duration) -> 
     let written = written_rx.recv_timeout(timeout.saturating_sub(started.elapsed())).ok()?.is_ok();
     let output = output_rx.recv_timeout(timeout.saturating_sub(started.elapsed())).ok()?.ok()?;
     if !written || !status?.success() || output.len() > MAX_BYTES { return None; }
-    let result: TypeScriptResult = serde_json::from_slice(&output).ok()?;
-    valid_response(&result, request).then_some(result)
+    Some(output)
 }
 
 fn wait_for_child(child: &mut std::process::Child, started: Instant, timeout: Duration) -> Option<std::process::ExitStatus> {
@@ -184,7 +189,7 @@ mod tests {
         let imports = [vec![KeyedImport { local: "upload".into(), path: "barrel.ts".into(), name: Some("upload".into()), owner: None, exported: true }], vec![], vec![KeyedImport { local: "create".into(), path: "factory.ts".into(), name: Some("default".into()), owner: None, exported: true }], vec![]];
         let exports = [vec![], vec![KeyedExport::Star { path: "binding.ts".into() }], vec![KeyedExport::Named { exported: "upload".into(), local: "upload".into(), path: None }], vec![KeyedExport::Named { exported: "default".into(), local: "create".into(), path: None }]];
         let units: Vec<_> = modules.iter().enumerate().map(|(i, module)| KeyedUnit { path: module.path, source: module.source, functions: if i == 0 { &functions } else { &[] }, imports: &imports[i], exports: &exports[i], entry: i == 0 }).collect();
-        let spec = CallOrderSpec { rule_id: "typed-test".into(), after: vec![], unless: vec![], before: vec![], check_before_return: false, identity: None, contract: Some(ResultContract { mode: ContractMode::MustUse, language: ContractLanguage::Web, import: "unused".into(), methods: vec!["missing".into()], borrows: vec![], acquire_awaited: false, complete_observed: false, typed_promise_factory: false }) };
+        let spec = CallOrderSpec { rule_id: "typed-test".into(), after: vec![], unless: vec![], before: vec![], check_before_return: false, identity: None, contract: Some(ResultContract { mode: ContractMode::MustUse, language: ContractLanguage::Web, import: "unused".into(), methods: vec!["missing".into()], borrows: vec![], acquire_awaited: false, complete_observed: false, typed_promise_factory: false, typed_go_error: false }) };
         let config = config_path.to_str().unwrap();
         let candidates = discover_factory_sources(&spec, &modules, &units);
         assert_eq!(candidates.candidates[&0].len(), 1);

@@ -13,10 +13,10 @@ contribute to accuracy scores. They are not counted as detected findings.
   the fix propagates that error. Two further calls discard `applyAlias` errors;
   the same fix propagates those too. Both functions are declared in the file.
 
-This is a candidate for checking discarded error returns from resolved Go
-functions, rather than only APIs named by a contract. A future case should
-label every finding in the whole file, include clean counterexamples, and
-confirm the expected behavior against both revisions before scoring it.
+The experimental typed Go rule now detects all three calls in the historical
+replay and none in the corrected file; see `benchmarks/yq-error.yaml`. This one
+fix pair does not establish general precision or recall, and the checker remains
+opt-in with documented package and runtime limitations.
 
 ## Promise-returning TypeScript helpers in `Promise.all`
 
