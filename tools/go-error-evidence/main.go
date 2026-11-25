@@ -74,13 +74,10 @@ func preparePackage(fset *token.FileSet, req request) (loadedPackage, string) {
 		return loadedPackage{}, "invalid_request"
 	}
 	loaded, reason := loadPackage(fset, req.PackageDir, req.GoBinary)
-	if reason != "" {
-		return loadedPackage{}, reason
-	}
-	if !matchesExpectedSources(loaded.files, req.Calls, req.ExpectedSources) {
+	if reason == "" && !matchesExpectedSources(loaded.files, req.Calls, req.ExpectedSources) {
 		return loadedPackage{}, "source_mismatch"
 	}
-	return loaded, ""
+	return loaded, reason
 }
 
 func parseFiles(fset *token.FileSet, sources []sourceFile) ([]*ast.File, map[string]*ast.File, string) {

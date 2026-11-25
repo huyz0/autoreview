@@ -59,6 +59,10 @@ func loadPackage(fset *token.FileSet, dir, binary string) (loadedPackage, string
 	if !ok {
 		return loadedPackage{}, "package_load_incomplete"
 	}
+	return assemblePackage(fset, target, exports)
+}
+
+func assemblePackage(fset *token.FileSet, target listedPackage, exports map[string]string) (loadedPackage, string) {
 	sources, ok := readSources(target)
 	if !ok {
 		return loadedPackage{}, "package_sources_unavailable"
@@ -143,24 +147,32 @@ func readSources(target listedPackage) ([]sourceFile, bool) {
 }
 
 func readSource(dir, name string, remaining int64) (sourceFile, bool) {
-	if filepath.Base(name) != name {
+	file, size := openSource(dir, name, remaining)
+	if file == nil {
 		return sourceFile{}, false
+	}
+	defer file.Close() //nolint:errcheck // Closing a read-only source cannot change the bytes read.
+	data, err := io.ReadAll(io.LimitReader(file, remaining+1))
+	if err != nil || int64(len(data)) != size || int64(len(data)) > remaining {
+		return sourceFile{}, false
+	}
+	return sourceFile{Path: name, Source: string(data)}, true
+}
+
+func openSource(dir, name string, remaining int64) (*os.File, int64) {
+	if filepath.Base(name) != name {
+		return nil, 0
 	}
 	path := filepath.Join(dir, name)
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > remaining {
-		return sourceFile{}, false
+		return nil, 0
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return sourceFile{}, false
+		return nil, 0
 	}
-	defer func() { _ = file.Close() }()
-	data, err := io.ReadAll(io.LimitReader(file, remaining+1))
-	if err != nil || int64(len(data)) != info.Size() || int64(len(data)) > remaining {
-		return sourceFile{}, false
-	}
-	return sourceFile{Path: name, Source: string(data)}, true
+	return file, info.Size()
 }
 
 func matchesExpectedSources(files []sourceFile, calls []callSite, expected map[string]string) bool {
