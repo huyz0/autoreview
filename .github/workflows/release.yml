@@ -19,6 +19,9 @@ on:
 permissions:
   contents: write
 
+env:
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
 jobs:
   build:
     strategy:
@@ -80,7 +83,7 @@ jobs:
       - name: Check the crate version matches the tag
         shell: bash
         run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          tag="$RELEASE_TAG"
           crate_version="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
           if [ "$tag" != "v$crate_version" ]; then
             echo "::error::tag $tag does not match workspace version $crate_version — bump [workspace.package] version in Cargo.toml, or retag"
@@ -113,7 +116,7 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          tag="$RELEASE_TAG"
           name="autoreview-${tag}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/autoreview" "dist/$name/"
@@ -133,11 +136,21 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      prerelease: ${{ steps.publish.outputs.prerelease }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # A manually selected older tag may predate the publishing script.
+      - name: Checkout release automation
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-automation
+          persist-credentials: false
 
       - name: Download all targets
         uses: actions/download-artifact@v4
@@ -159,7 +172,7 @@ jobs:
         working-directory: dist
         shell: bash
         run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          tag="$RELEASE_TAG"
           version="${tag#v}"
           repo="${{ github.repository }}"
           base="https://github.com/${repo}/releases/download/${tag}"
@@ -205,15 +218,11 @@ jobs:
           cat autoreview.rb
 
       - name: Publish release
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
-          gh release create "$tag" \
-            --repo "${{ github.repository }}" \
-            --title "$tag" \
-            --generate-notes \
-            dist/*.tar.gz dist/checksums.txt dist/autoreview.rb
+          sh .release-automation/packaging/publish-release.sh "$RELEASE_TAG" "${{ github.repository }}" dist
 
   # The `secrets` context cannot be referenced from a job-level `if:` —
   # GitHub rejects the workflow at parse time with "Unrecognized
@@ -246,7 +255,7 @@ jobs:
   # the formula is attached to it regardless.
   homebrew:
     needs: [release, check-secrets]
-    if: needs.check-secrets.outputs.has_homebrew == 'true'
+    if: needs.check-secrets.outputs.has_homebrew == 'true' && needs.release.outputs.prerelease == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -257,13 +266,13 @@ jobs:
       # construction rather than by two generators agreeing.
       - name: Download the formula from the release
         run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          tag="$RELEASE_TAG"
           gh release download "$tag" --repo "${{ github.repository }}" --pattern autoreview.rb
           cat autoreview.rb
 
       - name: Push to homebrew-tap
         run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          tag="$RELEASE_TAG"
           version="${tag#v}"
           content="$(base64 -w 0 autoreview.rb)"
           # Updating an existing file needs its current blob sha; creating

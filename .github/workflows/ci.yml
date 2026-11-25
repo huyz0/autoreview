@@ -73,6 +73,9 @@ jobs:
       - name: Build
         run: cargo build --workspace --tests --locked
 
+      - name: Test release classification
+        run: sh packaging/test-publish-release.sh
+
       # --test-threads=4: golangci-lint's own subprocess invocation
       # already retries its transient "no output" failure mode (a
       # contended shared Go build cache under heavy concurrent load —
