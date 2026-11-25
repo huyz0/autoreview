@@ -243,17 +243,9 @@ fn review_keeps_clippy_findings_when_another_target_fails() {
             && issue["detail"].as_str().unwrap().contains("additional targets failed")), "{report}");
 }
 
-#[test]
-fn rust_module_alias_results_reach_the_review_report() {
-    let root = "mod support; mod worker;\n";
-    let support = "use std::fs::remove_file;\npub(crate) fn discard(value: std::io::Result<()>) {}\npub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n";
-    let before = "use crate::support as tasks;\nfn run(path: &str) { let _ = path; }\n";
-    let after = "use crate::support as tasks;\nuse std::fs::remove_file;\nfn run(path: &str) { let result = remove_file(path); tasks::discard(result); }\nfn other(path: &str) { tasks::remove(path); }\n";
-    let repo = init_repo(&[("src/lib.rs", root), ("src/support.rs", support), ("src/worker.rs", before)]);
-    let base = current_commit(repo.path());
-    repo.commit(&[("src/worker.rs", after)], "discard helper results");
+fn assert_rust_helper_review(repo: &autoreview_test_support::TestRepo, base: &str, incomplete_reason: &str) {
     let run = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
-        .args(["diff", "--base", &base, "--head", "HEAD", "--static-only"])
+        .args(["diff", "--base", base, "--head", "HEAD", "--static-only"])
         .assert().success();
     let path = report_path_from_stdout(&String::from_utf8_lossy(&run.get_output().stdout));
     let report: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
@@ -263,7 +255,19 @@ fn rust_module_alias_results_reach_the_review_report() {
                 && finding["location"]["path"] == file && finding["location"]["range"]["startLine"] == line), "{report}");
     }
     assert!(!report.get("analysisCoverage").and_then(|items| items.as_array()).is_some_and(|items|
-        items.iter().any(|issue| issue["reason"] == "unresolved_rust_module_import")), "{report}");
+        items.iter().any(|issue| issue["reason"] == incomplete_reason)), "{report}");
+}
+
+#[test]
+fn rust_module_alias_results_reach_the_review_report() {
+    let root = "mod support; mod worker;\n";
+    let support = "use std::fs::remove_file;\npub(crate) fn discard(value: std::io::Result<()>) {}\npub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n";
+    let before = "use crate::support as tasks;\nfn run(path: &str) { let _ = path; }\n";
+    let after = "use crate::support as tasks;\nuse std::fs::remove_file;\nfn run(path: &str) { let result = remove_file(path); tasks::discard(result); }\nfn other(path: &str) { tasks::remove(path); }\n";
+    let repo = init_repo(&[("src/lib.rs", root), ("src/support.rs", support), ("src/worker.rs", before)]);
+    let base = current_commit(repo.path());
+    repo.commit(&[("src/worker.rs", after)], "discard helper results");
+    assert_rust_helper_review(&repo, &base, "unresolved_rust_module_import");
 }
 
 #[test]
@@ -276,18 +280,7 @@ fn rust_reexported_results_reach_the_review_report() {
     let repo = init_repo(&[("src/lib.rs", root), ("src/support.rs", support), ("src/api.rs", api), ("src/worker.rs", before)]);
     let base = current_commit(repo.path());
     repo.commit(&[("src/worker.rs", after)], "discard reexported results");
-    let run = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
-        .args(["diff", "--base", &base, "--head", "HEAD", "--static-only"])
-        .assert().success();
-    let path = report_path_from_stdout(&String::from_utf8_lossy(&run.get_output().stdout));
-    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    for (file, line) in [("src/worker.rs", 3), ("src/support.rs", 3)] {
-        assert!(report["findings"].as_array().unwrap().iter().any(|finding|
-            finding["source"]["ruleId"] == "rust-discarded-remove-file-result"
-                && finding["location"]["path"] == file && finding["location"]["range"]["startLine"] == line), "{report}");
-    }
-    assert!(!report.get("analysisCoverage").and_then(|items| items.as_array()).is_some_and(|items|
-        items.iter().any(|issue| issue["reason"] == "unresolved_helper_target")), "{report}");
+    assert_rust_helper_review(&repo, &base, "unresolved_helper_target");
 }
 
 #[test]

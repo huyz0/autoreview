@@ -435,13 +435,7 @@ fn dropped(path: &str) {
     assert_helper_locations(root.path(), "src/lib.rs", "rust-discarded-remove-file-result", &[("src/lib.rs", 4), ("src/support.rs", 4)]);
 }
 
-#[test]
-fn rust_module_aliases_preserve_helper_result_usage() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::create_dir(root.path().join("src")).unwrap();
-    std::fs::write(root.path().join("src/lib.rs"), "mod support; mod worker;\n").unwrap();
-    std::fs::write(root.path().join("src/support.rs"), RUST_RESULT_HELPERS).unwrap();
-    std::fs::write(root.path().join("src/worker.rs"), r#"use crate::support as tasks;
+const RUST_WORKER: &str = r#"use crate::support as tasks;
 use std::fs::remove_file;
 fn unused(path: &str) {
     let result = remove_file(path);
@@ -452,7 +446,15 @@ fn used(path: &str) -> std::io::Result<()> {
     tasks::forward(result)
 }
 fn dropped(path: &str) { tasks::remove(path); }
-"#).unwrap();
+"#;
+
+#[test]
+fn rust_module_aliases_preserve_helper_result_usage() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::write(root.path().join("src/lib.rs"), "mod support; mod worker;\n").unwrap();
+    std::fs::write(root.path().join("src/support.rs"), RUST_RESULT_HELPERS).unwrap();
+    std::fs::write(root.path().join("src/worker.rs"), RUST_WORKER).unwrap();
     let expected = &[("src/support.rs", 4), ("src/worker.rs", 4)];
     assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", expected);
     let clean = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
@@ -496,18 +498,8 @@ fn rust_reexported_helpers_preserve_result_usage() {
     std::fs::write(root.path().join("src/lib.rs"), "mod support; mod api; mod worker;\n").unwrap();
     std::fs::write(root.path().join("src/support.rs"), RUST_RESULT_HELPERS).unwrap();
     std::fs::write(root.path().join("src/api.rs"), "pub(crate) use crate::support::{discard as ignore, forward, remove};\n").unwrap();
-    std::fs::write(root.path().join("src/worker.rs"), r#"use crate::api as tasks;
-use std::fs::remove_file;
-fn unused(path: &str) {
-    let result = remove_file(path);
-    tasks::ignore(result);
-}
-fn used(path: &str) -> std::io::Result<()> {
-    let result = remove_file(path);
-    tasks::forward(result)
-}
-fn dropped(path: &str) { tasks::remove(path); }
-"#).unwrap();
+    let source = RUST_WORKER.replace("crate::support", "crate::api").replace("tasks::discard", "tasks::ignore");
+    std::fs::write(root.path().join("src/worker.rs"), source).unwrap();
     let expected = &[("src/support.rs", 4), ("src/worker.rs", 4)];
     assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", expected);
     let worker = std::fs::read_to_string(root.path().join("src/worker.rs")).unwrap();
