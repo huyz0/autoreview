@@ -139,6 +139,29 @@ fn report_path_from_stdout(stdout: &str) -> PathBuf {
 }
 
 #[test]
+fn diff_reports_dataflow_syntax_limitations_without_warning_on_clean_files() {
+    let repo = init_repo(&[("main.go", "package main\nfunc main() {}\n")]);
+    let base = current_commit(repo.path());
+    repo.commit(&[("main.go", "package main\nfunc main( {\n")], "break syntax");
+    let bad = current_commit(repo.path());
+    let run = |head: &str| {
+        let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+            .args(["diff", "--base", &base, "--head", head, "--static-only"])
+            .assert().success();
+        let report = report_path_from_stdout(&String::from_utf8_lossy(&result.get_output().stdout));
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(report).unwrap()).unwrap()
+    };
+    let report = run(&bad);
+    assert!(report["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["analyzer"] == "dataflow" && issue["reason"] == "syntax_errors" && issue["path"] == "main.go"));
+    assert!(report["analyzerWarnings"].as_array().unwrap().iter().any(|warning|
+        warning.as_str().is_some_and(|text| text.contains("main.go") && text.contains("incomplete"))));
+    repo.commit(&[("main.go", "package main\nfunc main() { println(1) }\n")], "fix syntax");
+    let clean = run(&current_commit(repo.path()));
+    assert!(clean.get("analysisCoverage").is_none(), "{clean}");
+}
+
+#[test]
 fn changed_lines_include_results_discarded_by_a_caller_in_another_file() {
     let helper = "package helper\nimport \"os\"\nfunc Move(a, b string) error { return os.Rename(a, b) }\n";
     let before = "package main\nimport \"example.com/demo/helper\"\nfunc move(a, b string) error { return helper.Move(a, b) }\n";

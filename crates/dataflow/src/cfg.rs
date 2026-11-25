@@ -198,6 +198,11 @@ pub struct Cfg<S> {
 }
 
 impl<S> Cfg<S> {
+    /// Whether keyed control-flow lowering exhausted its finally-copy budget.
+    pub fn keyed_flow_exhausted(&self) -> bool {
+        self.keyed_flow == Some(0)
+    }
+
     pub fn predecessors(&self, node: NodeId) -> Vec<NodeId> {
         self.edges.iter().filter(|(_, to, _)| *to == node).map(|(from, _, _)| *from).collect()
     }

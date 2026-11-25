@@ -42,7 +42,7 @@ pub(super) fn finish(
         suppress_similar_false_positives(run, &history, &mut findings);
     }
     print_findings(&findings.findings);
-    let report = build_report(run, &identity, model, findings, analyzer_warnings);
+    let report = build_report(run, &identity, model, findings, analyzer_warnings, static_results.coverage);
     persist(run, &history, &report)
 }
 
@@ -311,6 +311,7 @@ fn build_report(
     model: ModelReview,
     result: DedupeResult,
     analyzer_warnings: Vec<String>,
+    analysis_coverage: Vec<autoreview_schema::AnalysisCoverageIssue>,
 ) -> ReviewReport {
     let facts = run.facts;
     let summary = summarize(&result.findings);
@@ -337,6 +338,7 @@ fn build_report(
         findings: result.findings,
         suppressed: result.suppressed,
         analyzer_warnings,
+        analysis_coverage,
         costs: model.costs,
         summary,
         spec_verdicts: model.criteria,

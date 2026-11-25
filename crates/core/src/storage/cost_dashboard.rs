@@ -139,6 +139,7 @@ mod tests {
             },
             summary: ReviewSummary { by_severity: StdHashMap::new(), by_category: StdHashMap::new(), gate: None },
             analyzer_warnings: vec![],
+            analysis_coverage: vec![],
             spec_verdicts: vec![],
         };
         std::fs::write(run_dir.join("report.json"), serde_json::to_string(&report).unwrap()).unwrap();

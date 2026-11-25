@@ -472,6 +472,15 @@ pub fn run_dataflow_check(repo_root: &Path, changed_files: &[String], registered
 }
 
 pub fn run_dataflow_check_for_snapshot(repo: &Path, repo_root: &Path, changed_files: &[String], registered_packs: &[ResolvedRulePack]) -> Vec<AgentFinding> {
+    run_dataflow_check_with_coverage(repo, repo_root, changed_files, registered_packs).findings
+}
+
+pub struct DataflowReviewResult {
+    pub findings: Vec<AgentFinding>,
+    pub coverage: Vec<autoreview_schema::AnalysisCoverageIssue>,
+}
+
+pub fn run_dataflow_check_with_coverage(repo: &Path, repo_root: &Path, changed_files: &[String], registered_packs: &[ResolvedRulePack]) -> DataflowReviewResult {
     dispatch::run(repo, repo_root, changed_files, registered_packs)
 }
 
@@ -480,6 +489,49 @@ mod tests {
     use std::rc::Rc;
     use super::cache::summary_cache_path;
     use super::*;
+
+    #[test]
+    fn reports_unreadable_source_and_invalid_imported_syntax() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("invalid.go"), [0xff, 0xfe]).unwrap();
+        let unreadable = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["invalid.go".into()], &[]);
+        assert!(unreadable.coverage.iter().any(|item| item.reason == "source_unavailable" && item.path.as_deref() == Some("invalid.go")));
+        std::fs::write(dir.path().join("main.ts"), "import { helper } from './dep';\nexport function run() { helper(); }\n").unwrap();
+        std::fs::write(dir.path().join("dep.ts"), "export function helper( {\n").unwrap();
+        let imported = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["main.ts".into()], &[]);
+        assert!(imported.coverage.iter().any(|item| item.reason == "dependency_syntax_errors" && item.path.as_deref() == Some("dep.ts")), "{:?}", imported.coverage);
+    }
+
+    #[test]
+    fn reports_when_imported_source_limit_leaves_dependencies_unanalyzed() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..67 {
+            let source = if index < 66 {
+                format!("import {{ helper }} from './f{}';\nexport function run() {{ helper(); }}\n", index + 1)
+            } else {
+                "export function helper() {}\n".to_owned()
+            };
+            std::fs::write(dir.path().join(format!("f{index}.ts")), source).unwrap();
+        }
+        let result = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["f0.ts".into()], &[]);
+        assert!(result.coverage.iter().any(|item| item.reason == "dependency_limit" && item.scope == "dependency"), "{:?}", result.coverage);
+        let result = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["f2.ts".into()], &[]);
+        assert!(!result.coverage.iter().any(|item| item.reason == "dependency_limit"));
+    }
+
+    #[test]
+    fn reports_functions_skipped_when_finally_lowering_budget_is_exhausted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = String::from("function work(x: number) { try {\n");
+        for index in 0..140 {
+            source.push_str(&format!("if (x === {index}) return;\n"));
+        }
+        source.push_str("} finally { cleanup(); } }\n");
+        std::fs::write(dir.path().join("main.ts"), source).unwrap();
+        let result = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["main.ts".into()], &[]);
+        assert!(result.coverage.iter().any(|item| item.reason == "control_flow_limit"
+            && item.path.as_deref() == Some("main.ts") && item.line == Some(1)), "{:?}", result.coverage);
+    }
 
     #[test]
     fn parse_cache_returns_the_same_parse_on_repeated_lookups_of_the_same_path() {

@@ -8,7 +8,16 @@ use super::{effects, HelperOutcome, HelperSummary, KeyedUnit, Place, Plan, Progr
 pub(super) fn build(
     program: &Program<'_, '_, '_>,
     units: &[KeyedUnit<'_, '_, '_>],
-) -> BTreeMap<usize, HelperSummary> {
+) -> (BTreeMap<usize, HelperSummary>, bool) {
+    let budget = program.frames.len().saturating_mul(16).max(16);
+    build_with_budget(program, units, budget)
+}
+
+fn build_with_budget(
+    program: &Program<'_, '_, '_>,
+    units: &[KeyedUnit<'_, '_, '_>],
+    budget: usize,
+) -> (BTreeMap<usize, HelperSummary>, bool) {
     let mut summaries = BTreeMap::new();
     for (index, frame) in program.frames.iter().enumerate() {
         if frame.plan.is_some() {
@@ -25,7 +34,6 @@ pub(super) fn build(
             );
         }
     }
-    let budget = program.frames.len().saturating_mul(16).max(16);
     let mut converged = false;
     for _ in 0..budget {
         let previous = summaries.clone();
@@ -38,8 +46,9 @@ pub(super) fn build(
     if !converged {
         summaries.clear();
     }
-    summaries
+    (summaries, !converged)
 }
+
 
 fn round(
     program: &Program<'_, '_, '_>,
@@ -114,4 +123,34 @@ pub(super) fn resolved_helpers(
                 .map(|summary| (site, summary))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::call_order::{CallOrderSpec, ContractLanguage, ContractMode, ResultContract};
+    use autoreview_langsupport::Language;
+
+    #[test]
+    fn reports_summary_budget_exhaustion() {
+        let source = "package main\nimport \"os\"\nfunc move(a, b string) error { return os.Rename(a, b) }\n";
+        let mut parser = autoreview_langsupport::parser_for(Language::Go).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+        let function = root.named_children(&mut root.walk()).find(|node| node.kind() == "function_declaration").unwrap();
+        let graph = crate::lower::keyed_variant(Language::Go, source.as_bytes(), function);
+        let functions = [KeyedFunction { node: function, graph: &graph }];
+        let units = [KeyedUnit { path: "main.go", source: source.as_bytes(), functions: &functions, imports: &[], entry: true }];
+        let spec = CallOrderSpec {
+            rule_id: "test".into(), after: vec![], unless: vec![], before: vec![],
+            check_before_return: false, identity: None,
+            contract: Some(ResultContract { mode: ContractMode::MustUse, language: ContractLanguage::Go,
+                import: "os".into(), methods: vec!["Rename".into()], borrows: vec![],
+                acquire_awaited: false, complete_observed: false }),
+        };
+        let program = Program::new(&spec, &units);
+        let (summaries, exhausted) = build_with_budget(&program, &units, 0);
+        assert!(exhausted && summaries.is_empty());
+        assert!(!build(&program, &units).1);
+    }
 }

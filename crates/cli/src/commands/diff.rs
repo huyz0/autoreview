@@ -75,6 +75,7 @@ impl ReviewRun<'_> {
 struct StaticFindings {
     suppressed: Vec<SuppressedFinding>,
     warnings: Vec<String>,
+    coverage: Vec<autoreview_schema::AnalysisCoverageIssue>,
 }
 
 pub fn run_diff(options: DiffCommandOptions) -> anyhow::Result<()> {
@@ -155,7 +156,7 @@ fn load_registered_packs(repo: &Path) -> Vec<ResolvedRulePack> {
 }
 
 fn run_static_analyzers(run: &ReviewRun<'_>) -> (Vec<Finding>, StaticFindings) {
-    let (mut findings, mut warnings) = super::static_review::collect(
+    let (mut findings, mut warnings, coverage) = super::static_review::collect(
         super::static_review::ReviewInput {
             repo_root: &run.options.repo_root,
             source_root: run.source_root,
@@ -207,6 +208,7 @@ fn run_static_analyzers(run: &ReviewRun<'_>) -> (Vec<Finding>, StaticFindings) {
         StaticFindings {
             suppressed,
             warnings,
+            coverage,
         },
     )
 }

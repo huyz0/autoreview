@@ -41,7 +41,7 @@ pub use analyzers::shadow_rules::{discover_shadow_rule_files, run_shadow_rules, 
 pub use analyzers::duplication::{run_cross_file_duplication_check, run_duplication_check};
 pub use analyzers::golangci_lint::run_golangci_lint;
 pub use analyzers::sarif::{ingest_sarif_file, parse_sarif_document};
-pub use analyzers::dataflow_check::{run_dataflow_check, run_dataflow_check_for_snapshot};
+pub use analyzers::dataflow_check::{run_dataflow_check, run_dataflow_check_for_snapshot, run_dataflow_check_with_coverage, DataflowReviewResult};
 pub use analyzers::symindex_check::{run_symindex_check, run_symindex_check_with_tier4};
 pub use auth::bitbucket_token::{verify_bitbucket_token, BitbucketUser};
 pub use auth::credential_store::{CredentialStore, StoredVia};

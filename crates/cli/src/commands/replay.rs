@@ -176,7 +176,7 @@ fn replay_side(
             let changed: Vec<_> = facts.files.into_iter().map(|file| file.path).collect();
             super::revision::compare_java_nullability(repo, snapshot, base, &commit, &changed)?
         }
-        None => rule.tool.scan(snapshot, std::slice::from_ref(&label.path))?,
+        None => rule.tool.scan(snapshot, std::slice::from_ref(&label.path), &BTreeSet::from([rule.id.clone()]))?,
     };
     let lines = findings
         .into_iter()
@@ -442,7 +442,7 @@ pub(crate) fn run_gate(repo: &Path, base: &str, head: &str) -> anyhow::Result<()
             continue;
         }
         findings.extend(
-            tool.scan(snapshot.path(), &paths)?
+            tool.scan(snapshot.path(), &paths, &suite.gate.iter().filter(|rule| rule.tool == tool).map(|rule| rule.id.clone()).collect())?
                 .into_iter()
                 .filter(|finding| {
                     lines.contains_finding(finding)
