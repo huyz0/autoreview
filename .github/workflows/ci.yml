@@ -70,6 +70,19 @@ jobs:
       - name: Install ast-grep
         run: cargo install ast-grep --locked
 
+      - name: Install Node for checker tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install TypeScript for checker tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/autoreview-typescript" --no-save --no-audit --no-fund typescript@5.9.3
+          echo "AUTOREVIEW_TEST_TYPESCRIPT=$RUNNER_TEMP/autoreview-typescript/node_modules/typescript" >> "$GITHUB_ENV"
+
+      - name: Test TypeScript checker
+        run: node --test crates/core/tests/typescript_promise_probe.test.cjs
+
       - name: Build
         run: cargo build --workspace --tests --locked
 

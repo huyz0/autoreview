@@ -20,6 +20,7 @@ pub mod golangci_lint;
 pub mod sarif;
 pub mod symindex_check;
 pub mod taint_rules;
+pub mod typescript_checker;
 pub mod threshold_rules;
 mod artifact_policy;
 pub mod locale_catalogs;
