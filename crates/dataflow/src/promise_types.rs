@@ -119,7 +119,30 @@ fn direct_exported_factory<'tree>(root: Node<'tree>, source: &[u8], imported: &s
             return None;
         }
     }
-    selected
+    let function = selected?;
+    let owner = function.parent()?;
+    if root.named_children(&mut root.walk()).any(|statement| {
+        statement != owner && statement.kind() == "export_statement"
+            && explicit_export_may_match(statement, source, imported)
+    }) {
+        return None;
+    }
+    Some(function)
+}
+
+fn explicit_export_may_match(statement: Node<'_>, source: &[u8], imported: &str) -> bool {
+    let default = statement.children(&mut statement.walk()).any(|child| child.kind() == "default");
+    if default { return imported == "default"; }
+    if imported != "default" {
+        if let Some(declaration) = statement.child_by_field_name("declaration") {
+            return top_level_may_bind(declaration, source, imported);
+        }
+    }
+    statement.named_children(&mut statement.walk()).filter(|node| node.kind() == "export_clause")
+        .flat_map(|clause| clause.named_children(&mut clause.walk()).collect::<Vec<_>>())
+        .filter(|item| item.kind() == "export_specifier")
+        .any(|item| item.child_by_field_name("alias").or_else(|| item.child_by_field_name("name"))
+            .is_none_or(|name| name.utf8_text(source) == Ok(imported)))
 }
 
 pub fn factory_binding(node: Node<'_>, source: &[u8]) -> Option<FactoryBinding> {
@@ -410,6 +433,8 @@ function nested() { const local = createHandler({}); }
             ("export default function make(x: object, y: object): (ctx: string) => Promise<void> { throw 1; }", false),
             ("export default function make(x: object): (ctx: string) => Promise<void> { throw 1; }\nfunction replace() { make = other; }", false),
             ("export default function make(x: object): (ctx: string) => Promise<void> { throw 1; }\nconst make = other;", false),
+            ("export default function make(x: object): (ctx: string) => Promise<void> { throw 1; }\nexport { other as default };", false),
+            ("export default function make(x: object): (ctx: string) => Promise<void> { throw 1; }\nexport { other };", true),
         ] {
             let tree = parser_for(Language::TypeScript).unwrap().parse(provider_source, None).unwrap();
             let provider = TypeModule { path: "factory.ts", source: provider_source.as_bytes(), root: tree.root_node() };
