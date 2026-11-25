@@ -503,6 +503,18 @@ mod tests {
     }
 
     #[test]
+    fn reports_unmodeled_cleanup_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = tempfile::tempdir().unwrap();
+        std::fs::write(pack.path().join("pending.yml"), "id: pending-entry\nkind: call-sequence\nlanguage: JavaScript\ncategory: correctness\nseverity: warning\nmessage: Pending entry\nafter: [{call: register}]\nunless: [{call: remove}]\ncheckBeforeReturn: true\nidentity: {receiver: true, keyArgument: 0}\n").unwrap();
+        for argument in ["flag ? choose(key) : key", "unknown(key)"] {
+            std::fs::write(dir.path().join("main.js"), format!("function choose(key) {{ return key; }}\nfunction pending(root, key, flag) {{ root.register(key); root.remove({argument}); }}\n")).unwrap();
+            let result = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["main.js".into()], &[ResolvedRulePack { id: "test".into(), local_path: pack.path().into(), trust: autoreview_schema::RulePackTrust::Full }]);
+            assert!(result.coverage.iter().any(|item| item.reason == "unmodeled_path" && item.rule.as_deref() == Some("pending-entry")), "{argument}: {:?}", result.coverage);
+        }
+    }
+
+    #[test]
     fn reports_unresolved_local_web_imports_without_flagging_packages_or_assets() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("present.ts"), "export function helper() {}\n").unwrap();

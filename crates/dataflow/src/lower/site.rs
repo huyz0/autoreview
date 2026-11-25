@@ -31,7 +31,10 @@ pub(crate) fn capture(call: Node<'_>, source: &[u8]) -> Option<Box<CallSite>> {
         return None;
     }
     let mut arguments: Vec<_> = args.into_iter().flat_map(children)
-        .map(|node| operand(argument(node)?, source))
+        .map(|node| {
+            let value = argument(node)?;
+            operand(value, source).or_else(|| call_result_argument(value, source))
+        })
         .collect();
     arguments.extend(trailing_lambda.then_some(None));
     let (expression, awaited) = call_context(call);
@@ -46,6 +49,18 @@ pub(crate) fn capture(call: Node<'_>, source: &[u8]) -> Option<Box<CallSite>> {
         arguments,
         local: local_call(call),
     }))
+}
+
+fn call_result_argument(node: Node<'_>, source: &[u8]) -> Option<IdentityOperand> {
+    if node.kind() == "reference_expression"
+        && !children(node).any(|child| child.kind() == "mutable_specifier")
+    {
+        return call_result_argument(node.child_by_field_name("value")?, source);
+    }
+    match super::keyed_syntax::result_operand(node, source, false)? {
+        result @ IdentityOperand::CallResult { .. } => Some(result),
+        _ => None,
+    }
 }
 
 fn call_context(mut expression: Node<'_>) -> (Node<'_>, bool) {

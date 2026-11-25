@@ -41,6 +41,7 @@ impl Flow<'_> {
                 cfg.terminate(current, stmt, line(node))
             }
             "defer_statement" => {
+                let current = node.named_child(0).map_or(current, |call| nested_arguments(cfg, call, self.source, current));
                 super::record_evaluation(cfg, current, node);
                 if let Some(stmt) = self.deferred(node) {
                     cfg.emit(current, stmt, line(node));
@@ -60,6 +61,7 @@ impl Flow<'_> {
     }
 
     fn ordinary_statement(&self, cfg: &mut Cfg<Stmt>, node: Node<'_>, current: NodeId) -> NodeId {
+        let current = keyed_syntax::expression(node).map_or(current, |expr| nested_arguments(cfg, expr, self.source, current));
         let current = self.exceptional_edge(cfg, node, current);
         let conditional = matches!(node.kind(), "if_statement" | "if_expression");
         if conditional {
@@ -138,6 +140,36 @@ impl Flow<'_> {
         );
         Some(Stmt::DeferredBlock(Box::new(graph)))
     }
+}
+
+fn nested_arguments(cfg: &mut Cfg<Stmt>, call: Node<'_>, source: &[u8], mut current: NodeId) -> NodeId {
+    if !matches!(call.kind(), "call_expression" | "method_invocation" | "new_expression") {
+        return current;
+    }
+    // Optional calls and spread arguments do not have a modeled, unconditional
+    // argument evaluation order. Do not execute nested effects on those paths.
+    if site::capture(call, source).is_none() {
+        return current;
+    }
+    let Some(arguments) = site::arguments(call) else { return current };
+    for value in site::children(arguments).filter_map(|argument| nested_call(argument, source)) {
+        current = nested_arguments(cfg, value, source, current);
+        if cfg.keyed_exceptions {
+            if let Some(call) = throwing_call(value, source) {
+                current = cfg.fork_exception(current, call, line(value));
+            }
+        }
+        if let Some(call) = direct_call(value, source) {
+            cfg.emit(current, call, line(value));
+        }
+    }
+    current
+}
+
+fn nested_call<'tree>(argument: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
+    let value = site::argument(argument).and_then(keyed_syntax::expression_value)?;
+    (matches!(value.kind(), "call_expression" | "method_invocation") && site::capture(value, source).is_some())
+        .then_some(value)
 }
 
 fn positioned_call(node: Node<'_>, source: &[u8]) -> Option<Stmt> {
@@ -248,6 +280,7 @@ pub(crate) fn supports_try(node: Node<'_>) -> bool {
 }
 
 pub(super) fn expression_body(cfg: &mut Cfg<Stmt>, expr: Node<'_>, source: &[u8], at: NodeId) {
+    let at = nested_arguments(cfg, expr, source, at);
     let at =
         throwing_call(expr, source).map_or(at, |call| cfg.fork_exception(at, call, line(expr)));
     super::record_evaluation(cfg, at, expr);

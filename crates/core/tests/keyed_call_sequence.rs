@@ -109,9 +109,9 @@ fn cleanup_preserves_other_collections_keys_and_paths() {
 #[test]
 fn a_wrong_collection_and_key_do_not_satisfy_cleanup() {
     let source = r#"function pending(active: Map<string, unknown>, spare: Map<string, unknown>) {
-    register(active, makeValue(), "first");
-    remove(spare, makeValue(), "first");
-    remove(active, makeValue(), "second");
+    register(active, 0, "first");
+    remove(spare, 0, "first");
+    remove(active, 0, "second");
 }"#;
     let hits = findings("TypeScript", "worker.tsx", source, ARGUMENT, true);
     let hit = one(&hits);
@@ -260,17 +260,17 @@ fn positional_aliases_keep_the_collection_and_key_distinct() {
     let source = r#"function pending(root, other, first, second) {
     const collection = root;
     const key = first;
-    register(collection, value(), key);
-    remove(other, value(), key);
-    remove(collection, value(), second);
+    register(collection, 0, key);
+    remove(other, 0, key);
+    remove(collection, 0, second);
     return;
 }"#;
     let hits = findings("TypeScript", "worker.ts", source, ARGUMENT, true);
     let hit = one(&hits);
     assert_eq!(hit.message, "Clean up root and first before return");
     let clean = source.replace(
-        "remove(collection, value(), second)",
-        "remove(root, value(), first)",
+        "remove(collection, 0, second)",
+        "remove(root, 0, first)",
     );
     assert!(findings("TypeScript", "worker.ts", &clean, ARGUMENT, true).is_empty());
 }
@@ -1188,4 +1188,147 @@ fn extensionless_jsx_imports_follow_helper_results() {
     let wrong = "export function choose(key) { return 'other'; }";
     assert!(workspace_findings("JavaScript", &[("app.js", caller), ("picker.jsx", clean)], &["app.js"], RECEIVER, true).is_empty());
     assert_key_pending_on_fallthrough(&workspace_findings("JavaScript", &[("app.js", caller), ("picker.jsx", wrong)], &["app.js"], RECEIVER, true));
+}
+
+#[test]
+fn nested_helper_results_preserve_cleanup_keys_across_languages() {
+    let cases = [
+        ("JavaScript", "worker.js", "function choose(key) { return key; }\nfunction pending(root, key) { root.register(key); root.remove(choose(key)); }", "return key", "return 'other'"),
+        ("TypeScript", "worker.ts", "function choose(key: string) { return key; }\nfunction pending(root: Registry, key: string) { root.register(key); root.remove(choose(key)); }", "return key", "return 'other'"),
+        ("TypeScript", "worker.tsx", "function choose(key: string) { return key; }\nfunction pending(root: Registry, key: string) { root.register(key); root.remove(choose(key)); }", "return key", "return 'other'"),
+        ("Go", "worker.go", "package worker\nfunc choose(key string) string { return key }\nfunc pending(root *Registry, key string) { root.register(key); root.remove(choose(key)) }", "return key", "return \"other\""),
+        ("Java", "Worker.java", "class Worker { String choose(String key) { return key; } void pending(Registry root, String key) { root.register(key); root.remove(choose(key)); } }", "return key", "return \"other\""),
+        ("Kotlin", "Worker.kt", "fun choose(key: String): String { return key }\nfun pending(root: Registry, key: String) { root.register(key); root.remove(choose(key)) }", "return key", "return \"other\""),
+        ("Rust", "worker.rs", "fn choose(key: &str) -> &str { key }\nfn pending(root: &mut Registry, key: &str) { root.register(key); root.remove(choose(key)); }", "{ key }", "{ \"other\" }"),
+        ("Rust", "borrowed.rs", "fn choose(key: &str) -> &str { key }\nfn pending(root: &mut Registry, key: &str) { root.register(key); root.remove(&choose(key)); }", "{ key }", "{ \"other\" }"),
+    ];
+    for (language, path, clean, from, to) in cases {
+        assert!(findings(language, path, clean, RECEIVER, true).is_empty(), "clean {language} {path}");
+        let wrong = clean.replace(from, to);
+        let hits = findings(language, path, &wrong, RECEIVER, true);
+        assert!(!hits.is_empty(), "wrong key in {language} {path}: {hits:?}");
+    }
+}
+
+#[test]
+fn multiple_nested_helper_arguments_preserve_collection_and_key_identity() {
+    let source = r#"function collection(root) { return root; }
+function keyFor(key) { return key; }
+function cleanup(root, key) { root.remove(key); }
+function pending(root, spare, key) {
+    root.register(key);
+    cleanup(collection(root), keyFor(key));
+}"#;
+    assert_clean_js(source);
+    let wrong_key = source.replace("keyFor(key));", "keyFor('other'));");
+    assert_key_pending_on_fallthrough(&findings("JavaScript", "worker.js", &wrong_key, RECEIVER, true));
+    let wrong_collection = source.replace("collection(root),", "collection(spare),");
+    assert_key_pending_on_fallthrough(&findings("JavaScript", "worker.js", &wrong_collection, RECEIVER, true));
+}
+
+#[test]
+fn nested_collection_and_key_results_work_with_positional_selectors() {
+    let source = r#"function collection(root) { return root; }
+function keyFor(key) { return key; }
+function pending(root, spare, key) {
+    register(root, 0, key);
+    remove(collection(root), 0, keyFor(key));
+}"#;
+    assert!(findings("JavaScript", "worker.js", source, ARGUMENT, true).is_empty());
+    let wrong = source.replace("collection(root), 0", "collection(spare), 0");
+    assert_key_pending_on_fallthrough(&findings("JavaScript", "worker.js", &wrong, ARGUMENT, true));
+}
+
+#[test]
+fn nested_helper_branches_do_not_borrow_each_others_results() {
+    let source = r#"function choose(key, wrong) { if (wrong) return 'other'; return key; }
+function pending(root, key, wrong) {
+    root.register(key);
+    root.remove(choose(key, wrong));
+}"#;
+    assert_key_pending_on_fallthrough(&findings("JavaScript", "worker.js", source, RECEIVER, true));
+    let clean = source.replace("if (wrong) return 'other';", "if (wrong) return key;");
+    assert_clean_js(&clean);
+}
+
+#[test]
+fn nested_helper_chains_and_loops_keep_results_per_call_site() {
+    let source = r#"function choose(key) { return key; }
+function pending(root, keys) {
+    for (const key of keys) {
+        root.register(key);
+        root.remove(choose(choose(key)));
+    }
+}"#;
+    assert_clean_js(source);
+    let wrong = source.replace("choose(choose(key))", "choose(choose('other'))");
+    assert_key_pending_on_fallthrough(&findings("JavaScript", "worker.js", &wrong, RECEIVER, true));
+}
+
+#[test]
+fn nested_helper_returns_are_followed_through_expression_bodies() {
+    let cases = [
+        ("JavaScript", "worker.js", "function choose(key) { return key; }\nfunction wrap(key) { return choose(choose(key)); }\nfunction pending(root, key) { root.register(key); root.remove(wrap(key)); }", "return key", "return 'other'"),
+        ("Kotlin", "worker.kt", "fun choose(key: String): String { return key }\nfun wrap(key: String): String = choose(choose(key))\nfun pending(root: Registry, key: String) { root.register(key); root.remove(wrap(key)) }", "return key", "return \"other\""),
+    ];
+    for (language, path, source, from, to) in cases {
+        assert!(findings(language, path, source, RECEIVER, true).is_empty(), "{language} clean");
+        let hits = findings(language, path, &source.replace(from, to), RECEIVER, true);
+        assert!(!hits.is_empty(), "{language} wrong return: {hits:?}");
+    }
+}
+
+#[test]
+fn nested_helper_results_follow_imports_between_files() {
+    let web = "import { choose } from './helpers';\nfunction pending(root, key) { root.register(key); root.remove(choose(key)); }";
+    let clean = "export function choose(key) { return key; }";
+    let wrong = "export function choose(key) { return 'other'; }";
+    assert!(workspace_findings("JavaScript", &[("worker.js", web), ("helpers.js", clean)], &["worker.js"], RECEIVER, true).is_empty());
+    assert_key_pending_on_fallthrough(&workspace_findings("JavaScript", &[("worker.js", web), ("helpers.js", wrong)], &["worker.js"], RECEIVER, true));
+
+    let go = "package app\nimport \"example.test/app/helpers\"\nfunc pending(root *Registry, key string) { root.register(key); root.remove(helpers.Choose(key)) }";
+    let module = "module example.test/app\n\ngo 1.22";
+    let clean = "package helpers\nfunc Choose(key string) string { return key }";
+    let wrong = "package helpers\nfunc Choose(key string) string { return \"other\" }";
+    assert!(workspace_findings("Go", &[("go.mod", module), ("worker.go", go), ("helpers/helpers.go", clean)], &["worker.go"], RECEIVER, true).is_empty());
+    assert_key_pending_on_fallthrough(&workspace_findings("Go", &[("go.mod", module), ("worker.go", go), ("helpers/helpers.go", wrong)], &["worker.go"], RECEIVER, true));
+}
+
+#[test]
+fn nested_go_defer_arguments_are_captured_before_reassignment() {
+    let source = r#"package worker
+func choose(key string) string { return key }
+func pending(root *Registry, key string) {
+    root.register(key)
+    defer root.remove(choose(key))
+    key = "other"
+}"#;
+    assert!(findings("Go", "worker.go", source, RECEIVER, true).is_empty());
+    let wrong = source.replace("choose(key))", "choose(\"other\"))");
+    assert_key_pending_on_fallthrough(&findings("Go", "worker.go", &wrong, RECEIVER, true));
+}
+
+#[test]
+fn nested_throwing_helper_reaches_finally_before_exit() {
+    let source = r#"function choose(key, bad) { if (bad) throw new Error(); return key; }
+function pending(root, key, bad) {
+    root.register(key);
+    try { root.remove(choose(key, bad)); }
+    finally { root.remove(key); }
+}"#;
+    assert_clean_js(source);
+    let wrong = source.replace("finally { root.remove(key); }", "finally { root.remove('other'); }");
+    let hits = findings("JavaScript", "worker.js", &wrong, RECEIVER, true);
+    assert_eq!(one(&hits).message, "Clean up root and key before implicit throw");
+}
+
+#[test]
+fn optional_calls_do_not_unconditionally_execute_nested_cleanup() {
+    let source = r#"function cleanup(root, key) { root.remove(key); }
+function pending(root, key, maybe) {
+    root.register(key);
+    maybe?.(cleanup(root, key));
+}"#;
+    let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
+    assert!(hits.iter().any(|hit| hit.message == "Clean up root and key before fallthrough"), "{hits:?}");
 }

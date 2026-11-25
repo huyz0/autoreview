@@ -11,7 +11,7 @@ It does not claim that every unsupported construct has been catalogued.
 | Keyed path exploration exceeds its state budget | The root analysis returns no result. | Root location, rule, and path-budget reason. Distinguish this from unsupported identity or call effects. |
 | Ignored-result helper summaries do not converge within their iteration budget | All helper summaries for that rule are cleared. | Rule and analyzed source scope; ordinary local checking can still run. |
 | Local handles, cleanup identities, closures, calls, or syntax cannot be modeled | Several conservative `None` paths decline a plan, root, or expression. | Precise reason and location where available. Do not label ordinary nonmatches as skipped analysis. |
-| A keyed cleanup argument directly nests a helper call | A call such as `root.remove(choose(key))` is not tracked like an intermediate `chosen = choose(key); root.remove(chosen)`. | Track the returned identity through the nested expression or report that this path was not modeled. |
+| A keyed cleanup argument contains an unsupported nested expression | Direct nested calls such as `root.remove(choose(key))` are followed, but conditional and other complex argument expressions may still be unmodeled. | Track the returned identity through the expression or report that this path was not modeled. |
 | External static tool is unavailable or fails | The CLI already emits a string warning for ast-grep, golangci-lint, Clippy, and selected other tools. | Preserve existing warnings and add structured tool status without implying the other analyzers failed. |
 
 Report scopes should distinguish an entire file, a function or root, a rule,
