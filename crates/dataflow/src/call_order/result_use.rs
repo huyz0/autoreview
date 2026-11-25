@@ -10,7 +10,7 @@ mod syntax;
 #[cfg(test)]
 mod test_support;
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use crate::cfg::{Cfg, EdgeKind, NodeId, Stmt};
 
@@ -24,8 +24,21 @@ pub(super) fn check_units(
     spec: &CallOrderSpec,
     units: &[KeyedUnit<'_, '_, '_>],
 ) -> (Vec<CallOrderHit>, bool, Vec<super::keyed::KeyedLimitation>) {
+    check_units_with_sources(spec, units, &BTreeMap::new())
+}
+
+fn check_units_with_sources(
+    spec: &CallOrderSpec,
+    units: &[KeyedUnit<'_, '_, '_>],
+    sources: &BTreeMap<usize, BTreeSet<usize>>,
+) -> (Vec<CallOrderHit>, bool, Vec<super::keyed::KeyedLimitation>) {
     let mut hits = Vec::new();
-    let program = Program::new(spec, units);
+    let mut program = Program::new(spec, units);
+    for frame in &mut program.frames {
+        if let (Some(plan), Some(offsets)) = (&mut frame.plan, sources.get(&frame.unit)) {
+            plan.extra_sources.clone_from(offsets);
+        }
+    }
     if !program
         .frames
         .iter()
@@ -361,6 +374,31 @@ fn transfer_writes(writes: &[Write], live: &mut Live, mut observe: Option<&mut O
 mod tests {
     use super::*;
     use autoreview_langsupport::Language;
+
+    #[test]
+    fn call_site_sources_flow_through_helpers_without_matching_other_calls() {
+        let source = "function helper() { return acquire(); } function run() { helper(); unrelated(); }";
+        test_support::with_program((Language::TypeScript, ContractLanguage::Web), source, ("unused", "missing"), |program, units| {
+            let spec = program.frames[0].plan.as_ref().unwrap().spec;
+            let offset = source.find("acquire()").unwrap();
+            let sources = BTreeMap::from([(0, BTreeSet::from([offset]))]);
+            let (hits, exhausted, _) = check_units_with_sources(spec, units, &sources);
+            assert!(!exhausted);
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].trigger_call, "acquire");
+            assert!(check_units_with_sources(spec, units, &BTreeMap::new()).0.is_empty());
+        });
+    }
+
+    #[test]
+    fn call_site_source_is_clean_when_its_value_is_observed() {
+        let source = "function run() { const value = acquire(); consume(value); }";
+        test_support::with_program((Language::TypeScript, ContractLanguage::Web), source, ("unused", "missing"), |program, units| {
+            let spec = program.frames[0].plan.as_ref().unwrap().spec;
+            let sources = BTreeMap::from([(0, BTreeSet::from([source.find("acquire()").unwrap()]))]);
+            assert!(check_units_with_sources(spec, units, &sources).0.is_empty());
+        });
+    }
 
     #[test]
     fn helper_effect_propagates_only_the_arguments_required_by_the_caller() {

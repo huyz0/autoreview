@@ -304,7 +304,7 @@ impl Lower<'_, '_, '_> {
             return None;
         }
         let call = site::name(node, self.source)?;
-        self.plan.source_mode(&call)?;
+        self.plan.source_mode_at(&call, node.start_byte())?;
         Some(Origin {
             call,
             start: node.start_byte(),

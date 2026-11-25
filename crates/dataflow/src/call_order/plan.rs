@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use tree_sitter::Node;
 
 use crate::cfg::{CallSite, Cfg, Stmt};
@@ -11,6 +11,7 @@ pub(super) struct Plan<'a, 'src> {
     pub spec: &'a CallOrderSpec,
     pub syntax: Syntax<'src>,
     api: Option<ApiMatcher<'a>>,
+    pub(super) extra_sources: BTreeSet<usize>,
 }
 
 pub(super) struct Call {
@@ -41,6 +42,7 @@ impl<'a, 'src> Plan<'a, 'src> {
                 spec,
                 syntax,
                 api,
+                extra_sources: BTreeSet::new(),
             })
     }
 
@@ -79,6 +81,7 @@ impl<'a, 'src> Plan<'a, 'src> {
     }
 
     pub(super) fn has_registration(&self) -> bool {
+        if !self.extra_sources.is_empty() { return true; }
         match &self.api {
             Some(api) => self.syntax.any_call(|name| api.matches(name, |root| self.syntax.shadows_api(root))),
             None => self.syntax.has_registration(&self.spec.after),
@@ -89,6 +92,10 @@ impl<'a, 'src> Plan<'a, 'src> {
         let api = self.api.as_ref()?;
         api.matches(name, |root| self.syntax.shadows_api(root))
             .then_some(api.mode())
+    }
+
+    pub(super) fn source_mode_at(&self, name: &str, start: usize) -> Option<ContractMode> {
+        self.extra_sources.contains(&start).then_some(ContractMode::MustUse).or_else(|| self.source_mode(name))
     }
 
     pub(super) fn is_completion(&self, name: &str, start: usize, values: &Values) -> bool {
