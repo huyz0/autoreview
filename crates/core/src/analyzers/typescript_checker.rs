@@ -212,4 +212,46 @@ mod tests {
         assert!(changed.candidates.is_empty());
         assert_eq!(changed.limitations.len(), 2);
     }
+
+    #[test]
+    fn factory_sources_are_discovered_verified_and_checked_across_files() {
+        use autoreview_dataflow::call_order::{check_keyed_units_with_verified_sources, discover_factory_sources, CallOrderSpec, ContractLanguage, ContractMode, KeyedExport, KeyedFunction, KeyedImport, ResultContract};
+        use autoreview_dataflow::promise_types::TypeModule;
+        use autoreview_langsupport::{parser_for, Language};
+        let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ["caller.ts", "barrel.ts", "binding.ts", "factory.ts"];
+        let texts = [
+            "import { upload } from './barrel'; export function run() { upload('x'); }",
+            "export * from './binding';",
+            "import create from './factory'; export const upload = create({});",
+            "export default function create(x: object): (ctx: string) => Promise<void> { throw new Error(); }",
+        ];
+        for (path, source) in paths.iter().zip(texts) { std::fs::write(dir.path().join(path), source).unwrap(); }
+        let config_path = dir.path().join("tsconfig.json");
+        std::fs::write(&config_path, r#"{"compilerOptions":{"target":"ES2022","strict":true},"include":["*.ts"]}"#).unwrap();
+        let trees: Vec<_> = texts.iter().map(|text| parser_for(Language::TypeScript).unwrap().parse(text, None).unwrap()).collect();
+        let modules: Vec<_> = texts.iter().zip(&trees).zip(paths).map(|((text, tree), path)| TypeModule { path, source: text.as_bytes(), root: tree.root_node() }).collect();
+        let function = trees[0].root_node().named_children(&mut trees[0].root_node().walk()).find_map(|node| node.child_by_field_name("declaration")).unwrap();
+        let graph = autoreview_dataflow::lower::keyed_variant(Language::TypeScript, texts[0].as_bytes(), function);
+        let functions = [KeyedFunction { node: function, graph: &graph }];
+        let imports = [vec![KeyedImport { local: "upload".into(), path: "barrel.ts".into(), name: Some("upload".into()), owner: None, exported: true }], vec![], vec![KeyedImport { local: "create".into(), path: "factory.ts".into(), name: Some("default".into()), owner: None, exported: true }], vec![]];
+        let exports = [vec![], vec![KeyedExport::Star { path: "binding.ts".into() }], vec![KeyedExport::Named { exported: "upload".into(), local: "upload".into(), path: None }], vec![KeyedExport::Named { exported: "default".into(), local: "create".into(), path: None }]];
+        let units: Vec<_> = modules.iter().enumerate().map(|(i, module)| KeyedUnit { path: module.path, source: module.source, functions: if i == 0 { &functions } else { &[] }, imports: &imports[i], exports: &exports[i], entry: i == 0 }).collect();
+        let spec = CallOrderSpec { rule_id: "typed-test".into(), after: vec![], unless: vec![], before: vec![], check_before_return: false, identity: None, contract: Some(ResultContract { mode: ContractMode::MustUse, language: ContractLanguage::Web, import: "unused".into(), methods: vec!["missing".into()], borrows: vec![], acquire_awaited: false, complete_observed: false }) };
+        let config = config_path.to_str().unwrap();
+        let candidates = discover_factory_sources(&spec, &modules, &units);
+        assert_eq!(candidates.candidates[&0].len(), 1);
+        let verified = verify_candidates("node", &compiler, config, dir.path(), &units, candidates, Duration::from_secs(20));
+        assert!(verified.limitations.is_empty());
+        let outcome = check_keyed_units_with_verified_sources(&spec, &units, verified);
+        assert_eq!(outcome.hits.len(), 1);
+        assert_eq!(outcome.hits[0].trigger_call, "upload");
+        assert!(outcome.limitations.is_empty(), "{:?}", outcome.limitations.iter().map(|issue| issue.reason).collect::<Vec<_>>());
+        let candidates = discover_factory_sources(&spec, &modules, &units);
+        let unavailable = verify_candidates("node", "missing-autoreview-typescript", config, dir.path(), &units, candidates, Duration::from_secs(20));
+        let outcome = check_keyed_units_with_verified_sources(&spec, &units, unavailable);
+        assert!(outcome.hits.is_empty());
+        assert!(outcome.limitations.iter().any(|item| item.reason == "promise_type_unresolved"));
+    }
 }

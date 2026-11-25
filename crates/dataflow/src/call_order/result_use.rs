@@ -93,7 +93,7 @@ pub(super) fn check_units(
     check_units_with_sources(spec, units, &BTreeMap::new())
 }
 
-fn check_units_with_sources(
+pub(super) fn check_units_with_sources(
     spec: &CallOrderSpec,
     units: &[KeyedUnit<'_, '_, '_>],
     sources: &BTreeMap<usize, BTreeSet<usize>>,

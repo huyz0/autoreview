@@ -261,6 +261,9 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         plan: &Plan<'_, '_>,
         resolved: &mut BTreeSet<(usize, usize)>,
     ) {
+        // A verified result source is modeled at its call site, not as an
+        // unresolved helper body. Its exception paths remain in the CFG.
+        if plan.extra_sources.contains(&site.start) { return; }
         if plan.may_throw(name, site.start, &Values::new()) {
             if let Some(callee) = self.target(from, name, site) {
                 resolved.insert((site.start, callee));
