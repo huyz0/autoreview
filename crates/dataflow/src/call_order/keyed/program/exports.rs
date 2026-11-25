@@ -16,21 +16,26 @@ impl Default for ResolutionContext {
     }
 }
 
-#[derive(Default)]
-pub(super) struct Resolution {
-    targets: BTreeSet<usize>,
+pub(super) struct Resolution<T: Ord = usize> {
+    targets: BTreeSet<T>,
     incomplete: bool,
     limit: bool,
 }
 
-impl Resolution {
+impl<T: Ord> Default for Resolution<T> {
+    fn default() -> Self {
+        Self { targets: BTreeSet::new(), incomplete: false, limit: false }
+    }
+}
+
+impl<T: Ord> Resolution<T> {
     fn merge(&mut self, other: Self) {
         self.targets.extend(other.targets);
         self.incomplete |= other.incomplete;
         self.limit |= other.limit;
     }
 
-    pub(super) fn unique(mut self) -> Option<usize> {
+    pub(super) fn unique(mut self) -> Option<T> {
         (!self.incomplete && self.targets.len() == 1).then(|| self.targets.pop_first()).flatten()
     }
 
@@ -148,5 +153,32 @@ impl Program<'_, '_, '_> {
             Some(&provider) => self.resolve_export(provider, name, arity, context),
             None => Resolution { incomplete: true, ..Resolution::default() },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Resolution;
+
+    #[test]
+    fn resolution_distinguishes_declaration_identities_and_incomplete_paths() {
+        let target = ("src/factory.ts", 42usize);
+        let mut resolution = Resolution::default();
+        resolution.targets.insert(target);
+        let mut duplicate = Resolution::default();
+        duplicate.targets.insert(target);
+        resolution.merge(duplicate);
+        assert_eq!(resolution.unique(), Some(target));
+
+        let mut ambiguous = Resolution::default();
+        ambiguous.targets.insert(target);
+        ambiguous.targets.insert(("src/other.ts", 42));
+        assert_eq!(ambiguous.limitation(), Some("unresolved_helper_target"));
+        assert_eq!(ambiguous.unique(), None);
+
+        let mut incomplete = Resolution::default();
+        incomplete.targets.insert(target);
+        incomplete.merge(Resolution { incomplete: true, ..Resolution::default() });
+        assert_eq!(incomplete.unique(), None);
     }
 }
