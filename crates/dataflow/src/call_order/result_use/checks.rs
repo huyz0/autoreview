@@ -28,6 +28,7 @@ pub(in crate::call_order) fn check_units_with_components(
         }
     }
     let mut limitations = unmodeled_sources(&program, units, sources);
+    limitations.extend(unmodeled_component_helpers(&program, units, components));
     if !program.has_registration() {
         return (Vec::new(), false, limitations);
     }
@@ -77,6 +78,44 @@ fn unmodeled_sources(
                 if modeled { continue; }
                 let line = unit.source.get(..start).map(|source| source.iter().filter(|byte| **byte == b'\n').count() as u32 + 1);
                 limitations.push(super::super::keyed::KeyedLimitation { reason: "verified_source_unmodeled", path: Some(unit.path.to_owned()), line });
+            }
+        }
+        base += unit.functions.len();
+    }
+    limitations
+}
+
+// A multi-result source used as the sole argument is supported only when the
+// receiving helper resolves to a unique modeled function of the correct arity.
+fn unmodeled_component_helpers(
+    program: &Program<'_, '_, '_>, units: &[KeyedUnit<'_, '_, '_>],
+    components: &BTreeMap<usize, BTreeMap<usize, super::super::ResultComponents>>,
+) -> Vec<super::super::keyed::KeyedLimitation> {
+    let functions: Vec<_> = units.iter().flat_map(|unit| unit.functions.iter()).collect();
+    let reachable = super::sources::reachable_frames(program, units, &functions);
+    let mut limitations = Vec::new();
+    let mut resolved_by_frame = BTreeMap::new();
+    let mut base = 0;
+    for (unit_index, unit) in units.iter().enumerate() {
+        for &start in components.get(&unit_index).into_iter().flat_map(|items| items.keys()) {
+            let owner = unit.functions.iter().enumerate()
+                .filter(|(_, function)| function.node.start_byte() <= start && start < function.node.end_byte())
+                .min_by_key(|(_, function)| function.node.end_byte() - function.node.start_byte());
+            let Some((index, function)) = owner else { continue; };
+            if !reachable.contains(&(base + index)) { continue; }
+            let Some(mut call) = function.node.descendant_for_byte_range(start, start.saturating_add(1))
+                .and_then(|node| std::iter::successors(Some(node), |node| node.parent())
+                    .find(|node| node.start_byte() == start && node.kind() == "call_expression")) else { continue; };
+            while let Some(parent) = call.parent().filter(|node| node.kind() == "parenthesized_expression") { call = parent; }
+            let Some(outer) = call.parent().filter(|node| node.kind() == "argument_list").and_then(|node| node.parent()) else { continue; };
+            let frame = &program.frames[base + index];
+            let calls = resolved_by_frame.entry(base + index).or_insert_with(|| frame.plan.as_ref()
+                .map(|plan| program.resolved_calls(base + index, frame.graph, plan)).unwrap_or_default());
+            let resolved = calls.iter().any(|(position, target)|
+                *position == outer.start_byte() && program.frames[*target].plan.is_some());
+            if !resolved {
+                let line = unit.source.get(..start).map(|source| source.iter().filter(|byte| **byte == b'\n').count() as u32 + 1);
+                limitations.push(super::super::keyed::KeyedLimitation { reason: "go_multi_result_unmodeled", path: Some(unit.path.to_owned()), line });
             }
         }
         base += unit.functions.len();

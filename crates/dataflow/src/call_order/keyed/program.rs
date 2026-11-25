@@ -148,7 +148,11 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         if frame.plan.as_ref()?.syntax.taken_name(root) {
             return None;
         }
-        let arity = site.arguments.len();
+        let arity = match site.arguments.as_slice() {
+            [Some(crate::cfg::IdentityOperand::CallResult { start, .. })] => frame.plan.as_ref()?
+                .result_components.get(start).map_or(1, |shape| shape.count),
+            _ => site.arguments.len(),
+        };
         if site.local {
             if let Some(local) = self
                 .targets
