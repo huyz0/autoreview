@@ -246,7 +246,7 @@ impl Resolver<'_> {
             Language::Go => input.go(coverage),
             Language::Java | Language::Kotlin => jvm::imports(self, path, language, node, source),
             Language::Rust => input.rust(),
-            Language::JavaScript | Language::TypeScript | Language::Tsx => input.web(),
+            Language::JavaScript | Language::TypeScript | Language::Tsx => input.web(coverage),
         };
         imports
             .into_iter()

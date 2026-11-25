@@ -1180,3 +1180,12 @@ function pending(key) {
     )
     .is_empty());
 }
+
+#[test]
+fn extensionless_jsx_imports_follow_helper_results() {
+    let caller = "import { choose } from './picker';\nfunction pending(root, key) { root.register(key); const chosen = choose(key); root.remove(chosen); }";
+    let clean = "export function choose(key) { return key; }";
+    let wrong = "export function choose(key) { return 'other'; }";
+    assert!(workspace_findings("JavaScript", &[("app.js", caller), ("picker.jsx", clean)], &["app.js"], RECEIVER, true).is_empty());
+    assert_key_pending_on_fallthrough(&workspace_findings("JavaScript", &[("app.js", caller), ("picker.jsx", wrong)], &["app.js"], RECEIVER, true));
+}
