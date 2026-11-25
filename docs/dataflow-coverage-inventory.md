@@ -22,6 +22,8 @@ skipped scope as a clean negative example.
 The JSON review report now includes an optional `analysisCoverage` array for
 read and syntax problems, dependency discovery limits, finally lowering,
 path-state exhaustion, skipped paths, and helper-summary convergence limits.
+Go discovery also reports unreadable package files and files whose package
+cannot be identified, including files that cannot be bound to an import.
 Entries identify the analyzer, reason, scope, and available path, line, and
 rule. The same issues are summarized in `analyzerWarnings` for text reports.
 Dataflow replay fails affected cases instead of treating them as clean. Other

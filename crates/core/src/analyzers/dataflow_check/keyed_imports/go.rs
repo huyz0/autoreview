@@ -1,8 +1,8 @@
-use super::{children, text, unquote, ImportSource, KeyedImport, Node, Path, PathBuf, Resolver};
+use super::{children, issue, text, unquote, AnalysisCoverageIssue, ImportSource, KeyedImport, Node, Path, PathBuf, Resolver};
 use autoreview_langsupport::Language;
 
 impl ImportSource<'_> {
-    pub(super) fn go(&self) -> Vec<KeyedImport> {
+    pub(super) fn go(&self, coverage: &mut Vec<AnalysisCoverageIssue>) -> Vec<KeyedImport> {
         let resolver = self.resolver;
         let path = self.path;
         let node = self.node;
@@ -11,9 +11,12 @@ impl ImportSource<'_> {
         let mut imports = Vec::new();
         let package = go_package(node, source);
         for file in go_files(resolver, parent) {
-            if file != path && resolver.go_package_of(&file).as_deref() == package
-                && resolver.go_may_supply_helper(&file, source)
-            {
+            if file == path {
+                continue;
+            }
+            let other_package = resolver.go_package_of(&file, coverage);
+            if other_package.is_some() && other_package.as_deref() == package
+                && resolver.go_may_supply_helper(&file, source) {
                 imports.extend(resolver.binding(&file, "", None, None, false));
             }
         }
@@ -24,7 +27,7 @@ impl ImportSource<'_> {
         while let Some(node) = nodes.pop() {
             match node.kind() {
                 "import_declaration" | "import_spec_list" => nodes.extend(children(node)),
-                "import_spec" => imports.extend(go_import(resolver, node, source, &module)),
+                "import_spec" => imports.extend(go_import(resolver, node, source, &module, coverage)),
                 _ => {}
             }
         }
@@ -33,9 +36,24 @@ impl ImportSource<'_> {
 }
 
 impl Resolver<'_> {
-    fn go_package_of(&self, file: &Path) -> Option<String> {
-        let parsed = self.cache.get(file, Language::Go)?;
-        go_package(parsed.1.root_node(), &parsed.0).map(str::to_owned)
+    fn go_package_of(&self, file: &Path, coverage: &mut Vec<AnalysisCoverageIssue>) -> Option<String> {
+        let parsed = self.cache.get(file, Language::Go);
+        let package = parsed.as_ref().and_then(|parsed| go_package(parsed.1.root_node(), &parsed.0))
+            .filter(|name| !name.is_empty());
+        if let Some(package) = package {
+            return Some(package.to_owned());
+        }
+        let (reason, detail) = match parsed {
+            None => ("dependency_unavailable", "The Go source could not be read or parsed, so its package and potential helpers could not be determined."),
+            Some(parsed) if parsed.1.root_node().has_error() => ("dependency_syntax_errors", "The Go source has syntax errors and its package could not be determined; helper discovery may be incomplete."),
+            Some(_) => ("dependency_package_unavailable", "The Go source has no identifiable package; helper discovery may be incomplete."),
+        };
+        if let Some(path) = self.relative(file) {
+            if !coverage.iter().any(|item| item.path.as_deref() == Some(path.as_str()) && item.reason == reason) {
+                coverage.push(issue(Some(&path), reason, "dependency", detail));
+            }
+        }
+        None
     }
 
     // The keyed program resolves Go helpers by their declared function name.
@@ -63,6 +81,7 @@ fn go_import(
     node: Node<'_>,
     source: &str,
     module: &str,
+    coverage: &mut Vec<AnalysisCoverageIssue>,
 ) -> Vec<KeyedImport> {
     let Some(target) = node
         .child_by_field_name("path")
@@ -86,7 +105,7 @@ fn go_import(
     go_files(resolver, &resolver.root.join(suffix))
         .into_iter()
         .filter_map(|file| {
-            let package = resolver.go_package_of(&file)?;
+            let package = resolver.go_package_of(&file, coverage)?;
             if !resolver.go_may_supply_helper(&file, source) {
                 return None;
             }

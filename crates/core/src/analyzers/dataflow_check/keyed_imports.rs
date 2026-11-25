@@ -193,7 +193,7 @@ impl Resolver<'_> {
                 continue;
             }
             let Some((full, language, parsed)) = self.parse_dependency(&path, entries, &mut coverage) else { continue };
-            let imports = self.imports(&full, language, &parsed);
+            let imports = self.imports(&full, language, &parsed, &mut coverage);
             if sources.len() < entries.len().saturating_add(UNIT_LIMIT) {
                 pending.extend(imports.iter().map(|binding| binding.path.clone()));
             }
@@ -233,7 +233,7 @@ impl Resolver<'_> {
         Some((full, language, parsed))
     }
 
-    fn imports(&self, path: &Path, language: Language, parsed: &ParsedFile) -> Vec<KeyedImport> {
+    fn imports(&self, path: &Path, language: Language, parsed: &ParsedFile, coverage: &mut Vec<AnalysisCoverageIssue>) -> Vec<KeyedImport> {
         let source = &parsed.0;
         let node = parsed.1.root_node();
         let input = ImportSource {
@@ -243,7 +243,7 @@ impl Resolver<'_> {
             source,
         };
         let imports = match language {
-            Language::Go => input.go(),
+            Language::Go => input.go(coverage),
             Language::Java | Language::Kotlin => jvm::imports(self, path, language, node, source),
             Language::Rust => input.rust(),
             Language::JavaScript | Language::TypeScript | Language::Tsx => input.web(),
