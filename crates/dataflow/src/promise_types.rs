@@ -108,6 +108,19 @@ pub struct ImportedFactoryEvidence {
 pub fn imported_factory_evidence(
     modules: &[TypeModule<'_>], units: &[KeyedUnit<'_, '_, '_>], caller: usize, name: &str, arity: usize,
 ) -> Option<ImportedFactoryEvidence> {
+    imported_factory_evidence_at_arity(modules, units, caller, name, Some(arity))
+}
+
+/// Resolve factory evidence without assuming the number of arguments in a spread call.
+pub fn imported_factory_evidence_any_arity(
+    modules: &[TypeModule<'_>], units: &[KeyedUnit<'_, '_, '_>], caller: usize, name: &str,
+) -> Option<ImportedFactoryEvidence> {
+    imported_factory_evidence_at_arity(modules, units, caller, name, None)
+}
+
+fn imported_factory_evidence_at_arity(
+    modules: &[TypeModule<'_>], units: &[KeyedUnit<'_, '_, '_>], caller: usize, name: &str, arity: Option<usize>,
+) -> Option<ImportedFactoryEvidence> {
     if modules.len() != units.len() || modules.iter().zip(units).any(|(module, unit)| module.path != unit.path || module.source != unit.source) {
         return None;
     }
@@ -119,7 +132,7 @@ pub fn imported_factory_evidence(
         all.extend(module_bindings(module, unit)?);
         Some(all)
     })?;
-    let index = resolve_declaration_import(units, &declarations, caller, name, arity).declaration?;
+    let index = resolve_declaration_import(units, &declarations, caller, name, arity.unwrap_or(0)).declaration?;
     let selected = declarations.get(index)?;
     let binding_module = modules.get(selected.unit)?;
     let node = declaration_at(binding_module, selected.start, "variable_declarator")?;
@@ -128,7 +141,7 @@ pub fn imported_factory_evidence(
         return None;
     }
     let (factory_unit, factory_start, minimum, maximum) = factory_signature(modules, units, &declarations, selected.unit, &binding)?;
-    if !(minimum..=maximum).contains(&arity) { return None; }
+    if arity.is_some_and(|arity| !(minimum..=maximum).contains(&arity)) { return None; }
     Some(ImportedFactoryEvidence { binding_unit: selected.unit, binding_start: selected.start, factory_unit, factory_start, minimum, maximum })
 }
 

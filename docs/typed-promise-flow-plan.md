@@ -123,6 +123,10 @@ compiler configuration the typed contract is reported as skipped. This is an
 experimental interface; compiler distribution, descendant-process containment,
 and broader review and replay coverage still require work.
 
+Optional calls and calls with spread arguments are not modeled by the typed
+factory rule. When the imported binding resolves to factory annotation evidence,
+these call sites are reported as incomplete instead of being counted as clean.
+
 ## Evidence and release gate
 
 - Add positive, negative, ambiguity, shadowing, and regression fixtures for

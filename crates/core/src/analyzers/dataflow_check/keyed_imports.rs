@@ -420,6 +420,14 @@ mod budget_tests {
         let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
         assert_eq!(findings.len(), 1);
         assert!(coverage.is_empty(), "{:?}", coverage.iter().map(|issue| &issue.reason).collect::<Vec<_>>());
+
+        std::fs::write(dir.path().join("main.ts"), "import { upload } from './barrel';\nexport function run() {\n  upload?.('x');\n  upload(...(['x'] as [string]));\n}\n").unwrap();
+        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
+        assert!(findings.is_empty());
+        let unsupported: Vec<_> = coverage.iter().filter(|issue| issue.reason == "factory_call_unmodeled").collect();
+        assert_eq!(unsupported.len(), 2);
+        assert_eq!(unsupported.iter().map(|issue| issue.line).collect::<BTreeSet<_>>(), BTreeSet::from([Some(3), Some(4)]));
+        assert!(unsupported.iter().all(|issue| issue.path.as_deref() == Some("main.ts") && issue.rule.as_deref() == Some("test-typed")));
     }
 
     #[test]
