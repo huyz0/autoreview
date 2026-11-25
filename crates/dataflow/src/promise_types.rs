@@ -150,8 +150,11 @@ pub fn factory_binding(node: Node<'_>, source: &[u8]) -> Option<FactoryBinding> 
 /// The returned shape is evidence from an annotation, not proof of the
 /// project-wide meaning of `Promise`; callers must account for ambient types.
 pub fn local_factory_return(root: Node<'_>, source: &[u8], binding: &FactoryBinding) -> Option<PromiseReturn> {
-    if root.kind() != "program" || root.has_error() || !unshadowed_promise_name(root, source)
+    let module = TypeModule { path: "", source, root };
+    if root.kind() != "program" || root.has_error() || !binding_belongs_to(&module, binding)
+        || !unshadowed_promise_name(root, source)
         || may_reassign(root, source, &binding.callee)
+        || may_reassign(root, source, &binding.name)
     {
         return None;
     }
@@ -440,5 +443,38 @@ function nested() { const local = createHandler({}); }
             }
             assert!(imported_factory_return(&caller, &binding.unwrap(), &import, &provider).is_none(), "{source}");
         }
+    }
+
+    #[test]
+    fn resolves_named_import_alias_in_typescript_and_tsx() {
+        let source = "import { make as create } from './factory'; export const upload = create({});";
+        let provider_source = "export function make(x: object): (ctx: string) => Promise<void> { throw 1; }";
+        for language in [Language::TypeScript, Language::Tsx] {
+            let tree = parser_for(language).unwrap().parse(source, None).unwrap();
+            let provider_tree = parser_for(language).unwrap().parse(provider_source, None).unwrap();
+            let caller = TypeModule { path: "caller.ts", source: source.as_bytes(), root: tree.root_node() };
+            let provider = TypeModule { path: "factory.ts", source: provider_source.as_bytes(), root: provider_tree.root_node() };
+            let mut pending = vec![caller.root];
+            let mut binding = None;
+            while let Some(node) = pending.pop() {
+                binding = binding.or_else(|| factory_binding(node, caller.source));
+                pending.extend(node.named_children(&mut node.walk()));
+            }
+            let import = KeyedImport { local: "create".into(), path: "factory.ts".into(), name: Some("make".into()), owner: None, exported: true };
+            assert_eq!(imported_factory_return(&caller, &binding.unwrap(), &import, &provider), Some(PromiseReturn::FactoryAnnotation { minimum: 1, maximum: 1 }));
+        }
+    }
+
+    #[test]
+    fn rejects_local_factory_binding_reassignment() {
+        let source = "function create(x: object): (ctx: string) => Promise<void> { throw 1; } const upload = create({}); upload = other;";
+        let tree = parser_for(Language::TypeScript).unwrap().parse(source, None).unwrap();
+        let mut pending = vec![tree.root_node()];
+        let mut binding = None;
+        while let Some(node) = pending.pop() {
+            binding = binding.or_else(|| factory_binding(node, source.as_bytes()));
+            pending.extend(node.named_children(&mut node.walk()));
+        }
+        assert!(local_factory_return(tree.root_node(), source.as_bytes(), &binding.unwrap()).is_none());
     }
 }
