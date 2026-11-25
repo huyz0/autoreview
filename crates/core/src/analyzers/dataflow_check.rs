@@ -520,6 +520,23 @@ mod tests {
     }
 
     #[test]
+    fn go_helper_filter_keeps_unparseable_dependencies_and_avoids_unrelated_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.go"), "package app\nfunc run() { helper() }\n").unwrap();
+        std::fs::write(dir.path().join("broken.go"), "package app\nfunc broken( {\n").unwrap();
+        for index in 0..80 {
+            std::fs::write(dir.path().join(format!("unused_{index:03}.go")), format!("package app\nfunc unused_{index:03}() {{}}\n")).unwrap();
+        }
+        let result = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["main.go".into()], &[]);
+        assert!(result.coverage.iter().any(|item| item.reason == "dependency_syntax_errors" && item.path.as_deref() == Some("broken.go")), "{:?}", result.coverage);
+        assert!(!result.coverage.iter().any(|item| item.reason == "dependency_limit"), "{:?}", result.coverage);
+        let calls = (0..80).map(|index| format!("unused_{index:03}();")).collect::<String>();
+        std::fs::write(dir.path().join("main.go"), format!("package app\nfunc run() {{ {calls} }}\n")).unwrap();
+        let result = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["main.go".into()], &[]);
+        assert!(result.coverage.iter().any(|item| item.reason == "dependency_limit"), "{:?}", result.coverage);
+    }
+
+    #[test]
     fn reports_functions_skipped_when_finally_lowering_budget_is_exhausted() {
         let dir = tempfile::tempdir().unwrap();
         let mut source = String::from("function work(x: number) { try {\n");

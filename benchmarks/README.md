@@ -27,9 +27,11 @@ and do not interpret an unrepresentative sample as population-wide accuracy.
 
 `go-tools.yaml` is a historical negative case for a test backup rename whose
 error is explicitly ignored. The label treats this best-effort test operation
-as acceptable; teams may make a different policy choice. On the current
-analyzer, replay reports incomplete cross-file analysis because it reaches the
-dependency limit, so the case is **not scored**. Reproduce it with:
+as acceptable; teams may make a different policy choice. Before Go helper
+discovery filtered unrelated package files, replay reached the dependency
+limit. With the filter, both revisions replay without findings or reported
+coverage limits. This negative-only example does not measure recall or
+establish precision. Reproduce it with:
 
 ```sh
 git init go-tools
@@ -38,5 +40,6 @@ git fetch --depth 2 https://github.com/golang/tools.git c6f2f8edba4a9d5be665bb15
 autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/go-tools.yaml
 ```
 
-The incomplete result is useful evidence about coverage; it must not be
-treated as either a clean result or a measured false positive.
+Coverage reporting is not exhaustive: unsupported expressions and unresolved
+imports can still escape the current diagnostics. A clean replay is evidence
+for this case, not a guarantee of complete analysis in general.
