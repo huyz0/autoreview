@@ -7,6 +7,12 @@ barrel re-exports are resolvable, but the returned function type and discarded
 calls are not yet modeled. The implementation must establish those facts from
 the source; matching the names of the factory or helpers is insufficient.
 
+An exploratory parse of the pinned before revision confirms that
+`createFileHandler` declares a returned callable with one required and one
+optional argument, and that `removeRemote` is an immutable binding initialized
+by a one-argument call to that factory. This verifies the syntax probe only; it
+does not resolve the cross-file binding or score the historical case.
+
 ## Deliverables
 
 1. Represent proven promise-returning callable signatures as reusable facts.

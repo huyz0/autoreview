@@ -5,6 +5,7 @@
 //! treating annotation evidence as a runtime promise fact.
 
 use tree_sitter::Node;
+use crate::call_order::KeyedImport;
 
 /// How a declaration syntactically describes its returned value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +26,80 @@ pub struct FactoryBinding {
     pub callee: String,
     pub arguments: usize,
     pub call_start: usize,
+}
+
+/// A parsed module paired with the repository-relative path used by imports.
+pub struct TypeModule<'a> {
+    pub path: &'a str,
+    pub source: &'a [u8],
+    pub root: Node<'a>,
+}
+
+/// Resolve an immutable binding initialized by a directly imported factory.
+/// The import must come from the repository's verified module resolver.
+pub fn imported_factory_return(
+    caller: &TypeModule<'_>, binding: &FactoryBinding, import: &KeyedImport, provider: &TypeModule<'_>,
+) -> Option<PromiseReturn> {
+    if caller.root.has_error() || provider.root.has_error() || import.local != binding.callee
+        || import.path != provider.path || !import.exported || import.owner.is_some()
+        || may_reassign(caller.root, caller.source, &binding.callee)
+        || !unshadowed_promise_name(provider.root, provider.source)
+        || !unique_import(caller.root, caller.source, &binding.callee)
+    {
+        return None;
+    }
+    let name = import.name.as_deref()?;
+    let function = direct_exported_factory(provider.root, provider.source, name)?;
+    if let Some(local) = function.child_by_field_name("name") {
+        let name = local.utf8_text(provider.source).ok()?;
+        if may_reassign(provider.root, provider.source, name)
+            || !unique_provider_binding(provider.root, provider.source, function, name)
+        { return None; }
+    }
+    let (minimum, maximum) = parameter_bounds(function, provider.source)?;
+    if !(minimum..=maximum).contains(&binding.arguments) { return None; }
+    match declared_return(function, provider.source)? {
+        shape @ PromiseReturn::FactoryAnnotation { .. } => Some(shape),
+        _ => None,
+    }
+}
+
+fn unique_provider_binding(root: Node<'_>, source: &[u8], selected: Node<'_>, name: &str) -> bool {
+    root.named_children(&mut root.walk()).all(|statement| {
+        let declaration = if statement.kind() == "export_statement" {
+            statement.child_by_field_name("declaration").unwrap_or(statement)
+        } else { statement };
+        declaration == selected || !top_level_may_bind(declaration, source, name)
+    })
+}
+
+fn unique_import(root: Node<'_>, source: &[u8], name: &str) -> bool {
+    let mut imports = 0;
+    for statement in root.named_children(&mut root.walk()) {
+        if statement.kind() == "import_statement" && top_level_may_bind(statement, source, name) {
+            imports += 1;
+            continue;
+        }
+        let declaration = if statement.kind() == "export_statement" {
+            statement.child_by_field_name("declaration").unwrap_or(statement)
+        } else { statement };
+        if top_level_may_bind(declaration, source, name) { return false; }
+    }
+    imports == 1
+}
+
+fn direct_exported_factory<'tree>(root: Node<'tree>, source: &[u8], imported: &str) -> Option<Node<'tree>> {
+    let mut selected = None;
+    for statement in root.named_children(&mut root.walk()).filter(|node| node.kind() == "export_statement") {
+        let default = statement.children(&mut statement.walk()).any(|child| child.kind() == "default");
+        let Some(function) = statement.child_by_field_name("declaration").filter(|node| node.kind() == "function_declaration") else { continue };
+        let name = function.child_by_field_name("name").and_then(|name| name.utf8_text(source).ok());
+        if ((imported == "default" && default) || (!default && name == Some(imported)))
+            && selected.replace(function).is_some() {
+            return None;
+        }
+    }
+    selected
 }
 
 pub fn factory_binding(node: Node<'_>, source: &[u8]) -> Option<FactoryBinding> {
@@ -267,11 +342,14 @@ function nested() { const local = createHandler({}); }
     fn resolves_only_unambiguous_local_factory_annotations() {
         for (prefix, expected) in [
             ("function createHandler<T>(option: T): (ctx: string, next?: string) => Promise<void> { throw 1; }", true),
+            ("function createHandler<T>(option: T, next?: T): (ctx: string) => Promise<void> { throw 1; }", true),
             ("async function createHandler<T>(option: T) { return option; }", false),
             ("function createHandler<T>(option: T): (ctx: string) => string { throw 1; }", false),
             ("type Promise<T> = T; function createHandler<T>(option: T): (ctx: string) => Promise<void> { throw 1; }", false),
             ("import { createHandler } from './lib'; function createHandler<T>(option: T): (ctx: string) => Promise<void> { throw 1; }", false),
             ("function createHandler<T>(first: T, second: T): (ctx: string) => Promise<void> { throw 1; }", false),
+            ("function createHandler<T>(...options: T[]): (ctx: string) => Promise<void> { throw 1; }", false),
+            ("function createHandler<T>(option: T): (ctx: string) => Promise<void> | undefined { throw 1; }", false),
             ("function createHandler<T>(option: T): (ctx: string) => Promise<void> { throw 1; }\nfunction replace() { createHandler = other; }", false),
             ("function createHandler<T>(option: T): (ctx: string) => Promise<void> { throw 1; }\nfunction replace() { for (createHandler of values) {} }", false),
             ("function createHandler<T>(option: T): (ctx: string) => Promise<void> { throw 1; }\nfunction replace() { eval(code); }", false),
@@ -286,6 +364,36 @@ function nested() { const local = createHandler({}); }
             }
             let shape = local_factory_return(tree.root_node(), source.as_bytes(), &binding.unwrap());
             assert_eq!(shape.is_some(), expected, "{source}: {shape:?}");
+        }
+    }
+
+    #[test]
+    fn resolves_a_verified_direct_factory_import_conservatively() {
+        let caller_source = "import create from './factory';\nexport const upload = create({});\n";
+        let caller_tree = parser_for(Language::TypeScript).unwrap().parse(caller_source, None).unwrap();
+        let caller = TypeModule { path: "caller.ts", source: caller_source.as_bytes(), root: caller_tree.root_node() };
+        let mut nodes = vec![caller.root];
+        let mut binding = None;
+        while let Some(node) = nodes.pop() {
+            binding = binding.or_else(|| factory_binding(node, caller.source));
+            nodes.extend(node.named_children(&mut node.walk()));
+        }
+        let binding = binding.unwrap();
+        let import = KeyedImport { local: "create".into(), path: "factory.ts".into(), name: Some("default".into()), owner: None, exported: true };
+        for (provider_source, expected) in [
+            ("export default function make(x: object): (ctx: string, opt?: string) => Promise<void> { throw 1; }", true),
+            ("export function make(x: object): (ctx: string) => Promise<void> { throw 1; }", false),
+            ("type Promise<T> = T; export default function make(x: object): (ctx: string) => Promise<void> { throw 1; }", false),
+            ("export default function make(x: object, y: object): (ctx: string) => Promise<void> { throw 1; }", false),
+            ("export default function make(x: object): (ctx: string) => Promise<void> { throw 1; }\nfunction replace() { make = other; }", false),
+            ("export default function make(x: object): (ctx: string) => Promise<void> { throw 1; }\nconst make = other;", false),
+        ] {
+            let tree = parser_for(Language::TypeScript).unwrap().parse(provider_source, None).unwrap();
+            let provider = TypeModule { path: "factory.ts", source: provider_source.as_bytes(), root: tree.root_node() };
+            let shape = imported_factory_return(&caller, &binding, &import, &provider);
+            assert_eq!(shape.is_some(), expected, "{provider_source}: {shape:?}");
+            let wrong_path = TypeModule { path: "other.ts", ..provider };
+            assert!(imported_factory_return(&caller, &binding, &import, &wrong_path).is_none());
         }
     }
 }
