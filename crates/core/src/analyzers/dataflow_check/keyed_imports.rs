@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, keyed_flow_exhausted, KeyedExport, KeyedFunction, KeyedImport, KeyedUnit};
+use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, KeyedExport, KeyedFunction, KeyedImport, KeyedUnit};
 use autoreview_dataflow::lower;
 use autoreview_dataflow::cfg::{Cfg, Stmt};
 use autoreview_langsupport::{language_for_path, Language};
@@ -18,8 +18,13 @@ mod go;
 mod jvm;
 mod rust;
 mod web;
+mod typed;
+mod coverage;
+use coverage::{issue, record_flow_limits, record_rule_limits, scope_coverage};
+use typed::{check_typed_rule, TrustedTypeScript};
 
 const UNIT_LIMIT: usize = 64;
+const TYPED_UNIT_LIMIT: usize = 128;
 
 struct Source {
     language: Language,
@@ -49,6 +54,7 @@ pub(super) fn run(
     rules: &[CallOrderRuleDef],
     caches: &SummaryCaches<'_>,
 ) -> (Vec<AgentFinding>, Vec<AnalysisCoverageIssue>) {
+    let source_root = if root.is_absolute() { root.to_path_buf() } else { std::env::current_dir().unwrap_or_default().join(root) };
     let rules: Vec<_> = rules
         .iter()
         .filter_map(|rule| {
@@ -67,6 +73,23 @@ pub(super) fn run(
         cache: caches.parse,
         packages: caches,
     };
+    let (typed, ordinary): (Vec<_>, Vec<_>) = rules.into_iter().partition(|(rule, _)| {
+        rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory)
+    });
+    let checker = TrustedTypeScript::from_environment(&source_root);
+    let (mut findings, mut coverage) = run_group(&resolver, paths, &ordinary, &source_root, (None, UNIT_LIMIT));
+    let limit = if checker.is_some() { TYPED_UNIT_LIMIT } else { UNIT_LIMIT };
+    let (typed_findings, typed_coverage) = run_group(&resolver, paths, &typed, &source_root, (checker.as_ref(), limit));
+    findings.extend(typed_findings);
+    coverage.extend(typed_coverage);
+    (findings, coverage)
+}
+
+fn run_group(
+    resolver: &Resolver<'_>, paths: &[String], rules: &[(&CallOrderRuleDef, Language)],
+    root: &Path, options: (Option<&TrustedTypeScript>, usize),
+) -> (Vec<AgentFinding>, Vec<AnalysisCoverageIssue>) {
+    let (checker, limit) = options;
     let entries: BTreeSet<_> = paths
         .iter()
         .filter_map(|path| {
@@ -78,15 +101,19 @@ pub(super) fn run(
                 .flatten()
         })
         .collect();
-    let (sources, mut coverage) = resolver.load(&entries);
-    let findings = run_sources(&sources, &entries, &rules, &mut coverage);
-    (findings, coverage)
+    if entries.is_empty() { return (Vec::new(), Vec::new()); }
+    let (sources, mut coverage) = if limit == UNIT_LIMIT { resolver.load(&entries) } else { resolver.load_with_limit(&entries, limit) };
+    let findings = run_sources(&sources, &entries, rules, root, checker, &mut coverage);
+    (findings, scope_coverage(coverage, rules, &entries))
 }
+
 
 fn run_sources(
     sources: &BTreeMap<String, Source>,
     entries: &BTreeSet<String>,
     rules: &[(&CallOrderRuleDef, Language)],
+    root: &Path,
+    checker: Option<&TrustedTypeScript>,
     coverage: &mut Vec<AnalysisCoverageIssue>,
 ) -> Vec<AgentFinding> {
     let lowered: Vec<_> = sources
@@ -126,9 +153,11 @@ fn run_sources(
         .collect();
     let mut findings = Vec::new();
     for &(rule, declared) in rules {
+        let typed = rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory);
         let units: Vec<_> = sources
             .iter()
             .zip(&functions)
+            .filter(|((_, file), _)| !typed || matches!(file.language, Language::JavaScript | Language::TypeScript | Language::Tsx))
             .map(|((path, file), (ordinary, functions))| KeyedUnit {
                 path,
                 source: file.parsed.0.as_bytes(),
@@ -138,7 +167,12 @@ fn run_sources(
                 entry: entries.contains(path) && file.language.matches_rule_language(declared),
             })
             .collect();
-        let result = check_keyed_units_with_coverage(&rule.spec, &units);
+        if !units.iter().any(|unit| unit.entry) { continue; }
+        let result = if typed {
+            check_typed_rule(&rule.spec, &units, sources, root, checker)
+        } else {
+            check_keyed_units_with_coverage(&rule.spec, &units)
+        };
         record_rule_limits(coverage, &rule.id, result.limitations);
         findings.extend(result.hits.iter().map(|hit| {
             let path = hit.path.as_deref().unwrap_or_default();
@@ -158,45 +192,12 @@ fn run_sources(
     findings
 }
 
-fn record_flow_limits(
-    sources: &BTreeMap<String, Source>,
-    lowered: &[LoweredFile<'_>],
-    rules: &[(&CallOrderRuleDef, Language)],
-    coverage: &mut Vec<AnalysisCoverageIssue>,
-) {
-    for ((path, file), (_, graphs)) in sources.iter().zip(lowered) {
-        if !rules.iter().any(|(_, language)| file.language.matches_rule_language(*language)) {
-            continue;
-        }
-        for (node, graph) in graphs {
-            if keyed_flow_exhausted(graph) {
-                let mut limitation = issue(Some(path), "control_flow_limit", "function", "The finally-path lowering budget was exhausted; call-sequence analysis skipped this function.");
-                limitation.line = Some(node.start_position().row as u32 + 1);
-                coverage.push(limitation);
-            }
-        }
-    }
-}
-
-fn record_rule_limits(coverage: &mut Vec<AnalysisCoverageIssue>, rule_id: &str, limitations: Vec<autoreview_dataflow::call_order::KeyedLimitation>) {
-    for limitation in limitations {
-        let detail = match limitation.reason {
-            "path_budget" => "The path-state budget was exhausted; this rule skipped the affected root.",
-            "helper_summary_limit" => "Helper summaries did not converge within the analysis budget; cross-file result tracking was skipped.",
-            "unresolved_helper_target" => "The helper target is ambiguous or depends on unavailable exports; cross-file call-sequence analysis may be incomplete.",
-            "reexport_resolution_limit" => "The re-export resolution budget was exhausted; cross-file call-sequence analysis may be incomplete.",
-            _ => "The rule could not model a path safely; analysis of the affected root was skipped.",
-        };
-        let mut record = issue(limitation.path.as_deref(), limitation.reason,
-            if limitation.path.is_some() { "function" } else { "rule" }, detail);
-        record.line = limitation.line.filter(|line| *line > 0);
-        record.rule = Some(rule_id.to_owned());
-        coverage.push(record);
-    }
-}
-
 impl Resolver<'_> {
     fn load(&self, entries: &BTreeSet<String>) -> (BTreeMap<String, Source>, Vec<AnalysisCoverageIssue>) {
+        self.load_with_limit(entries, UNIT_LIMIT)
+    }
+
+    fn load_with_limit(&self, entries: &BTreeSet<String>, limit: usize) -> (BTreeMap<String, Source>, Vec<AnalysisCoverageIssue>) {
         let mut pending: VecDeque<_> = entries.iter().cloned().collect();
         let mut sources = BTreeMap::new();
         let mut coverage = Vec::new();
@@ -207,7 +208,7 @@ impl Resolver<'_> {
             let Some((full, language, parsed)) = self.parse_dependency(&path, entries, &mut coverage) else { continue };
             let imports = self.imports(&full, language, &parsed, &mut coverage);
             let exports = self.exports(&full, language, &parsed, &mut coverage);
-            if sources.len() < entries.len().saturating_add(UNIT_LIMIT) {
+            if sources.len() < entries.len().saturating_add(limit) {
                 pending.extend(imports.iter().map(|binding| binding.path.clone()));
                 pending.extend(exports.iter().filter_map(|export| match export {
                     KeyedExport::Named { path: Some(path), .. } | KeyedExport::Star { path } if !path.is_empty() => Some(path.clone()),
@@ -223,7 +224,7 @@ impl Resolver<'_> {
                     exports,
                 },
             );
-            if sources.len() >= entries.len().saturating_add(UNIT_LIMIT) {
+            if sources.len() >= entries.len().saturating_add(limit) {
                 if let Some(skipped) = pending.iter().find(|path| !sources.contains_key(*path)) {
                     coverage.push(issue(Some(skipped), "dependency_limit", "dependency", "The cross-file call-sequence source limit was reached; remaining dependencies were not analyzed."));
                 }
@@ -323,12 +324,6 @@ impl Resolver<'_> {
     }
 }
 
-fn issue(path: Option<&str>, reason: &str, scope: &str, detail: &str) -> AnalysisCoverageIssue {
-    AnalysisCoverageIssue {
-        analyzer: "call-sequence".into(), reason: reason.into(), scope: scope.into(),
-        path: path.map(str::to_owned), line: None, rule: None, detail: detail.into(),
-    }
-}
 
 fn children(node: Node<'_>) -> Vec<Node<'_>> {
     node.named_children(&mut node.walk())
@@ -348,3 +343,107 @@ fn unquote(value: &str) -> Option<&str> {
     let content = value.strip_prefix(delimiter)?.strip_suffix(delimiter)?;
     (!content.contains(['\\', '\n', '\r'])).then_some(content)
 }
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use super::super::cache::PersistentSummaryCache;
+
+    fn with_resolver<T>(dir: &Path, run: impl FnOnce(&Resolver<'_>) -> T) -> T {
+        let root = dir.canonicalize().unwrap();
+        let parse = ParseCache::new();
+        let persistent = PersistentSummaryCache::load(&root, &root);
+        let caches = SummaryCaches { parse: &parse, persistent: &persistent, java_kotlin_packages: Default::default() };
+        run(&Resolver { root, cache: &parse, packages: &caches })
+    }
+
+    #[test]
+    fn dependency_budget_reports_only_unvisited_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.ts"), "import { b } from './b'; b();").unwrap();
+        std::fs::write(dir.path().join("b.ts"), "import { c } from './c'; export function b() { c(); }").unwrap();
+        std::fs::write(dir.path().join("c.ts"), "export function c() {}").unwrap();
+        let entries = BTreeSet::from(["a.ts".to_owned()]);
+        with_resolver(dir.path(), |resolver| {
+            let (limited, issues) = resolver.load_with_limit(&entries, 1);
+            assert_eq!(limited.len(), 2);
+            assert!(issues.iter().any(|issue| issue.reason == "dependency_limit"));
+            let (complete, issues) = resolver.load_with_limit(&entries, 2);
+            assert_eq!(complete.len(), 3);
+            assert!(!issues.iter().any(|issue| issue.reason == "dependency_limit"));
+        });
+    }
+
+    #[test]
+    fn dependency_limit_is_scoped_to_rules_in_its_graph() {
+        let rules = super::super::super::call_order_rules::load_call_order_rules(&[]);
+        let ordinary = rules.iter().find(|rule| rule.language == "TypeScript" && !rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory)).unwrap();
+        let entries = BTreeSet::from(["main.ts".to_owned()]);
+        let coverage = scope_coverage(vec![issue(Some("dependency.ts"), "dependency_limit", "dependency", "limit")], &[(ordinary, Language::TypeScript)], &entries);
+        assert_eq!(coverage.len(), 1);
+        assert_eq!(coverage[0].rule.as_deref(), Some(ordinary.id.as_str()));
+        assert_ne!(coverage[0].rule.as_deref(), Some("typescript-factory-promise-unobserved"));
+    }
+
+    #[test]
+    fn typed_rule_runs_with_trusted_checker_and_reports_missing_configuration() {
+        use autoreview_dataflow::call_order::{CallOrderSpec, ContractLanguage, ContractMode, ResultContract};
+        use autoreview_schema::Severity;
+        let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let files = [
+            ("main.ts", "import { upload } from './barrel'; export function run() { upload('x'); }"),
+            ("barrel.ts", "export * from './binding';"),
+            ("binding.ts", "import create from './factory'; export const upload = create({});"),
+            ("factory.ts", "export default function create(x: object): (ctx: string) => Promise<void> { throw new Error(); }"),
+        ];
+        for (path, source) in files { std::fs::write(dir.path().join(path), source).unwrap(); }
+        std::fs::write(dir.path().join("other.rs"), "fn other() {}\n").unwrap();
+        let config = dir.path().join("tsconfig.json");
+        std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true},"include":["*.ts"]}"#).unwrap();
+        let entries = BTreeSet::from(["main.ts".to_owned(), "other.rs".to_owned()]);
+        let (sources, issues) = with_resolver(dir.path(), |resolver| resolver.load(&entries));
+        assert!(issues.is_empty());
+        let rule = CallOrderRuleDef { id: "test-typed".into(), language: "TypeScript".into(), category: "correctness".into(), severity: Severity::Medium, message: "unused promise".into(), pack_id: None, metadata: None,
+            spec: CallOrderSpec { rule_id: "test-typed".into(), after: vec![], unless: vec![], before: vec![], check_before_return: false, identity: None, contract: Some(ResultContract { mode: ContractMode::MustUse, language: ContractLanguage::Web, import: String::new(), methods: vec![], borrows: vec![], acquire_awaited: false, complete_observed: false, typed_promise_factory: true }) } };
+        let rules = [(&rule, Language::TypeScript)];
+        let mut coverage = Vec::new();
+        assert!(run_sources(&sources, &entries, &rules, dir.path(), None, &mut coverage).is_empty());
+        assert!(coverage.iter().any(|issue| issue.reason == "typed_promise_source_unavailable"));
+        let checker = TrustedTypeScript { node: "node".into(), compiler, config: config.to_str().unwrap().into() };
+        let mut coverage = Vec::new();
+        let findings = run_sources(&sources, &entries, &rules, dir.path(), Some(&checker), &mut coverage);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("test-typed"));
+        assert!(coverage.is_empty(), "{:?}", coverage.iter().map(|issue| &issue.reason).collect::<Vec<_>>());
+        let paths = ["main.ts".to_owned(), "other.rs".to_owned()];
+        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
+        assert_eq!(findings.len(), 1);
+        assert!(coverage.is_empty(), "{:?}", coverage.iter().map(|issue| &issue.reason).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn builtin_typed_rule_fixtures_cover_typescript_and_tsx() {
+        let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
+        let rules = super::super::super::call_order_rules::load_call_order_rules(&[]);
+        let rule = rules.iter().find(|rule| rule.id == "typescript-factory-promise-unobserved").unwrap();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rules/typescript-factory-promise-unobserved");
+        for extension in ["ts", "tsx"] {
+            for (fixture, expected) in [("positive", 1), ("negative", 0)] {
+                let dir = tempfile::tempdir().unwrap();
+                let entry = format!("main.{extension}");
+                std::fs::copy(fixtures.join(format!("{fixture}.{extension}")), dir.path().join(&entry)).unwrap();
+                for path in ["binding.ts", "factory.ts"] { std::fs::copy(fixtures.join(path), dir.path().join(path)).unwrap(); }
+                let config = dir.path().join("tsconfig.json");
+                std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true,"jsx":"preserve"},"include":["*.ts","*.tsx"]}"#).unwrap();
+                let entries = BTreeSet::from([entry]);
+                let (sources, mut coverage) = with_resolver(dir.path(), |resolver| resolver.load(&entries));
+                let checker = TrustedTypeScript { node: "node".into(), compiler: compiler.clone(), config: config.to_str().unwrap().into() };
+                let found = run_sources(&sources, &entries, &[(rule, Language::TypeScript)], dir.path(), Some(&checker), &mut coverage);
+                assert_eq!(found.len(), expected, "{fixture}.{extension}");
+                assert!(coverage.is_empty(), "{fixture}.{extension}: {:?}", coverage.iter().map(|issue| &issue.reason).collect::<Vec<_>>());
+            }
+        }
+    }
+}
+

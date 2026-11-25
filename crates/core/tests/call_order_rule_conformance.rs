@@ -17,7 +17,11 @@ struct RuleMeta {
     language: String,
     #[serde(default)]
     category: String,
+    contract: Option<ContractMeta>,
 }
+
+#[derive(Debug, Deserialize)]
+struct ContractMeta { source: Option<String> }
 
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("rules")
@@ -74,6 +78,12 @@ fn every_call_order_rule_fires_on_its_positive_fixture_and_stays_silent_on_its_n
             failures.push(format!("{}: missing fixture files (expected {} and {})", rule.id, positive_path.display(), negative_path.display()));
             continue;
         };
+
+        // Typed sources require a multi-file TypeScript project and a trusted
+        // compiler; keyed_imports tests run these fixtures with that setup.
+        if rule.contract.as_ref().and_then(|contract| contract.source.as_deref()) == Some("typed-promise-factory") {
+            continue;
+        }
 
         let positive_dir = write_single_file(&filename, &positive);
         let positive_findings = run_dataflow_check(positive_dir.path(), std::slice::from_ref(&filename), &[]);

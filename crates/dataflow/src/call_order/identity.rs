@@ -136,6 +136,22 @@ impl<'src> Syntax<'src> {
         self.taken_name(name) || self.local_callables.contains(name)
     }
 
+    /// Check bindings without requiring the enclosing control flow to be
+    /// supported. Used to prevent a nested callback from borrowing an import
+    /// that an enclosing function shadows.
+    pub(super) fn may_shadow(function: Node<'_>, source: &'src [u8], name: &str) -> bool {
+        let mut syntax = Self::default();
+        let mut nodes = vec![function];
+        while let Some(node) = nodes.pop() {
+            if let Some(local) = local_callable(node, function, source) {
+                syntax.local_callables.insert(local);
+            }
+            syntax.bindings.visit(node, source, false, true);
+            nodes.extend(children(node));
+        }
+        syntax.shadows_api(name)
+    }
+
     pub(super) fn repeated_guard(&self, name: &str) -> bool {
         self.guards.get(name).is_some_and(|count| *count > 1)
     }

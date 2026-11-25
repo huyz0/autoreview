@@ -1,0 +1,9 @@
+id: typescript-factory-promise-unobserved
+language: TypeScript
+category: correctness
+severity: warning
+kind: call-sequence
+message: Observe, await, or return the promise produced by this factory-created function.
+contract:
+  mode: must-use
+  source: typed-promise-factory

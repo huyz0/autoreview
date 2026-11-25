@@ -5,6 +5,7 @@ use tree_sitter::Node;
 use crate::cfg::{CallSite, CallTarget, Cfg, IdentityOperand, Stmt};
 mod signature;
 mod exports;
+pub use exports::{resolve_declaration_import, DeclarationResolution, KeyedDeclaration};
 use signature::{candidate, export, parameters, Export};
 
 use super::{CallOrderSpec, Plan, Values};
@@ -137,6 +138,10 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         (!path.is_empty()).then(|| path.to_owned())
     }
 
+    pub(in crate::call_order) fn has_registration(&self) -> bool {
+        self.frames.iter().filter_map(|frame| frame.plan.as_ref()).any(Plan::has_registration)
+    }
+
     pub(in crate::call_order) fn target(&self, from: usize, name: &str, site: &CallSite) -> Option<usize> {
         let frame = &self.frames[from];
         let root = name.split(['.', ':']).next()?;
@@ -260,6 +265,9 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         plan: &Plan<'_, '_>,
         resolved: &mut BTreeSet<(usize, usize)>,
     ) {
+        // A verified result source is modeled at its call site, not as an
+        // unresolved helper body. Its exception paths remain in the CFG.
+        if plan.extra_sources.contains(&site.start) { return; }
         if plan.may_throw(name, site.start, &Values::new()) {
             if let Some(callee) = self.target(from, name, site) {
                 resolved.insert((site.start, callee));

@@ -10,12 +10,12 @@ use super::{CallOrderHit, CallOrderSpec, EntryHit};
 
 mod contracts;
 mod coverage;
-pub use coverage::{check_keyed_units, check_keyed_units_with_coverage, keyed_flow_exhausted, KeyedCheckResult, KeyedLimitation};
+pub use coverage::{check_keyed_units, check_keyed_units_with_coverage, check_keyed_units_with_verified_sources, keyed_flow_exhausted, KeyedCheckResult, KeyedLimitation};
 mod helpers;
 pub(super) mod program;
 mod state;
 use program::Program;
-pub use program::{KeyedExport, KeyedFunction, KeyedImport, KeyedUnit};
+pub use program::{resolve_declaration_import, DeclarationResolution, KeyedDeclaration, KeyedExport, KeyedFunction, KeyedImport, KeyedUnit};
 use state::{Deferred, Registration, State};
 
 const PATH_BUDGET: usize = 16_384;
@@ -58,6 +58,9 @@ pub fn check_keyed_file(
 }
 
 fn check_with_budget(spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], budget: usize) -> KeyedCheckResult {
+    if spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory) {
+        return KeyedCheckResult { hits: Vec::new(), limitations: vec![KeyedLimitation { reason: "typed_promise_source_unavailable", path: None, line: None }] };
+    }
     if spec.tracks_result_use() {
         let (hits, exhausted, mut limitations) = super::result_use::check_units(spec, units);
         limitations.extend(exhausted.then_some(KeyedLimitation {
@@ -66,12 +69,7 @@ fn check_with_budget(spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], budg
         return KeyedCheckResult { hits, limitations };
     }
     let program = Program::new(spec, units);
-    if !program
-        .frames
-        .iter()
-        .filter_map(|frame| frame.plan.as_ref())
-        .any(Plan::has_registration)
-    {
+    if !program.has_registration() {
         return KeyedCheckResult { hits: Vec::new(), limitations: Vec::new() };
     }
     let mut hits = Vec::new();

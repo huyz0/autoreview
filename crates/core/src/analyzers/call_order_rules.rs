@@ -71,10 +71,19 @@ enum ContractModeYaml {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ContractSourceYaml {
+    TypedPromiseFactory,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ContractYaml {
     mode: ContractModeYaml,
+    source: Option<ContractSourceYaml>,
+    #[serde(default)]
     import: String,
+    #[serde(default)]
     methods: Vec<String>,
     #[serde(default)]
     borrows: Vec<String>,
@@ -86,6 +95,7 @@ struct ContractYaml {
 
 impl ContractYaml {
     fn resolve(self, language: &str) -> anyhow::Result<ResultContract> {
+        let has_type_syntax = matches!(language, "TypeScript" | "Tsx");
         let language = match language {
             "Go" => ContractLanguage::Go,
             "Java" => ContractLanguage::Java,
@@ -98,16 +108,23 @@ impl ContractYaml {
             ContractModeYaml::MustUse => ContractMode::MustUse,
             ContractModeYaml::MustComplete => ContractMode::MustComplete,
         };
-        anyhow::ensure!(!self.import.trim().is_empty(), "contract import must name the package or class");
-        anyhow::ensure!(!self.methods.is_empty() && self.methods.iter().chain(&self.borrows).all(|name| {
-            !name.is_empty() && name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        }), "contract methods and borrows must contain literal method names");
+        let typed_promise_factory = self.source.is_some();
+        if typed_promise_factory {
+            anyhow::ensure!(has_type_syntax && matches!(mode, ContractMode::MustUse)
+                && self.import.is_empty() && self.methods.is_empty() && self.borrows.is_empty(),
+                "typed-promise-factory requires a TypeScript or TSX must-use contract without API names");
+        } else {
+            anyhow::ensure!(!self.import.trim().is_empty(), "contract import must name the package or class");
+            anyhow::ensure!(!self.methods.is_empty() && self.methods.iter().chain(&self.borrows).all(|name| {
+                !name.is_empty() && name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            }), "contract methods and borrows must contain literal method names");
+        }
         anyhow::ensure!(!(self.acquire_awaited || self.complete_observed)
             || (language == ContractLanguage::Web && mode == ContractMode::MustComplete),
             "acquireAwaited and completeObserved require a web must-complete contract");
         Ok(ResultContract {
             mode, language, import: self.import, methods: self.methods, borrows: self.borrows,
-            acquire_awaited: self.acquire_awaited, complete_observed: self.complete_observed,
+            acquire_awaited: self.acquire_awaited, complete_observed: self.complete_observed, typed_promise_factory,
         })
     }
 }
@@ -223,6 +240,19 @@ pub fn load_call_order_rules(registered_packs: &[ResolvedRulePack]) -> Vec<CallO
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_promise_contract_requires_type_aware_must_use_without_api_names() {
+        let yaml = "id: typed\nlanguage: TypeScript\ncategory: correctness\nseverity: warning\nkind: call-sequence\nmessage: discarded promise\ncontract:\n  mode: must-use\n  source: typed-promise-factory\n";
+        let parsed = parse_call_order_rule(yaml).unwrap();
+        assert!(parsed.spec.contract.as_ref().unwrap().typed_promise_factory);
+        let skipped = autoreview_dataflow::call_order::check_keyed_units_with_coverage(&parsed.spec, &[]);
+        assert_eq!(skipped.limitations[0].reason, "typed_promise_source_unavailable");
+        assert!(validate_call_sequence(&yaml.replace("TypeScript", "Tsx")).is_ok());
+        assert!(validate_call_sequence(&yaml.replace("TypeScript", "JavaScript")).is_err());
+        assert!(validate_call_sequence(&yaml.replace("must-use", "must-complete")).is_err());
+        assert!(validate_call_sequence(&format!("{yaml}  import: example\n  methods: [run]\n")).is_err());
+    }
 
     #[test]
     fn parses_a_minimal_call_sequence_rule() {

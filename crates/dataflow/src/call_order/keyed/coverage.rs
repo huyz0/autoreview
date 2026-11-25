@@ -32,3 +32,21 @@ pub fn check_keyed_units_with_coverage(
     check_with_budget(spec, units, PATH_BUDGET)
 }
 
+/// Analyze call positions that the caller has independently verified as
+/// result sources, retaining any discovery and verification limitations.
+pub fn check_keyed_units_with_verified_sources(
+    spec: &CallOrderSpec,
+    units: &[KeyedUnit<'_, '_, '_>],
+    verified: super::super::result_use::FactorySourceDiscovery,
+) -> KeyedCheckResult {
+    let mut limitations = verified.limitations;
+    if !spec.tracks_result_use() {
+        limitations.push(KeyedLimitation { reason: "unsupported_verified_sources", path: None, line: None });
+        return KeyedCheckResult { hits: Vec::new(), limitations };
+    }
+    let (hits, exhausted, found) = super::super::result_use::check_units_with_sources(spec, units, &verified.candidates);
+    limitations.extend(found);
+    if exhausted { limitations.push(KeyedLimitation { reason: "helper_summary_limit", path: None, line: None }); }
+    KeyedCheckResult { hits, limitations }
+}
+
