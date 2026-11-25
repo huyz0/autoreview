@@ -24,6 +24,14 @@ pub(super) fn check_units(
 ) -> (Vec<CallOrderHit>, bool) {
     let mut hits = Vec::new();
     let program = Program::new(spec, units);
+    if !program
+        .frames
+        .iter()
+        .filter_map(|frame| frame.plan.as_ref())
+        .any(Plan::has_registration)
+    {
+        return (hits, false);
+    }
     let (summaries, summary_limit) = summaries::build(&program, units);
     let mut frame_index = 0;
     for unit in units {

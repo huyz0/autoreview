@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::cfg::{Cfg, Stmt};
 
@@ -9,7 +9,13 @@ pub(super) fn build(
     program: &Program<'_, '_, '_>,
     units: &[KeyedUnit<'_, '_, '_>],
 ) -> (BTreeMap<usize, HelperSummary>, bool) {
-    let budget = program.frames.len().saturating_mul(16).max(16);
+    let count = program.frames.len();
+    // The former algorithm allowed 16 * N complete rounds of N functions.
+    // Keep the same worst-case evaluation budget for the worklist.
+    let budget = count
+        .saturating_mul(count.max(1))
+        .saturating_mul(16)
+        .max(16);
     build_with_budget(program, units, budget)
 }
 
@@ -18,58 +24,68 @@ fn build_with_budget(
     units: &[KeyedUnit<'_, '_, '_>],
     budget: usize,
 ) -> (BTreeMap<usize, HelperSummary>, bool) {
+    let functions: Vec<_> = units
+        .iter()
+        .flat_map(|unit| unit.functions.iter().map(move |function| (unit, function)))
+        .collect();
     let mut summaries = BTreeMap::new();
-    for (index, frame) in program.frames.iter().enumerate() {
-        if frame.plan.is_some() {
-            let empty = HelperOutcome {
-                parameters: vec![false; frame.params.len()],
-                origins: Vec::new(),
-            };
-            summaries.insert(
-                index,
-                HelperSummary {
-                    when_discarded: empty.clone(),
-                    when_observed: empty,
-                },
-            );
+    let mut calls = vec![BTreeSet::new(); functions.len()];
+    let mut callers = vec![Vec::new(); functions.len()];
+    for (index, (_, function)) in functions.iter().enumerate() {
+        let frame = &program.frames[index];
+        let Some(plan) = &frame.plan else { continue };
+        let empty = HelperOutcome {
+            parameters: vec![false; frame.params.len()],
+            origins: Vec::new(),
+        };
+        summaries.insert(
+            index,
+            HelperSummary {
+                when_discarded: empty.clone(),
+                when_observed: empty,
+            },
+        );
+        calls[index] = program.resolved_calls(index, function.graph, plan);
+        for &(_, target) in &calls[index] {
+            callers[target].push(index);
         }
     }
-    let mut converged = false;
-    for _ in 0..budget {
-        let previous = summaries.clone();
-        summaries = round(program, units, &previous);
-        if summaries == previous {
-            converged = true;
-            break;
-        }
-    }
-    if !converged {
-        summaries.clear();
-    }
-    (summaries, !converged)
-}
-
-
-fn round(
-    program: &Program<'_, '_, '_>,
-    units: &[KeyedUnit<'_, '_, '_>],
-    previous: &BTreeMap<usize, HelperSummary>,
-) -> BTreeMap<usize, HelperSummary> {
-    let mut summaries = BTreeMap::new();
-    let mut index = 0;
-    for unit in units {
-        for function in unit.functions {
-            let frame = &program.frames[index];
-            if let Some(plan) = &frame.plan {
-                let calls = resolved_helpers(program, index, function.graph, plan, previous);
-                let mut summary = summarize(plan, function, unit, &frame.params, &calls);
-                set_origin_paths(&mut summary, unit.path);
-                summaries.insert(index, summary);
+    let mut queued: Vec<_> = program
+        .frames
+        .iter()
+        .map(|frame| frame.plan.is_some())
+        .collect();
+    let mut pending: VecDeque<_> = (0..functions.len())
+        .rev()
+        .filter(|&index| queued[index])
+        .collect();
+    let mut remaining = budget;
+    while let Some(index) = pending.pop_front() {
+        let Some(next) = remaining.checked_sub(1) else {
+            return (BTreeMap::new(), true);
+        };
+        remaining = next;
+        queued[index] = false;
+        let frame = &program.frames[index];
+        let plan = frame
+            .plan
+            .as_ref()
+            .expect("only planned functions are queued");
+        let (unit, function) = functions[index];
+        let available = select_summaries(&calls[index], &summaries);
+        let mut summary = summarize(plan, function, unit, &frame.params, &available);
+        set_origin_paths(&mut summary, unit.path);
+        if summaries.get(&index) != Some(&summary) {
+            summaries.insert(index, summary);
+            for &caller in &callers[index] {
+                if !queued[caller] {
+                    queued[caller] = true;
+                    pending.push_back(caller);
+                }
             }
-            index += 1;
         }
     }
-    summaries
+    (summaries, false)
 }
 
 fn summarize(
@@ -113,14 +129,20 @@ pub(super) fn resolved_helpers(
     plan: &Plan<'_, '_>,
     summaries: &BTreeMap<usize, HelperSummary>,
 ) -> BTreeMap<usize, HelperSummary> {
-    program
-        .resolved_calls(index, graph, plan)
-        .into_iter()
+    select_summaries(&program.resolved_calls(index, graph, plan), summaries)
+}
+
+fn select_summaries(
+    calls: &BTreeSet<(usize, usize)>,
+    summaries: &BTreeMap<usize, HelperSummary>,
+) -> BTreeMap<usize, HelperSummary> {
+    calls
+        .iter()
         .filter_map(|(site, target)| {
             summaries
-                .get(&target)
+                .get(target)
                 .cloned()
-                .map(|summary| (site, summary))
+                .map(|summary| (*site, summary))
         })
         .collect()
 }
@@ -137,20 +159,202 @@ mod tests {
         let mut parser = autoreview_langsupport::parser_for(Language::Go).unwrap();
         let tree = parser.parse(source, None).unwrap();
         let root = tree.root_node();
-        let function = root.named_children(&mut root.walk()).find(|node| node.kind() == "function_declaration").unwrap();
+        let function = root
+            .named_children(&mut root.walk())
+            .find(|node| node.kind() == "function_declaration")
+            .unwrap();
         let graph = crate::lower::keyed_variant(Language::Go, source.as_bytes(), function);
-        let functions = [KeyedFunction { node: function, graph: &graph }];
-        let units = [KeyedUnit { path: "main.go", source: source.as_bytes(), functions: &functions, imports: &[], entry: true }];
+        let functions = [KeyedFunction {
+            node: function,
+            graph: &graph,
+        }];
+        let units = [KeyedUnit {
+            path: "main.go",
+            source: source.as_bytes(),
+            functions: &functions,
+            imports: &[],
+            entry: true,
+        }];
         let spec = CallOrderSpec {
-            rule_id: "test".into(), after: vec![], unless: vec![], before: vec![],
-            check_before_return: false, identity: None,
-            contract: Some(ResultContract { mode: ContractMode::MustUse, language: ContractLanguage::Go,
-                import: "os".into(), methods: vec!["Rename".into()], borrows: vec![],
-                acquire_awaited: false, complete_observed: false }),
+            rule_id: "test".into(),
+            after: vec![],
+            unless: vec![],
+            before: vec![],
+            check_before_return: false,
+            identity: None,
+            contract: Some(ResultContract {
+                mode: ContractMode::MustUse,
+                language: ContractLanguage::Go,
+                import: "os".into(),
+                methods: vec!["Rename".into()],
+                borrows: vec![],
+                acquire_awaited: false,
+                complete_observed: false,
+            }),
         };
         let program = Program::new(&spec, &units);
         let (summaries, exhausted) = build_with_budget(&program, &units, 0);
         assert!(exhausted && summaries.is_empty());
         assert!(!build(&program, &units).1);
+    }
+
+    #[test]
+    fn worklist_matches_rounds_and_avoids_rescanning_a_helper_chain() {
+        let mut source = String::from("package main\nimport \"os\"\n");
+        let count = 40;
+        for index in 0..count - 1 {
+            source.push_str(&format!(
+                "func f{index}(p string) error {{ return f{}(p) }}\n",
+                index + 1
+            ));
+        }
+        source.push_str(&format!(
+            "func f{}(p string) error {{ return os.Remove(p) }}\n",
+            count - 1
+        ));
+        with_remove_program(&source, |program, units| {
+            let (actual, exhausted) = build_with_budget(program, units, count);
+            assert!(
+                !exhausted,
+                "the chain should converge in one dependency-ordered pass"
+            );
+            assert!(build_with_budget(program, units, count - 1).1);
+            assert!(actual == reference_rounds(program, units));
+        });
+    }
+
+    #[test]
+    fn worklist_matches_rounds_for_recursive_and_branching_helpers() {
+        let examples = [
+            r#"package main
+import "os"
+func first(p string, n int) error {
+    if n > 0 { return second(p, n - 1) }
+    return os.Remove(p)
+}
+func second(p string, n int) error {
+    if n > 0 { return first(p, n - 1) }
+    return os.Remove(p)
+}
+func ignore(p string) { first(p, 2) }
+"#,
+            r#"package main
+import "os"
+func forward(err error) error { return err }
+func discard(err error) {}
+func run(p string, cond bool) error {
+    result := os.Remove(p)
+    if cond { discard(result); return nil }
+    return forward(result)
+}
+"#,
+            r#"package main
+import "os"
+func recur(p string, n int) error {
+    if n > 0 { recur(p, n - 1) }
+    return os.Remove(p)
+}
+func use(p string) error { return recur(p, 2) }
+func drop(p string) { recur(p, 3) }
+"#,
+        ];
+        for source in examples {
+            with_remove_program(source, |program, units| {
+                let (actual, exhausted) = build(program, units);
+                assert!(!exhausted);
+                assert!(actual == reference_rounds(program, units), "{source}");
+            });
+        }
+    }
+
+    fn with_remove_program(
+        source: &str,
+        check: impl FnOnce(&Program<'_, '_, '_>, &[KeyedUnit<'_, '_, '_>]),
+    ) {
+        let mut parser = autoreview_langsupport::parser_for(Language::Go).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+        let nodes: Vec<_> = root
+            .named_children(&mut root.walk())
+            .filter(|node| node.kind() == "function_declaration")
+            .collect();
+        let graphs: Vec<_> = nodes
+            .iter()
+            .map(|node| crate::lower::keyed_variant(Language::Go, source.as_bytes(), *node))
+            .collect();
+        let functions: Vec<_> = nodes
+            .iter()
+            .zip(&graphs)
+            .map(|(node, graph)| KeyedFunction { node: *node, graph })
+            .collect();
+        let units = [KeyedUnit {
+            path: "main.go",
+            source: source.as_bytes(),
+            functions: &functions,
+            imports: &[],
+            entry: true,
+        }];
+        let spec = CallOrderSpec {
+            rule_id: "test".into(),
+            after: vec![],
+            unless: vec![],
+            before: vec![],
+            check_before_return: false,
+            identity: None,
+            contract: Some(ResultContract {
+                mode: ContractMode::MustUse,
+                language: ContractLanguage::Go,
+                import: "os".into(),
+                methods: vec!["Remove".into()],
+                borrows: vec![],
+                acquire_awaited: false,
+                complete_observed: false,
+            }),
+        };
+        check(&Program::new(&spec, &units), &units);
+    }
+
+    fn reference_rounds(
+        program: &Program<'_, '_, '_>,
+        units: &[KeyedUnit<'_, '_, '_>],
+    ) -> BTreeMap<usize, HelperSummary> {
+        let mut previous = BTreeMap::new();
+        for (index, frame) in program.frames.iter().enumerate() {
+            if frame.plan.is_some() {
+                let empty = HelperOutcome {
+                    parameters: vec![false; frame.params.len()],
+                    origins: Vec::new(),
+                };
+                previous.insert(
+                    index,
+                    HelperSummary {
+                        when_discarded: empty.clone(),
+                        when_observed: empty,
+                    },
+                );
+            }
+        }
+        for _ in 0..program.frames.len() * 16 {
+            let mut next = BTreeMap::new();
+            let mut index = 0;
+            for unit in units {
+                for function in unit.functions {
+                    let frame = &program.frames[index];
+                    if let Some(plan) = &frame.plan {
+                        let calls =
+                            resolved_helpers(program, index, function.graph, plan, &previous);
+                        let mut summary = summarize(plan, function, unit, &frame.params, &calls);
+                        set_origin_paths(&mut summary, unit.path);
+                        next.insert(index, summary);
+                    }
+                    index += 1;
+                }
+            }
+            if next == previous {
+                return next;
+            }
+            previous = next;
+        }
+        panic!("reference summaries did not converge");
     }
 }
