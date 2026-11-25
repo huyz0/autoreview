@@ -27,8 +27,7 @@ pub(in crate::call_order) fn check_units_with_components(
             if let Some(shapes) = components.get(&frame.unit) { plan.result_components.clone_from(shapes); }
         }
     }
-    let mut limitations = unmodeled_sources(&program, units, sources);
-    limitations.extend(unmodeled_component_helpers(&program, units, components));
+    let mut limitations = unmodeled_sources(&program, units, sources, components);
     if !program.has_registration() {
         return (Vec::new(), false, limitations);
     }
@@ -52,6 +51,7 @@ pub(in crate::call_order) fn check_units_with_components(
 
 fn unmodeled_sources(
     program: &Program<'_, '_, '_>, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<usize, BTreeSet<usize>>,
+    components: &BTreeMap<usize, BTreeMap<usize, super::super::ResultComponents>>,
 ) -> Vec<super::super::keyed::KeyedLimitation> {
     let mut limitations = Vec::new();
     let functions: Vec<_> = units.iter().flat_map(|unit| unit.functions.iter()).collect();
@@ -60,6 +60,7 @@ fn unmodeled_sources(
         limitations.push(super::super::keyed::KeyedLimitation { reason: "verified_source_unmodeled", path: None, line: None });
     }
     let mut base = 0;
+    let mut resolved_by_frame = BTreeMap::new();
     for (unit_index, unit) in units.iter().enumerate() {
         if let Some(offsets) = sources.get(&unit_index) {
             for &start in offsets {
@@ -79,25 +80,8 @@ fn unmodeled_sources(
                 limitations.push(source_limitation(unit, start, "verified_source_unmodeled"));
             }
         }
-        base += unit.functions.len();
-    }
-    limitations
-}
-
-// A multi-result source used as the sole argument is supported only when the
-// receiving helper resolves to a unique modeled function of the correct arity.
-fn unmodeled_component_helpers(
-    program: &Program<'_, '_, '_>, units: &[KeyedUnit<'_, '_, '_>],
-    components: &BTreeMap<usize, BTreeMap<usize, super::super::ResultComponents>>,
-) -> Vec<super::super::keyed::KeyedLimitation> {
-    let functions: Vec<_> = units.iter().flat_map(|unit| unit.functions.iter()).collect();
-    let reachable = super::sources::reachable_frames(program, units, &functions);
-    let mut limitations = Vec::new();
-    let mut resolved_by_frame = BTreeMap::new();
-    let mut base = 0;
-    for (unit_index, unit) in units.iter().enumerate() {
         for &start in components.get(&unit_index).into_iter().flat_map(|items| items.keys()) {
-            if component_helper_unmodeled(program, unit, start, base, &reachable, &mut resolved_by_frame) {
+            if component_helper_unmodeled(program, (unit, base), start, &reachable, &mut resolved_by_frame) {
                 limitations.push(source_limitation(unit, start, "go_multi_result_unmodeled"));
             }
         }
@@ -106,10 +90,12 @@ fn unmodeled_component_helpers(
     limitations
 }
 
+// Multi-result arguments need a uniquely resolved, modeled receiving helper.
 fn component_helper_unmodeled(
-    program: &Program<'_, '_, '_>, unit: &KeyedUnit<'_, '_, '_>, start: usize, base: usize,
+    program: &Program<'_, '_, '_>, context: (&KeyedUnit<'_, '_, '_>, usize), start: usize,
     reachable: &BTreeSet<usize>, calls: &mut BTreeMap<usize, BTreeSet<(usize, usize)>>,
 ) -> bool {
+    let (unit, base) = context;
     let owner = unit.functions.iter().enumerate()
         .filter(|(_, function)| function.node.start_byte() <= start && start < function.node.end_byte())
         .min_by_key(|(_, function)| function.node.end_byte() - function.node.start_byte());
