@@ -110,7 +110,14 @@ impl<'tree, 'text> Source<'tree, 'text> {
                     self.index_import(list, prefix, conditional, scope);
                 }
             }
-            "use_wildcard" => scope.glob = true,
+            "use_wildcard" => {
+                if !conditional && prefix.parts.is_empty() && !prefix.absolute
+                    && self.text(node).split_whitespace().collect::<String>() == "super::*" {
+                    scope.parent_glob = true;
+                } else {
+                    scope.glob = true;
+                }
+            },
             _ => self.index_import_leaf(node, prefix, conditional, scope),
         }
     }

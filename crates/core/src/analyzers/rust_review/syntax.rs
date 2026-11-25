@@ -125,6 +125,7 @@ struct Scope<'tree> {
     items: HashSet<String>,
     locals: HashMap<String, Vec<Node<'tree>>>,
     glob: bool,
+    parent_glob: bool,
     opaque_macros: bool,
 }
 
@@ -166,47 +167,39 @@ impl<'tree, 'text> Source<'tree, 'text> {
     }
 
     pub(super) fn external_path(&self, node: Node<'tree>) -> Option<String> {
-        let mut reference = self.path(node)?;
+        let reference = self.path(node)?;
         let head = reference.parts.first()?;
         if reference.absolute {
             return known_crate(head).then(|| reference.parts.join("::"));
         }
         let mut locals_visible = true;
         for scope_node in ancestors(node) {
-            if self.binds_type_parameter(scope_node, head)
-                || locals_visible && self.binds_in_context(scope_node, node, head)
-            {
-                return None;
-            }
-            if scope_node.kind() == "function_item" {
-                locals_visible = false;
-            }
-            if let Some(scope) = self.scopes.get(&scope_node.id()) {
-                if scope.items.contains(head)
-                    || locals_visible && visible_local(scope, head, node).is_some()
-                {
-                    return None;
-                }
-                if let Some(imported) = scope.imports.get(head) {
-                    let imported = imported.as_ref()?;
-                    let root = imported.parts.first()?;
-                    if !known_crate(root)
-                        || !imported.absolute && self.crate_root_is_ambiguous(scope_node, root)
-                    {
-                        return None;
-                    }
-                    reference.parts.splice(..1, imported.parts.iter().cloned());
-                    return Some(reference.parts.join("::"));
-                }
-                if scope.glob {
-                    return None;
-                }
-            }
-            if is_module_boundary(scope_node) {
-                break;
-            }
+            if let Some(result) = self.scope_path(scope_node, node, &reference, locals_visible) { return result; }
+            if scope_node.kind() == "function_item" { locals_visible = false; }
+            if is_module_boundary(scope_node) { break; }
         }
         (reference.parts.len() > 1 && known_crate(head)).then(|| reference.parts.join("::"))
+    }
+
+    fn scope_path(&self, scope_node: Node<'tree>, node: Node<'tree>, reference: &Path, locals: bool) -> Option<Option<String>> {
+        let head = reference.parts.first()?;
+        if self.binds_type_parameter(scope_node, head) || locals && self.binds_in_context(scope_node, node, head) {
+            return Some(None);
+        }
+        let scope = self.scopes.get(&scope_node.id())?;
+        if scope.items.contains(head) || locals && visible_local(scope, head, node).is_some() { return Some(None); }
+        if let Some(imported) = scope.imports.get(head) {
+            return Some(imported.as_ref().and_then(|imported| self.imported_path(scope_node, reference, imported)));
+        }
+        self.glob_may_shadow(scope_node, head).then_some(None)
+    }
+
+    fn imported_path(&self, scope_node: Node<'tree>, reference: &Path, imported: &Path) -> Option<String> {
+        let root = imported.parts.first()?;
+        if !known_crate(root) || !imported.absolute && self.crate_root_is_ambiguous(scope_node, root, imported) { return None; }
+        let mut parts = reference.parts.clone();
+        parts.splice(..1, imported.parts.iter().cloned());
+        Some(parts.join("::"))
     }
 
     pub(in crate::analyzers) fn standard_macro(&self, node: Node<'tree>, names: &[&str]) -> bool {
@@ -243,10 +236,26 @@ impl<'tree, 'text> Source<'tree, 'text> {
                     || self.scopes.get(&parent.id()).is_some_and(|scope| {
                         scope.items.contains(name)
                             || scope.imports.contains_key(name)
-                            || scope.glob
+                            || self.glob_may_shadow(parent, name)
                             || scope.opaque_macros
                     })
             })
+    }
+
+    // `super::*` has a visible source scope in the same parsed file. Other
+    // globs remain opaque; follow parent globs only through known scopes.
+    fn glob_may_shadow(&self, scope_node: Node<'tree>, name: &str) -> bool {
+        match self.scopes.get(&scope_node.id()) {
+            None => true,
+            Some(scope) if scope.glob => true,
+            Some(scope) if scope.parent_glob => std::iter::once(scope_node).chain(ancestors(scope_node))
+                .find(|node| is_module_boundary(*node))
+                .and_then(|module| ancestors(module).find(|node| node.kind() == "source_file" || is_module_boundary(*node)))
+                .and_then(|parent| self.scopes.get(&parent.id()).map(|scope| (parent, scope)))
+                .is_none_or(|(parent, scope)| scope.items.contains(name) || scope.imports.contains_key(name)
+                    || scope.opaque_macros || self.glob_may_shadow(parent, name)),
+            Some(_) => false,
+        }
     }
 
     fn binds_type_parameter(&self, scope: Node<'tree>, name: &str) -> bool {
@@ -258,15 +267,20 @@ impl<'tree, 'text> Source<'tree, 'text> {
             .any(|parameter| identifier(self.text(parameter)) == name)
     }
 
-    fn crate_root_is_ambiguous(&self, scope_node: Node<'tree>, name: &str) -> bool {
+    fn crate_root_is_ambiguous(&self, scope_node: Node<'tree>, name: &str, imported: &Path) -> bool {
         for node in std::iter::once(scope_node).chain(ancestors(scope_node)) {
             if self.scopes.get(&node.id()).is_some_and(|scope| {
                 scope.items.contains(name)
-                    || scope.glob
+                    || self.glob_may_shadow(node, name)
                     || scope
                         .imports
                         .get(name)
-                        .is_some_and(|root| root.as_ref().is_none_or(|root| root.parts != [name]))
+                        .is_some_and(|root| root.as_ref().is_none_or(|root| {
+                            let same_test_macro = node.id() == scope_node.id()
+                                && matches!(name, "test_case" | "rstest")
+                                && root.parts == [name, name] && root.parts == imported.parts;
+                            root.parts != [name] && !same_test_macro
+                        }))
             }) {
                 return true;
             }
@@ -301,5 +315,8 @@ fn known_crate(name: &str) -> bool {
             | "secrecy"
             | "axum"
             | "actix_web"
+            | "async_std"
+            | "test_case"
+            | "rstest"
     )
 }

@@ -127,10 +127,13 @@ pub(super) fn test_body<'tree>(source: &Source<'tree, '_>, node: Node<'tree>) ->
     attributes(function).any(|attr| {
         matches!(
             attr_name(source, attr).as_deref(),
-            Some("test" | "tokio::test")
+            Some("test" | "tokio::test" | "async_std::test" | "test_case::test_case" | "rstest::rstest")
         )
-    }) && !attributes(function)
-        .any(|attr| attr_name(source, attr).as_deref() == Some("should_panic"))
+    }) && !attributes(function).any(|attr| {
+        let name = attr_name(source, attr);
+        name.as_deref() == Some("should_panic")
+            || (name.as_deref() == Some("test_case::test_case") && source.text(attr).contains("=>"))
+    })
 }
 
 fn await_with_live_trace_guard<'tree>(
@@ -347,6 +350,59 @@ async fn example() {
 }
 "#)
         .is_empty());
+    }
+
+    #[test]
+    fn detects_scoped_parameterized_test_attributes_without_guessing() {
+        assert_eq!(ids(r#"
+use test_case::test_case as case;
+use rstest::rstest;
+#[case(1)] fn first(value: i32) { matches!(value, 1); }
+#[test_case::test_case(2)] fn second(value: i32) { matches!(value, 2); }
+#[rstest] fn third() { matches!(3, 3); }
+#[async_std::test] async fn fourth() { matches!(4, 4); }
+#[case(5 => panics)] fn panics(value: i32) { matches!(value, 5); }
+#[rstest] #[should_panic] fn expected_panic() { matches!(panic!(), ()); }
+#[case(6)] fn safe(value: i32) { assert!(matches!(value, 6)); }
+"#), vec!["rust-discarded-test-matches"; 4]);
+        assert_eq!(ids(r#"
+mod tests {
+    use test_case::test_case;
+    use super::*;
+    #[test_case(1)] fn example(value: i32) { matches!(value, 1); }
+}
+"#), ["rust-discarded-test-matches"]);
+        for prefix in ["use other::matches;", "mod test_case { pub fn test_case() {} }", "use other::*;"] {
+            let fixture = format!(r#"{prefix}
+mod tests {{
+    use test_case::test_case;
+    use super::*;
+    #[test_case(1)] fn example(value: i32) {{ matches!(value, 1); }}
+}}
+"#);
+            assert!(ids(&fixture).is_empty(), "{prefix}");
+        }
+        assert!(ids(r#"
+use other::matches;
+mod tests {
+    use test_case::test_case;
+    #[test_case(1)] fn example(value: i32) {
+        { use super::*; matches!(value, 1); }
+    }
+}
+"#).is_empty());
+        assert!(ids(r#"
+mod tokio {}
+mod tests {
+    use super::*;
+    #[tokio::test] async fn shadowed() { matches!(1, 1); }
+}
+"#).is_empty());
+        assert!(ids(r#"
+#[test_case(1)] fn unknown(value: i32) { matches!(value, 1); }
+mod test_case { pub fn test_case() {} }
+#[test_case::test_case(2)] fn shadowed(value: i32) { matches!(value, 2); }
+"#).is_empty());
     }
 
     #[test]

@@ -34,6 +34,18 @@ accuracy scores. Incomplete and failed cases are excluded from precision and
 recall, and make replay exit unsuccessfully. These are case counts, not file
 or finding counts.
 
+`azure-iot-matches.yaml` records an MIT-licensed Rust test fix in the Azure IoT
+Operations SDK. Six `test_case` tests discarded `matches!` predicates before
+the fix; replay detects all six and none in the fixed file. This is one fix
+pair, not a representative accuracy estimate. Reproduce it with:
+
+```sh
+git init azure-iot
+cd azure-iot
+git fetch --depth 2 https://github.com/Azure/iot-operations-sdks.git 9c5c20f714caedc7fda71df9032469b5da1e04ce
+autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/azure-iot-matches.yaml
+```
+
 `jplag-trim.yaml` is an independent GPL-3.0 Java fix pair from JPlag. A
 standalone `String.trim()` result was discarded before a filter entry was
 lowercased; the fix uses the trimmed string. Replay of the pinned parent and
