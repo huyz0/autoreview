@@ -62,11 +62,9 @@ fn unmodeled_sources(
     let mut base = 0;
     let mut resolved_by_frame = BTreeMap::new();
     for (unit_index, unit) in units.iter().enumerate() {
-        if let Some(offsets) = sources.get(&unit_index) {
-            for &start in offsets {
-                if source_modeled(program, (unit, base), start, &reachable) != Some(false) { continue; }
-                limitations.push(source_limitation(unit, start, "verified_source_unmodeled"));
-            }
+        for &start in sources.get(&unit_index).into_iter().flatten() {
+            if source_modeled(program, (unit, base), start, &reachable) != Some(false) { continue; }
+            limitations.push(source_limitation(unit, start, "verified_source_unmodeled"));
         }
         for &start in components.get(&unit_index).into_iter().flat_map(|items| items.keys()) {
             if component_helper_unmodeled(program, (unit, base), start, &reachable, &mut resolved_by_frame) {
