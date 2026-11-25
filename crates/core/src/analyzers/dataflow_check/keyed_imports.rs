@@ -455,5 +455,34 @@ mod budget_tests {
         assert_eq!(findings[0].source.rule_id.as_deref(), Some("test-typed"));
         assert!(coverage.is_empty(), "{:?}", coverage.iter().map(|issue| &issue.reason).collect::<Vec<_>>());
     }
+
+    #[test]
+    fn builtin_typed_rule_fixtures_cover_typescript_and_tsx() {
+        let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
+        let rules = super::super::super::call_order_rules::load_call_order_rules(&[]);
+        let rule = rules.iter().find(|rule| rule.id == "typescript-factory-promise-unobserved").unwrap();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rules/typescript-factory-promise-unobserved");
+        for extension in ["ts", "tsx"] {
+            for (fixture, expected) in [("positive", 1), ("negative", 0)] {
+                let dir = tempfile::tempdir().unwrap();
+                let entry = format!("main.{extension}");
+                std::fs::copy(fixtures.join(format!("{fixture}.{extension}")), dir.path().join(&entry)).unwrap();
+                for path in ["binding.ts", "factory.ts"] { std::fs::copy(fixtures.join(path), dir.path().join(path)).unwrap(); }
+                let config = dir.path().join("tsconfig.json");
+                std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true,"jsx":"preserve"},"include":["*.ts","*.tsx"]}"#).unwrap();
+                let root = dir.path().canonicalize().unwrap();
+                let parse = ParseCache::new();
+                let persistent = PersistentSummaryCache::load(&root, &root);
+                let caches = SummaryCaches { parse: &parse, persistent: &persistent, java_kotlin_packages: Default::default() };
+                let resolver = Resolver { root, cache: &parse, packages: &caches };
+                let entries = BTreeSet::from([entry]);
+                let (sources, mut coverage) = resolver.load(&entries);
+                let checker = TrustedTypeScript { node: "node".into(), compiler: compiler.clone(), config: config.to_str().unwrap().into() };
+                let found = run_sources(&sources, &entries, &[(rule, Language::TypeScript)], dir.path(), Some(&checker), &mut coverage);
+                assert_eq!(found.len(), expected, "{fixture}.{extension}");
+                assert!(coverage.is_empty(), "{fixture}.{extension}: {:?}", coverage.iter().map(|issue| &issue.reason).collect::<Vec<_>>());
+            }
+        }
+    }
 }
 

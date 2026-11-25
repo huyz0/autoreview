@@ -24,6 +24,14 @@ deep tier.
   Kotlin, JavaScript, TypeScript, TSX, and Rust. It can trace an HTTP parameter to a
   command execution call or check whether code closes a resource before reuse.
   Go also checks whether typed nil pointers are returned through interfaces.
+- **Typed promise checks** can flag unused results from imported TypeScript
+  and TSX functions created by a typed factory. Set
+  `AUTOREVIEW_TYPESCRIPT_MODULE` to the absolute path of a trusted TypeScript
+  installation to enable type verification; Node must also be available.
+  The repository-root `tsconfig.json` is used unless
+  `AUTOREVIEW_TYPESCRIPT_CONFIG` names an absolute config path. Without a
+  configured checker, coverage reports identify the skipped rule. This check
+  only covers supported, unambiguous factory and import shapes.
 - **Framework checks** flag Go context cancellation missed on a branch or
   through a same-package helper, Java Spring transaction self-invocation,
   and Hibernate reads that initialize a mapped lazy collection for each

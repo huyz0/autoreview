@@ -96,7 +96,8 @@ An isolated TypeScript 5.9.3 probe uses the documented `getAwaitedType` checker
 API and rejects `any`, unknown, generic, and mixed promise/synchronous unions.
 The prototype in `crates/core/src/analyzers/typescript_promise_probe.cjs` also
 declines projects with compiler errors and reports missing call locations. It
-is not yet used by a built-in rule or a complete type-safety proof. The Rust
+is used by an experimental built-in rule but is not a complete type-safety
+proof. The Rust
 prototype embeds the script, limits request and response sizes and process
 time, and requires an explicitly supplied trusted compiler path. It does not
 yet contain descendant processes or resolve the compiler automatically; do
