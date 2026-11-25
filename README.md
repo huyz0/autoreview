@@ -18,7 +18,7 @@ deep tier.
   and Rust. Rust rules cover resource lifetimes, panic and unsafe preconditions,
   blocking behavior, credentials, and TLS.
 - **Scoped Rust review** resolves explicit imports and local bindings to catch
-  discarded asynchronous test failures, Mockall expectation problems, and
+  discarded assertions in supported parameterized and asynchronous tests, Mockall expectation problems, and
   SQLx, Diesel, and rusqlite query issues without a build.
 - **Control-flow analysis** runs taint and call-sequence rules for Go, Java,
   Kotlin, JavaScript, TypeScript, TSX, and Rust. It can trace an HTTP parameter to a

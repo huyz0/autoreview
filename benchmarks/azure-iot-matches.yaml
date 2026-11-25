@@ -1,0 +1,18 @@
+cases:
+  - name: azure iot parameterized tests discard match predicates
+    rule: {tool: autoreview-rust, id: rust-discarded-test-matches}
+    evidence:
+      kind: historical
+      source: https://github.com/Azure/iot-operations-sdks/commit/9c5c20f714caedc7fda71df9032469b5da1e04ce
+      license: MIT
+      rationale: >-
+        Six parameterized tests evaluated matches! without asserting its result;
+        the fix wraps each predicate in assert! so mismatches fail the test.
+    before:
+      commit: 31f97358b4b92647826e2d38bd9c25f0bedf4dea
+      path: rust/azure_iot_operations_protocol/src/common/topic_processor.rs
+      lines: [468, 494, 504, 528, 555, 617]
+    after:
+      commit: 9c5c20f714caedc7fda71df9032469b5da1e04ce
+      path: rust/azure_iot_operations_protocol/src/common/topic_processor.rs
+      lines: []

@@ -125,6 +125,7 @@ struct Scope<'tree> {
     items: HashSet<String>,
     locals: HashMap<String, Vec<Node<'tree>>>,
     glob: bool,
+    parent_glob: bool,
     opaque_macros: bool,
 }
 
@@ -191,7 +192,7 @@ impl<'tree, 'text> Source<'tree, 'text> {
                     let imported = imported.as_ref()?;
                     let root = imported.parts.first()?;
                     if !known_crate(root)
-                        || !imported.absolute && self.crate_root_is_ambiguous(scope_node, root)
+                        || !imported.absolute && self.crate_root_is_ambiguous(scope_node, root, imported)
                     {
                         return None;
                     }
@@ -243,10 +244,22 @@ impl<'tree, 'text> Source<'tree, 'text> {
                     || self.scopes.get(&parent.id()).is_some_and(|scope| {
                         scope.items.contains(name)
                             || scope.imports.contains_key(name)
-                            || scope.glob
+                            || self.glob_may_shadow(parent, name)
                             || scope.opaque_macros
                     })
             })
+    }
+
+    // `super::*` has a visible source scope in the same parsed file. Other
+    // globs remain opaque; follow parent globs only through known scopes.
+    fn glob_may_shadow(&self, scope_node: Node<'tree>, name: &str) -> bool {
+        let Some(scope) = self.scopes.get(&scope_node.id()) else { return true };
+        if scope.glob { return true; }
+        if !scope.parent_glob { return false; }
+        let Some(parent) = ancestors(scope_node).find(|node| self.scopes.contains_key(&node.id())) else { return true };
+        let Some(parent_scope) = self.scopes.get(&parent.id()) else { return true };
+        parent_scope.items.contains(name) || parent_scope.imports.contains_key(name)
+            || parent_scope.opaque_macros || self.glob_may_shadow(parent, name)
     }
 
     fn binds_type_parameter(&self, scope: Node<'tree>, name: &str) -> bool {
@@ -258,15 +271,20 @@ impl<'tree, 'text> Source<'tree, 'text> {
             .any(|parameter| identifier(self.text(parameter)) == name)
     }
 
-    fn crate_root_is_ambiguous(&self, scope_node: Node<'tree>, name: &str) -> bool {
+    fn crate_root_is_ambiguous(&self, scope_node: Node<'tree>, name: &str, imported: &Path) -> bool {
         for node in std::iter::once(scope_node).chain(ancestors(scope_node)) {
             if self.scopes.get(&node.id()).is_some_and(|scope| {
                 scope.items.contains(name)
-                    || scope.glob
+                    || self.glob_may_shadow(node, name)
                     || scope
                         .imports
                         .get(name)
-                        .is_some_and(|root| root.as_ref().is_none_or(|root| root.parts != [name]))
+                        .is_some_and(|root| root.as_ref().is_none_or(|root| {
+                            let same_test_macro = node.id() == scope_node.id()
+                                && matches!(name, "test_case" | "rstest")
+                                && root.parts == [name, name] && root.parts == imported.parts;
+                            root.parts != [name] && !same_test_macro
+                        }))
             }) {
                 return true;
             }
@@ -301,5 +319,8 @@ fn known_crate(name: &str) -> bool {
             | "secrecy"
             | "axum"
             | "actix_web"
+            | "async_std"
+            | "test_case"
+            | "rstest"
     )
 }
