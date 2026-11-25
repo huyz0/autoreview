@@ -31,8 +31,8 @@ are outside this particular diagnostic.
 Named and wildcard web re-exports are followed across files. Unresolved or
 unsupported re-exports and reachable ambiguous helper targets are reported;
 cycles are handled, and resolution has step and depth limits that are also
-reported. Namespace re-exports and function values returned by factories are
-not modeled.
+reported. Namespace re-exports, exported arrow-function values, and function
+values returned by factories are not resolved as named helpers.
 Entries identify the analyzer, reason, scope, and available path, line, and
 rule. The same issues are summarized in `analyzerWarnings` for text reports.
 Dataflow replay fails affected cases instead of treating them as clean. Other

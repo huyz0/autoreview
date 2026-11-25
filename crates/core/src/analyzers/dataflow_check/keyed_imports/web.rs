@@ -52,31 +52,28 @@ impl ImportSource<'_> {
             }
             return exports;
         }
-        let names: Vec<_> = clause.into_iter().flat_map(children).filter_map(|item| {
-            if item.kind() != "export_specifier" || item.children(&mut item.walk()).any(|child| child.kind() == "type") {
-                return None;
-            }
-            let local = text(item.child_by_field_name("name")?, self.source)?;
-            let exported = item.child_by_field_name("alias").and_then(|alias| text(alias, self.source)).unwrap_or(local);
-            Some((local.to_owned(), exported.to_owned()))
-        }).collect();
+        let names = exported_names(clause, self.source);
         if names.is_empty() && !star && !namespace {
             return Vec::new();
         }
         let target = node.child_by_field_name("source").and_then(|value| text(value, self.source)).and_then(unquote);
         let path = target.map(|target| self.reexport_path(node, target, coverage));
         if namespace {
-            self.reexport_issue(node, "unsupported_reexport", "Namespace re-exports are not modeled by helper analysis.", coverage);
-            return children(node).into_iter().find(|child| child.kind() == "namespace_export")
-                .and_then(|namespace| namespace.named_child(0))
-                .and_then(|name| text(name, self.source))
-                .map(|name| vec![KeyedExport::Named { exported: name.to_owned(), local: String::new(), path: None }])
-                .unwrap_or_else(|| vec![KeyedExport::Unknown]);
+            self.namespace_export(node, coverage)
+        } else if star {
+            path.into_iter().map(|path| KeyedExport::Star { path }).collect()
+        } else {
+            names.into_iter().map(|(local, exported)| KeyedExport::Named { exported, local, path: path.clone() }).collect()
         }
-        if star {
-            return path.into_iter().map(|path| KeyedExport::Star { path }).collect();
-        }
-        names.into_iter().map(|(local, exported)| KeyedExport::Named { exported, local, path: path.clone() }).collect()
+    }
+
+    fn namespace_export(&self, node: Node<'_>, coverage: &mut Vec<AnalysisCoverageIssue>) -> Vec<KeyedExport> {
+        self.reexport_issue(node, "unsupported_reexport", "Namespace re-exports are not modeled by helper analysis.", coverage);
+        children(node).into_iter().find(|child| child.kind() == "namespace_export")
+            .and_then(|namespace| namespace.named_child(0))
+            .and_then(|name| text(name, self.source))
+            .map(|name| vec![KeyedExport::Named { exported: name.to_owned(), local: String::new(), path: None }])
+            .unwrap_or_else(|| vec![KeyedExport::Unknown])
     }
 
     fn reexport_path(&self, node: Node<'_>, target: &str, coverage: &mut Vec<AnalysisCoverageIssue>) -> String {
@@ -94,6 +91,17 @@ impl ImportSource<'_> {
         record.line = Some(node.start_position().row as u32 + 1);
         coverage.push(record);
     }
+}
+
+fn exported_names(clause: Option<Node<'_>>, source: &str) -> Vec<(String, String)> {
+    clause.into_iter().flat_map(children).filter_map(|item| {
+        if item.kind() != "export_specifier" || item.children(&mut item.walk()).any(|child| child.kind() == "type") {
+            return None;
+        }
+        let local = text(item.child_by_field_name("name")?, source)?;
+        let exported = item.child_by_field_name("alias").and_then(|alias| text(alias, source)).unwrap_or(local);
+        Some((local.to_owned(), exported.to_owned()))
+    }).collect()
 }
 
 fn declaration_exports(node: Node<'_>, source: &str) -> Vec<KeyedExport> {

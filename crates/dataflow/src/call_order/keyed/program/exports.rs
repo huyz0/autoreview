@@ -74,6 +74,17 @@ impl Program<'_, '_, '_> {
         }
         context.remaining -= 1;
         context.seen.insert(key.clone());
+        let (explicit, mut result) = self.explicit_exports(unit, name, arity, context);
+        if !explicit && name != "default" {
+            result.merge(self.star_exports(unit, name, arity, context));
+        }
+        context.seen.remove(&key);
+        result
+    }
+
+    fn explicit_exports(
+        &self, unit: usize, name: &str, arity: usize, context: &mut ResolutionContext,
+    ) -> (bool, Resolution) {
         let mut result = Resolution::default();
         let mut explicit = false;
         for &index in &self.units[unit].frames {
@@ -94,16 +105,20 @@ impl Program<'_, '_, '_> {
                 }
             }
         }
-        if !explicit && name != "default" {
-            for export in self.units[unit].exports {
-                match export {
-                    KeyedExport::Star { path } => result.merge(self.resolve_reexport(path, name, arity, context)),
-                    KeyedExport::Unknown => result.incomplete = true,
-                    _ => {}
-                }
+        (explicit, result)
+    }
+
+    fn star_exports(
+        &self, unit: usize, name: &str, arity: usize, context: &mut ResolutionContext,
+    ) -> Resolution {
+        let mut result = Resolution::default();
+        for export in self.units[unit].exports {
+            match export {
+                KeyedExport::Star { path } => result.merge(self.resolve_reexport(path, name, arity, context)),
+                KeyedExport::Unknown => result.incomplete = true,
+                _ => {}
             }
         }
-        context.seen.remove(&key);
         result
     }
 
