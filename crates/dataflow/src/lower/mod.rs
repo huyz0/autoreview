@@ -34,12 +34,16 @@ pub(crate) fn result_closure(language: Language, source: &[u8], node: Node<'_>) 
             keyed_variant(language, source, node)
         });
     }
+    Some(expression_graph(language, source, node, body))
+}
+
+fn expression_graph(language: Language, source: &[u8], node: Node<'_>, expr: Node<'_>) -> Cfg<Stmt> {
     let mut cfg = keyed_graph(language);
     cfg.entry = cfg.push_node(line(node));
     cfg.exit = cfg.push_node(node.end_position().row as u32 + 1);
     let entry = cfg.entry;
-    keyed_flow::expression_body(&mut cfg, body, source, entry);
-    Some(cfg)
+    keyed_flow::expression_body(&mut cfg, expr, source, entry);
+    cfg
 }
 
 fn keyed_graph(language: Language) -> Cfg<Stmt> {
@@ -58,18 +62,18 @@ pub fn keyed_variant(language: Language, source: &[u8], node: Node<'_>) -> Cfg<S
         Language::JavaScript | Language::TypeScript | Language::Tsx => javascript::lower_block,
         Language::Rust => return rust::lower_keyed(source, node),
     };
-    let mut cfg = keyed_graph(language);
     let body = if language == Language::Kotlin { kotlin::function_body(node) } else { node.child_by_field_name("body") };
-    if language == Language::Kotlin && body.is_none() {
-        if let Some(expr) = kotlin::expression_body(node) {
-            cfg.entry = cfg.push_node(line(node));
-            cfg.exit = cfg.push_node(node.end_position().row as u32 + 1);
-            let entry = cfg.entry;
-            keyed_flow::expression_body(&mut cfg, expr, source, entry);
-            return cfg;
-        }
+    let expr = if node.kind() == "arrow_function" {
+        body.filter(|body| body.kind() != "statement_block")
+    } else if language == Language::Kotlin && body.is_none() {
+        kotlin::expression_body(node)
+    } else {
+        None
+    };
+    if let Some(expr) = expr {
+        return expression_graph(language, source, node, expr);
     }
-    function(cfg, source, node, body, lower)
+    function(keyed_graph(language), source, node, body, lower)
 }
 
 type StatementLowerer = fn(&mut Cfg<Stmt>, Node<'_>, &[u8], NodeId) -> NodeId;

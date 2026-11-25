@@ -356,6 +356,9 @@ fn function_return_tail(node: Node<'_>, language: ContractLanguage) -> Option<No
             })
         }
         ContractLanguage::Kotlin => crate::lower::kotlin::expression_body(node),
+        ContractLanguage::Web if node.kind() == "arrow_function" => node
+            .child_by_field_name("body")
+            .filter(|body| body.kind() != "statement_block"),
         _ => None,
     }
 }

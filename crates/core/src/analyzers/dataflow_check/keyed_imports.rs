@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, keyed_flow_exhausted, KeyedExport, KeyedFunction, KeyedImport, KeyedUnit};
@@ -11,7 +11,7 @@ use tree_sitter::Node;
 use super::cache::{ParseCache, ParsedFile, SummaryCaches};
 use super::dispatch::profile;
 use super::dsl::call_order_finding;
-use super::functions::web_result_functions;
+use super::functions::{web_named_functions, web_result_functions};
 use super::{call_order_rules::CallOrderRuleDef, AgentFinding};
 
 mod go;
@@ -94,11 +94,19 @@ fn run_sources(
         .map(|file| {
             let (extract, _) = profile(file.language);
             let mut nodes = extract(&file.parsed.1);
+            if matches!(file.language, Language::JavaScript | Language::TypeScript | Language::Tsx) {
+                nodes.extend(web_named_functions(&file.parsed.1));
+            }
             let ordinary = nodes.len();
             if matches!(file.language, Language::JavaScript | Language::TypeScript | Language::Tsx)
                 && rules.iter().any(|(rule, language)| rule.spec.tracks_result_use() && file.language.matches_rule_language(*language))
             {
-                nodes.extend(web_result_functions(&file.parsed.1));
+                let mut seen: HashSet<_> = nodes.iter().map(Node::id).collect();
+                for node in web_result_functions(&file.parsed.1) {
+                    if seen.insert(node.id()) {
+                        nodes.push(node);
+                    }
+                }
             }
             let graphs = nodes.into_iter()
                 .map(|node| (node, lower::keyed_variant(file.language, file.parsed.0.as_bytes(), node)))

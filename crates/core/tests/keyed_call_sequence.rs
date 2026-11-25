@@ -1325,6 +1325,7 @@ fn web_reexports_support_cycles_and_default_aliases() {
     let cycle = "export * from './index';";
     for (index, helper) in [
         ("export * from './cycle'; export { default as pick } from './helper';", "export default function choose(key) { return key; }"),
+        ("export * from './cycle'; export { default as pick } from './helper';", "export default (key) => { return key; };"),
         ("export * from './cycle'; export * from './helper';", "export function pick(key) { return key; }"),
     ] {
         let clean = [("worker.js", caller), ("index.js", index), ("cycle.js", cycle), ("helper.js", helper)];
@@ -1333,6 +1334,56 @@ fn web_reexports_support_cycles_and_default_aliases() {
         let files = [("worker.js", caller), ("index.js", index), ("cycle.js", cycle), ("helper.js", wrong.as_str())];
         assert_key_pending_on_fallthrough(&workspace_findings("JavaScript", &files, &["worker.js"], RECEIVER, true));
     }
+}
+
+#[test]
+fn exported_web_function_values_preserve_key_identities() {
+    for (language, caller_path, index_path, helper_path) in [
+        ("JavaScript", "worker.js", "index.js", "helper.js"),
+        ("TypeScript", "worker.ts", "index.ts", "helper.ts"),
+        ("TypeScript", "worker.tsx", "index.ts", "helper.ts"),
+    ] {
+        let caller = "import { choose } from './index';\nfunction pending(root, key) { root.register(key); root.remove(choose(key)); }";
+        let index = "export * from './helper';";
+        for (clean, wrong) in [
+            ("export const choose = key => key;", "export const choose = key => 'other';"),
+            ("export const choose = (key) => { return key; };", "export const choose = (key) => { return 'other'; };"),
+            ("export const choose = function(key) { return key; };", "export const choose = function(key) { return 'other'; };"),
+            ("const choose = key => key; export { choose };", "const choose = key => 'other'; export { choose };"),
+        ] {
+            let files = [(caller_path, caller), (index_path, index), (helper_path, clean)];
+            assert!(workspace_findings(language, &files, &[caller_path], RECEIVER, true).is_empty(), "{language}: {clean}");
+            let files = [(caller_path, caller), (index_path, index), (helper_path, wrong)];
+            let hits = workspace_findings(language, &files, &[caller_path], RECEIVER, true);
+            assert!(!hits.is_empty(), "{language}: {wrong}: {hits:?}");
+        }
+        if language == "TypeScript" {
+            let clean = "export const choose = (key: string): string => key;";
+            let wrong = "export const choose = (key: string): string => 'other';";
+            assert!(workspace_findings(language, &[(caller_path, caller), (index_path, index), (helper_path, clean)], &[caller_path], RECEIVER, true).is_empty());
+            assert_key_pending_on_fallthrough(&workspace_findings(language, &[(caller_path, caller), (index_path, index), (helper_path, wrong)], &[caller_path], RECEIVER, true));
+        }
+    }
+}
+
+#[test]
+fn default_exported_arrow_helpers_follow_returns() {
+    let caller = "import pick from './helper';\nfunction pending(root, key) { root.register(key); root.remove(pick(key)); }";
+    for (clean, wrong) in [
+        ("export default key => key;", "export default key => 'other';"),
+        ("export default function(key) { return key; }", "export default function(key) { return 'other'; }"),
+    ] {
+        assert!(workspace_findings("JavaScript", &[("worker.js", caller), ("helper.js", clean)], &["worker.js"], RECEIVER, true).is_empty());
+        assert_key_pending_on_fallthrough(&workspace_findings("JavaScript", &[("worker.js", caller), ("helper.js", wrong)], &["worker.js"], RECEIVER, true));
+    }
+}
+
+#[test]
+fn top_level_arrow_functions_are_checked_as_entry_points() {
+    let source = "const pending = (root, key) => { root.register(key); };";
+    assert_key_pending_on_fallthrough(&findings("JavaScript", "worker.js", source, RECEIVER, true));
+    let clean = source.replace("root.register(key);", "root.register(key); root.remove(key);");
+    assert_clean_js(&clean);
 }
 
 #[test]
