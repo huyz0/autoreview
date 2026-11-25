@@ -3,7 +3,7 @@ use std::path::Path;
 use autoreview_langsupport::{language_for_path, Language};
 use autoreview_schema::AnalysisCoverageIssue;
 use autoreview_dataflow::call_order::keyed_flow_exhausted;
-use super::{issue, CallOrderRuleDef, LoweredFile, Source};
+use super::{CallOrderRuleDef, LoweredFile, Source};
 
 pub(super) fn record_flow_limits(
     sources: &BTreeMap<String, Source>,
@@ -73,5 +73,13 @@ pub(super) fn scope_coverage(
             scoped
         }).collect()
     }).collect()
+}
+
+
+pub(super) fn issue(path: Option<&str>, reason: &str, scope: &str, detail: &str) -> AnalysisCoverageIssue {
+    AnalysisCoverageIssue {
+        analyzer: "call-sequence".into(), reason: reason.into(), scope: scope.into(),
+        path: path.map(str::to_owned), line: None, rule: None, detail: detail.into(),
+    }
 }
 

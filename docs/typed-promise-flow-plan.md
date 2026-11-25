@@ -17,7 +17,7 @@ and factory source files and resolved `removeRemote` to the annotated factory
 with one required and one optional returned-function argument. The graph was
 manually restricted to that route and omitted other barrel exports, so this is
 not evidence that automatic dependency discovery resolves the real project or
-that the bug is detected. The case remains unscored.
+that the bug was detected. At that stage the case remained unscored.
 
 A subsequent exploratory run used the normal dependency loader on complete
 checkouts of both pinned revisions, with lockfile dependencies installed using

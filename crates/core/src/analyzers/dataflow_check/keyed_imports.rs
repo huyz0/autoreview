@@ -20,7 +20,7 @@ mod rust;
 mod web;
 mod typed;
 mod coverage;
-use coverage::{record_flow_limits, record_rule_limits, scope_coverage};
+use coverage::{issue, record_flow_limits, record_rule_limits, scope_coverage};
 use typed::{check_typed_rule, TrustedTypeScript};
 
 const UNIT_LIMIT: usize = 64;
@@ -324,12 +324,6 @@ impl Resolver<'_> {
     }
 }
 
-fn issue(path: Option<&str>, reason: &str, scope: &str, detail: &str) -> AnalysisCoverageIssue {
-    AnalysisCoverageIssue {
-        analyzer: "call-sequence".into(), reason: reason.into(), scope: scope.into(),
-        path: path.map(str::to_owned), line: None, rule: None, detail: detail.into(),
-    }
-}
 
 fn children(node: Node<'_>) -> Vec<Node<'_>> {
     node.named_children(&mut node.walk())
