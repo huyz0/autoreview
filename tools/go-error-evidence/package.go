@@ -147,8 +147,12 @@ func readSources(target listedPackage) ([]sourceFile, bool) {
 }
 
 func readSource(dir, name string, remaining int64) (sourceFile, bool) {
-	file, size := openSource(dir, name, remaining)
-	if file == nil {
+	path, size, ok := sourcePath(dir, name, remaining)
+	if !ok {
+		return sourceFile{}, false
+	}
+	file, err := os.Open(path)
+	if err != nil {
 		return sourceFile{}, false
 	}
 	defer file.Close() //nolint:errcheck // Closing a read-only source cannot change the bytes read.
@@ -159,20 +163,16 @@ func readSource(dir, name string, remaining int64) (sourceFile, bool) {
 	return sourceFile{Path: name, Source: string(data)}, true
 }
 
-func openSource(dir, name string, remaining int64) (*os.File, int64) {
+func sourcePath(dir, name string, remaining int64) (string, int64, bool) {
 	if filepath.Base(name) != name {
-		return nil, 0
+		return "", 0, false
 	}
 	path := filepath.Join(dir, name)
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > remaining {
-		return nil, 0
+		return "", 0, false
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, 0
-	}
-	return file, info.Size()
+	return path, info.Size(), true
 }
 
 func matchesExpectedSources(files []sourceFile, calls []callSite, expected map[string]string) bool {
