@@ -42,6 +42,34 @@ does not resolve the cross-file binding or score the historical case.
    prevent replay from scoring that scope as clean. Keep unrelated files and
    rules usable, and preserve the existing compatibility of report consumers.
 
+## Integration points
+
+`Program` currently indexes lowered callable bodies by file, name, and exact
+arity. Factory-produced bindings are not callable bodies, and optional
+parameters make a single exact arity insufficient. Extend the shared export
+resolution to return declaration identities separately from helper-frame
+identities, without changing the existing helper resolution behavior. Apply
+the same explicit-export precedence, ambiguity, cycle, and budget handling to
+both. An exported binding that is present but cannot be typed must still
+shadow wildcard exports and must not be treated as an absent export.
+
+Carry source locations and callable arity bounds with each type fact. Resolve
+the initializer's factory declaration and the resulting binding separately;
+both resolutions must be unique. The current direct-import prototype trusts
+its caller to supply a verified `KeyedImport`; its local `Promise` shadow
+check does not establish the meaning of ambient or project-wide types. Do not
+enable annotation-derived findings until that environment is resolved or an
+explicit, documented contract supplies the missing guarantee.
+
+The ignored-result engine currently gates both the entire pass and each
+function on `Plan::has_registration`, and `effects::Lower::origin` obtains
+sources from `Plan::source_mode`. A new source kind must participate in all
+three places, as well as in helper summaries, rather than only matching calls
+while lowering. Feed call-site-specific identities into those checks so local
+shadowing and different calls with the same spelling cannot share a fact.
+Keep the existing API-contract path unchanged and add end-to-end tests through
+the normal core rule and replay entry points before claiming coverage.
+
 ## Evidence and release gate
 
 - Add positive, negative, ambiguity, shadowing, and regression fixtures for
