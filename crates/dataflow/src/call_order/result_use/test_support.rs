@@ -30,6 +30,7 @@ pub(super) fn with_program(
         source: source.as_bytes(),
         functions: &functions,
         imports: &[],
+        exports: &[],
         entry: true,
     }];
     let spec = CallOrderSpec {

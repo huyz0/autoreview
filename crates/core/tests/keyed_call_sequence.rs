@@ -1295,6 +1295,47 @@ fn nested_helper_results_follow_imports_between_files() {
 }
 
 #[test]
+fn web_barrel_reexports_follow_helper_results_across_files() {
+    let leaf = "export function choose(key) { return key; }";
+    let wrong_leaf = "export function choose(key) { return 'other'; }";
+    for (language, caller_path, barrel_path, leaf_path) in [
+        ("JavaScript", "worker.js", "index.js", "helpers.js"),
+        ("TypeScript", "worker.ts", "index.ts", "helpers.ts"),
+        ("TypeScript", "worker.tsx", "index.ts", "helpers.ts"),
+    ] {
+        for (barrel, import, call) in [
+            ("export * from './helpers';", "import { choose as pick } from './index';", "pick"),
+            ("export { choose as pick } from './helpers';", "import { pick } from './index';", "pick"),
+            ("import { choose } from './helpers'; export { choose as pick };", "import { pick } from './index';", "pick"),
+            ("export * from './helpers';", "import * as support from './index';", "support.choose"),
+        ] {
+            let caller = format!("{import}\nfunction pending(root, key) {{ root.register(key); root.remove({call}(key)); }}");
+            let clean = [(caller_path, caller.as_str()), (barrel_path, barrel), (leaf_path, leaf)];
+            assert!(workspace_findings(language, &clean, &[caller_path], RECEIVER, true).is_empty(), "clean {language} {barrel}");
+            let wrong = [(caller_path, caller.as_str()), (barrel_path, barrel), (leaf_path, wrong_leaf)];
+            let hits = workspace_findings(language, &wrong, &[caller_path], RECEIVER, true);
+            assert!(!hits.is_empty(), "wrong return through {language} {barrel}: {hits:?}");
+        }
+    }
+}
+
+#[test]
+fn web_reexports_support_cycles_and_default_aliases() {
+    let caller = "import { pick } from './index';\nfunction pending(root, key) { root.register(key); root.remove(pick(key)); }";
+    let cycle = "export * from './index';";
+    for (index, helper) in [
+        ("export * from './cycle'; export { default as pick } from './helper';", "export default function choose(key) { return key; }"),
+        ("export * from './cycle'; export * from './helper';", "export function pick(key) { return key; }"),
+    ] {
+        let clean = [("worker.js", caller), ("index.js", index), ("cycle.js", cycle), ("helper.js", helper)];
+        assert!(workspace_findings("JavaScript", &clean, &["worker.js"], RECEIVER, true).is_empty());
+        let wrong = helper.replace("return key", "return 'other'");
+        let files = [("worker.js", caller), ("index.js", index), ("cycle.js", cycle), ("helper.js", wrong.as_str())];
+        assert_key_pending_on_fallthrough(&workspace_findings("JavaScript", &files, &["worker.js"], RECEIVER, true));
+    }
+}
+
+#[test]
 fn nested_go_defer_arguments_are_captured_before_reassignment() {
     let source = r#"package worker
 func choose(key string) string { return key }

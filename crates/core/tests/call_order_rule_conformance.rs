@@ -209,6 +209,34 @@ func ignoredReturn(a, b string) {
 }
 
 #[test]
+fn ignored_results_follow_helpers_through_web_reexports() {
+    for (extension, rule) in [("js", "javascript-node-fs-discarded-promise"), ("ts", "typescript-node-fs-discarded-promise"), ("tsx", "typescript-node-fs-discarded-promise")] {
+        let root = tempfile::tempdir().unwrap();
+        let helper = format!("helper.{extension}");
+        let barrel = format!("index.{extension}");
+        let caller = format!("main.{extension}");
+        std::fs::write(root.path().join(&helper), "import { rename } from 'node:fs/promises';\nexport function move(a, b) { return rename(a, b); }\n").unwrap();
+        std::fs::write(root.path().join(&barrel), "export { move as moveFile } from './helper';\n").unwrap();
+        std::fs::write(root.path().join(&caller), "import { moveFile } from './index';\nfunction ignored(a, b) { moveFile(a, b); }\n").unwrap();
+        let found = run_dataflow_check(root.path(), std::slice::from_ref(&caller), &[]);
+        let finding = found.iter().find(|item| item.source.rule_id.as_deref() == Some(rule)).expect("ignored promise through barrel");
+        assert_eq!(finding.location.path, helper);
+        assert!(finding.related_locations.iter().flatten().any(|location| location.path == caller), "{found:#?}");
+        std::fs::write(root.path().join(&caller), "import { moveFile } from './index';\nasync function handled(a, b) { await moveFile(a, b); }\n").unwrap();
+        let clean = run_dataflow_check(root.path(), &[caller], &[]);
+        assert!(!clean.iter().any(|item| item.source.rule_id.as_deref() == Some(rule)), "{clean:#?}");
+    }
+    let root = tempfile::tempdir().unwrap();
+    let helper = "import { rename } from 'node:fs/promises';\nexport function move(a, b) { return rename(a, b); }\n";
+    std::fs::write(root.path().join("a.js"), helper).unwrap();
+    std::fs::write(root.path().join("b.js"), helper).unwrap();
+    std::fs::write(root.path().join("index.js"), "export * from './a'; export * from './b';\n").unwrap();
+    std::fs::write(root.path().join("main.js"), "import { move } from './index';\nfunction ignored(a, b) { move(a, b); }\n").unwrap();
+    let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &["main.js".into()], &[]);
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unresolved_helper_target" && issue.rule.as_deref() == Some("javascript-node-fs-discarded-promise") && issue.path.as_deref() == Some("main.js")), "{:?}", result.coverage);
+}
+
+#[test]
 fn helper_return_demand_is_kept_separate_for_each_caller() {
     let source = r#"package storage
 import "os"

@@ -144,6 +144,19 @@ mod tests {
     }
 
     #[test]
+    fn dataflow_replay_rejects_ambiguous_barrel_helpers() {
+        let root = tempfile::tempdir().unwrap();
+        let helper = "import { rename } from 'node:fs/promises';\nexport function move(a, b) { return rename(a, b); }\n";
+        for path in ["a.js", "b.js"] {
+            std::fs::write(root.path().join(path), helper).unwrap();
+        }
+        std::fs::write(root.path().join("index.js"), "export * from './a'; export * from './b';\n").unwrap();
+        std::fs::write(root.path().join("main.js"), "import { move } from './index'; function run(a, b) { move(a, b); }\n").unwrap();
+        let error = Tool::AutoreviewDataflow.scan(root.path(), &["main.js".into()], &BTreeSet::from(["javascript-node-fs-discarded-promise".into()])).unwrap_err();
+        assert!(error.to_string().contains("ambiguous"), "{error}");
+    }
+
+    #[test]
     fn rule_specific_limitations_do_not_block_unrelated_rules() {
         let issue = autoreview_schema::AnalysisCoverageIssue {
             analyzer: "call-sequence".into(), reason: "path_budget".into(), scope: "function".into(),

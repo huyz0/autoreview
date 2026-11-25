@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::cell::RefCell;
 use tree_sitter::Node;
 
 use crate::cfg::{CallSite, CallTarget, Cfg, IdentityOperand, Stmt};
 mod signature;
+mod exports;
 use signature::{candidate, export, parameters, Export};
 
 use super::{CallOrderSpec, Plan, Values};
@@ -19,7 +21,17 @@ pub struct KeyedUnit<'src, 'tree, 'graph> {
     pub source: &'src [u8],
     pub functions: &'graph [KeyedFunction<'tree, 'graph>],
     pub imports: &'graph [KeyedImport],
+    pub exports: &'graph [KeyedExport],
     pub entry: bool,
+}
+
+/// A named export (local or from another unit), or a wildcard re-export.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum KeyedExport {
+    Named { exported: String, local: String, path: Option<String> },
+    Star { path: String },
+    /// An export whose runtime names cannot be enumerated safely.
+    Unknown,
 }
 
 /// Exact local name or namespace prefix mapped to a repository source file.
@@ -38,6 +50,7 @@ pub(in crate::call_order) struct Program<'spec, 'src, 'graph> {
     targets: BTreeMap<(Scope, String, usize), Option<usize>>,
     units: Vec<Unit<'src, 'graph>>,
     paths: BTreeMap<&'src str, usize>,
+    unresolved: RefCell<BTreeSet<(usize, usize, &'static str)>>,
 }
 
 pub(in crate::call_order) struct Frame<'spec, 'src, 'graph> {
@@ -57,7 +70,9 @@ enum Scope {
 
 struct Unit<'src, 'graph> {
     path: &'src str,
+    source: &'src [u8],
     imports: &'graph [KeyedImport],
+    exports: &'graph [KeyedExport],
     entry: bool,
     frames: Vec<usize>,
 }
@@ -68,13 +83,16 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             frames: Vec::new(),
             targets: BTreeMap::new(),
             paths: BTreeMap::new(),
+            unresolved: RefCell::new(BTreeSet::new()),
             units: Vec::new(),
         };
         for (unit, input) in inputs.iter().enumerate() {
             program.paths.insert(input.path, unit);
             program.units.push(Unit {
                 path: input.path,
+                source: input.source,
                 imports: input.imports,
+                exports: input.exports,
                 entry: input.entry,
                 frames: Vec::new(),
             });
@@ -140,28 +158,11 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         } else if root == name {
             return None;
         }
-        self.imported_target(frame.unit, name, arity)
-    }
-
-    fn imported_target(&self, unit: usize, name: &str, arity: usize) -> Option<usize> {
-        let imports = self.units[unit].imports;
-        let mut matches = BTreeSet::new();
-        for binding in imports {
-            let Some(target) = binding.target(name) else {
-                continue;
-            };
-            let Some(&provider) = self.paths.get(binding.path.as_str()) else {
-                continue;
-            };
-            matches.extend(
-                self.units[provider]
-                    .frames
-                    .iter()
-                    .copied()
-                    .filter(|index| self.frames[*index].matches_export(binding, target, arity)),
-            );
+        let resolution = self.resolve_import(frame.unit, name, arity, &mut exports::ResolutionContext::default());
+        if let Some(reason) = resolution.limitation() {
+            self.unresolved.borrow_mut().insert((from, site.start, reason));
         }
-        (matches.len() == 1).then(|| matches.pop_first()).flatten()
+        resolution.unique()
     }
 
     pub(super) fn roots(&self) -> Vec<usize> {
@@ -190,6 +191,28 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             .into_iter()
             .filter(|index| !incoming.contains(index))
             .collect()
+    }
+
+    pub(in crate::call_order) fn resolution_limitations(&self) -> Vec<super::KeyedLimitation> {
+        if self.unresolved.borrow().is_empty() {
+            return Vec::new();
+        }
+        let mut pending: Vec<_> = self.units.iter().filter(|unit| unit.entry)
+            .flat_map(|unit| unit.frames.iter().copied()).collect();
+        let mut reachable = BTreeSet::new();
+        while let Some(index) = pending.pop() {
+            if !reachable.insert(index) { continue; }
+            let frame = &self.frames[index];
+            if let Some(plan) = &frame.plan {
+                pending.extend(self.resolved_calls(index, frame.graph, plan).into_iter().map(|(_, target)| target));
+            }
+        }
+        self.unresolved.borrow().iter().filter_map(|&(frame, start, reason)| {
+            if !reachable.contains(&frame) { return None; }
+            let unit = &self.units[self.frames[frame].unit];
+            let line = unit.source.get(..start).map(|before| before.iter().filter(|byte| **byte == b'\n').count() as u32 + 1);
+            Some(super::KeyedLimitation { reason, path: self.path(self.frames[frame].unit), line })
+        }).collect()
     }
 
     /// Return reachable modeled calls with their source positions and unique

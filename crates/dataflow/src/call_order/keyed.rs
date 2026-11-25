@@ -15,7 +15,7 @@ mod helpers;
 pub(super) mod program;
 mod state;
 use program::Program;
-pub use program::{KeyedFunction, KeyedImport, KeyedUnit};
+pub use program::{KeyedExport, KeyedFunction, KeyedImport, KeyedUnit};
 use state::{Deferred, Registration, State};
 
 const PATH_BUDGET: usize = 16_384;
@@ -51,6 +51,7 @@ pub fn check_keyed_file(
             source,
             functions,
             imports: &[],
+            exports: &[],
             entry: true,
         }],
     )
@@ -58,10 +59,10 @@ pub fn check_keyed_file(
 
 fn check_with_budget(spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], budget: usize) -> KeyedCheckResult {
     if spec.tracks_result_use() {
-        let (hits, exhausted) = super::result_use::check_units(spec, units);
-        let limitations = exhausted.then_some(KeyedLimitation {
+        let (hits, exhausted, mut limitations) = super::result_use::check_units(spec, units);
+        limitations.extend(exhausted.then_some(KeyedLimitation {
             reason: "helper_summary_limit", path: None, line: None,
-        }).into_iter().collect();
+        }));
         return KeyedCheckResult { hits, limitations };
     }
     let program = Program::new(spec, units);
@@ -92,6 +93,7 @@ fn check_with_budget(spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], budg
             }
         }
     }
+    limitations.extend(program.resolution_limitations());
     KeyedCheckResult { hits, limitations }
 }
 
@@ -390,7 +392,7 @@ mod coverage_tests {
         let function = tree.root_node().named_child(0).unwrap();
         let graph = crate::lower::keyed_variant(Language::JavaScript, source.as_bytes(), function);
         let functions = [KeyedFunction { node: function, graph: &graph }];
-        let units = [KeyedUnit { path: "main.js", source: source.as_bytes(), functions: &functions, imports: &[], entry: true }];
+        let units = [KeyedUnit { path: "main.js", source: source.as_bytes(), functions: &functions, imports: &[], exports: &[], entry: true }];
         let spec = CallOrderSpec {
             rule_id: "test".into(), after: vec![NamePattern::suffix("set")],
             unless: vec![NamePattern::suffix("delete")], before: vec![], check_before_return: true,

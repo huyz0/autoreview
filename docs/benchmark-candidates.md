@@ -30,7 +30,8 @@ confirm the expected behavior against both revisions before scoring it.
   The helpers are exposed through a barrel export and created by a factory
   whose return type is `Promise<void>`.
 
-This is a candidate for type-aware promise tracking across imports, re-exports,
-and function factories. Validate the complete file and safe alternatives before
-using it to score a rule; matching the helper names alone is not evidence that
-arbitrary calls return promises.
+The helper resolver now follows named and wildcard re-exports. This case still
+needs type-aware promise tracking for functions returned by factories. Validate
+the complete file and safe alternatives before using it to score a rule;
+matching the helper names alone is not evidence that arbitrary calls return
+promises.
