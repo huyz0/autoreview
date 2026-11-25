@@ -60,6 +60,15 @@ pub fn keyed_variant(language: Language, source: &[u8], node: Node<'_>) -> Cfg<S
     };
     let mut cfg = keyed_graph(language);
     let body = if language == Language::Kotlin { kotlin::function_body(node) } else { node.child_by_field_name("body") };
+    if node.kind() == "arrow_function" {
+        if let Some(expr) = body.filter(|body| body.kind() != "statement_block") {
+            cfg.entry = cfg.push_node(line(node));
+            cfg.exit = cfg.push_node(node.end_position().row as u32 + 1);
+            let entry = cfg.entry;
+            keyed_flow::expression_body(&mut cfg, expr, source, entry);
+            return cfg;
+        }
+    }
     if language == Language::Kotlin && body.is_none() {
         if let Some(expr) = kotlin::expression_body(node) {
             cfg.entry = cfg.push_node(line(node));

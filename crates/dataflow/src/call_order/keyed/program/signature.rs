@@ -28,6 +28,10 @@ pub(super) fn export(node: Node<'_>, source: &[u8], name: String) -> Export {
     let visible = match node.kind() {
         "method_declaration" => has(b"static") && !has(b"private"),
         "function_item" => has(b"pub"),
+        "arrow_function" | "function_expression" if parent.is_some_and(|parent| parent.kind() == "variable_declarator") => parent
+            .and_then(|node| node.parent())
+            .and_then(|node| node.parent())
+            .is_some_and(|parent| parent.kind() == "export_statement"),
         _ if parent.is_some_and(|parent| parent.kind() == "export_statement") => true,
         _ if node
             .child_by_field_name("parameters")
@@ -52,6 +56,9 @@ pub(super) fn export(node: Node<'_>, source: &[u8], name: String) -> Export {
 }
 
 pub(super) fn candidate(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if matches!(node.kind(), "arrow_function" | "function_expression") {
+        return web_binding_name(node, source);
+    }
     let owner = node.parent()?;
     let local_owner = match node.kind() {
         "method_declaration" => {
@@ -81,7 +88,31 @@ pub(super) fn candidate(node: Node<'_>, source: &[u8]) -> Option<String> {
     Some(name.utf8_text(source).ok()?.to_owned())
 }
 
+fn web_binding_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if node.has_error() || node.children(&mut node.walk()).any(|child| child.kind() == "async") {
+        return None;
+    }
+    if let Some(export) = node.parent().filter(|parent| parent.kind() == "export_statement") {
+        return export.children(&mut export.walk()).any(|child| child.kind() == "default").then(|| "default".to_owned());
+    }
+    let binding = node.parent().filter(|parent| parent.kind() == "variable_declarator")?;
+    let declaration = binding.parent().filter(|parent| parent.kind() == "lexical_declaration")?;
+    if binding.child_by_field_name("value") != Some(node)
+        || !declaration.children(&mut declaration.walk()).any(|child| child.kind() == "const")
+        || !declaration.parent().is_some_and(|parent| matches!(parent.kind(), "program" | "export_statement"))
+    {
+        return None;
+    }
+    let name = binding.child_by_field_name("name").filter(|name| identifier(*name))?;
+    Some(name.utf8_text(source).ok()?.to_owned())
+}
+
 pub(super) fn parameters(node: Node<'_>, source: &[u8]) -> Option<Vec<String>> {
+    if node.kind() == "arrow_function" {
+        if let Some(parameter) = node.child_by_field_name("parameter") {
+            return identifier(parameter).then(|| parameter.utf8_text(source).ok().map(|name| vec![name.to_owned()])).flatten();
+        }
+    }
     let list = node
         .child_by_field_name("parameters")
         .or_else(|| children(node).find(|child| child.kind() == "function_value_parameters"))?;

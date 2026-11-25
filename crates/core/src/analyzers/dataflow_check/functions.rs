@@ -23,6 +23,22 @@ pub(super) fn web_result_functions(tree: &Tree) -> Vec<Node<'_>> {
         .collect()
 }
 
+pub(super) fn web_named_functions(tree: &Tree) -> Vec<Node<'_>> {
+    descendants_of_kinds(tree, &["arrow_function", "function_expression"])
+        .into_iter()
+        .filter(|node| {
+            if let Some(export) = node.parent().filter(|parent| parent.kind() == "export_statement") {
+                return export.children(&mut export.walk()).any(|child| child.kind() == "default");
+            }
+            let Some(binding) = node.parent().filter(|parent| parent.kind() == "variable_declarator") else { return false };
+            let Some(declaration) = binding.parent().filter(|parent| parent.kind() == "lexical_declaration") else { return false };
+            binding.child_by_field_name("value") == Some(*node)
+                && declaration.children(&mut declaration.walk()).any(|child| child.kind() == "const")
+                && declaration.parent().is_some_and(|parent| matches!(parent.kind(), "program" | "export_statement"))
+        })
+        .collect()
+}
+
 pub(super) fn rust_functions(tree: &Tree) -> Vec<Node<'_>> {
     descendants_of_kinds(tree, &["function_item"])
         .into_iter()
