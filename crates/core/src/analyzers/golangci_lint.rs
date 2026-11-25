@@ -160,14 +160,31 @@ fn run_golangci_lint_once(repo_root: &Path, go_files: &[&str], targets: &[&str])
     }
     let changed_set: HashSet<&str> = go_files.iter().copied().collect();
 
-    let findings: Vec<_> = parsed.issues.iter()
-        .map(|issue| issue_to_finding(repo_root, issue))
-        .filter(|f| changed_set.contains(f.location.path.as_str()))
-        .collect();
+    let (findings, unreported_typecheck) = filter_findings(repo_root, &parsed.issues, &changed_set);
+    if let Some(diagnostic) = unreported_typecheck {
+        return Err(GolangciRunError::Other(anyhow::anyhow!("golangci-lint reported a type-check error outside the changed files; package analysis is incomplete: {diagnostic}")));
+    }
     if let Some(report_error) = report_error.filter(|_| findings.is_empty()) {
         return Err(GolangciRunError::Other(anyhow::anyhow!("golangci-lint reported a package-level error: {report_error}")));
     }
+    if !output.status.success() && parsed.issues.is_empty() {
+        return Err(GolangciRunError::Other(anyhow::anyhow!("golangci-lint failed without reporting issues: {}", String::from_utf8_lossy(&output.stderr))));
+    }
     Ok(Some(findings))
+}
+
+fn filter_findings(repo_root: &Path, issues: &[GolangciIssue], changed: &HashSet<&str>) -> (Vec<AgentFinding>, Option<String>) {
+    let mut findings = Vec::new();
+    let mut unreported_typecheck = None;
+    for issue in issues {
+        let finding = issue_to_finding(repo_root, issue);
+        if changed.contains(finding.location.path.as_str()) {
+            findings.push(finding);
+        } else if issue.from_linter == "typecheck" {
+            unreported_typecheck.get_or_insert_with(|| format!("{}:{}: {}", finding.location.path, finding.location.range.start_line, finding.message));
+        }
+    }
+    (findings, unreported_typecheck)
 }
 
 /// Runs golangci-lint against the given changed Go files and normalizes its
@@ -302,6 +319,21 @@ mod tests {
         let loose = groups.iter().find(|group| group.targets.len() == 2).unwrap();
         assert_eq!(loose.prefix, Path::new(""));
         assert_eq!(loose.targets, ["loose/a.go", "loose/b.go"]);
+    }
+
+    #[test]
+    fn distinguishes_sibling_type_errors_from_unrelated_lint_findings() {
+        let issue = |linter: &str, path: &str| GolangciIssue {
+            from_linter: linter.into(), text: "diagnostic".into(),
+            pos: GolangciPos { filename: path.into(), line: 1, column: 1 }, source_lines: None,
+        };
+        let changed = HashSet::from(["main.go"]);
+        let (findings, incomplete) = filter_findings(Path::new("/repo"), &[issue("typecheck", "helper.go")], &changed);
+        assert!(findings.is_empty());
+        assert!(incomplete.as_deref().is_some_and(|detail| detail.contains("helper.go")));
+        let (findings, incomplete) = filter_findings(Path::new("/repo"), &[issue("errcheck", "helper.go"), issue("typecheck", "main.go")], &changed);
+        assert_eq!(findings.len(), 1);
+        assert!(incomplete.is_none());
     }
 
     #[test]
@@ -448,8 +480,17 @@ mod tests {
             ("tool/helper.go", "package tool\nfunc helper() { missing() }\n"),
         ]);
         std::fs::remove_file(dir.path().join("go.mod")).unwrap();
-        let error = run_golangci_lint(dir.path(), &["tool/main.go".into()]).unwrap_err();
-        assert!(error.to_string().contains("typecheck"), "{error:#}");
+        let result = run_golangci_lint(dir.path(), &["tool/main.go".into()]);
+        match result {
+            Err(error) => assert!(error.to_string().contains("typecheck") || error.to_string().contains("type-check"), "{error:#}"),
+            Ok(findings) => {
+                let json = dir.path().join("diagnostic.json");
+                let output = Command::new("golangci-lint").args(["run", "--output.json.path"]).arg(&json)
+                    .args(["--", "."]).current_dir(dir.path().join("tool")).output().unwrap();
+                panic!("expected an incomplete-analysis error, got {findings:#?}; status: {}; stderr: {}; json: {}", output.status,
+                    String::from_utf8_lossy(&output.stderr), std::fs::read_to_string(json).unwrap_or_default());
+            }
+        }
     }
 
     #[test]
