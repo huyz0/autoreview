@@ -63,6 +63,12 @@ imports, and build constraints can change its meaning or the selected function.
 Do not infer a package-wide fact from the current helper loader: it deliberately
 filters files that do not appear to supply helpers.
 
+`tools/go-error-evidence` is a standalone `go/types` prototype for complete,
+caller-supplied package sources. It rejects type errors and distinguishes
+unavailable call locations, but it is not yet connected to Autoreview and does
+not select build files or resolve module dependencies. Its README records the
+integration constraints; it cannot yet score the yq candidate.
+
 Connect proven single-error results to the existing result-use analysis and
 preserve source identities through callers and helper summaries. Extend to
 multi-result calls only after individual result positions can be tracked; a
