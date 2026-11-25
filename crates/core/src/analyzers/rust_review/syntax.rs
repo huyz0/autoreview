@@ -167,47 +167,39 @@ impl<'tree, 'text> Source<'tree, 'text> {
     }
 
     pub(super) fn external_path(&self, node: Node<'tree>) -> Option<String> {
-        let mut reference = self.path(node)?;
+        let reference = self.path(node)?;
         let head = reference.parts.first()?;
         if reference.absolute {
             return known_crate(head).then(|| reference.parts.join("::"));
         }
         let mut locals_visible = true;
         for scope_node in ancestors(node) {
-            if self.binds_type_parameter(scope_node, head)
-                || locals_visible && self.binds_in_context(scope_node, node, head)
-            {
-                return None;
-            }
-            if scope_node.kind() == "function_item" {
-                locals_visible = false;
-            }
-            if let Some(scope) = self.scopes.get(&scope_node.id()) {
-                if scope.items.contains(head)
-                    || locals_visible && visible_local(scope, head, node).is_some()
-                {
-                    return None;
-                }
-                if let Some(imported) = scope.imports.get(head) {
-                    let imported = imported.as_ref()?;
-                    let root = imported.parts.first()?;
-                    if !known_crate(root)
-                        || !imported.absolute && self.crate_root_is_ambiguous(scope_node, root, imported)
-                    {
-                        return None;
-                    }
-                    reference.parts.splice(..1, imported.parts.iter().cloned());
-                    return Some(reference.parts.join("::"));
-                }
-                if scope.glob {
-                    return None;
-                }
-            }
-            if is_module_boundary(scope_node) {
-                break;
-            }
+            if let Some(result) = self.scope_path(scope_node, node, &reference, locals_visible) { return result; }
+            if scope_node.kind() == "function_item" { locals_visible = false; }
+            if is_module_boundary(scope_node) { break; }
         }
         (reference.parts.len() > 1 && known_crate(head)).then(|| reference.parts.join("::"))
+    }
+
+    fn scope_path(&self, scope_node: Node<'tree>, node: Node<'tree>, reference: &Path, locals: bool) -> Option<Option<String>> {
+        let head = reference.parts.first()?;
+        if self.binds_type_parameter(scope_node, head) || locals && self.binds_in_context(scope_node, node, head) {
+            return Some(None);
+        }
+        let scope = self.scopes.get(&scope_node.id())?;
+        if scope.items.contains(head) || locals && visible_local(scope, head, node).is_some() { return Some(None); }
+        if let Some(imported) = scope.imports.get(head) {
+            return Some(imported.as_ref().and_then(|imported| self.imported_path(scope_node, reference, imported)));
+        }
+        scope.glob.then_some(None)
+    }
+
+    fn imported_path(&self, scope_node: Node<'tree>, reference: &Path, imported: &Path) -> Option<String> {
+        let root = imported.parts.first()?;
+        if !known_crate(root) || !imported.absolute && self.crate_root_is_ambiguous(scope_node, root, imported) { return None; }
+        let mut parts = reference.parts.clone();
+        parts.splice(..1, imported.parts.iter().cloned());
+        Some(parts.join("::"))
     }
 
     pub(in crate::analyzers) fn standard_macro(&self, node: Node<'tree>, names: &[&str]) -> bool {
@@ -253,13 +245,16 @@ impl<'tree, 'text> Source<'tree, 'text> {
     // `super::*` has a visible source scope in the same parsed file. Other
     // globs remain opaque; follow parent globs only through known scopes.
     fn glob_may_shadow(&self, scope_node: Node<'tree>, name: &str) -> bool {
-        let Some(scope) = self.scopes.get(&scope_node.id()) else { return true };
-        if scope.glob { return true; }
-        if !scope.parent_glob { return false; }
-        let Some(parent) = ancestors(scope_node).find(|node| self.scopes.contains_key(&node.id())) else { return true };
-        let Some(parent_scope) = self.scopes.get(&parent.id()) else { return true };
-        parent_scope.items.contains(name) || parent_scope.imports.contains_key(name)
-            || parent_scope.opaque_macros || self.glob_may_shadow(parent, name)
+        match self.scopes.get(&scope_node.id()) {
+            None => true,
+            Some(scope) if scope.glob => true,
+            Some(scope) if scope.parent_glob => ancestors(scope_node)
+                .find(|node| self.scopes.contains_key(&node.id()))
+                .and_then(|parent| self.scopes.get(&parent.id()).map(|scope| (parent, scope)))
+                .is_none_or(|(parent, scope)| scope.items.contains(name) || scope.imports.contains_key(name)
+                    || scope.opaque_macros || self.glob_may_shadow(parent, name)),
+            Some(_) => false,
+        }
     }
 
     fn binds_type_parameter(&self, scope: Node<'tree>, name: &str) -> bool {

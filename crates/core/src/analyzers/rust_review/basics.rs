@@ -372,30 +372,16 @@ mod tests {
     #[test_case(1)] fn example(value: i32) { matches!(value, 1); }
 }
 "#), ["rust-discarded-test-matches"]);
-        assert!(ids(r#"
-use other::matches;
-mod tests {
+        for prefix in ["use other::matches;", "mod test_case { pub fn test_case() {} }", "use other::*;"] {
+            let fixture = format!(r#"{prefix}
+mod tests {{
     use test_case::test_case;
     use super::*;
-    #[test_case(1)] fn example(value: i32) { matches!(value, 1); }
-}
-"#).is_empty());
-        assert!(ids(r#"
-mod test_case { pub fn test_case() {} }
-mod tests {
-    use test_case::test_case;
-    use super::*;
-    #[test_case(1)] fn example(value: i32) { matches!(value, 1); }
-}
-"#).is_empty());
-        assert!(ids(r#"
-use other::*;
-mod tests {
-    use test_case::test_case;
-    use super::*;
-    #[test_case(1)] fn example(value: i32) { matches!(value, 1); }
-}
-"#).is_empty());
+    #[test_case(1)] fn example(value: i32) {{ matches!(value, 1); }}
+}}
+"#);
+            assert!(ids(&fixture).is_empty(), "{prefix}");
+        }
         assert!(ids(r#"
 #[test_case(1)] fn unknown(value: i32) { matches!(value, 1); }
 mod test_case { pub fn test_case() {} }
