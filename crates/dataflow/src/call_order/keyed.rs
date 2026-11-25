@@ -356,6 +356,7 @@ impl Engine<'_, '_, '_, '_> {
             node: location.node,
             source_line: location.line,
             path: self.program.path(self.program.frames[frame].unit),
+            related_calls: Vec::new(),
             entry: Some(EntryHit {
                 collection: entry.display_collection(),
                 key: entry.display_key(),

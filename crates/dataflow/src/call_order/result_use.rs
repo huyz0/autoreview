@@ -5,6 +5,7 @@ mod closures;
 mod effects;
 mod places;
 mod references;
+mod summaries;
 mod syntax;
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
@@ -12,59 +13,13 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use crate::cfg::{Cfg, EdgeKind, NodeId, Stmt};
 
 use super::{keyed::program::Program, plan::Plan, CallOrderHit, CallOrderSpec, ContractLanguage, KeyedUnit};
-use effects::{Demand, Effect, Origin, Value, Write};
+use effects::{Demand, Effect, HelperCall, Origin, Value, Write};
 use places::Place;
 
 pub(super) fn check_units(spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>]) -> Vec<CallOrderHit> {
     let mut hits = Vec::new();
     let program = Program::new(spec, units);
-    let mut summaries = BTreeMap::new();
-    for (index, frame) in program.frames.iter().enumerate() {
-        if frame.plan.is_some() {
-            let empty = HelperOutcome { parameters: vec![false; frame.params.len()], origins: Vec::new() };
-            summaries.insert(index, HelperSummary { when_discarded: empty.clone(), when_observed: empty });
-        }
-    }
-    let budget = program.frames.len().saturating_mul(16).max(16);
-    let mut converged = false;
-    for _ in 0..budget {
-        let previous = summaries.clone();
-        let mut index = 0;
-        for unit in units {
-            for function in unit.functions {
-                let frame = &program.frames[index];
-                if let Some(plan) = &frame.plan {
-                    let resolved = program.resolved_calls(index, function.graph, plan);
-                    let calls: BTreeMap<_, _> = resolved.into_iter()
-                        .filter_map(|(site, target)| previous.get(&target).cloned().map(|summary| (site, summary)))
-                        .collect();
-                    let body_start = function.node.child_by_field_name("body")
-                        .map_or(function.node.end_byte().saturating_sub(1), |body| body.start_byte());
-                    let parameters: Vec<_> = frame.params.iter().map(|name| {
-                        plan.syntax.local_result_binding(name, body_start, false).map(Place::Local)
-                    }).collect();
-                    let analysis = effects::lower(plan, function, unit.source, true, &calls);
-                    let mut summary = analysis.helper_summary(&parameters);
-                    for outcome in [&mut summary.when_discarded, &mut summary.when_observed] {
-                        for (origin, _) in &mut outcome.origins {
-                            if origin.path.is_none() {
-                                origin.path = (!unit.path.is_empty()).then(|| unit.path.to_owned());
-                            }
-                        }
-                    }
-                    summaries.insert(index, summary);
-                }
-                index += 1;
-            }
-        }
-        if summaries == previous {
-            converged = true;
-            break;
-        }
-    }
-    if !converged {
-        summaries.clear();
-    }
+    let summaries = summaries::build(&program, units);
     let mut frame_index = 0;
     for unit in units {
         for function in unit.functions {
@@ -75,8 +30,10 @@ pub(super) fn check_units(spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>])
                 continue;
             }
             let Some(plan) = frame.plan.as_ref() else { continue };
-            let calls: BTreeMap<_, _> = program.resolved_calls(current, function.graph, plan)
-                .into_iter().filter_map(|(site, target)| summaries.get(&target).cloned().map(|summary| (site, summary)))
+            let calls: BTreeMap<_, _> = program
+                .resolved_calls(current, function.graph, plan)
+                .into_iter()
+                .filter_map(|(site, target)| summaries.get(&target).cloned().map(|summary| (site, summary)))
                 .collect();
             if !plan.has_registration() && calls.is_empty() {
                 continue;
@@ -88,12 +45,25 @@ pub(super) fn check_units(spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>])
                 source_line: origin.line,
                 path: origin.path.or_else(|| (!unit.path.is_empty()).then(|| unit.path.to_owned())),
                 entry: None,
+                related_calls: origin.calls.iter().filter_map(|&(unit_index, offset)| {
+                    let unit = units.get(unit_index)?;
+                    let before = unit.source.get(..offset)?;
+                    let line = before.iter().filter(|byte| **byte == b'\n').count() as u32 + 1;
+                    (!unit.path.is_empty()).then(|| (unit.path.to_owned(), line))
+                }).collect(),
             }));
         }
     }
-    let mut seen = HashSet::new();
-    hits.retain(|hit| seen.insert((hit.path.clone(), hit.source_line, hit.trigger_call.clone())));
-    hits
+    let mut combined = BTreeMap::new();
+    for hit in hits {
+        let key = (hit.path.clone(), hit.source_line, hit.trigger_call.clone());
+        combined.entry(key).and_modify(|previous: &mut CallOrderHit| {
+            previous.related_calls.extend(hit.related_calls.iter().cloned());
+            previous.related_calls.sort();
+            previous.related_calls.dedup();
+        }).or_insert(hit);
+    }
+    combined.into_values().collect()
 }
 
 type Live = HashSet<Place>;
@@ -154,11 +124,16 @@ impl Analysis {
         }
         let mut origins = BTreeMap::new();
         let live = self.record(&seed, &mut |_, origin, used| {
-            origins.entry((origin.path.clone(), origin.start, origin.calls.clone())).and_modify(|(_, previous)| *previous |= used)
+            origins
+                .entry((origin.path.clone(), origin.start, origin.calls.clone()))
+                .and_modify(|(_, previous)| *previous |= used)
                 .or_insert_with(|| (origin.clone(), used));
         });
         HelperOutcome {
-            parameters: parameters.iter().map(|parameter| parameter.is_none_or(|place| live.contains(&place))).collect(),
+            parameters: parameters
+                .iter()
+                .map(|parameter| parameter.is_none_or(|place| live.contains(&place)))
+                .collect(),
             origins: origins.into_values().collect(),
         }
     }
@@ -265,21 +240,23 @@ fn transfer(effects: &[Effect], live: &mut Live, closures: &[Body], mut observe:
             Effect::Invoke(index, demand) => {
                 closures[*index].invoke(live, *demand, observe.as_deref_mut());
             }
-            Effect::ApplyHelper { arguments, demand, when_discarded, when_observed, origins_discarded, origins_observed } => {
-                let observed = demand.observed(live);
-                let required = if observed { when_observed } else { when_discarded };
-                for (argument, used) in arguments.iter().zip(required) {
-                    if *used {
-                        live.extend(*argument);
-                    }
-                }
-                if let Some(report) = &mut observe {
-                    let origins = if observed { origins_observed } else { origins_discarded };
-                    for (origin, used) in origins {
-                        report(origin, *used);
-                    }
-                }
-            }
+            Effect::ApplyHelper(call) => apply_helper(call, live, observe.as_deref_mut()),
+        }
+    }
+}
+
+fn apply_helper(call: &HelperCall, live: &mut Live, observe: Option<&mut Observer<'_>>) {
+    let observed = call.demand.observed(live);
+    let required = if observed { &call.when_observed } else { &call.when_discarded };
+    for (argument, used) in call.arguments.iter().zip(required) {
+        if *used {
+            live.extend(*argument);
+        }
+    }
+    if let Some(report) = observe {
+        let origins = if observed { &call.origins_observed } else { &call.origins_discarded };
+        for (origin, used) in origins {
+            report(origin, *used);
         }
     }
 }
@@ -311,17 +288,19 @@ mod tests {
     #[test]
     fn helper_effect_propagates_only_the_arguments_required_by_the_caller() {
         let output = Place::CallResult(50);
-        let effects = [Effect::ApplyHelper {
+        let effects = [Effect::ApplyHelper(HelperCall {
             arguments: vec![Some(Place::Local(1)), Some(Place::Local(2))],
             demand: Demand::Slot(output),
             when_discarded: vec![true, false],
             when_observed: vec![true, true],
             origins_discarded: vec![],
             origins_observed: vec![],
-        }];
+        })];
         for observed in [false, true] {
             let mut live = Live::new();
-            if observed { live.insert(output); }
+            if observed {
+                live.insert(output);
+            }
             transfer(&effects, &mut live, &[], None);
             assert!(live.contains(&Place::Local(1)));
             assert_eq!(live.contains(&Place::Local(2)), observed);
@@ -332,30 +311,60 @@ mod tests {
     #[test]
     fn helper_summaries_follow_rust_and_kotlin_expression_returns() {
         let examples = [
-            (Language::Rust, ContractLanguage::Rust, "use std::fs::remove_file; fn run(p: &str) -> Result<(), Error> { remove_file(p) }", "std::fs", "remove_file"),
-            (Language::Kotlin, ContractLanguage::Kotlin, "import kotlin.runCatching\nfun run(s: String) = runCatching { s.toInt() }", "kotlin", "runCatching"),
+            (
+                Language::Rust,
+                ContractLanguage::Rust,
+                "use std::fs::remove_file; fn run(p: &str) -> Result<(), Error> { remove_file(p) }",
+                "std::fs",
+                "remove_file",
+            ),
+            (
+                Language::Kotlin,
+                ContractLanguage::Kotlin,
+                "import kotlin.runCatching\nfun run(s: String) = runCatching { s.toInt() }",
+                "kotlin",
+                "runCatching",
+            ),
         ];
         for (language, contract_language, source, import, method) in examples {
             let mut parser = autoreview_langsupport::parser_for(language).unwrap();
             let tree = parser.parse(source, None).unwrap();
             let root = tree.root_node();
-            let function = root.named_children(&mut root.walk())
-                .find(|node| matches!(node.kind(), "function_item" | "function_declaration")).unwrap();
+            let function = root
+                .named_children(&mut root.walk())
+                .find(|node| matches!(node.kind(), "function_item" | "function_declaration"))
+                .unwrap();
             let graph = crate::lower::keyed_variant(language, source.as_bytes(), function);
             let spec = CallOrderSpec {
-                rule_id: "test".into(), after: vec![], unless: vec![], before: vec![],
-                check_before_return: false, identity: None,
+                rule_id: "test".into(),
+                after: vec![],
+                unless: vec![],
+                before: vec![],
+                check_before_return: false,
+                identity: None,
                 contract: Some(ResultContract {
-                    mode: ContractMode::MustUse, language: contract_language,
-                    import: import.into(), methods: vec![method.into()], borrows: vec![],
-                    acquire_awaited: false, complete_observed: false,
+                    mode: ContractMode::MustUse,
+                    language: contract_language,
+                    import: import.into(),
+                    methods: vec![method.into()],
+                    borrows: vec![],
+                    acquire_awaited: false,
+                    complete_observed: false,
                 }),
             };
             let plan = Plan::new(&spec, &graph, function, source.as_bytes(), 0).unwrap();
-            let analysis = effects::lower(&plan, &super::super::KeyedFunction { node: function, graph: &graph }, source.as_bytes(), true, &BTreeMap::new());
+            let analysis = effects::lower(
+                &plan,
+                &super::super::KeyedFunction { node: function, graph: &graph },
+                source.as_bytes(),
+                true,
+                &BTreeMap::new(),
+            );
             for (observed, expected) in [(false, false), (true, true)] {
                 let mut seed = Live::new();
-                if observed { seed.insert(Place::Return); }
+                if observed {
+                    seed.insert(Place::Return);
+                }
                 let mut found = Vec::new();
                 analysis.record(&seed, &mut |_, _, used| found.push(used));
                 assert_eq!(found, [expected], "{language:?}");
@@ -369,23 +378,39 @@ mod tests {
         let mut parser = autoreview_langsupport::parser_for(Language::Go).unwrap();
         let tree = parser.parse(source, None).unwrap();
         let root = tree.root_node();
-        let function = root.named_children(&mut root.walk())
-            .find(|node| node.kind() == "function_declaration").unwrap();
+        let function =
+            root.named_children(&mut root.walk()).find(|node| node.kind() == "function_declaration").unwrap();
         let graph = crate::lower::keyed_variant(Language::Go, source, function);
         let spec = CallOrderSpec {
-            rule_id: "test".into(), after: vec![], unless: vec![], before: vec![],
-            check_before_return: false, identity: None,
+            rule_id: "test".into(),
+            after: vec![],
+            unless: vec![],
+            before: vec![],
+            check_before_return: false,
+            identity: None,
             contract: Some(ResultContract {
-                mode: ContractMode::MustUse, language: ContractLanguage::Go,
-                import: "os".into(), methods: vec!["Rename".into()], borrows: vec![],
-                acquire_awaited: false, complete_observed: false,
+                mode: ContractMode::MustUse,
+                language: ContractLanguage::Go,
+                import: "os".into(),
+                methods: vec!["Rename".into()],
+                borrows: vec![],
+                acquire_awaited: false,
+                complete_observed: false,
             }),
         };
         let plan = Plan::new(&spec, &graph, function, source, 0).unwrap();
-        let analysis = effects::lower(&plan, &super::super::KeyedFunction { node: function, graph: &graph }, source, true, &BTreeMap::new());
+        let analysis = effects::lower(
+            &plan,
+            &super::super::KeyedFunction { node: function, graph: &graph },
+            source,
+            true,
+            &BTreeMap::new(),
+        );
         for (observed, expected) in [(false, false), (true, true)] {
             let mut seed = Live::new();
-            if observed { seed.insert(Place::Return); }
+            if observed {
+                seed.insert(Place::Return);
+            }
             let mut found = Vec::new();
             analysis.record(&seed, &mut |_, origin, used| found.push((origin.call.clone(), used)));
             assert_eq!(found, [("os.Rename".into(), expected)]);
@@ -398,25 +423,41 @@ mod tests {
         let mut parser = autoreview_langsupport::parser_for(Language::Go).unwrap();
         let tree = parser.parse(source, None).unwrap();
         let root = tree.root_node();
-        let function = root.named_children(&mut root.walk())
-            .find(|node| node.kind() == "function_declaration").unwrap();
+        let function =
+            root.named_children(&mut root.walk()).find(|node| node.kind() == "function_declaration").unwrap();
         let graph = crate::lower::keyed_variant(Language::Go, source, function);
         let spec = CallOrderSpec {
-            rule_id: "test".into(), after: vec![], unless: vec![], before: vec![],
-            check_before_return: false, identity: None,
+            rule_id: "test".into(),
+            after: vec![],
+            unless: vec![],
+            before: vec![],
+            check_before_return: false,
+            identity: None,
             contract: Some(ResultContract {
-                mode: ContractMode::MustUse, language: ContractLanguage::Go,
-                import: "os".into(), methods: vec!["Rename".into()], borrows: vec![],
-                acquire_awaited: false, complete_observed: false,
+                mode: ContractMode::MustUse,
+                language: ContractLanguage::Go,
+                import: "os".into(),
+                methods: vec!["Rename".into()],
+                borrows: vec![],
+                acquire_awaited: false,
+                complete_observed: false,
             }),
         };
         let plan = Plan::new(&spec, &graph, function, source, 0).unwrap();
         let body = function.child_by_field_name("body").unwrap();
         let parameter = plan.syntax.local_result_binding("err", body.start_byte(), false).unwrap();
-        let analysis = effects::lower(&plan, &super::super::KeyedFunction { node: function, graph: &graph }, source, true, &BTreeMap::new());
+        let analysis = effects::lower(
+            &plan,
+            &super::super::KeyedFunction { node: function, graph: &graph },
+            source,
+            true,
+            &BTreeMap::new(),
+        );
         for (observed, expected) in [(false, false), (true, true)] {
             let mut seed = Live::new();
-            if observed { seed.insert(Place::Return); }
+            if observed {
+                seed.insert(Place::Return);
+            }
             let entry = analysis.record(&seed, &mut |_, _, _| {});
             assert_eq!(entry.contains(&Place::Local(parameter)), expected);
         }

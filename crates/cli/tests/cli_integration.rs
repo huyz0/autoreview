@@ -110,6 +110,24 @@ fn report_path_from_stdout(stdout: &str) -> PathBuf {
 }
 
 #[test]
+fn changed_lines_include_results_discarded_by_a_caller_in_another_file() {
+    let helper = "package helper\nimport \"os\"\nfunc Move(a, b string) error { return os.Rename(a, b) }\n";
+    let before = "package main\nimport \"example.com/demo/helper\"\nfunc move(a, b string) error { return helper.Move(a, b) }\n";
+    let after = "package main\nimport \"example.com/demo/helper\"\nfunc move(a, b string) { helper.Move(a, b) }\n";
+    let repo = init_repo(&[("go.mod", "module example.com/demo\n\ngo 1.22\n"), ("helper/helper.go", helper), ("main.go", before)]);
+    let base = current_commit(repo.path());
+    repo.commit(&[("main.go", after)], "discard helper result");
+    let review = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["diff", "--base", &base, "--head", "HEAD", "--static-only", "--changed-lines", "--aspects", "correctness"])
+        .assert().success();
+    let path = report_path_from_stdout(&String::from_utf8_lossy(&review.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert!(report["findings"].as_array().unwrap().iter().any(|finding|
+        finding["source"]["ruleId"] == "go-os-rename-discarded-error"
+            && finding["location"]["path"] == "helper/helper.go"), "{report}");
+}
+
+#[test]
 fn rust_structural_rules_surface_and_replay_at_exact_commits() {
     let path = "src/checkout.rs";
     let clean = "struct Cart { base: i32, tax: i32, fee: i32 }\nstruct Checkout;\n";

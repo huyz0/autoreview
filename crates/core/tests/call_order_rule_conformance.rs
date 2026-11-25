@@ -202,6 +202,10 @@ func ignoredReturn(a, b string) {
         .collect();
     locations.sort_unstable();
     assert_eq!(locations, [("helper/helper.go", 6), ("main.go", 7), ("main.go", 11)], "{found:#?}");
+    let helper_finding = found.iter().find(|finding| finding.location.path == "helper/helper.go"
+        && finding.source.rule_id.as_deref() == Some("go-os-rename-discarded-error")).unwrap();
+    assert!(helper_finding.related_locations.iter().flatten()
+        .any(|location| location.path == "main.go" && location.range.start_line == 23), "{helper_finding:#?}");
 }
 
 #[test]

@@ -37,14 +37,16 @@ pub(super) enum Effect {
     Read(Place),
     Write(Vec<Write>),
     Invoke(usize, Demand),
-    ApplyHelper {
-        arguments: Vec<Option<Place>>,
-        demand: Demand,
-        when_discarded: Vec<bool>,
-        when_observed: Vec<bool>,
-        origins_discarded: Vec<(Origin, bool)>,
-        origins_observed: Vec<(Origin, bool)>,
-    },
+    ApplyHelper(HelperCall),
+}
+
+pub(super) struct HelperCall {
+    pub(super) arguments: Vec<Option<Place>>,
+    pub(super) demand: Demand,
+    pub(super) when_discarded: Vec<bool>,
+    pub(super) when_observed: Vec<bool>,
+    pub(super) origins_discarded: Vec<(Origin, bool)>,
+    pub(super) origins_observed: Vec<(Origin, bool)>,
 }
 
 #[derive(Clone, Copy)]
@@ -65,7 +67,9 @@ impl Demand {
 }
 
 pub(super) fn lower<'src>(
-    plan: &Plan<'_, 'src>, function: &KeyedFunction<'_, '_>, source: &'src [u8],
+    plan: &Plan<'_, 'src>,
+    function: &KeyedFunction<'_, '_>,
+    source: &'src [u8],
     returns_to_caller: bool,
     helpers: &BTreeMap<usize, HelperSummary>,
 ) -> Analysis {
@@ -74,7 +78,17 @@ pub(super) fn lower<'src>(
     let closures = Closures::scan(function.node, language, &places, source);
     places.exclude_captures(captured_names(function.node, source, language, |node| closures.literal(node).is_some()));
     let return_tail = returns_to_caller.then(|| function_return_tail(function.node, language)).flatten();
-    let lower = Lower { plan, source, language, places: &places, closures: &closures, inside: None, returns_to_caller, return_tail, helpers };
+    let lower = Lower {
+        plan,
+        source,
+        language,
+        places: &places,
+        closures: &closures,
+        inside: None,
+        returns_to_caller,
+        return_tail,
+        helpers,
+    };
     let owner = lower.body(function.node, function.graph);
     let bodies = closures
         .bodies
@@ -125,22 +139,21 @@ impl Lower<'_, '_, '_> {
     }
 
     fn statement(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
-        if self.inside.is_none() && self.returns_to_caller {
-            if let Some(value) = return_value(node).or_else(|| {
-                self.return_tail.filter(|tail| tail.byte_range() == node.byte_range() && tail.kind() == node.kind())
+        let value = if let Some(closure) = self.inside {
+            closure_result(node, closure)
+        } else if self.returns_to_caller {
+            return_value(node).or_else(|| {
+                self.return_tail
+                    .filter(|tail| tail.byte_range() == node.byte_range() && tail.kind() == node.kind())
                     .map(|_| node)
-            }) {
-                let value = self.value(value, effects);
-                effects.push(Effect::Write(vec![Write { target: Some(Place::Return), value }]));
-                return;
-            }
-        }
-        if let Some(closure) = self.inside {
-            if let Some(value) = closure_result(node, closure) {
-                let value = self.value(value, effects);
-                effects.push(Effect::Write(vec![Write { target: Some(Place::Return), value }]));
-                return;
-            }
+            })
+        } else {
+            None
+        };
+        if let Some(value) = value {
+            let value = self.value(value, effects);
+            effects.push(Effect::Write(vec![Write { target: Some(Place::Return), value }]));
+            return;
         }
         match node.kind() {
             "expression_statement" => {
@@ -301,7 +314,13 @@ impl Lower<'_, '_, '_> {
         }
         let call = site::name(node, self.source)?;
         self.plan.source_mode(&call)?;
-        Some(Origin { call, start: node.start_byte(), line: node.start_position().row as u32 + 1, path: None, calls: Vec::new() })
+        Some(Origin {
+            call,
+            start: node.start_byte(),
+            line: node.start_position().row as u32 + 1,
+            path: None,
+            calls: Vec::new(),
+        })
     }
 }
 
@@ -330,8 +349,14 @@ fn function_return_tail(node: Node<'_>, language: ContractLanguage) -> Option<No
         ContractLanguage::Rust => {
             let body = node.child_by_field_name("body")?;
             site::children(body).last().filter(|tail| {
-                !matches!(tail.kind(), "expression_statement" | "let_declaration"
-                    | "return_expression" | "if_expression" | "match_expression")
+                !matches!(
+                    tail.kind(),
+                    "expression_statement"
+                        | "let_declaration"
+                        | "return_expression"
+                        | "if_expression"
+                        | "match_expression"
+                )
             })
         }
         ContractLanguage::Kotlin => crate::lower::kotlin::expression_body(node),

@@ -3,7 +3,7 @@ use tree_sitter::Node;
 use crate::lower::site;
 
 use super::super::references::{reference, string_references};
-use super::{Demand, Effect, Lower, Place, Value, Write};
+use super::{Demand, Effect, HelperCall, Lower, Place, Value, Write};
 
 enum Visit<'tree> {
     Syntax(Node<'tree>, Demand),
@@ -39,32 +39,40 @@ impl Lower<'_, '_, '_> {
 
     fn visit<'tree>(&self, node: Node<'tree>, demand: Demand, todo: &mut Vec<Visit<'tree>>, effects: &mut Vec<Effect>) {
         if let Some((arguments, summary)) = self.helper_call(node) {
-            let arguments = arguments.into_iter().map(|argument| {
-                if let Some(place) = self.place(argument, false) {
-                    return Some(place);
-                }
-                let temporary = Place::CallResult(argument.start_byte());
-                let value = self.value(argument, effects);
-                effects.push(Effect::Write(vec![Write { target: Some(temporary), value }]));
-                Some(temporary)
-            }).collect();
-            let origins = |values: &[(super::Origin, bool)]| {
-                values.iter().cloned().map(|(mut origin, used)| {
-                    let call = (self.plan.syntax.unit, node.start_byte());
-                    if !origin.calls.contains(&call) {
-                        origin.calls.push(call);
-                        origin.calls.sort_unstable();
+            let arguments = arguments
+                .into_iter()
+                .map(|argument| {
+                    if let Some(place) = self.place(argument, false) {
+                        return Some(place);
                     }
-                    (origin, used)
-                }).collect()
+                    let temporary = Place::CallResult(argument.start_byte());
+                    let value = self.value(argument, effects);
+                    effects.push(Effect::Write(vec![Write { target: Some(temporary), value }]));
+                    Some(temporary)
+                })
+                .collect();
+            let origins = |values: &[(super::Origin, bool)]| {
+                values
+                    .iter()
+                    .cloned()
+                    .map(|(mut origin, used)| {
+                        let call = (self.plan.syntax.unit, node.start_byte());
+                        if !origin.calls.contains(&call) {
+                            origin.calls.push(call);
+                            origin.calls.sort_unstable();
+                        }
+                        (origin, used)
+                    })
+                    .collect()
             };
-            effects.push(Effect::ApplyHelper {
-                arguments, demand,
+            effects.push(Effect::ApplyHelper(HelperCall {
+                arguments,
+                demand,
                 when_discarded: summary.when_discarded.parameters.clone(),
                 when_observed: summary.when_observed.parameters.clone(),
                 origins_discarded: origins(&summary.when_discarded.origins),
                 origins_observed: origins(&summary.when_observed.origins),
-            });
+            }));
             return;
         }
         if let Some(closure) = self.closures.literal(node) {
