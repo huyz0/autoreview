@@ -1,10 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 
 use serde::Deserialize;
 
 use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
+
+mod targets;
 
 #[derive(Debug, Deserialize)]
 struct GolangciOutput {
@@ -177,33 +179,15 @@ fn run_golangci_lint_once(repo_root: &Path, go_files: &[&str], targets: &[&str])
 /// other failure (a real config/compile problem) surfaces immediately,
 /// unretried.
 pub fn run_golangci_lint(repo_root: &Path, changed_files: &[String]) -> anyhow::Result<Vec<AgentFinding>> {
-    // A deleted file's path still shows up in `git diff --numstat`, but
-    // passing a nonexistent path to golangci-lint doesn't just skip that one
-    // file — it fails typechecking for the *whole package* and silently
-    // reports zero issues everywhere, burying the real cause in `Report.Error`.
-    // Filtering to files that still exist avoids that failure mode entirely.
-    let go_files: Vec<&str> = changed_files.iter().map(String::as_str).filter(|p| p.ends_with(".go") && repo_root.join(p).exists()).collect();
-    if go_files.is_empty() {
-        return Ok(vec![]);
-    }
-
-    if repo_root.join("go.mod").is_file() || repo_root.join("go.work").is_file() {
-        // Named-file mode omits unchanged siblings and fails across packages.
-        let packages: BTreeSet<String> = go_files.iter().map(|file| {
-            file.rsplit_once('/').map_or_else(|| ".".to_string(), |(directory, _)| format!("./{directory}"))
-        }).collect();
-        let targets: Vec<_> = packages.iter().map(String::as_str).collect();
-        return run_with_retries(repo_root, &go_files, &targets);
-    }
-
-    // Keep named-file mode for repositories that have no Go module.
-    let mut groups: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for file in go_files {
-        groups.entry(file.rsplit_once('/').map_or("", |(directory, _)| directory)).or_default().push(file);
-    }
     let mut findings = Vec::new();
-    for files in groups.values() {
-        findings.extend(run_with_retries(repo_root, files, files)?);
+    for group in targets::groups(repo_root, changed_files) {
+        let files: Vec<_> = group.files.iter().map(String::as_str).collect();
+        let targets: Vec<_> = group.targets.iter().map(String::as_str).collect();
+        let mut found = run_with_retries(&group.root, &files, &targets)?;
+        for finding in &mut found {
+            finding.location.path = targets::normalize(&group.prefix.join(&finding.location.path));
+        }
+        findings.extend(found);
     }
     Ok(findings)
 }
@@ -379,6 +363,49 @@ mod tests {
         for file in ["example.go", "child/child.go"] {
             assert!(findings.iter().any(|finding| finding.location.path == file && finding.source.rule_id.as_deref() == Some("errcheck")));
         }
+    }
+
+    #[test]
+    fn reviews_nested_modules_with_unchanged_siblings_and_repo_relative_paths() {
+        if !golangci_lint_available() { return; }
+        let dir = write_go_module(&[
+            ("root.go", "package root\nfunc Check() { helper() }\n"),
+            ("helper.go", "package root\nfunc helper() error { return nil }\n"),
+            ("nested/go.mod", "module example.com/nested\n\ngo 1.21\n"),
+            ("nested/child/changed.go", "package child\nfunc Check() { helper() }\n"),
+            ("nested/child/helper.go", "package child\nfunc helper() error { return nil }\n"),
+        ]);
+        let findings = run_golangci_lint(dir.path(), &["root.go".into(), "nested/child/changed.go".into()]).unwrap();
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+        for path in ["root.go", "nested/child/changed.go"] {
+            assert!(findings.iter().any(|finding| finding.location.path == path && finding.source.rule_id.as_deref() == Some("errcheck")), "{findings:#?}");
+        }
+    }
+
+    #[test]
+    fn nested_module_with_no_root_go_module_uses_full_package() {
+        if !golangci_lint_available() { return; }
+        let dir = write_go_module(&[
+            ("tool/go.mod", "module example.com/tool\n\ngo 1.21\n"),
+            ("tool/main.go", "package tool\nfunc Check() { helper() }\n"),
+            ("tool/helper.go", "package tool\nfunc helper() error { return nil }\n"),
+        ]);
+        std::fs::remove_file(dir.path().join("go.mod")).unwrap();
+        let findings = run_golangci_lint(dir.path(), &["tool/main.go".into()]).unwrap();
+        assert!(findings.iter().any(|finding| finding.location.path == "tool/main.go" && finding.source.rule_id.as_deref() == Some("errcheck")), "{findings:#?}");
+    }
+
+    #[test]
+    fn nested_module_reports_type_errors_in_unchanged_siblings() {
+        if !golangci_lint_available() { return; }
+        let dir = write_go_module(&[
+            ("tool/go.mod", "module example.com/tool\n\ngo 1.21\n"),
+            ("tool/main.go", "package tool\nfunc Check() { helper() }\n"),
+            ("tool/helper.go", "package tool\nfunc helper() { missing() }\n"),
+        ]);
+        std::fs::remove_file(dir.path().join("go.mod")).unwrap();
+        let error = run_golangci_lint(dir.path(), &["tool/main.go".into()]).unwrap_err();
+        assert!(error.to_string().contains("typecheck"), "{error:#}");
     }
 
     #[test]
