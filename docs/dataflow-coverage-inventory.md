@@ -25,6 +25,10 @@ read and syntax problems, dependency discovery limits, finally lowering,
 path-state exhaustion, skipped paths, and helper-summary convergence limits.
 Go discovery also reports unreadable package files and files whose package
 cannot be identified, including files that cannot be bound to an import.
+Rust discovery reports a used `crate::` module import that cannot be resolved
+through an unambiguous chain of ordinary external module declarations. This
+includes conditional imports, `#[path]`, and ambiguous crate roots; other Rust
+import shapes remain outside this diagnostic.
 JavaScript and TypeScript discovery reports unresolved relative code imports
 with runtime bindings. Side-effect, type-only, asset, and bare-package imports
 are outside this particular diagnostic.

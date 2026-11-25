@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use autoreview_core::run_dataflow_check;
+use autoreview_core::{run_dataflow_check, run_dataflow_check_with_coverage};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -431,6 +431,55 @@ fn dropped(path: &str) {
 }
 "#).unwrap();
     assert_helper_locations(root.path(), "src/lib.rs", "rust-discarded-remove-file-result", &[("src/lib.rs", 4), ("src/support.rs", 4)]);
+}
+
+#[test]
+fn rust_module_aliases_preserve_helper_result_usage() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::write(root.path().join("src/lib.rs"), "mod support; mod worker;\n").unwrap();
+    std::fs::write(root.path().join("src/support.rs"), r#"use std::fs::remove_file;
+pub(crate) fn discard(value: std::io::Result<()>) {}
+pub(crate) fn forward(value: std::io::Result<()>) -> std::io::Result<()> { value }
+pub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }
+"#).unwrap();
+    std::fs::write(root.path().join("src/worker.rs"), r#"use crate::support as tasks;
+use std::fs::remove_file;
+fn unused(path: &str) {
+    let result = remove_file(path);
+    tasks::discard(result);
+}
+fn used(path: &str) -> std::io::Result<()> {
+    let result = remove_file(path);
+    tasks::forward(result)
+}
+fn dropped(path: &str) { tasks::remove(path); }
+"#).unwrap();
+    let expected = &[("src/support.rs", 4), ("src/worker.rs", 4)];
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", expected);
+    let clean = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
+    assert!(!clean.coverage.iter().any(|issue| issue.reason == "unresolved_rust_module_import"));
+    let worker = std::fs::read_to_string(root.path().join("src/worker.rs")).unwrap();
+    std::fs::write(root.path().join("src/worker.rs"), worker.replace("use crate::support as tasks;", "use crate::support::{self as tasks};")).unwrap();
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", expected);
+    std::fs::write(root.path().join("src/worker.rs"), &worker).unwrap();
+    for crate_root in ["mod worker;\n", "#[path = \"alternate.rs\"] mod support; mod worker;\n", "#[cfg(feature = \"optional\")] mod support; mod worker;\n"] {
+        std::fs::write(root.path().join("src/lib.rs"), crate_root).unwrap();
+        let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
+        assert!(!result.findings.iter().any(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result")), "{crate_root}: {:#?}", result.findings);
+        assert!(result.coverage.iter().any(|issue| issue.reason == "unresolved_rust_module_import" && issue.path.as_deref() == Some("src/worker.rs") && issue.line == Some(1)), "{crate_root}: {:?}", result.coverage);
+    }
+    std::fs::write(root.path().join("src/lib.rs"), "mod support; mod worker;\n").unwrap();
+    std::fs::write(root.path().join("src/worker.rs"), format!("#[cfg(feature = \"optional\")]\n{worker}")).unwrap();
+    let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
+    assert!(!result.findings.iter().any(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result")), "{:#?}", result.findings);
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unresolved_rust_module_import" && issue.line == Some(2)), "{:?}", result.coverage);
+    std::fs::write(root.path().join("src/lib.rs"), "mod group; mod worker;\n").unwrap();
+    std::fs::write(root.path().join("src/group.rs"), "pub(crate) mod support;\n").unwrap();
+    std::fs::create_dir(root.path().join("src/group")).unwrap();
+    std::fs::copy(root.path().join("src/support.rs"), root.path().join("src/group/support.rs")).unwrap();
+    std::fs::write(root.path().join("src/worker.rs"), worker.replace("crate::support", "crate::group::support")).unwrap();
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", &[("src/group/support.rs", 4), ("src/worker.rs", 4)]);
 }
 
 #[test]
