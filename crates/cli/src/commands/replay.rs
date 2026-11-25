@@ -26,17 +26,35 @@ struct Suite {
     gate: BTreeSet<Rule>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Case {
     name: String,
     rule: Rule,
+    #[serde(default)]
+    evidence: Option<Evidence>,
     base: Option<String>,
     before: Label,
     after: Label,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Evidence {
+    kind: EvidenceKind,
+    source: String,
+    license: String,
+    rationale: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum EvidenceKind {
+    Historical,
+    Synthetic,
+}
+
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Label {
     commit: String,
@@ -44,7 +62,7 @@ struct Label {
     lines: Vec<u32>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SnapshotResult {
     commit: String,
@@ -54,10 +72,12 @@ struct SnapshotResult {
     missed_lines: Vec<u32>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct CaseResult {
     name: String,
     rule: Rule,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evidence: Option<Evidence>,
     before: SnapshotResult,
     after: SnapshotResult,
 }
@@ -185,8 +205,16 @@ fn replay_side(
 }
 
 fn replay(repo: &Path, suite: &Suite, gate_only: bool) -> anyhow::Result<Vec<CaseResult>> {
+    replay_with_cache(repo, suite, gate_only, &mut BTreeMap::new())
+}
+
+fn replay_with_cache(
+    repo: &Path,
+    suite: &Suite,
+    gate_only: bool,
+    snapshots: &mut BTreeMap<String, tempfile::TempDir>,
+) -> anyhow::Result<Vec<CaseResult>> {
     let mut cases = Vec::new();
-    let mut snapshots = BTreeMap::new();
     let mut names = BTreeSet::new();
     let mut labelled_snapshots = BTreeSet::new();
     for case in &suite.cases {
@@ -198,6 +226,12 @@ fn replay(repo: &Path, suite: &Suite, gate_only: bool) -> anyhow::Result<Vec<Cas
             "case names must be unique and nonempty: '{}'",
             case.name
         );
+        if let Some(evidence) = &case.evidence {
+            ensure!(
+                [&evidence.source, &evidence.license, &evidence.rationale].iter().all(|value| !value.trim().is_empty()),
+                "case '{}' has incomplete evidence", case.name
+            );
+        }
         case.rule
             .check_replay_support()
             .with_context(|| format!("case '{}'", case.name))?;
@@ -207,9 +241,9 @@ fn replay(repo: &Path, suite: &Suite, gate_only: bool) -> anyhow::Result<Vec<Cas
             "case '{}' must specify base only for a rule that compares revisions", case.name
         );
         let base = base.map(|reference| resolve_commit(repo, reference)).transpose()?;
-        let before = replay_side(repo, &mut snapshots, &case.rule, &case.before, base.as_deref(), gate_only)
+        let before = replay_side(repo, snapshots, &case.rule, &case.before, base.as_deref(), gate_only)
             .with_context(|| format!("case '{}' before", case.name))?;
-        let after = replay_side(repo, &mut snapshots, &case.rule, &case.after, base.as_deref(), gate_only)
+        let after = replay_side(repo, snapshots, &case.rule, &case.after, base.as_deref(), gate_only)
             .with_context(|| format!("case '{}' after", case.name))?;
         ensure!(
             before.commit != after.commit,
@@ -239,6 +273,7 @@ fn replay(repo: &Path, suite: &Suite, gate_only: bool) -> anyhow::Result<Vec<Cas
         cases.push(CaseResult {
             name: case.name.clone(),
             rule: case.rule.clone(),
+            evidence: case.evidence.clone(),
             before,
             after,
         });
@@ -289,21 +324,101 @@ fn scores(cases: &[CaseResult]) -> Vec<RuleScore> {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ReplayReport {
     rules: Vec<RuleScore>,
+    languages: Vec<LanguageScore>,
+    evidence_kinds: Vec<EvidenceScore>,
     cases: Vec<CaseResult>,
+    failures: Vec<CaseFailure>,
+}
+
+#[derive(Serialize)]
+struct LanguageScore {
+    language: String,
+    rules: Vec<RuleScore>,
+}
+
+#[derive(Serialize)]
+struct EvidenceScore {
+    kind: String,
+    rules: Vec<RuleScore>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CaseFailure {
+    name: String,
+    rule: Rule,
+    before_path: String,
+    after_path: String,
+    error: String,
+}
+
+fn replay_report(repo: &Path, suite: &Suite) -> anyhow::Result<ReplayReport> {
+    ensure!(!suite.cases.is_empty(), "the suite has no cases for the selected rules");
+    let mut names = BTreeSet::new();
+    let mut snapshots = BTreeSet::new();
+    let mut cases = Vec::new();
+    let mut failures = Vec::new();
+    let mut cache = BTreeMap::new();
+    for case in &suite.cases {
+        let outcome: anyhow::Result<CaseResult> = (|| {
+            ensure!(!case.name.trim().is_empty() && names.insert(&case.name),
+                "case names must be unique and nonempty: '{}'", case.name);
+            let single = Suite { cases: vec![case.clone()], gate: BTreeSet::new() };
+            let result = replay_with_cache(repo, &single, false, &mut cache)?.pop().expect("a single replay case");
+            let keys: Vec<_> = [&result.before, &result.after].into_iter()
+                .map(|side| (case.rule.clone(), side.commit.clone(), side.path.clone())).collect();
+            for key in &keys {
+                ensure!(!snapshots.contains(key),
+                    "case '{}' repeats the same rule, commit and path", case.name);
+            }
+            snapshots.extend(keys);
+            Ok(result)
+        })();
+        match outcome {
+            Ok(result) => cases.push(result),
+            Err(error) => failures.push(CaseFailure {
+                name: case.name.clone(), rule: case.rule.clone(),
+                before_path: case.before.path.clone(), after_path: case.after.path.clone(),
+                error: format!("{error:#}"),
+            }),
+        }
+    }
+    let mut groups: BTreeMap<String, Vec<CaseResult>> = BTreeMap::new();
+    let mut evidence_groups: BTreeMap<String, Vec<CaseResult>> = BTreeMap::new();
+    for case in &cases {
+        let before = language_for_path(Path::new(&case.before.path));
+        let after = language_for_path(Path::new(&case.after.path));
+        let language = if before == after {
+            before.map_or_else(|| "unknown".to_owned(), |language| format!("{language:?}"))
+        } else {
+            "mixed".to_owned()
+        };
+        groups.entry(language).or_default().push(case.clone());
+        let kind = match case.evidence.as_ref().map(|evidence| &evidence.kind) {
+            Some(EvidenceKind::Historical) => "historical",
+            Some(EvidenceKind::Synthetic) => "synthetic",
+            None => "unclassified",
+        };
+        evidence_groups.entry(kind.to_owned()).or_default().push(case.clone());
+    }
+    let languages = groups.into_iter().map(|(language, cases)| LanguageScore {
+        language, rules: scores(&cases),
+    }).collect();
+    let evidence_kinds = evidence_groups.into_iter().map(|(kind, cases)| EvidenceScore {
+        kind, rules: scores(&cases),
+    }).collect();
+    Ok(ReplayReport { rules: scores(&cases), languages, evidence_kinds, cases, failures })
 }
 
 pub(crate) fn run_replay(repo: &Path, suite: &Path) -> anyhow::Result<()> {
     let suite: Suite = serde_yaml::from_slice(&std::fs::read(repo.join(suite))?)?;
-    let cases = replay(repo, &suite, false)?;
-    let report = ReplayReport {
-        rules: scores(&cases),
-        cases,
-    };
+    let report = replay_report(repo, &suite)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     ensure!(
-        report
+        report.failures.is_empty() && report
             .rules
             .iter()
             .all(|entry| entry.score.false_negatives == 0 && entry.score.false_positives == 0),

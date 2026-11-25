@@ -142,11 +142,21 @@ marks a snapshot where the rule should stay silent. Use the head path on
 each side if the fix renamed the file. The fixed commit must descend from
 the before commit. Reported precision and recall describe the labelled
 files in this suite. A metric with no observations is reported as `null`.
+The report includes totals per rule, per language, and per evidence kind.
+Cases that cannot be
+analyzed appear in `failures` with a reason and are excluded from the scores;
+the command exits nonzero if any case fails. Review these failures alongside
+the metrics before drawing conclusions about coverage.
 
 ```yaml
 cases:
   - name: comparison uses the wrong operand
     rule: {tool: ast-grep, id: go-no-self-comparison}
+    evidence:
+      kind: historical
+      source: 'https://example.org/project/commit/<full object ID>'
+      license: MIT
+      rationale: 'The fix replaces a self-comparison with a comparison against the intended operand.'
     before:
       commit: '<full object ID of the commit containing the bug>'
       path: internal/search/filter.go
@@ -156,6 +166,11 @@ cases:
       path: internal/search/filter.go
       lines: []
 ```
+
+The optional `evidence` block records the source, license, and label rationale.
+Use `historical` for an independently authored fix and `synthetic` for a
+constructed regression case. Keep the two groups separate when interpreting
+scores; a small labelled sample does not establish population-wide accuracy.
 
 Replay supports built-in pattern, dataflow, and complexity rules, as well
 as the within-file `duplicate-code-block` check. Use `ast-grep`,
