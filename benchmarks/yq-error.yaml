@@ -1,0 +1,18 @@
+cases:
+  - name: yq explode discards project-defined errors
+    rule: {tool: autoreview-dataflow, id: go-project-error-result-unobserved}
+    evidence:
+      kind: historical
+      source: https://github.com/taigrr/yq/commit/af39fc737dc49317dafe3adf99fb24749f759482
+      license: MIT
+      rationale: >-
+        Three calls discard errors from functions defined in the package.
+        The fix propagates all three errors. Labels cover the entire file.
+    before:
+      commit: f8a700e4005dbf47528eaee3060e90ae5d41b5e4
+      path: pkg/yqlib/operator_explode.go
+      lines: [21, 68, 72]
+    after:
+      commit: af39fc737dc49317dafe3adf99fb24749f759482
+      path: pkg/yqlib/operator_explode.go
+      lines: []

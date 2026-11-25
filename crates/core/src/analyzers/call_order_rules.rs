@@ -74,6 +74,7 @@ enum ContractModeYaml {
 #[serde(rename_all = "kebab-case")]
 enum ContractSourceYaml {
     TypedPromiseFactory,
+    TypedGoError,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,11 +109,13 @@ impl ContractYaml {
             ContractModeYaml::MustUse => ContractMode::MustUse,
             ContractModeYaml::MustComplete => ContractMode::MustComplete,
         };
-        let typed_promise_factory = self.source.is_some();
-        if typed_promise_factory {
-            anyhow::ensure!(has_type_syntax && matches!(mode, ContractMode::MustUse)
+        let typed_promise_factory = matches!(self.source, Some(ContractSourceYaml::TypedPromiseFactory));
+        let typed_go_error = matches!(self.source, Some(ContractSourceYaml::TypedGoError));
+        if self.source.is_some() {
+            anyhow::ensure!((typed_promise_factory && has_type_syntax || typed_go_error && language == ContractLanguage::Go)
+                && matches!(mode, ContractMode::MustUse)
                 && self.import.is_empty() && self.methods.is_empty() && self.borrows.is_empty(),
-                "typed-promise-factory requires a TypeScript or TSX must-use contract without API names");
+                "typed sources require their matching language and a must-use contract without API names");
         } else {
             anyhow::ensure!(!self.import.trim().is_empty(), "contract import must name the package or class");
             anyhow::ensure!(!self.methods.is_empty() && self.methods.iter().chain(&self.borrows).all(|name| {
@@ -124,7 +127,7 @@ impl ContractYaml {
             "acquireAwaited and completeObserved require a web must-complete contract");
         Ok(ResultContract {
             mode, language, import: self.import, methods: self.methods, borrows: self.borrows,
-            acquire_awaited: self.acquire_awaited, complete_observed: self.complete_observed, typed_promise_factory,
+            acquire_awaited: self.acquire_awaited, complete_observed: self.complete_observed, typed_promise_factory, typed_go_error,
         })
     }
 }
@@ -250,6 +253,21 @@ mod tests {
         assert_eq!(skipped.limitations[0].reason, "typed_promise_source_unavailable");
         assert!(validate_call_sequence(&yaml.replace("TypeScript", "Tsx")).is_ok());
         assert!(validate_call_sequence(&yaml.replace("TypeScript", "JavaScript")).is_err());
+        assert_invalid_typed_contracts(yaml);
+    }
+
+    #[test]
+    fn typed_go_error_contract_requires_go_must_use_without_api_names() {
+        let yaml = "id: typed-go\nlanguage: Go\ncategory: correctness\nseverity: warning\nkind: call-sequence\nmessage: discarded error\ncontract:\n  mode: must-use\n  source: typed-go-error\n";
+        let parsed = parse_call_order_rule(yaml).unwrap();
+        assert!(parsed.spec.contract.as_ref().unwrap().typed_go_error);
+        let skipped = autoreview_dataflow::call_order::check_keyed_units_with_coverage(&parsed.spec, &[]);
+        assert_eq!(skipped.limitations[0].reason, "typed_go_error_source_unavailable");
+        assert!(validate_call_sequence(&yaml.replace("language: Go", "language: Rust")).is_err());
+        assert_invalid_typed_contracts(yaml);
+    }
+
+    fn assert_invalid_typed_contracts(yaml: &str) {
         assert!(validate_call_sequence(&yaml.replace("must-use", "must-complete")).is_err());
         assert!(validate_call_sequence(&format!("{yaml}  import: example\n  methods: [run]\n")).is_err());
     }

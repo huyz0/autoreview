@@ -78,3 +78,28 @@ The configured TypeScript package executes as part of the check; use only a
 trusted installation. Replay rejects reported incomplete analysis rather than
 counting it as a clean result. Do not reuse this dependency setup for other
 revisions unless their dependency configuration also matches.
+
+
+`yq-error.yaml` labels three discarded errors before one historical fix and
+none in the fixed file. With the experimental Go checker configured and the
+pinned dependencies cached, replay detects all three before the fix and none
+after it. This is one historical fix pair, not a general accuracy estimate.
+The two revisions have identical dependency manifests. For an isolated checkout
+containing both commits, download the pinned modules into an isolated cache,
+then disable downloads for replay:
+
+```sh
+export GOMODCACHE=/absolute/path/to/isolated-cache
+GOTOOLCHAIN=local go mod download all
+cd /absolute/path/to/autoreview/tools/go-error-evidence
+go build -o /absolute/path/to/trusted-go-error-probe .
+cd /absolute/path/to/yq-checkout
+AUTOREVIEW_GO_ERROR_PROBE=/absolute/path/to/trusted-go-error-probe \
+AUTOREVIEW_GO_BINARY=/absolute/path/to/trusted/go \
+GOPROXY=off GOSUMDB=off \
+  autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/yq-error.yaml
+```
+
+The Go checker can execute build tools and requires a trusted project and
+compiler. It does not yet support test variants, cgo target packages, explicit
+build tags, full snapshot verification, or process-tree containment.

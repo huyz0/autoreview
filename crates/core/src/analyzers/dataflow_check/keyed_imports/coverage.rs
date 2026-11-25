@@ -37,12 +37,21 @@ pub(super) fn record_rule_limits(coverage: &mut Vec<AnalysisCoverageIssue>, rule
 }
 
 fn limitation_detail(reason: &str) -> &'static str {
-    typed_detail(reason).unwrap_or(match reason {
+    verified_detail(reason).or_else(|| typed_detail(reason)).unwrap_or(match reason {
             "path_budget" => "The path-state budget was exhausted; this rule skipped the affected root.",
             "helper_summary_limit" => "Helper summaries did not converge within the analysis budget; cross-file result tracking was skipped.",
             "unresolved_helper_target" => "The helper target is ambiguous or depends on unavailable exports; cross-file call-sequence analysis may be incomplete.",
             "reexport_resolution_limit" => "The re-export resolution budget was exhausted; cross-file call-sequence analysis may be incomplete.",
             _ => "The rule could not model a path safely; analysis of the affected root was skipped.",
+    })
+}
+
+fn verified_detail(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+            "verified_source_unmodeled" => "A verified result source is outside modeled function flow; result-use analysis skipped this call.",
+            "typed_go_error_source_unavailable" => "Go error type verification is not configured; this rule was skipped.",
+            "go_error_checker_incomplete" => "Go error type verification could not complete for this package; result-use analysis may be incomplete.",
+            _ => return None,
     })
 }
 

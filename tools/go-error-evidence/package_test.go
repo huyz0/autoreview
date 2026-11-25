@@ -39,6 +39,12 @@ func TestPackageModeUsesBuildFilesAndLocalDependencies(t *testing.T) {
 	if got := analyze(req); got.Status != "incomplete" || got.Reason != "source_mismatch" {
 		t.Fatalf("changed source: %+v", got)
 	}
+	req.ExpectedSources["main.go"] = hex.EncodeToString(sum[:])
+	write("other.go", "package sample\nfunc helper() {}\n")
+	req.ExpectedSources["other.go"] = strings.Repeat("0", 64)
+	if got := analyze(req); got.Status != "incomplete" || got.Reason != "source_mismatch" {
+		t.Fatalf("changed helper source: %+v", got)
+	}
 	req.ExpectedSources = nil
 	if got := analyze(req); got.Status != "incomplete" || got.Reason != "source_mismatch" {
 		t.Fatalf("missing digest: %+v", got)

@@ -81,7 +81,7 @@ func listPackages(dir, binary string) ([]listedPackage, bool) {
 	defer cancel()
 	command := exec.CommandContext(ctx, binary, "list", "-deps", "-export", "-json", ".")
 	command.Dir = dir
-	command.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "GOFLAGS=")
+	command.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "GOFLAGS=-mod=readonly")
 	var output limitedBuffer
 	output.limit = maxListOutput
 	command.Stdout = &output
@@ -181,8 +181,13 @@ func matchesExpectedSources(files []sourceFile, calls []callSite, expected map[s
 		hash := sha256.Sum256([]byte(file.Source))
 		hashes[file.Path] = hex.EncodeToString(hash[:])
 	}
+	for path, hash := range expected {
+		if hash == "" || hash != hashes[path] {
+			return false
+		}
+	}
 	for _, call := range calls {
-		if expected[call.Path] == "" || expected[call.Path] != hashes[call.Path] {
+		if expected[call.Path] == "" {
 			return false
 		}
 	}

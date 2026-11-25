@@ -19,8 +19,9 @@ pub(in crate::call_order) fn check_units_with_sources(
             plan.extra_sources.clone_from(offsets);
         }
     }
+    let mut limitations = unmodeled_sources(&program, units, sources);
     if !program.has_registration() {
-        return (Vec::new(), false, Vec::new());
+        return (Vec::new(), false, limitations);
     }
     let (summaries, summary_limit) = summaries::build(&program, units);
     let hits = collect_hits(&program, units, &summaries);
@@ -36,7 +37,40 @@ pub(in crate::call_order) fn check_units_with_sources(
             })
             .or_insert(hit);
     }
-    (combined.into_values().collect(), summary_limit, program.resolution_limitations())
+    limitations.extend(program.resolution_limitations());
+    (combined.into_values().collect(), summary_limit, limitations)
+}
+
+fn unmodeled_sources(
+    program: &Program<'_, '_, '_>, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<usize, BTreeSet<usize>>,
+) -> Vec<super::super::keyed::KeyedLimitation> {
+    let mut limitations = Vec::new();
+    if sources.keys().any(|index| *index >= units.len()) {
+        limitations.push(super::super::keyed::KeyedLimitation { reason: "verified_source_unmodeled", path: None, line: None });
+    }
+    let mut base = 0;
+    for (unit_index, unit) in units.iter().enumerate() {
+        if let Some(offsets) = sources.get(&unit_index) {
+            for &start in offsets {
+                let owner = unit.functions.iter().enumerate()
+                    .filter(|(_, function)| function.node.start_byte() <= start && start < function.node.end_byte())
+                    .min_by_key(|(_, function)| function.node.end_byte() - function.node.start_byte());
+                let modeled = owner.is_some_and(|(index, function)| {
+                    let frame = &program.frames[base + index];
+                    let call = function.node.descendant_for_byte_range(start, start.saturating_add(1))
+                        .and_then(|node| std::iter::successors(Some(node), |node| node.parent())
+                            .find(|node| node.start_byte() == start && matches!(node.kind(), "call_expression" | "method_invocation" | "new_expression")));
+                    frame.plan.is_some() && call.is_some_and(|node| crate::lower::site::name(node, unit.source).is_some())
+                        && frame.graph.nodes.iter().flat_map(|node| &node.evaluations).any(|item| item.span.start <= start && start < item.span.end)
+                });
+                if modeled { continue; }
+                let line = unit.source.get(..start).map(|source| source.iter().filter(|byte| **byte == b'\n').count() as u32 + 1);
+                limitations.push(super::super::keyed::KeyedLimitation { reason: "verified_source_unmodeled", path: Some(unit.path.to_owned()), line });
+            }
+        }
+        base += unit.functions.len();
+    }
+    limitations
 }
 
 fn collect_hits(

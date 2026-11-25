@@ -1,0 +1,9 @@
+id: go-project-error-result-unobserved
+language: Go
+category: correctness
+severity: warning
+kind: call-sequence
+message: Observe, return, or explicitly handle the error returned by this call.
+contract:
+  mode: must-use
+  source: typed-go-error

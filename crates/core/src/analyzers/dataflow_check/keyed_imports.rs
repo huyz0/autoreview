@@ -19,6 +19,7 @@ mod jvm;
 mod rust;
 mod web;
 mod typed;
+mod go_evidence;
 mod coverage;
 use coverage::{issue, record_flow_limits, record_rule_limits, scope_coverage};
 use typed::{check_typed_rule, TrustedTypeScript};
@@ -154,10 +155,11 @@ fn run_sources(
     let mut findings = Vec::new();
     for &(rule, declared) in rules {
         let typed = rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory);
+        let go_typed = rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_go_error);
         let units: Vec<_> = sources
             .iter()
             .zip(&functions)
-            .filter(|((_, file), _)| !typed || matches!(file.language, Language::JavaScript | Language::TypeScript | Language::Tsx))
+            .filter(|((_, file), _)| (!typed || matches!(file.language, Language::JavaScript | Language::TypeScript | Language::Tsx)) && (!go_typed || file.language == Language::Go))
             .map(|((path, file), (ordinary, functions))| KeyedUnit {
                 path,
                 source: file.parsed.0.as_bytes(),
@@ -170,6 +172,8 @@ fn run_sources(
         if !units.iter().any(|unit| unit.entry) { continue; }
         let result = if typed {
             check_typed_rule(&rule.spec, &units, sources, root, checker)
+        } else if go_typed {
+            go_evidence::check_go_rule(&rule.spec, &units, sources, root)
         } else {
             check_keyed_units_with_coverage(&rule.spec, &units)
         };
@@ -405,7 +409,7 @@ mod budget_tests {
         let (sources, issues) = with_resolver(dir.path(), |resolver| resolver.load(&entries));
         assert!(issues.is_empty());
         let rule = CallOrderRuleDef { id: "test-typed".into(), language: "TypeScript".into(), category: "correctness".into(), severity: Severity::Medium, message: "unused promise".into(), pack_id: None, metadata: None,
-            spec: CallOrderSpec { rule_id: "test-typed".into(), after: vec![], unless: vec![], before: vec![], check_before_return: false, identity: None, contract: Some(ResultContract { mode: ContractMode::MustUse, language: ContractLanguage::Web, import: String::new(), methods: vec![], borrows: vec![], acquire_awaited: false, complete_observed: false, typed_promise_factory: true }) } };
+            spec: CallOrderSpec { rule_id: "test-typed".into(), after: vec![], unless: vec![], before: vec![], check_before_return: false, identity: None, contract: Some(ResultContract { mode: ContractMode::MustUse, language: ContractLanguage::Web, import: String::new(), methods: vec![], borrows: vec![], acquire_awaited: false, complete_observed: false, typed_promise_factory: true, typed_go_error: false }) } };
         let rules = [(&rule, Language::TypeScript)];
         let mut coverage = Vec::new();
         assert!(run_sources(&sources, &entries, &rules, dir.path(), None, &mut coverage).is_empty());

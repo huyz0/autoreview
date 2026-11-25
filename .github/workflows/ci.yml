@@ -57,7 +57,11 @@ jobs:
         env:
           GOPROXY: 'off'
           GOSUMDB: 'off'
-        run: go test ./...
+        run: |
+          go test ./...
+          go build -o "$RUNNER_TEMP/autoreview-go-error-probe" .
+          echo "AUTOREVIEW_TEST_GO_PROBE=$RUNNER_TEMP/autoreview-go-error-probe" >> "$GITHUB_ENV"
+          echo "AUTOREVIEW_TEST_GO_BINARY=$(command -v go)" >> "$GITHUB_ENV"
 
       # The `/v2` in the module path is load-bearing. Go requires a `/vN`
       # suffix for major version 2 and above, so the un-suffixed path
