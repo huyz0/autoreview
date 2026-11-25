@@ -185,6 +185,7 @@ fn record_rule_limits(coverage: &mut Vec<AnalysisCoverageIssue>, rule_id: &str, 
             "helper_summary_limit" => "Helper summaries did not converge within the analysis budget; cross-file result tracking was skipped.",
             "unresolved_helper_target" => "The helper target is ambiguous or depends on unavailable exports; cross-file call-sequence analysis may be incomplete.",
             "reexport_resolution_limit" => "The re-export resolution budget was exhausted; cross-file call-sequence analysis may be incomplete.",
+            "typed_promise_source_unavailable" => "Typed promise source verification is not configured; this rule was skipped.",
             _ => "The rule could not model a path safely; analysis of the affected root was skipped.",
         };
         let mut record = issue(limitation.path.as_deref(), limitation.reason,

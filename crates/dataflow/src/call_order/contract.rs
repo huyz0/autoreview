@@ -28,6 +28,9 @@ pub struct ResultContract {
     pub borrows: Vec<String>,
     pub acquire_awaited: bool,
     pub complete_observed: bool,
+    /// Sources are obtained from verified TypeScript callable types instead
+    /// of matching a named API. Only valid for web must-use contracts.
+    pub typed_promise_factory: bool,
 }
 
 /// Resolve explicit imports and fully qualified Java calls. A name-only
