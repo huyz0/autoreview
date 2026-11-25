@@ -449,6 +449,20 @@ fn dropped(path: &str) { tasks::remove(path); }
 "#;
 
 #[test]
+fn rust_unresolved_imports_identify_each_used_name() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::write(root.path().join("src/lib.rs"),
+        "use crate::missing::{first, second, unused};\nfn run() { first(); second(); first(); }\n").unwrap();
+    let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/lib.rs".into()], &[]);
+    let issues: Vec<_> = result.coverage.iter().filter(|issue| issue.reason == "unresolved_rust_module_import").collect();
+    assert_eq!(issues.len(), 2, "{issues:?}");
+    for name in ["first", "second"] {
+        assert!(issues.iter().any(|issue| issue.line == Some(1) && issue.detail.contains(&format!("`{name}`"))), "{issues:?}");
+    }
+}
+
+#[test]
 fn rust_module_aliases_preserve_helper_result_usage() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("src")).unwrap();

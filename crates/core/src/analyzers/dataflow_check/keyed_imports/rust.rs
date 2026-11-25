@@ -178,8 +178,8 @@ fn resolve_use_module(resolver: &Resolver<'_>, path: &Path, dir: &Path, module: 
 
 fn record_unresolved(input: &ImportSource<'_>, node: Node<'_>, local: &str, coverage: &mut Vec<AnalysisCoverageIssue>) {
     if !namespace_called(input.node, local, input.source) { return; }
-    let mut record = issue(input.resolver.relative(input.path).as_deref(), "unresolved_rust_module_import", "dependency",
-        "A used Rust import or associated call could not be resolved safely; cross-file call-sequence analysis may be incomplete.");
+    let detail = format!("Rust import or associated call `{local}` could not be resolved safely; cross-file call-sequence analysis may be incomplete.");
+    let mut record = issue(input.resolver.relative(input.path).as_deref(), "unresolved_rust_module_import", "dependency", &detail);
     record.line = Some(node.start_position().row as u32 + 1);
     if !coverage.contains(&record) { coverage.push(record); }
 }
