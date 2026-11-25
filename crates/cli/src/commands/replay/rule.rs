@@ -119,6 +119,16 @@ mod tests {
     }
 
     #[test]
+    fn dataflow_replay_rejects_unreadable_go_package_sources() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("main.go"), "package main\nfunc main() {}\n").unwrap();
+        std::fs::write(root.path().join("broken.go"), [0xff, 0xfe]).unwrap();
+        let error = Tool::AutoreviewDataflow.scan(root.path(), &["main.go".into()], &BTreeSet::from(["go-os-rename-discarded-error".into()])).unwrap_err();
+        assert!(error.to_string().contains("broken.go"), "{error}");
+        assert!(error.to_string().contains("dataflow analysis was incomplete"), "{error}");
+    }
+
+    #[test]
     fn rule_specific_limitations_do_not_block_unrelated_rules() {
         let issue = autoreview_schema::AnalysisCoverageIssue {
             analyzer: "call-sequence".into(), reason: "path_budget".into(), scope: "function".into(),

@@ -537,6 +537,30 @@ mod tests {
     }
 
     #[test]
+    fn reports_go_dependencies_when_the_package_cannot_be_determined() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("lib")).unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module example.test/project\n\ngo 1.22\n").unwrap();
+        std::fs::write(dir.path().join("main.go"), "package app\nimport \"example.test/project/lib\"\nfunc run() { lib.Work() }\n").unwrap();
+        std::fs::write(dir.path().join("second.go"), "package app\nimport \"example.test/project/lib\"\nfunc next() { lib.Work() }\n").unwrap();
+        std::fs::write(dir.path().join("unreadable.go"), [0xff, 0xfe]).unwrap();
+        std::fs::write(dir.path().join("lib/unreadable.go"), [0xff, 0xfe]).unwrap();
+        std::fs::write(dir.path().join("missing_package.go"), "func broken( {\n").unwrap();
+        std::fs::write(dir.path().join("lib/missing_package.go"), "func broken( {\n").unwrap();
+        std::fs::write(dir.path().join("lib/empty.go"), "// package declaration is missing\n").unwrap();
+        let result = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["main.go".into(), "second.go".into()], &[]);
+        for (path, reason) in [
+            ("unreadable.go", "dependency_unavailable"),
+            ("lib/unreadable.go", "dependency_unavailable"),
+            ("missing_package.go", "dependency_syntax_errors"),
+            ("lib/missing_package.go", "dependency_syntax_errors"),
+            ("lib/empty.go", "dependency_package_unavailable"),
+        ] {
+            assert_eq!(result.coverage.iter().filter(|item| item.path.as_deref() == Some(path) && item.reason == reason).count(), 1, "expected one {reason} for {path}: {:?}", result.coverage);
+        }
+    }
+
+    #[test]
     fn reports_functions_skipped_when_finally_lowering_budget_is_exhausted() {
         let dir = tempfile::tempdir().unwrap();
         let mut source = String::from("function work(x: number) { try {\n");
