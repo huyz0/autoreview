@@ -253,8 +253,7 @@ mod tests {
         assert_eq!(skipped.limitations[0].reason, "typed_promise_source_unavailable");
         assert!(validate_call_sequence(&yaml.replace("TypeScript", "Tsx")).is_ok());
         assert!(validate_call_sequence(&yaml.replace("TypeScript", "JavaScript")).is_err());
-        assert!(validate_call_sequence(&yaml.replace("must-use", "must-complete")).is_err());
-        assert!(validate_call_sequence(&format!("{yaml}  import: example\n  methods: [run]\n")).is_err());
+        assert_invalid_typed_contracts(yaml);
     }
 
     #[test]
@@ -265,6 +264,10 @@ mod tests {
         let skipped = autoreview_dataflow::call_order::check_keyed_units_with_coverage(&parsed.spec, &[]);
         assert_eq!(skipped.limitations[0].reason, "typed_go_error_source_unavailable");
         assert!(validate_call_sequence(&yaml.replace("language: Go", "language: Rust")).is_err());
+        assert_invalid_typed_contracts(yaml);
+    }
+
+    fn assert_invalid_typed_contracts(yaml: &str) {
         assert!(validate_call_sequence(&yaml.replace("must-use", "must-complete")).is_err());
         assert!(validate_call_sequence(&format!("{yaml}  import: example\n  methods: [run]\n")).is_err());
     }

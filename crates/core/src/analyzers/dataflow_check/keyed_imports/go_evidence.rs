@@ -97,24 +97,30 @@ fn collect_groups(
     let mut groups = BTreeMap::<PathBuf, Group>::new();
     let Ok(root) = root.canonicalize() else { limitations.push(limitation(None)); return groups; };
     for (index, unit) in units.iter().enumerate() {
-        let Some(file) = sources.get(unit.path) else { limitations.push(limitation(Some(unit.path))); continue };
-        let path = root.join(unit.path);
-        let Ok(resolved) = path.canonicalize() else { limitations.push(limitation(Some(unit.path))); continue };
-        if !resolved.starts_with(&root) { limitations.push(limitation(Some(unit.path))); continue; }
-        let Some(dir) = resolved.parent() else { limitations.push(limitation(Some(unit.path))); continue };
-        let Some(name) = resolved.file_name().and_then(|part| part.to_str()) else { limitations.push(limitation(Some(unit.path))); continue };
-        let mut pending = vec![file.parsed.1.root_node()];
-        let mut calls = Vec::new();
-        while let Some(node) = pending.pop() {
-            if node.kind() == "call_expression" { calls.push(Call { path: name.to_owned(), start: node.start_byte() }); }
-            pending.extend(node.named_children(&mut node.walk()));
-        }
-        let group = groups.entry(dir.to_path_buf()).or_insert_with(|| Group { indices: Vec::new(), calls: Vec::new(), expected: BTreeMap::new() });
-        group.expected.insert(name.to_owned(), format!("{:x}", Sha256::digest(unit.source)));
+        let Some((dir, name, calls)) = collect_unit(unit, sources, &root) else {
+            limitations.push(limitation(Some(unit.path))); continue;
+        };
+        let group = groups.entry(dir).or_insert_with(|| Group { indices: Vec::new(), calls: Vec::new(), expected: BTreeMap::new() });
+        group.expected.insert(name, format!("{:x}", Sha256::digest(unit.source)));
         group.indices.extend(calls.iter().map(|call| (index, call.start)));
         group.calls.extend(calls);
     }
     groups
+}
+
+fn collect_unit(unit: &KeyedUnit<'_, '_, '_>, sources: &BTreeMap<String, Source>, root: &Path) -> Option<(PathBuf, String, Vec<Call>)> {
+    let file = sources.get(unit.path)?;
+    let resolved = root.join(unit.path).canonicalize().ok()?;
+    if !resolved.starts_with(root) { return None; }
+    let dir = resolved.parent()?.to_path_buf();
+    let name = resolved.file_name()?.to_str()?.to_owned();
+    let mut pending = vec![file.parsed.1.root_node()];
+    let mut calls = Vec::new();
+    while let Some(node) = pending.pop() {
+        if node.kind() == "call_expression" { calls.push(Call { path: name.clone(), start: node.start_byte() }); }
+        pending.extend(node.named_children(&mut node.walk()));
+    }
+    Some((dir, name, calls))
 }
 
 fn verify(probe: &Path, request: &Request<'_>) -> Option<Vec<String>> {

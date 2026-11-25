@@ -1,3 +1,3 @@
 package sample
-func operation() error { return nil }
-func run() error { return operation() }
+func negativeOperation() error { return nil }
+func negativeRun() error { return negativeOperation() }

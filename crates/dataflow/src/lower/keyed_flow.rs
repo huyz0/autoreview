@@ -33,7 +33,6 @@ impl Flow<'_> {
             _ if loops::jump_kind(node, self.source).is_some() => {
                 self.loop_jump(cfg, node, current)
             }
-            "expression_switch_statement" if supports_go_switch(node) => self.go_switch(cfg, node, current),
             "try_statement" | "try_expression" => self.protected(cfg, node, current),
             "throw_statement" | "throw_expression" => {
                 super::record_evaluation(cfg, current, node);
@@ -64,6 +63,7 @@ impl Flow<'_> {
     }
 
     fn ordinary_statement(&self, cfg: &mut Cfg<Stmt>, node: Node<'_>, current: NodeId) -> NodeId {
+        if supports_go_switch(node) { return self.go_switch(cfg, node, current); }
         let current = keyed_syntax::expression(node).map_or(current, |expr| nested_arguments(cfg, expr, self.source, current));
         let current = self.exceptional_edge(cfg, node, current);
         let conditional = matches!(node.kind(), "if_statement" | "if_expression");
