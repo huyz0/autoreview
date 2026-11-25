@@ -269,7 +269,7 @@ for the comparison and replay commits. [Suite format and gate criteria](docs/aut
 | Check | Go | Java / Kotlin | JavaScript / TypeScript / TSX | Rust |
 |---|---|---|---|---|
 | Syntax patterns and complexity | Yes | Yes | Yes | Yes |
-| Taint and call-sequence DSL | Yes | Yes | Yes | Intraprocedural subset |
+| Taint and call-sequence DSL | Yes | Yes | Yes | Supported local and cross-file subset |
 | Feature envy | Symbol index | Symbol index | Symbol index | Typed parameters in inherent methods |
 | Layer policies | Imports | Imports | Imports | Direct Cargo workspace dependencies |
 | Import cycles | Go packages | JVM packages | Relative module imports | Unavailable |
@@ -278,6 +278,11 @@ JavaScript and TypeScript analysis and triage recognize JSX, TSX, and
 module extensions such as `.mjs` and `.mts`. Rules with
 `language: TypeScript` also run on TSX. Use `language: Tsx` to target only
 TSX. [DSL reference](.claude/skills/authoring-rules/reference/rule-dsl.md)
+
+Rust call-sequence helper tracking follows supported explicit imports and
+unambiguous `crate::` module aliases. Conditional modules, custom paths,
+ambiguous crate roots, and other import forms can limit coverage; a used
+unsupported module alias is reported as incomplete where recognized.
 
 Web cycle checks follow static relative imports and re-exports, plus direct
 top-level `require` calls in `.cjs` and `.cts` files. They skip type-only
