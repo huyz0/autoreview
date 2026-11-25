@@ -180,6 +180,45 @@ fn diff_reports_dataflow_syntax_limitations_without_warning_on_clean_files() {
 }
 
 #[test]
+fn review_reports_missing_external_tools_as_structured_coverage() {
+    let git_name = if cfg!(windows) { "git.exe" } else { "git" };
+    let git_dir = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .find(|dir| dir.join(git_name).is_file()).expect("git is required by integration tests");
+    let mut dirs = vec![git_dir];
+    if cfg!(windows) {
+        dirs.push(PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32"));
+    }
+    let restricted = std::env::join_paths(dirs).unwrap();
+    for tool in ["ast-grep", "golangci-lint"] {
+        assert!(StdCommand::new(tool).env("PATH", &restricted).arg("--version").output().is_err(), "{tool} must be absent from the test PATH");
+    }
+    let repo = init_repo(&[("main.go", "package main\nfunc run() {}\n")]);
+    let base = current_commit(repo.path());
+    repo.commit(&[("main.go", "package main\nfunc run() { println(1) }\n")], "change Go code");
+    let run = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).env("PATH", &restricted)
+        .args(["diff", "--base", &base, "--head", "HEAD", "--static-only"])
+        .assert().success();
+    let report = report_path_from_stdout(&String::from_utf8_lossy(&run.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    let coverage = report["analysisCoverage"].as_array().expect("structured coverage");
+    for tool in ["ast-grep", "golangci-lint"] {
+        assert!(coverage.iter().any(|issue| issue["analyzer"] == tool && issue["reason"] == "tool_unavailable" && issue["scope"] == "analyzer"), "{report}");
+        assert!(report["analyzerWarnings"].as_array().unwrap().iter().any(|warning| warning.as_str().unwrap().contains(tool)), "{report}");
+    }
+    let base = current_commit(repo.path());
+    repo.commit(&[("Cargo.lock", "version = 3\n")], "add lockfile");
+    let run = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).env("PATH", restricted)
+        .args(["diff", "--base", &base, "--head", "HEAD", "--static-only", "--audit-rust-deps"])
+        .assert().success();
+    let path = report_path_from_stdout(&String::from_utf8_lossy(&run.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let coverage = report["analysisCoverage"].as_array().expect("structured coverage");
+    assert!(coverage.iter().any(|issue| issue["analyzer"] == "cargo-audit" && issue["reason"] == "tool_failed"
+        && issue["scope"] == "file" && issue["path"] == "Cargo.lock"), "{report}");
+    assert!(!coverage.iter().any(|issue| issue["analyzer"] == "ast-grep" || issue["analyzer"] == "golangci-lint"), "{report}");
+}
+
+#[test]
 fn changed_lines_include_verified_project_error_results() {
     let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
     let helper = "package helper\nfunc Work() (int, error) { return 1, nil }\nfunc Ignore(n int, err error) {}\nfunc Check(n int, err error) { if err != nil { return } }\n";

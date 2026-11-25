@@ -36,14 +36,15 @@ pub(super) fn collect(
         input.source_root,
         changed_files,
         packs,
-        &languages,
         &mut warnings,
+        &mut coverage,
     );
     if input.audit_rust_deps && input.wants("security") {
         findings.extend(audit_dependencies(
             input.source_root,
             changed_files,
             &mut warnings,
+            &mut coverage,
         ));
     }
     findings.extend(artifact_findings(&input, changed_files, &mut warnings));
@@ -67,6 +68,18 @@ pub(super) fn collect(
 fn record_warning(warnings: &mut Vec<String>, message: String) {
     println!("  [warn] {message}");
     warnings.push(message);
+}
+
+
+fn record_tool_issue(
+    warnings: &mut Vec<String>, coverage: &mut Vec<AnalysisCoverageIssue>,
+    tool: &str, reason: &str, message: String,
+) {
+    record_warning(warnings, message.clone());
+    coverage.push(AnalysisCoverageIssue {
+        analyzer: tool.into(), reason: reason.into(), scope: "analyzer".into(),
+        path: None, line: None, rule: None, detail: message,
+    });
 }
 
 fn artifact_findings(
@@ -111,20 +124,18 @@ fn lint(
     root: &Path,
     files: &[String],
     packs: &[ResolvedRulePack],
-    languages: &HashSet<Language>,
     warnings: &mut Vec<String>,
+    coverage: &mut Vec<AnalysisCoverageIssue>,
 ) -> Vec<AgentFinding> {
+    let languages = autoreview_langsupport::languages_present(files.iter()
+        .filter(|path| root.join(path).is_file()).map(String::as_str));
     if !languages.is_empty() && !binary_available("ast-grep") {
-        record_warning(
-            warnings,
-            "ast-grep is unavailable. Pattern rules were skipped.".into(),
-        );
+        record_tool_issue(warnings, coverage, "ast-grep", "tool_unavailable",
+            "ast-grep is unavailable. Pattern rules were skipped.".into());
     }
     if languages.contains(&Language::Go) && !binary_available("golangci-lint") {
-        record_warning(
-            warnings,
-            "golangci-lint is unavailable. Go linter checks were skipped.".into(),
-        );
+        record_tool_issue(warnings, coverage, "golangci-lint", "tool_unavailable",
+            "golangci-lint is unavailable. Go linter checks were skipped.".into());
     }
     let results = [
         ("ast-grep", run_ast_grep(root, files, packs)),
@@ -135,7 +146,7 @@ fn lint(
     for (tool, result) in results {
         match result {
             Ok(items) => findings.extend(items),
-            Err(err) => record_warning(warnings, format!("{tool} run failed: {err}")),
+            Err(err) => record_tool_issue(warnings, coverage, tool, "tool_failed", format!("{tool} run failed: {err}")),
         }
     }
     findings.extend(autoreview_core::run_rust_review(root, files));
@@ -146,6 +157,7 @@ fn audit_dependencies(
     root: &Path,
     paths: &[String],
     warnings: &mut Vec<String>,
+    coverage: &mut Vec<AnalysisCoverageIssue>,
 ) -> Vec<AgentFinding> {
     let mut findings = Vec::new();
     for path in paths.iter().filter(|path| {
@@ -155,7 +167,13 @@ fn audit_dependencies(
     }) {
         match autoreview_core::run_cargo_audit(root, path) {
             Ok(items) => findings.extend(items),
-            Err(err) => record_warning(warnings, format!("cargo audit failed for {path}: {err:#}")),
+            Err(err) => {
+                record_tool_issue(warnings, coverage, "cargo-audit", "tool_failed", format!("cargo audit failed for {path}: {err:#}"));
+                if let Some(issue) = coverage.last_mut() {
+                    issue.scope = "file".into();
+                    issue.path = Some(path.clone());
+                }
+            }
         }
     }
     findings
