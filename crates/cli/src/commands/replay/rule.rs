@@ -129,6 +129,21 @@ mod tests {
     }
 
     #[test]
+    fn dataflow_replay_rejects_unresolved_local_web_helpers() {
+        let root = tempfile::tempdir().unwrap();
+        for (path, rule) in [
+            ("main.js", "javascript-node-fs-discarded-promise"),
+            ("main.ts", "typescript-node-fs-discarded-promise"),
+            ("main.tsx", "typescript-node-fs-discarded-promise"),
+        ] {
+            std::fs::write(root.path().join(path), "import { run } from './missing';\nexport function main() { run(); }\n").unwrap();
+            let error = Tool::AutoreviewDataflow.scan(root.path(), &[path.into()], &BTreeSet::from([rule.into()])).unwrap_err();
+            assert!(error.to_string().contains("./missing"), "{path}: {error}");
+            assert!(error.to_string().contains("dataflow analysis was incomplete"), "{path}: {error}");
+        }
+    }
+
+    #[test]
     fn rule_specific_limitations_do_not_block_unrelated_rules() {
         let issue = autoreview_schema::AnalysisCoverageIssue {
             analyzer: "call-sequence".into(), reason: "path_budget".into(), scope: "function".into(),

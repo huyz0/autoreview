@@ -11,6 +11,7 @@ It does not claim that every unsupported construct has been catalogued.
 | Keyed path exploration exceeds its state budget | The root analysis returns no result. | Root location, rule, and path-budget reason. Distinguish this from unsupported identity or call effects. |
 | Ignored-result helper summaries do not converge within their iteration budget | All helper summaries for that rule are cleared. | Rule and analyzed source scope; ordinary local checking can still run. |
 | Local handles, cleanup identities, closures, calls, or syntax cannot be modeled | Several conservative `None` paths decline a plan, root, or expression. | Precise reason and location where available. Do not label ordinary nonmatches as skipped analysis. |
+| A keyed cleanup argument directly nests a helper call | A call such as `root.remove(choose(key))` is not tracked like an intermediate `chosen = choose(key); root.remove(chosen)`. | Track the returned identity through the nested expression or report that this path was not modeled. |
 | External static tool is unavailable or fails | The CLI already emits a string warning for ast-grep, golangci-lint, Clippy, and selected other tools. | Preserve existing warnings and add structured tool status without implying the other analyzers failed. |
 
 Report scopes should distinguish an entire file, a function or root, a rule,
@@ -24,6 +25,9 @@ read and syntax problems, dependency discovery limits, finally lowering,
 path-state exhaustion, skipped paths, and helper-summary convergence limits.
 Go discovery also reports unreadable package files and files whose package
 cannot be identified, including files that cannot be bound to an import.
+JavaScript and TypeScript discovery reports unresolved relative code imports
+with runtime bindings. Side-effect, type-only, asset, and bare-package imports
+are outside this particular diagnostic.
 Entries identify the analyzer, reason, scope, and available path, line, and
 rule. The same issues are summarized in `analyzerWarnings` for text reports.
 Dataflow replay fails affected cases instead of treating them as clean. Other

@@ -503,6 +503,32 @@ mod tests {
     }
 
     #[test]
+    fn reports_unresolved_local_web_imports_without_flagging_packages_or_assets() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("present.ts"), "export function helper() {}\n").unwrap();
+        std::fs::write(dir.path().join("component.jsx"), "export function component() {}\n").unwrap();
+        std::fs::write(dir.path().join("types.ts"), "import { helper } from './missing-type-dependency';\nexport type Shape = typeof helper;\n").unwrap();
+        std::fs::write(dir.path().join("main.ts"), r#"import { helper } from './present.js';
+import { missing } from './missing';
+import { absent } from '../absent';
+import { external } from 'some-package';
+import './side-effects';
+import styles from './styles.css';
+import type { Shape } from './types';
+import { type Other } from './other-types';
+import { type Data, work } from './mixed';
+import { component } from './component';
+export function run() { helper(); missing(); absent(); external(); }
+"#).unwrap();
+        let result = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["main.ts".into()], &[]);
+        let unresolved: Vec<_> = result.coverage.iter().filter(|item| item.reason == "unresolved_local_import").collect();
+        assert_eq!(unresolved.len(), 3, "{:?}", result.coverage);
+        assert!(unresolved.iter().any(|item| item.path.as_deref() == Some("main.ts") && item.line == Some(2) && item.detail.contains("./missing")));
+        assert!(unresolved.iter().any(|item| item.path.as_deref() == Some("main.ts") && item.line == Some(3) && item.detail.contains("../absent")));
+        assert!(unresolved.iter().any(|item| item.path.as_deref() == Some("main.ts") && item.line == Some(9) && item.detail.contains("./mixed")));
+    }
+
+    #[test]
     fn reports_when_imported_source_limit_leaves_dependencies_unanalyzed() {
         let dir = tempfile::tempdir().unwrap();
         for index in 0..67 {
