@@ -50,24 +50,28 @@ pub fn module_bindings(module: &TypeModule<'_>, unit: usize) -> Option<Vec<Keyed
         let node = if statement.kind() == "export_statement" {
             match statement.child_by_field_name("declaration") { Some(node) => node, None => continue }
         } else { statement };
-        match node.kind() {
-            "lexical_declaration" | "variable_declaration" => {
-                for item in node.named_children(&mut node.walk()).filter(|item| item.kind() == "variable_declarator") {
-                    let name = item.child_by_field_name("name").filter(|name| name.kind() == "identifier")?;
-                    bindings.push(module_binding(unit, name, item.start_byte(), module.source)?);
-                }
-            }
-            "function_declaration" | "generator_function_declaration" | "class_declaration" | "enum_declaration" => {
-                let name = node.child_by_field_name("name")?;
-                bindings.push(module_binding(unit, name, node.start_byte(), module.source)?);
-            }
-            "ambient_declaration" | "internal_module" | "module" | "function_signature" => return None,
-            "import_statement" | "type_alias_declaration" | "interface_declaration" => {}
-            _ if has_hoisted_var(node) => return None,
-            _ => {}
-        }
+        append_bindings(&mut bindings, module, unit, node)?;
     }
     Some(bindings)
+}
+
+fn append_bindings(bindings: &mut Vec<KeyedDeclaration>, module: &TypeModule<'_>, unit: usize, node: Node<'_>) -> Option<()> {
+    match node.kind() {
+        "lexical_declaration" | "variable_declaration" => {
+            for item in node.named_children(&mut node.walk()).filter(|item| item.kind() == "variable_declarator") {
+                let name = item.child_by_field_name("name").filter(|name| name.kind() == "identifier")?;
+                bindings.push(module_binding(unit, name, item.start_byte(), module.source)?);
+            }
+        }
+        "function_declaration" | "generator_function_declaration" | "class_declaration" | "enum_declaration" => {
+            bindings.push(module_binding(unit, node.child_by_field_name("name")?, node.start_byte(), module.source)?);
+        }
+        "ambient_declaration" | "internal_module" | "module" | "function_signature" => return None,
+        "import_statement" | "type_alias_declaration" | "interface_declaration" => {}
+        _ if has_hoisted_var(node) => return None,
+        _ => {}
+    }
+    Some(())
 }
 
 fn module_binding(unit: usize, name: Node<'_>, start: usize, source: &[u8]) -> Option<KeyedDeclaration> {
@@ -121,13 +125,20 @@ pub fn imported_factory_evidence(
     if !binding_belongs_to(binding_module, &binding) || may_reassign(binding_module.root, binding_module.source, &binding.name) {
         return None;
     }
-    if let Some(PromiseReturn::FactoryAnnotation { minimum, maximum }) = local_factory_return(binding_module.root, binding_module.source, &binding) {
-        if !(minimum..=maximum).contains(&arity) { return None; }
-        let factory = module_function(binding_module, &binding.callee)?;
-        return Some(ImportedFactoryEvidence { binding_unit: selected.unit, binding_start: selected.start, factory_unit: selected.unit, factory_start: factory.start_byte(), minimum, maximum });
+    let (factory_unit, factory_start, minimum, maximum) = factory_signature(modules, units, &declarations, selected.unit, &binding)?;
+    if !(minimum..=maximum).contains(&arity) { return None; }
+    Some(ImportedFactoryEvidence { binding_unit: selected.unit, binding_start: selected.start, factory_unit, factory_start, minimum, maximum })
+}
+
+fn factory_signature(
+    modules: &[TypeModule<'_>], units: &[KeyedUnit<'_, '_, '_>], declarations: &[KeyedDeclaration], binding_unit: usize, binding: &FactoryBinding,
+) -> Option<(usize, usize, usize, usize)> {
+    let binding_module = modules.get(binding_unit)?;
+    if let Some(PromiseReturn::FactoryAnnotation { minimum, maximum }) = local_factory_return(binding_module.root, binding_module.source, binding) {
+        return Some((binding_unit, module_function(binding_module, &binding.callee)?.start_byte(), minimum, maximum));
     }
     if !unique_import(binding_module.root, binding_module.source, &binding.callee) || may_reassign(binding_module.root, binding_module.source, &binding.callee) { return None; }
-    let factory_index = resolve_declaration_import(units, &declarations, selected.unit, &binding.callee, binding.arguments).declaration?;
+    let factory_index = resolve_declaration_import(units, declarations, binding_unit, &binding.callee, binding.arguments).declaration?;
     let factory_decl = declarations.get(factory_index)?;
     let provider = modules.get(factory_decl.unit)?;
     let factory = declaration_at(provider, factory_decl.start, "function_declaration")?;
@@ -136,8 +147,7 @@ pub fn imported_factory_evidence(
     let (args_min, args_max) = parameter_bounds(factory, provider.source)?;
     if !(args_min..=args_max).contains(&binding.arguments) { return None; }
     let PromiseReturn::FactoryAnnotation { minimum, maximum } = declared_return(factory, provider.source)? else { return None; };
-    if !(minimum..=maximum).contains(&arity) { return None; }
-    Some(ImportedFactoryEvidence { binding_unit: selected.unit, binding_start: selected.start, factory_unit: factory_decl.unit, factory_start: factory_decl.start, minimum, maximum })
+    Some((factory_decl.unit, factory_decl.start, minimum, maximum))
 }
 
 fn declaration_at<'a>(module: &TypeModule<'a>, start: usize, kind: &str) -> Option<Node<'a>> {

@@ -89,6 +89,15 @@ impl<T: ExportTargets> ExportTraversal<'_, T> {
         }
         context.remaining -= 1;
         context.seen.insert(key.clone());
+        let (explicit, mut result) = self.explicit(unit, name, arity, context);
+        if !explicit && name != "default" {
+            result.merge(self.stars(unit, name, arity, context));
+        }
+        context.seen.remove(&key);
+        result
+    }
+
+    fn explicit(&self, unit: usize, name: &str, arity: usize, context: &mut ResolutionContext) -> (bool, Resolution<T::Target>) {
         let (mut explicit, mut result) = self.targets.direct(unit, name, arity);
         for export in self.targets.exports(unit) {
             if let KeyedExport::Named { exported, local, path } = export {
@@ -98,16 +107,18 @@ impl<T: ExportTargets> ExportTraversal<'_, T> {
                 }
             }
         }
-        if !explicit && name != "default" {
-            for export in self.targets.exports(unit) {
-                match export {
-                    KeyedExport::Star { path } => result.merge(self.reexport(path, name, arity, context)),
-                    KeyedExport::Unknown => result.incomplete = true,
-                    _ => {}
-                }
+        (explicit, result)
+    }
+
+    fn stars(&self, unit: usize, name: &str, arity: usize, context: &mut ResolutionContext) -> Resolution<T::Target> {
+        let mut result = Resolution::default();
+        for export in self.targets.exports(unit) {
+            match export {
+                KeyedExport::Star { path } => result.merge(self.reexport(path, name, arity, context)),
+                KeyedExport::Unknown => result.incomplete = true,
+                _ => {}
             }
         }
-        context.seen.remove(&key);
         result
     }
 

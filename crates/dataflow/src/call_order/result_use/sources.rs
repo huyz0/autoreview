@@ -26,6 +26,40 @@ pub fn discover_factory_sources(
     }
     let program = Program::new(spec, units);
     let functions: Vec<_> = units.iter().flat_map(|unit| unit.functions.iter()).collect();
+    let reachable = reachable_frames(&program, units, &functions);
+    let mut result = BTreeMap::<usize, BTreeSet<usize>>::new();
+    let mut limitations = inventory_limitations(modules);
+    let mut cache = BTreeMap::<(usize, String, usize), bool>::new();
+    for (index, (function, frame)) in functions.iter().zip(&program.frames).enumerate() {
+        if !reachable.contains(&index) { continue; }
+        let Some(plan) = &frame.plan else { continue };
+        let unit = &units[frame.unit];
+        let mut pending = vec![function.node];
+        while let Some(node) = pending.pop() {
+            let candidate = direct_call(node, unit.source).filter(|(name, _)| {
+                !plan.syntax.shadows_api(name) && !enclosing_scope_shadows(function.node, unit.source, name)
+                    && unit.imports.iter().any(|binding| binding.local == *name && binding.name.is_some() && binding.owner.is_none() && binding.exported)
+            });
+            if let Some((name, arity)) = candidate {
+                let valid = *cache.entry((frame.unit, name.to_owned(), arity)).or_insert_with(|| {
+                    crate::promise_types::imported_factory_evidence(modules, units, frame.unit, name, arity).is_some()
+                });
+                if valid && result.entry(frame.unit).or_default().insert(node.start_byte()) {
+                    limitations.push(KeyedLimitation {
+                        reason: "promise_type_unresolved", path: Some(unit.path.to_owned()),
+                        line: Some(node.start_position().row as u32 + 1),
+                    });
+                }
+            }
+            pending.extend(node.named_children(&mut node.walk()));
+        }
+    }
+    FactorySourceDiscovery { candidates: result, limitations }
+}
+
+fn reachable_frames(
+    program: &Program<'_, '_, '_>, units: &[KeyedUnit<'_, '_, '_>], functions: &[&super::super::KeyedFunction<'_, '_>],
+) -> BTreeSet<usize> {
     let mut pending: Vec<_> = program.frames.iter().enumerate().filter_map(|(index, frame)| units[frame.unit].entry.then_some(index)).collect();
     let mut reachable = BTreeSet::new();
     while let Some(index) = pending.pop() {
@@ -41,39 +75,17 @@ pub fn discover_factory_sources(
             pending.extend(program.resolved_calls(index, frame.graph, plan).into_iter().map(|(_, target)| target));
         }
     }
-    let mut result = BTreeMap::<usize, BTreeSet<usize>>::new();
+    reachable
+}
+
+fn inventory_limitations(modules: &[crate::promise_types::TypeModule<'_>]) -> Vec<KeyedLimitation> {
     let mut limitations = Vec::new();
     for (index, module) in modules.iter().enumerate() {
         if crate::promise_types::module_bindings(module, index).is_none() {
             limitations.push(KeyedLimitation { reason: "factory_binding_inventory_incomplete", path: Some(module.path.to_owned()), line: None });
         }
     }
-    let mut cache = BTreeMap::<(usize, String, usize), bool>::new();
-    for (index, (function, frame)) in functions.iter().zip(&program.frames).enumerate() {
-        if !reachable.contains(&index) { continue; }
-        let Some(plan) = &frame.plan else { continue };
-        let unit = &units[frame.unit];
-        let mut pending = vec![function.node];
-        while let Some(node) = pending.pop() {
-            if let Some((name, arity)) = direct_call(node, unit.source) {
-                if !plan.syntax.shadows_api(name) && !enclosing_scope_shadows(function.node, unit.source, name)
-                    && unit.imports.iter().any(|binding| binding.local == name && binding.name.is_some() && binding.owner.is_none() && binding.exported) {
-                    let valid = *cache.entry((frame.unit, name.to_owned(), arity)).or_insert_with(|| {
-                        crate::promise_types::imported_factory_evidence(modules, units, frame.unit, name, arity).is_some()
-                    });
-                    if valid && result.entry(frame.unit).or_default().insert(node.start_byte()) {
-                        limitations.push(KeyedLimitation {
-                            reason: "promise_type_unresolved",
-                            path: Some(unit.path.to_owned()),
-                            line: Some(node.start_position().row as u32 + 1),
-                        });
-                    }
-                }
-            }
-            pending.extend(node.named_children(&mut node.walk()));
-        }
-    }
-    FactorySourceDiscovery { candidates: result, limitations }
+    limitations
 }
 
 fn enclosing_scope_shadows(function: tree_sitter::Node<'_>, source: &[u8], name: &str) -> bool {
