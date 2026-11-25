@@ -182,32 +182,40 @@ fn private_parent_namespace(resolver: &Resolver<'_>, path: &Path, qualified: &st
     let parsed = resolver.cache.get(&parent, Language::Rust)?;
     let root = parsed.1.root_node();
     if root.has_error() { return None; }
-    let mut matches = Vec::new();
-    for node in children(root) {
-        if node.kind() != "use_declaration" {
-            if node.kind() == "macro_invocation" || (node.kind() == "expression_statement"
-                && children(node).iter().any(|part| part.kind() == "macro_invocation")) { return None; }
-            if node.child_by_field_name("name").and_then(|part| text(part, &parsed.0)) == Some(name) { return None; }
-            continue;
-        }
-        let usage = node.child_by_field_name("argument").and_then(|part| text(part, &parsed.0))?;
-        if usage.matches('{').count() > 1 || usage.matches('}').count() > 1 { return None; }
-        let paths = rust_paths(usage.trim());
-        if paths.is_empty() { return None; }
-        for usage in paths {
-            let (target, alias) = usage.split_once(" as ").map_or((usage.as_str(), None), |(target, alias)| (target.trim(), Some(alias.trim())));
-            let (module, member) = target.rsplit_once("::")?;
-            if member == "*" { return None; }
-            let default = if member == "self" { module.rsplit("::").next()? } else { member };
-            if alias.unwrap_or(default) == name {
-                if has_attributes(node) { return None; }
-                let target = if member == "self" { module } else { target };
-                matches.push(reexport_module(resolver, &parent, target)?);
-            }
-        }
-    }
+    let matches = children(root).into_iter().try_fold(Vec::new(), |mut found, node| {
+        found.extend(parent_item_targets(resolver, &parent, node, &parsed.0, name)?);
+        Some(found)
+    })?;
     let [target] = matches.as_slice() else { return None };
     Some(target.clone())
+}
+
+fn parent_item_targets(resolver: &Resolver<'_>, parent: &Path, node: Node<'_>, source: &str, name: &str) -> Option<Vec<PathBuf>> {
+    if node.kind() != "use_declaration" {
+        let macro_item = node.kind() == "macro_invocation" || (node.kind() == "expression_statement"
+            && children(node).iter().any(|part| part.kind() == "macro_invocation"));
+        let collision = node.child_by_field_name("name").and_then(|part| text(part, source)) == Some(name);
+        return (!macro_item && !collision).then(Vec::new);
+    }
+    let usage = node.child_by_field_name("argument").and_then(|part| text(part, source))?;
+    if usage.matches('{').count() > 1 || usage.matches('}').count() > 1 { return None; }
+    let paths = rust_paths(usage.trim());
+    if paths.is_empty() { return None; }
+    paths.into_iter().try_fold(Vec::new(), |mut found, usage| {
+        if let Some(target) = parent_import_target(resolver, parent, node, &usage, name)? { found.push(target); }
+        Some(found)
+    })
+}
+
+fn parent_import_target(resolver: &Resolver<'_>, parent: &Path, node: Node<'_>, usage: &str, name: &str) -> Option<Option<PathBuf>> {
+    let (target, alias) = usage.split_once(" as ").map_or((usage, None), |(target, alias)| (target.trim(), Some(alias.trim())));
+    let (module, member) = target.rsplit_once("::")?;
+    if member == "*" { return None; }
+    let default = if member == "self" { module.rsplit("::").next()? } else { member };
+    if alias.unwrap_or(default) != name { return Some(None); }
+    if has_attributes(node) { return None; }
+    let target = if member == "self" { module } else { target };
+    reexport_module(resolver, parent, target).map(Some)
 }
 
 fn resolve_use_module(resolver: &Resolver<'_>, path: &Path, dir: &Path, module: &str) -> Option<PathBuf> {
