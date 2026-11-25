@@ -64,19 +64,7 @@ fn unmodeled_sources(
     for (unit_index, unit) in units.iter().enumerate() {
         if let Some(offsets) = sources.get(&unit_index) {
             for &start in offsets {
-                let owner = unit.functions.iter().enumerate()
-                    .filter(|(_, function)| function.node.start_byte() <= start && start < function.node.end_byte())
-                    .min_by_key(|(_, function)| function.node.end_byte() - function.node.start_byte());
-                if owner.is_some_and(|(index, _)| !reachable.contains(&(base + index))) || (owner.is_none() && !unit.entry) { continue; }
-                let modeled = owner.is_some_and(|(index, function)| {
-                    let frame = &program.frames[base + index];
-                    let call = function.node.descendant_for_byte_range(start, start.saturating_add(1))
-                        .and_then(|node| std::iter::successors(Some(node), |node| node.parent())
-                            .find(|node| node.start_byte() == start && matches!(node.kind(), "call_expression" | "method_invocation" | "new_expression")));
-                    frame.plan.is_some() && call.is_some_and(|node| crate::lower::site::name(node, unit.source).is_some())
-                        && frame.graph.nodes.iter().flat_map(|node| &node.evaluations).any(|item| item.span.start <= start && start < item.span.end)
-                });
-                if modeled { continue; }
+                if source_modeled(program, (unit, base), start, &reachable) != Some(false) { continue; }
                 limitations.push(source_limitation(unit, start, "verified_source_unmodeled"));
             }
         }
@@ -88,6 +76,25 @@ fn unmodeled_sources(
         base += unit.functions.len();
     }
     limitations
+}
+
+fn source_modeled(
+    program: &Program<'_, '_, '_>, context: (&KeyedUnit<'_, '_, '_>, usize), start: usize,
+    reachable: &BTreeSet<usize>,
+) -> Option<bool> {
+    let (unit, base) = context;
+    let owner = unit.functions.iter().enumerate()
+        .filter(|(_, function)| function.node.start_byte() <= start && start < function.node.end_byte())
+        .min_by_key(|(_, function)| function.node.end_byte() - function.node.start_byte());
+    if owner.is_some_and(|(index, _)| !reachable.contains(&(base + index))) || (owner.is_none() && !unit.entry) { return None; }
+    Some(owner.is_some_and(|(index, function)| {
+        let frame = &program.frames[base + index];
+        let call = function.node.descendant_for_byte_range(start, start.saturating_add(1))
+            .and_then(|node| std::iter::successors(Some(node), |node| node.parent())
+                .find(|node| node.start_byte() == start && matches!(node.kind(), "call_expression" | "method_invocation" | "new_expression")));
+        frame.plan.is_some() && call.is_some_and(|node| crate::lower::site::name(node, unit.source).is_some())
+            && frame.graph.nodes.iter().flat_map(|node| &node.evaluations).any(|item| item.span.start <= start && start < item.span.end)
+    }))
 }
 
 // Multi-result arguments need a uniquely resolved, modeled receiving helper.
