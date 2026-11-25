@@ -76,8 +76,7 @@ fn unmodeled_sources(
                         && frame.graph.nodes.iter().flat_map(|node| &node.evaluations).any(|item| item.span.start <= start && start < item.span.end)
                 });
                 if modeled { continue; }
-                let line = unit.source.get(..start).map(|source| source.iter().filter(|byte| **byte == b'\n').count() as u32 + 1);
-                limitations.push(super::super::keyed::KeyedLimitation { reason: "verified_source_unmodeled", path: Some(unit.path.to_owned()), line });
+                limitations.push(source_limitation(unit, start, "verified_source_unmodeled"));
             }
         }
         base += unit.functions.len();
@@ -98,29 +97,38 @@ fn unmodeled_component_helpers(
     let mut base = 0;
     for (unit_index, unit) in units.iter().enumerate() {
         for &start in components.get(&unit_index).into_iter().flat_map(|items| items.keys()) {
-            let owner = unit.functions.iter().enumerate()
-                .filter(|(_, function)| function.node.start_byte() <= start && start < function.node.end_byte())
-                .min_by_key(|(_, function)| function.node.end_byte() - function.node.start_byte());
-            let Some((index, function)) = owner else { continue; };
-            if !reachable.contains(&(base + index)) { continue; }
-            let Some(mut call) = function.node.descendant_for_byte_range(start, start.saturating_add(1))
-                .and_then(|node| std::iter::successors(Some(node), |node| node.parent())
-                    .find(|node| node.start_byte() == start && node.kind() == "call_expression")) else { continue; };
-            while let Some(parent) = call.parent().filter(|node| node.kind() == "parenthesized_expression") { call = parent; }
-            let Some(outer) = call.parent().filter(|node| node.kind() == "argument_list").and_then(|node| node.parent()) else { continue; };
-            let frame = &program.frames[base + index];
-            let calls = resolved_by_frame.entry(base + index).or_insert_with(|| frame.plan.as_ref()
-                .map(|plan| program.resolved_calls(base + index, frame.graph, plan)).unwrap_or_default());
-            let resolved = calls.iter().any(|(position, target)|
-                *position == outer.start_byte() && program.frames[*target].plan.is_some());
-            if !resolved {
-                let line = unit.source.get(..start).map(|source| source.iter().filter(|byte| **byte == b'\n').count() as u32 + 1);
-                limitations.push(super::super::keyed::KeyedLimitation { reason: "go_multi_result_unmodeled", path: Some(unit.path.to_owned()), line });
+            if component_helper_unmodeled(program, unit, start, base, &reachable, &mut resolved_by_frame) {
+                limitations.push(source_limitation(unit, start, "go_multi_result_unmodeled"));
             }
         }
         base += unit.functions.len();
     }
     limitations
+}
+
+fn component_helper_unmodeled(
+    program: &Program<'_, '_, '_>, unit: &KeyedUnit<'_, '_, '_>, start: usize, base: usize,
+    reachable: &BTreeSet<usize>, calls: &mut BTreeMap<usize, BTreeSet<(usize, usize)>>,
+) -> bool {
+    let owner = unit.functions.iter().enumerate()
+        .filter(|(_, function)| function.node.start_byte() <= start && start < function.node.end_byte())
+        .min_by_key(|(_, function)| function.node.end_byte() - function.node.start_byte());
+    let Some((index, function)) = owner else { return false; };
+    if !reachable.contains(&(base + index)) { return false; }
+    let Some(mut call) = function.node.descendant_for_byte_range(start, start.saturating_add(1))
+        .and_then(|node| std::iter::successors(Some(node), |node| node.parent())
+            .find(|node| node.start_byte() == start && node.kind() == "call_expression")) else { return false; };
+    while let Some(parent) = call.parent().filter(|node| node.kind() == "parenthesized_expression") { call = parent; }
+    let Some(outer) = call.parent().filter(|node| node.kind() == "argument_list").and_then(|node| node.parent()) else { return false; };
+    let frame = &program.frames[base + index];
+    let calls = calls.entry(base + index).or_insert_with(|| frame.plan.as_ref()
+        .map(|plan| program.resolved_calls(base + index, frame.graph, plan)).unwrap_or_default());
+    !calls.iter().any(|(position, target)| *position == outer.start_byte() && program.frames[*target].plan.is_some())
+}
+
+fn source_limitation(unit: &KeyedUnit<'_, '_, '_>, start: usize, reason: &'static str) -> super::super::keyed::KeyedLimitation {
+    let line = unit.source.get(..start).map(|source| source.iter().filter(|byte| **byte == b'\n').count() as u32 + 1);
+    super::super::keyed::KeyedLimitation { reason, path: Some(unit.path.to_owned()), line }
 }
 
 fn collect_hits(
