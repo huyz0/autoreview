@@ -11,6 +11,14 @@ enum Visit<'tree> {
 }
 
 impl Lower<'_, '_, '_> {
+    pub(super) fn helper_call<'tree>(&self, node: Node<'tree>) -> Option<(Vec<Node<'tree>>, &super::HelperSummary)> {
+        let summary = self.helpers.get(&node.start_byte())?;
+        let arguments = site::arguments(node)?;
+        let arguments: Option<Vec<_>> = site::children(arguments).map(site::argument).collect();
+        let arguments = arguments?;
+        (arguments.len() == summary.when_discarded.parameters.len()).then_some((arguments, summary))
+    }
+
     pub(super) fn closure_call(&self, node: Node<'_>) -> Option<usize> {
         self.inside.is_none().then(|| self.closures.call(node)).flatten()
     }
@@ -30,6 +38,35 @@ impl Lower<'_, '_, '_> {
     }
 
     fn visit<'tree>(&self, node: Node<'tree>, demand: Demand, todo: &mut Vec<Visit<'tree>>, effects: &mut Vec<Effect>) {
+        if let Some((arguments, summary)) = self.helper_call(node) {
+            let arguments = arguments.into_iter().map(|argument| {
+                if let Some(place) = self.place(argument, false) {
+                    return Some(place);
+                }
+                let temporary = Place::CallResult(argument.start_byte());
+                let value = self.value(argument, effects);
+                effects.push(Effect::Write(vec![Write { target: Some(temporary), value }]));
+                Some(temporary)
+            }).collect();
+            let origins = |values: &[(super::Origin, bool)]| {
+                values.iter().cloned().map(|(mut origin, used)| {
+                    let call = (self.plan.syntax.unit, node.start_byte());
+                    if !origin.calls.contains(&call) {
+                        origin.calls.push(call);
+                        origin.calls.sort_unstable();
+                    }
+                    (origin, used)
+                }).collect()
+            };
+            effects.push(Effect::ApplyHelper {
+                arguments, demand,
+                when_discarded: summary.when_discarded.parameters.clone(),
+                when_observed: summary.when_observed.parameters.clone(),
+                origins_discarded: origins(&summary.when_discarded.origins),
+                origins_observed: origins(&summary.when_observed.origins),
+            });
+            return;
+        }
         if let Some(closure) = self.closures.literal(node) {
             let snapshots = closure
                 .snapshots

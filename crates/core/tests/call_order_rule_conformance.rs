@@ -157,6 +157,268 @@ fn every_call_order_rule_declares_a_category() {
     }
 }
 
+#[test]
+fn ignored_results_follow_imported_helper_arguments_and_returns() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("helper")).unwrap();
+    std::fs::write(root.path().join("go.mod"), "module example.com/project\n\ngo 1.22\n").unwrap();
+    std::fs::write(root.path().join("helper/helper.go"), r#"package helper
+import "os"
+func Ignore(err error) {}
+func Check(err error) { if err != nil { panic(err) } }
+func Forward(err error) error { return err }
+func Move(a, b string) error { return os.Rename(a, b) }
+func Bridge(a, b string) error { return Move(a, b) }
+"#).unwrap();
+    std::fs::write(root.path().join("main.go"), r#"package main
+import (
+    "os"
+    "example.com/project/helper"
+)
+func discarded(a, b string) {
+    err := os.Rename(a, b)
+    helper.Ignore(err)
+}
+func direct(a, b string) {
+    helper.Ignore(os.Rename(a, b))
+}
+
+func checked(a, b string) {
+    err := os.Rename(a, b)
+    helper.Check(err)
+}
+func forwarded(a, b string) error {
+    err := os.Rename(a, b)
+    return helper.Forward(err)
+}
+func ignoredReturn(a, b string) {
+    helper.Bridge(a, b)
+}
+"#).unwrap();
+    let found = run_dataflow_check(root.path(), &["main.go".into()], &[]);
+    let mut locations: Vec<_> = found.iter()
+        .filter(|finding| finding.source.rule_id.as_deref() == Some("go-os-rename-discarded-error"))
+        .map(|finding| (finding.location.path.as_str(), finding.location.range.start_line))
+        .collect();
+    locations.sort_unstable();
+    assert_eq!(locations, [("helper/helper.go", 6), ("main.go", 7), ("main.go", 11)], "{found:#?}");
+}
+
+#[test]
+fn helper_return_demand_is_kept_separate_for_each_caller() {
+    let source = r#"package storage
+import "os"
+func moveFile(a, b string) error {
+    return os.Rename(a, b)
+}
+func ignored(a, b string) {
+    moveFile(a, b)
+}
+func handled(a, b string) error {
+    return moveFile(a, b)
+}
+func mixed(a, b string) error {
+    moveFile(a, b)
+    return moveFile(a, b)
+}
+"#;
+    let root = write_single_file("storage.go", source);
+    let found = run_dataflow_check(root.path(), &["storage.go".into()], &[]);
+    let matches: Vec<_> = found.iter()
+        .filter(|finding| finding.source.rule_id.as_deref() == Some("go-os-rename-discarded-error"))
+        .map(|finding| finding.location.range.start_line)
+        .collect();
+    assert_eq!(matches, [4], "{found:#?}");
+    let mixed_only = source.replace("func ignored(a, b string) {\n    moveFile(a, b)\n}\n", "");
+    let root = write_single_file("storage.go", &mixed_only);
+    let found = run_dataflow_check(root.path(), &["storage.go".into()], &[]);
+    assert!(found.iter().any(|finding| finding.source.rule_id.as_deref() == Some("go-os-rename-discarded-error")),
+        "a used call must not hide a discarded call in the same function: {found:#?}");
+}
+
+#[test]
+fn imported_web_helpers_track_unused_promises_in_all_web_grammars() {
+    for (extension, rule) in [
+        ("js", "javascript-node-fs-discarded-promise"),
+        ("ts", "typescript-node-fs-discarded-promise"),
+        ("tsx", "typescript-node-fs-discarded-promise"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let helper = format!("helper.{extension}");
+        let caller = format!("worker.{extension}");
+        std::fs::write(root.path().join(&helper), r#"import { rename } from "node:fs/promises";
+export function discard(value) {}
+export function forward(value) { return value; }
+export function move(a, b) { return rename(a, b); }
+"#).unwrap();
+        std::fs::write(root.path().join(&caller), r#"import { rename } from "node:fs/promises";
+import { discard, forward, move } from "./helper";
+export function unused(a, b) {
+  const result = rename(a, b);
+  discard(result);
+}
+export function used(a, b) {
+  const result = rename(a, b);
+  return forward(result);
+}
+export function discardedReturn(a, b) {
+  move(a, b);
+}
+"#).unwrap();
+        let found = run_dataflow_check(root.path(), std::slice::from_ref(&caller), &[]);
+        let mut locations: Vec<_> = found.iter()
+            .filter(|finding| finding.source.rule_id.as_deref() == Some(rule))
+            .map(|finding| (finding.location.path.as_str(), finding.location.range.start_line))
+            .collect();
+        locations.sort_unstable();
+        assert_eq!(locations, [(helper.as_str(), 4), (caller.as_str(), 4)], "{extension}: {found:#?}");
+    }
+}
+
+#[test]
+fn imported_jvm_helpers_preserve_result_usage() {
+    let cases = [
+        (
+            "Java", "java-discarded-objects-comparison", "app/Worker.java", "support/Checks.java",
+            r#"package support;
+import java.util.Objects;
+public class Checks {
+    public static void discard(boolean value) {}
+    public static boolean forward(boolean value) { return value; }
+    public static boolean compare(Object a, Object b) { return Objects.equals(a, b); }
+}
+"#,
+            r#"package app;
+import java.util.Objects;
+import support.Checks;
+class Worker {
+    void unused(Object a, Object b) {
+        boolean same = Objects.equals(a, b);
+        Checks.discard(same);
+    }
+    boolean used(Object a, Object b) {
+        boolean same = Objects.equals(a, b);
+        return Checks.forward(same);
+    }
+    void dropped(Object a, Object b) { Checks.compare(a, b); }
+}
+"#,
+            6, 6,
+        ),
+        (
+            "Kotlin", "kotlin-discarded-run-catching-result", "app/Worker.kt", "support/Checks.kt",
+            r#"package support
+import kotlin.runCatching
+fun discard(value: Result<Int>) {}
+fun forward(value: Result<Int>): Result<Int> = value
+fun parse(value: String): Result<Int> = runCatching { value.toInt() }
+"#,
+            r#"package app
+import kotlin.runCatching
+import support.discard
+import support.forward
+import support.parse
+fun unused(text: String) {
+    val parsed = runCatching { text.toInt() }
+    discard(parsed)
+}
+fun used(text: String): Result<Int> {
+    val parsed = runCatching { text.toInt() }
+    return forward(parsed)
+}
+fun dropped(text: String) { parse(text) }
+"#,
+            7, 5,
+        ),
+    ];
+    for (language, rule, caller, helper, helper_source, caller_source, caller_line, helper_line) in cases {
+        let root = tempfile::tempdir().unwrap();
+        for (path, source) in [(caller, caller_source), (helper, helper_source)] {
+            let file = root.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, source).unwrap();
+        }
+        let found = run_dataflow_check(root.path(), &[caller.into()], &[]);
+        let mut locations: Vec<_> = found.iter()
+            .filter(|finding| finding.source.rule_id.as_deref() == Some(rule))
+            .map(|finding| (finding.location.path.as_str(), finding.location.range.start_line))
+            .collect();
+        locations.sort_unstable();
+        assert_eq!(locations, [(caller, caller_line), (helper, helper_line)], "{language}: {found:#?}");
+    }
+}
+
+#[test]
+fn imported_rust_helpers_preserve_result_usage() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::write(root.path().join("src/support.rs"), r#"use std::fs::remove_file;
+pub(crate) fn discard(value: std::io::Result<()>) {}
+pub(crate) fn forward(value: std::io::Result<()>) -> std::io::Result<()> { value }
+pub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }
+"#).unwrap();
+    std::fs::write(root.path().join("src/lib.rs"), r#"mod support;
+use std::fs::remove_file;
+fn unused(path: &str) {
+    let result = remove_file(path);
+    support::discard(result);
+}
+fn used(path: &str) -> std::io::Result<()> {
+    let result = remove_file(path);
+    support::forward(result)
+}
+fn dropped(path: &str) {
+    support::remove(path);
+}
+"#).unwrap();
+    let found = run_dataflow_check(root.path(), &["src/lib.rs".into()], &[]);
+    let mut locations: Vec<_> = found.iter()
+        .filter(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result"))
+        .map(|finding| (finding.location.path.as_str(), finding.location.range.start_line))
+        .collect();
+    locations.sort_unstable();
+    assert_eq!(locations, [("src/lib.rs", 4), ("src/support.rs", 4)], "{found:#?}");
+}
+
+#[test]
+fn recursive_helpers_propagate_argument_use_and_returned_results() {
+    let source = r#"package storage
+import "os"
+func discardAtEnd(err error, depth int) {
+    if depth > 0 { discardAtEnd(err, depth - 1) }
+}
+func checkAtEnd(err error, depth int) {
+    if depth > 0 { checkAtEnd(err, depth - 1); return }
+    if err != nil { panic(err) }
+}
+func moveAtEnd(a, b string, depth int) error {
+    if depth > 0 { return moveAtEnd(a, b, depth - 1) }
+    return os.Rename(a, b)
+}
+func unused(a, b string) {
+    err := os.Rename(a, b)
+    discardAtEnd(err, 3)
+}
+func used(a, b string) {
+    err := os.Rename(a, b)
+    checkAtEnd(err, 3)
+}
+func discardedReturn(a, b string) {
+    moveAtEnd(a, b, 3)
+}
+func handledReturn(a, b string) error {
+    return moveAtEnd(a, b, 3)
+}
+"#;
+    let root = write_single_file("storage.go", source);
+    let found = run_dataflow_check(root.path(), &["storage.go".into()], &[]);
+    let mut lines: Vec<_> = found.iter()
+        .filter(|finding| finding.source.rule_id.as_deref() == Some("go-os-rename-discarded-error"))
+        .map(|finding| finding.location.range.start_line).collect();
+    lines.sort_unstable();
+    assert_eq!(lines, [12, 15], "{found:#?}");
+}
+
 const ASSIGNED_RESULT_CASES: [(&str, &str, &str); 4] = [
     ("move.go", "go-os-rename-discarded-error", r#"package storage
 import "os"

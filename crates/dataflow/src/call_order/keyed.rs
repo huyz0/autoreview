@@ -10,7 +10,7 @@ use super::{CallOrderHit, CallOrderSpec, EntryHit};
 
 mod contracts;
 mod helpers;
-mod program;
+pub(super) mod program;
 mod state;
 use program::Program;
 pub use program::{KeyedFunction, KeyedImport, KeyedUnit};

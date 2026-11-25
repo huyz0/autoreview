@@ -162,7 +162,7 @@ fn callee(call: Node<'_>) -> Option<Node<'_>> {
         .or_else(|| call.named_child(0))
 }
 
-fn arguments(call: Node<'_>) -> Option<Node<'_>> {
+pub(crate) fn arguments(call: Node<'_>) -> Option<Node<'_>> {
     call.child_by_field_name("arguments")
         .or_else(|| children(call).find(|node| node.kind() == "value_arguments"))
 }
@@ -187,7 +187,7 @@ fn receiver(call: Node<'_>) -> Option<Node<'_>> {
     }
 }
 
-fn argument(node: Node<'_>) -> Option<Node<'_>> {
+pub(crate) fn argument(node: Node<'_>) -> Option<Node<'_>> {
     match node.kind() {
         "value_argument" => {
             let mut parts = children(node);

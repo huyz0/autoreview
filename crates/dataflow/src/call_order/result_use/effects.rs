@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use tree_sitter::Node;
 
 use crate::cfg::{Cfg, Evaluation, Stmt};
@@ -8,15 +9,17 @@ use super::closures::{Closure, Closures};
 use super::places::{Place, Places};
 use super::references::captured_names;
 use super::syntax::{items as assignment_items, targets as assignment_targets, transparent};
-use super::{Analysis, Body, ContractLanguage, Flow, Live, Plan};
+use super::{Analysis, Body, ContractLanguage, Flow, HelperSummary, Live, Plan};
 
 mod reads;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct Origin {
     pub(super) call: String,
     pub(super) start: usize,
     pub(super) line: u32,
+    pub(super) path: Option<String>,
+    pub(super) calls: Vec<(usize, usize)>,
 }
 
 pub(super) enum Value {
@@ -34,6 +37,14 @@ pub(super) enum Effect {
     Read(Place),
     Write(Vec<Write>),
     Invoke(usize, Demand),
+    ApplyHelper {
+        arguments: Vec<Option<Place>>,
+        demand: Demand,
+        when_discarded: Vec<bool>,
+        when_observed: Vec<bool>,
+        origins_discarded: Vec<(Origin, bool)>,
+        origins_observed: Vec<(Origin, bool)>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -53,12 +64,17 @@ impl Demand {
     }
 }
 
-pub(super) fn lower<'src>(plan: &Plan<'_, 'src>, function: &KeyedFunction<'_, '_>, source: &'src [u8]) -> Analysis {
+pub(super) fn lower<'src>(
+    plan: &Plan<'_, 'src>, function: &KeyedFunction<'_, '_>, source: &'src [u8],
+    returns_to_caller: bool,
+    helpers: &BTreeMap<usize, HelperSummary>,
+) -> Analysis {
     let language = plan.spec.contract.as_ref().unwrap().language;
     let mut places = Places::new(plan, function.node, source);
     let closures = Closures::scan(function.node, language, &places, source);
     places.exclude_captures(captured_names(function.node, source, language, |node| closures.literal(node).is_some()));
-    let lower = Lower { plan, source, language, places: &places, closures: &closures, inside: None };
+    let return_tail = returns_to_caller.then(|| function_return_tail(function.node, language)).flatten();
+    let lower = Lower { plan, source, language, places: &places, closures: &closures, inside: None, returns_to_caller, return_tail, helpers };
     let owner = lower.body(function.node, function.graph);
     let bodies = closures
         .bodies
@@ -83,6 +99,9 @@ struct Lower<'plan, 'src, 'tree> {
     places: &'plan Places<'plan, 'src>,
     closures: &'plan Closures<'tree>,
     inside: Option<&'plan Closure<'tree>>,
+    returns_to_caller: bool,
+    return_tail: Option<Node<'tree>>,
+    helpers: &'plan BTreeMap<usize, HelperSummary>,
 }
 
 impl Lower<'_, '_, '_> {
@@ -106,6 +125,16 @@ impl Lower<'_, '_, '_> {
     }
 
     fn statement(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
+        if self.inside.is_none() && self.returns_to_caller {
+            if let Some(value) = return_value(node).or_else(|| {
+                self.return_tail.filter(|tail| tail.byte_range() == node.byte_range() && tail.kind() == node.kind())
+                    .map(|_| node)
+            }) {
+                let value = self.value(value, effects);
+                effects.push(Effect::Write(vec![Write { target: Some(Place::Return), value }]));
+                return;
+            }
+        }
         if let Some(closure) = self.inside {
             if let Some(value) = closure_result(node, closure) {
                 let value = self.value(value, effects);
@@ -208,7 +237,7 @@ impl Lower<'_, '_, '_> {
         if let Some(binding) = self.place(value, false) {
             return Value::Copy(binding);
         }
-        if self.closure_call(value).is_some() {
+        if self.closure_call(value).is_some() || self.helper_call(value).is_some() {
             let output = Place::CallResult(value.start_byte());
             self.reads_with(value, effects, Demand::Slot(output));
             return Value::Copy(output);
@@ -272,14 +301,13 @@ impl Lower<'_, '_, '_> {
         }
         let call = site::name(node, self.source)?;
         self.plan.source_mode(&call)?;
-        Some(Origin { call, start: node.start_byte(), line: node.start_position().row as u32 + 1 })
+        Some(Origin { call, start: node.start_byte(), line: node.start_position().row as u32 + 1, path: None, calls: Vec::new() })
     }
 }
 
 fn closure_result<'tree>(node: Node<'tree>, closure: &Closure<'_>) -> Option<Node<'tree>> {
-    if matches!(node.kind(), "return_statement" | "return_expression") {
-        let values = assignment_items(site::children(node).next()?);
-        return (values.len() == 1).then(|| values[0]);
+    if let Some(value) = return_value(node) {
+        return Some(value);
     }
     if closure.tail.is_some_and(|tail| tail.byte_range() == node.byte_range() && tail.kind() == node.kind())
         && !matches!(node.kind(), "assignment" | "assignment_expression" | "property_declaration")
@@ -287,4 +315,26 @@ fn closure_result<'tree>(node: Node<'tree>, closure: &Closure<'_>) -> Option<Nod
         return Some(node);
     }
     None
+}
+
+fn return_value(node: Node<'_>) -> Option<Node<'_>> {
+    if !matches!(node.kind(), "return_statement" | "return_expression") {
+        return None;
+    }
+    let values = assignment_items(site::children(node).next()?);
+    (values.len() == 1).then(|| values[0])
+}
+
+fn function_return_tail(node: Node<'_>, language: ContractLanguage) -> Option<Node<'_>> {
+    match language {
+        ContractLanguage::Rust => {
+            let body = node.child_by_field_name("body")?;
+            site::children(body).last().filter(|tail| {
+                !matches!(tail.kind(), "expression_statement" | "let_declaration"
+                    | "return_expression" | "if_expression" | "match_expression")
+            })
+        }
+        ContractLanguage::Kotlin => crate::lower::kotlin::expression_body(node),
+        _ => None,
+    }
 }
