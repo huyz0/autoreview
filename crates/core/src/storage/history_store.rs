@@ -594,24 +594,10 @@ pub struct KnownVerdict {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use autoreview_schema::{Finding, FindingFingerprints, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
+    use autoreview_schema::{Finding, FindingSource, FindingSourceKind};
 
     fn make_finding(fingerprint: &str) -> Finding {
-        Finding {
-            id: format!("f-{fingerprint}"),
-            fingerprints: FindingFingerprints { primary: fingerprint.to_string(), secondary: None },
-            source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "ast-grep".into(), rule_id: Some("go-no-self-comparison".into()), aspect: None, backend: None },
-            category: "correctness".into(),
-            severity: Severity::Medium,
-            confidence: 1.0,
-            title: "t".into(),
-            message: "m".into(),
-            location: Location { path: "a.go".into(), range: LocationRange { start_line: 1, start_col: None, end_line: None, end_col: None }, snippet: "x".into(), side: Side::New },
-            related_locations: None,
-            suggestion: None,
-            tags: None,
-            meta: None,
-        }
+        autoreview_test_support::sample_finding(fingerprint, Some("go-no-self-comparison"), None)
     }
 
     fn make_agent_finding(fingerprint: &str, title: &str, message: &str) -> Finding {

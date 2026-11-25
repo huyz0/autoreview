@@ -393,6 +393,29 @@ fn gate_paths(snapshot: &Path, root: &Path, files: &[autoreview_core::FileChange
     Ok(paths)
 }
 
+fn gate_evidence(repo: &Path, suite: &Suite) -> anyhow::Result<Vec<RuleScore>> {
+    let evidence = scores(&replay(repo, suite, true)?);
+    for rule in &suite.gate {
+        let qualified = evidence
+            .iter()
+            .find(|entry| &entry.rule == rule)
+            .is_some_and(|entry| {
+                let score = &entry.score;
+                score.distinct_fix_pairs >= MIN_GATE_PAIRS
+                    && score.false_negatives == 0
+                    && score
+                        .precision
+                        .is_some_and(|precision| precision >= MIN_GATE_PRECISION as f64 / 100.0)
+            });
+        if !qualified {
+            println!("{}", serde_json::to_string_pretty(&evidence)?);
+            anyhow::bail!("gate rule '{}' needs {MIN_GATE_PAIRS} distinct verified fix pairs, at least {MIN_GATE_PRECISION}% labelled precision, and zero missed labels", rule.id);
+        }
+    }
+
+    Ok(evidence)
+}
+
 pub(crate) fn run_gate(repo: &Path, base: &str, head: &str) -> anyhow::Result<()> {
     let base = resolve_commit(repo, base)?;
     let head = resolve_commit(repo, head)?;
@@ -417,24 +440,7 @@ pub(crate) fn run_gate(repo: &Path, base: &str, head: &str) -> anyhow::Result<()
             .or_default()
             .extend(validate_gate_rule(rule)?);
     }
-    let evidence = scores(&replay(repo, &suite, true)?);
-    for rule in &suite.gate {
-        let qualified = evidence
-            .iter()
-            .find(|entry| &entry.rule == rule)
-            .is_some_and(|entry| {
-                let score = &entry.score;
-                score.distinct_fix_pairs >= MIN_GATE_PAIRS
-                    && score.false_negatives == 0
-                    && score
-                        .precision
-                        .is_some_and(|precision| precision >= MIN_GATE_PRECISION as f64 / 100.0)
-            });
-        if !qualified {
-            println!("{}", serde_json::to_string_pretty(&evidence)?);
-            anyhow::bail!("gate rule '{}' needs {MIN_GATE_PAIRS} distinct verified fix pairs, at least {MIN_GATE_PRECISION}% labelled precision, and zero missed labels", rule.id);
-        }
-    }
+    let evidence = gate_evidence(repo, &suite)?;
 
     let facts = autoreview_core::collect_diff_facts(&repo.to_string_lossy(), &base, &head, None)?;
     let lines = ChangedLines::load(repo, &base, &head)?;

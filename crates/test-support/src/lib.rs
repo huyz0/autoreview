@@ -22,6 +22,19 @@ pub fn sample_review_report() -> autoreview_schema::ReviewReport {
     }
 }
 
+pub fn sample_finding(fingerprint: &str, rule_id: Option<&str>, aspect: Option<&str>) -> autoreview_schema::Finding {
+    use autoreview_schema::{Finding, FindingFingerprints, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
+    Finding {
+        id: format!("f-{fingerprint}"),
+        fingerprints: FindingFingerprints { primary: fingerprint.into(), secondary: None },
+        source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "ast-grep".into(), rule_id: rule_id.map(str::to_owned), aspect: aspect.map(str::to_owned), backend: None },
+        category: "correctness".into(), severity: Severity::Medium, confidence: 1.0,
+        title: "t".into(), message: "m".into(),
+        location: Location { path: "a.go".into(), range: LocationRange { start_line: 1, ..Default::default() }, snippet: "x".into(), side: Side::New },
+        related_locations: None, suggestion: None, tags: None, meta: None,
+    }
+}
+
 pub struct TestRepo {
     dir: tempfile::TempDir,
 }

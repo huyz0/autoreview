@@ -82,28 +82,14 @@ pub fn append_event_log(history_dir: &Path, date: &str, host: &str, events: &[Ev
 #[cfg(test)]
 mod tests {
     use super::*;
-    use autoreview_schema::{Finding, FindingFingerprints, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
+    use autoreview_schema::Finding;
 
     fn make_report(findings: Vec<Finding>) -> ReviewReport {
         ReviewReport { findings, ..autoreview_test_support::sample_review_report() }
     }
 
     fn make_finding(fingerprint: &str, rule_id: Option<&str>, aspect: Option<&str>) -> Finding {
-        Finding {
-            id: format!("f-{fingerprint}"),
-            fingerprints: FindingFingerprints { primary: fingerprint.to_string(), secondary: None },
-            source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "ast-grep".into(), rule_id: rule_id.map(String::from), aspect: aspect.map(String::from), backend: None },
-            category: "correctness".into(),
-            severity: Severity::Medium,
-            confidence: 1.0,
-            title: "t".into(),
-            message: "m".into(),
-            location: Location { path: "a.go".into(), range: LocationRange { start_line: 1, start_col: None, end_line: None, end_col: None }, snippet: "x".into(), side: Side::New },
-            related_locations: None,
-            suggestion: None,
-            tags: None,
-            meta: None,
-        }
+        autoreview_test_support::sample_finding(fingerprint, rule_id, aspect)
     }
 
     #[test]
