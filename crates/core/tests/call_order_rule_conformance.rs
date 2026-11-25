@@ -463,6 +463,33 @@ fn rust_unresolved_imports_identify_each_used_name() {
 }
 
 #[test]
+fn rust_private_parent_module_imports_preserve_helper_result_usage() {
+    let root = tempfile::tempdir().unwrap();
+    let src = root.path().join("src");
+    std::fs::create_dir_all(src.join("parent")).unwrap();
+    std::fs::write(src.join("lib.rs"), "mod support; mod parent;\n").unwrap();
+    std::fs::write(src.join("support.rs"), RUST_RESULT_HELPERS).unwrap();
+    let worker = RUST_WORKER.replace("use crate::support as tasks;", "use super::tasks;");
+    std::fs::write(src.join("parent/worker.rs"), worker).unwrap();
+    std::fs::write(src.join("parent.rs"), "use super::support as tasks; mod worker;\n").unwrap();
+    assert_helper_locations(root.path(), "src/parent/worker.rs", "rust-discarded-remove-file-result", &[("src/parent/worker.rs", 4), ("src/support.rs", 4)]);
+    let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/parent/worker.rs".into()], &[]);
+    assert!(!result.coverage.iter().any(|issue| issue.reason == "unresolved_rust_module_import" && issue.path.as_deref() == Some("src/parent/worker.rs")), "{:?}", result.coverage);
+    for parent in [
+        "#[cfg(feature = \"optional\")] use super::support as tasks; mod worker;\n",
+        "use super::support as tasks; use super::other as tasks; mod worker;\n",
+        "use super::support as tasks; use super::other::*; mod worker;\n",
+        "use super::{support as tasks, other::{x}}; mod worker;\n",
+        "use super::support as tasks; generated_items!(); mod worker;\n",
+    ] {
+        std::fs::write(src.join("parent.rs"), parent).unwrap();
+        let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/parent/worker.rs".into()], &[]);
+        assert!(result.coverage.iter().any(|issue| issue.reason == "unresolved_rust_module_import" && issue.path.as_deref() == Some("src/parent/worker.rs")), "{parent}: {:?}", result.coverage);
+        assert!(!result.findings.iter().any(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result")), "{parent}: {:?}", result.findings);
+    }
+}
+
+#[test]
 fn rust_module_aliases_preserve_helper_result_usage() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("src")).unwrap();

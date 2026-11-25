@@ -1,5 +1,8 @@
 use std::collections::HashSet;
 
+mod parent;
+use parent::private_parent_namespace;
+
 use super::{children, issue, text, AnalysisCoverageIssue, ImportSource, KeyedExport, KeyedImport, Language, Node, Path, PathBuf, Resolver};
 
 impl ImportSource<'_> {
@@ -153,7 +156,8 @@ fn rust_uses(
             (module, module.rsplit("::").next().unwrap_or(module))
         } else { (qualified, member) };
         let local = format!("{}::", alias.unwrap_or(default));
-        let namespace = (!conditional).then(|| reexport_module(resolver, path, module_path)).flatten();
+        let namespace = (!conditional).then(|| reexport_module(resolver, path, module_path)
+            .or_else(|| private_parent_namespace(resolver, path, module_path))).flatten();
         if let Some(file) = namespace {
             if let Some(binding) = resolver.binding(&file, &local, None, None, true) { bindings.push(binding); }
         } else if is_relative(module_path) {
