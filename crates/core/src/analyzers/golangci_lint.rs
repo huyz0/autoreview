@@ -399,10 +399,7 @@ mod tests {
             ("nested/child/helper.go", "package child\nfunc helper() error { return nil }\n"),
         ]);
         let findings = run_golangci_lint(dir.path(), &["root.go".into(), "nested/child/changed.go".into()]).unwrap();
-        assert_eq!(findings.len(), 2, "{findings:#?}");
-        for path in ["root.go", "nested/child/changed.go"] {
-            assert!(findings.iter().any(|finding| finding.location.path == path && finding.source.rule_id.as_deref() == Some("errcheck")), "{findings:#?}");
-        }
+        assert_errcheck_paths(&findings, &["root.go", "nested/child/changed.go"]);
     }
 
     #[test]
@@ -432,9 +429,13 @@ mod tests {
         ]);
         std::fs::remove_file(dir.path().join("go.mod")).unwrap();
         let findings = run_golangci_lint(dir.path(), &["one/main.go".into(), "two/main.go".into()]).unwrap();
-        assert_eq!(findings.len(), 2, "{findings:#?}");
-        for path in ["one/main.go", "two/main.go"] {
-            assert!(findings.iter().any(|finding| finding.location.path == path && finding.source.rule_id.as_deref() == Some("errcheck")), "{findings:#?}");
+        assert_errcheck_paths(&findings, &["one/main.go", "two/main.go"]);
+    }
+
+    fn assert_errcheck_paths(findings: &[AgentFinding], paths: &[&str]) {
+        assert_eq!(findings.len(), paths.len(), "{findings:#?}");
+        for path in paths {
+            assert!(findings.iter().any(|finding| finding.location.path == *path && finding.source.rule_id.as_deref() == Some("errcheck")), "{findings:#?}");
         }
     }
 
