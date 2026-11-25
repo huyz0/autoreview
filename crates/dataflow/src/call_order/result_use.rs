@@ -20,6 +20,12 @@ use super::{
 use effects::{Demand, Effect, HelperCall, Origin, Value, Write};
 use places::Place;
 
+/// Candidate call sites and limitations discovered while inspecting them.
+pub struct FactorySourceDiscovery {
+    pub candidates: BTreeMap<usize, BTreeSet<usize>>,
+    pub limitations: Vec<super::keyed::KeyedLimitation>,
+}
+
 /// Discover direct imported calls with factory-return annotation evidence.
 /// This returns syntactic candidates only: callers must independently prove
 /// that `Promise` denotes the intended project type before treating them as
@@ -29,9 +35,21 @@ pub fn discover_factory_sources(
     spec: &CallOrderSpec,
     modules: &[crate::promise_types::TypeModule<'_>],
     units: &[KeyedUnit<'_, '_, '_>],
-) -> BTreeMap<usize, BTreeSet<usize>> {
+) -> FactorySourceDiscovery {
+    if modules.len() != units.len() || modules.iter().zip(units).any(|(module, unit)| module.path != unit.path || module.source != unit.source) {
+        return FactorySourceDiscovery {
+            candidates: BTreeMap::new(),
+            limitations: vec![super::keyed::KeyedLimitation { reason: "factory_module_graph_incomplete", path: None, line: None }],
+        };
+    }
     let program = Program::new(spec, units);
     let mut result = BTreeMap::<usize, BTreeSet<usize>>::new();
+    let mut limitations = Vec::new();
+    for (index, module) in modules.iter().enumerate() {
+        if crate::promise_types::module_bindings(module, index).is_none() {
+            limitations.push(super::keyed::KeyedLimitation { reason: "factory_binding_inventory_incomplete", path: Some(module.path.to_owned()), line: None });
+        }
+    }
     let mut cache = BTreeMap::<(usize, String, usize), bool>::new();
     for (function, frame) in units.iter().flat_map(|unit| unit.functions.iter()).zip(&program.frames) {
         let Some(plan) = &frame.plan else { continue };
@@ -44,13 +62,19 @@ pub fn discover_factory_sources(
                     let valid = *cache.entry((frame.unit, name.to_owned(), arity)).or_insert_with(|| {
                         crate::promise_types::imported_factory_evidence(modules, units, frame.unit, name, arity).is_some()
                     });
-                    if valid { result.entry(frame.unit).or_default().insert(node.start_byte()); }
+                    if valid && result.entry(frame.unit).or_default().insert(node.start_byte()) {
+                        limitations.push(super::keyed::KeyedLimitation {
+                            reason: "promise_type_unresolved",
+                            path: Some(unit.path.to_owned()),
+                            line: Some(node.start_position().row as u32 + 1),
+                        });
+                    }
                 }
             }
             pending.extend(node.named_children(&mut node.walk()));
         }
     }
-    result
+    FactorySourceDiscovery { candidates: result, limitations }
 }
 
 fn direct_call<'a>(node: tree_sitter::Node<'_>, source: &'a [u8]) -> Option<(&'a str, usize)> {
@@ -443,6 +467,23 @@ mod tests {
     }
 
     #[test]
+    fn factory_discovery_reports_incomplete_graph_and_inventory() {
+        use crate::promise_types::TypeModule;
+        let source = "const { value } = source;";
+        let tree = autoreview_langsupport::parser_for(Language::TypeScript).unwrap().parse(source, None).unwrap();
+        let modules = [TypeModule { path: "main.ts", source: source.as_bytes(), root: tree.root_node() }];
+        let units = [KeyedUnit { path: "main.ts", source: source.as_bytes(), functions: &[], imports: &[], exports: &[], entry: true }];
+        test_support::with_program((Language::TypeScript, ContractLanguage::Web), "function dummy() {}", ("unused", "missing"), |program, _| {
+            let spec = program.frames[0].plan.as_ref().unwrap().spec;
+            let incomplete = discover_factory_sources(spec, &modules, &units);
+            assert_eq!(incomplete.limitations[0].reason, "factory_binding_inventory_incomplete");
+            let mismatch = discover_factory_sources(spec, &modules, &[]);
+            assert_eq!(mismatch.limitations[0].reason, "factory_module_graph_incomplete");
+            assert!(mismatch.candidates.is_empty());
+        });
+    }
+
+    #[test]
     fn imported_factory_evidence_can_feed_result_use_without_shadowed_calls() {
         use crate::call_order::{KeyedExport, KeyedFunction, KeyedImport};
         use crate::promise_types::TypeModule;
@@ -459,7 +500,10 @@ mod tests {
         let units: Vec<_> = modules.iter().enumerate().map(|(i, module)| KeyedUnit { path: module.path, source: module.source, functions: if i == 0 { &functions } else { &[] }, imports: &imports[i], exports: &exports[i], entry: i == 0 }).collect();
         test_support::with_program((Language::TypeScript, ContractLanguage::Web), "function dummy() {}", ("unused", "missing"), |dummy, _| {
             let spec = dummy.frames[0].plan.as_ref().unwrap().spec;
-            let offsets = discover_factory_sources(spec, &modules, &units).remove(&0).unwrap();
+            let discovery = discover_factory_sources(spec, &modules, &units);
+            assert_eq!(discovery.limitations.len(), 1);
+            assert_eq!(discovery.limitations[0].reason, "promise_type_unresolved");
+            let offsets = discovery.candidates.get(&0).unwrap().clone();
             assert_eq!(offsets.len(), 1);
             let (hits, exhausted, _) = check_units_with_sources(spec, &units, &BTreeMap::from([(0, offsets)]));
             assert!(!exhausted);
