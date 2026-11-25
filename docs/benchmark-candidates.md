@@ -54,6 +54,13 @@ establish general precision or recall.
   This is expected from its documented factory-only scope and must not be
   counted as a false-negative score for that rule. The cases are candidates
   for a general typed promise-result rule, not completed benchmark cases.
+- The factory scan selected no candidates, so that experiment does not prove
+  that the compiler could type-check these snapshots. The pinned TypeScript
+  3.6.4 compiler lacks the probe's `getAwaitedType` API. A separate TypeScript
+  5.9.3 check with the original project configuration reports type errors,
+  including errors in the old Node declarations and catch variables. A scored
+  replay needs a justified, reproducible compatible compiler configuration;
+  it must not silently bypass those errors.
 
 To turn these into scored cases, the general rule needs to prove the return
 type of ordinary imported functions and class methods, track the particular

@@ -24,6 +24,7 @@ pub fn verify_candidates(
     options: &CheckerConfig<'_>, units: &[KeyedUnit<'_, '_, '_>], discovery: FactorySourceDiscovery,
 ) -> FactorySourceDiscovery {
     let mut verified = BTreeMap::<usize, BTreeSet<usize>>::new();
+    let mut classified = BTreeMap::<usize, BTreeSet<usize>>::new();
     let mut limitations = discovery.limitations;
     let Some(batch) = collect_calls(options.root, units, &discovery.candidates) else {
         limitations.push(checker_limitation());
@@ -35,12 +36,15 @@ pub fn verify_candidates(
             Some(result) if result.status == "ok" => {
                 for ((unit, start), result) in batch.positions.iter().copied().zip(result.calls.unwrap_or_default()) {
                     if result.status == "promise_like" { verified.entry(unit).or_default().insert(start); }
+                    if matches!(result.status.as_str(), "promise_like" | "not_promise") {
+                        classified.entry(unit).or_default().insert(start);
+                    }
                 }
             }
             _ => limitations.push(checker_limitation()),
         }
     }
-    retain_unresolved(&mut limitations, units, &discovery.candidates, &verified);
+    retain_unresolved(&mut limitations, units, &discovery.candidates, &classified);
     FactorySourceDiscovery { candidates: verified, limitations }
 }
 
