@@ -51,19 +51,7 @@ func loadPackage(fset *token.FileSet, dir, binary string) (loadedPackage, string
 	if !filepath.IsAbs(dir) || !filepath.IsAbs(binary) {
 		return loadedPackage{}, "invalid_package_config"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, binary, "list", "-deps", "-export", "-json", ".")
-	command.Dir = dir
-	command.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "GOFLAGS=")
-	var output limitedBuffer
-	output.limit = maxListOutput
-	command.Stdout = &output
-	command.Stderr = io.Discard
-	if command.Run() != nil {
-		return loadedPackage{}, "package_load_failed"
-	}
-	packages, ok := decodePackages(output.Bytes())
+	packages, ok := listPackages(dir, binary)
 	if !ok {
 		return loadedPackage{}, "package_load_failed"
 	}
@@ -82,6 +70,22 @@ func loadPackage(fset *token.FileSet, dir, binary string) (loadedPackage, string
 		return os.Open(exports[path])
 	}
 	return loadedPackage{files: sources, importer: importer.ForCompiler(fset, "gc", lookup), path: target.ImportPath}, ""
+}
+
+func listPackages(dir, binary string) ([]listedPackage, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, binary, "list", "-deps", "-export", "-json", ".")
+	command.Dir = dir
+	command.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "GOFLAGS=")
+	var output limitedBuffer
+	output.limit = maxListOutput
+	command.Stdout = &output
+	command.Stderr = io.Discard
+	if command.Run() != nil {
+		return nil, false
+	}
+	return decodePackages(output.Bytes())
 }
 
 func decodePackages(data []byte) ([]listedPackage, bool) {
@@ -128,25 +132,35 @@ func readSources(target listedPackage) ([]sourceFile, bool) {
 	sources := make([]sourceFile, 0, len(target.GoFiles))
 	size := int64(0)
 	for _, name := range target.GoFiles {
-		if filepath.Base(name) != name {
+		source, ok := readSource(target.Dir, name, maxPackageSource-size)
+		if !ok {
 			return nil, false
 		}
-		path := filepath.Join(target.Dir, name)
-		info, err := os.Stat(path)
-		if err != nil || !info.Mode().IsRegular() {
-			return nil, false
-		}
-		size += info.Size()
-		if size > maxPackageSource {
-			return nil, false
-		}
-		data, err := os.ReadFile(path)
-		if err != nil || int64(len(data)) != info.Size() {
-			return nil, false
-		}
-		sources = append(sources, sourceFile{Path: name, Source: string(data)})
+		size += int64(len(source.Source))
+		sources = append(sources, source)
 	}
 	return sources, len(sources) > 0
+}
+
+func readSource(dir, name string, remaining int64) (sourceFile, bool) {
+	if filepath.Base(name) != name {
+		return sourceFile{}, false
+	}
+	path := filepath.Join(dir, name)
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > remaining {
+		return sourceFile{}, false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return sourceFile{}, false
+	}
+	defer func() { _ = file.Close() }()
+	data, err := io.ReadAll(io.LimitReader(file, remaining+1))
+	if err != nil || int64(len(data)) != info.Size() || int64(len(data)) > remaining {
+		return sourceFile{}, false
+	}
+	return sourceFile{Path: name, Source: string(data)}, true
 }
 
 func matchesExpectedSources(files []sourceFile, calls []callSite, expected map[string]string) bool {

@@ -45,29 +45,17 @@ type response struct {
 
 func analyze(req request) response {
 	fset := token.NewFileSet()
-	config := types.Config{Importer: importer.Default(), Error: func(error) {}}
-	packagePath := "autoreview.local/package"
-	if req.PackageDir != "" || req.GoBinary != "" {
-		if len(req.Files) != 0 {
-			return incomplete("invalid_request")
-		}
-		loaded, reason := loadPackage(fset, req.PackageDir, req.GoBinary)
-		if reason != "" {
-			return incomplete(reason)
-		}
-		req.Files = loaded.files
-		config.Importer = loaded.importer
-		packagePath = loaded.path
-		if !matchesExpectedSources(req.Files, req.Calls, req.ExpectedSources) {
-			return incomplete("source_mismatch")
-		}
+	loaded, reason := preparePackage(fset, req)
+	if reason != "" {
+		return incomplete(reason)
 	}
-	files, byPath, reason := parseFiles(fset, req.Files)
+	config := types.Config{Importer: loaded.importer, Error: func(error) {}}
+	files, byPath, reason := parseFiles(fset, loaded.files)
 	if reason != "" {
 		return incomplete(reason)
 	}
 	info := &types.Info{Types: make(map[ast.Expr]types.TypeAndValue)}
-	if _, err := config.Check(packagePath, fset, files, info); err != nil {
+	if _, err := config.Check(loaded.path, fset, files, info); err != nil {
 		return incomplete("type_errors")
 	}
 	indexes := indexCalls(fset, byPath)
@@ -76,6 +64,23 @@ func analyze(req request) response {
 		result.Calls = append(result.Calls, callResult{Path: call.Path, Start: call.Start, Status: callStatus(indexes[call.Path][call.Start], info)})
 	}
 	return result
+}
+
+func preparePackage(fset *token.FileSet, req request) (loadedPackage, string) {
+	if req.PackageDir == "" && req.GoBinary == "" {
+		return loadedPackage{files: req.Files, importer: importer.Default(), path: "autoreview.local/package"}, ""
+	}
+	if len(req.Files) != 0 {
+		return loadedPackage{}, "invalid_request"
+	}
+	loaded, reason := loadPackage(fset, req.PackageDir, req.GoBinary)
+	if reason != "" {
+		return loadedPackage{}, reason
+	}
+	if !matchesExpectedSources(loaded.files, req.Calls, req.ExpectedSources) {
+		return loadedPackage{}, "source_mismatch"
+	}
+	return loaded, ""
 }
 
 func parseFiles(fset *token.FileSet, sources []sourceFile) ([]*ast.File, map[string]*ast.File, string) {

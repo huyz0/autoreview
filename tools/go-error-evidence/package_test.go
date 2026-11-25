@@ -12,14 +12,7 @@ import (
 
 func TestPackageModeUsesBuildFilesAndLocalDependencies(t *testing.T) {
 	t.Setenv("GOFLAGS", "-tags=never")
-	binary, err := exec.LookPath("go")
-	if err != nil {
-		t.Skip("Go toolchain unavailable")
-	}
-	binary, err = filepath.Abs(binary)
-	if err != nil {
-		t.Fatal(err)
-	}
+	binary := goBinary(t)
 	dir := t.TempDir()
 	write := func(path, data string) {
 		t.Helper()
@@ -63,14 +56,7 @@ func TestPackageModeRejectsInvalidConfiguration(t *testing.T) {
 	}
 }
 func TestPackageModeReportsMissingDependency(t *testing.T) {
-	binary, err := exec.LookPath("go")
-	if err != nil {
-		t.Skip("Go toolchain unavailable")
-	}
-	binary, err = filepath.Abs(binary)
-	if err != nil {
-		t.Fatal(err)
-	}
+	binary := goBinary(t)
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.test/missing\n\ngo 1.22\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -83,4 +69,17 @@ func TestPackageModeReportsMissingDependency(t *testing.T) {
 	if got.Status != "incomplete" || got.Reason != "package_load_failed" {
 		t.Fatalf("missing dependency: %+v", got)
 	}
+}
+
+func goBinary(t *testing.T) string {
+	t.Helper()
+	binary, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("Go toolchain unavailable")
+	}
+	binary, err = filepath.Abs(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return binary
 }
