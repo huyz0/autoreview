@@ -3,14 +3,10 @@
 //! it must point to a trusted TypeScript installation.
 
 use std::io::{Read, Write};
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use autoreview_dataflow::call_order::{FactorySourceDiscovery, KeyedLimitation, KeyedUnit};
 
 const SCRIPT: &str = include_str!("typescript_promise_probe.cjs");
 const MAX_BYTES: usize = 256 * 1024;
@@ -62,96 +58,46 @@ pub fn check(node: &str, request: &TypeScriptRequest<'_>, timeout: Duration) -> 
         let _ = output_tx.send(result);
     });
     let started = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if started.elapsed() < timeout => std::thread::sleep(Duration::from_millis(10)),
-            _ => { let _ = child.kill(); let _ = child.wait(); break None; }
-        }
-    };
+    let status = wait_for_child(&mut child, started, timeout);
     let written = written_rx.recv_timeout(timeout.saturating_sub(started.elapsed())).ok()?.is_ok();
     let output = output_rx.recv_timeout(timeout.saturating_sub(started.elapsed())).ok()?.ok()?;
     if !written || !status?.success() || output.len() > MAX_BYTES { return None; }
     let result: TypeScriptResult = serde_json::from_slice(&output).ok()?;
+    valid_response(&result, request).then_some(result)
+}
+
+fn wait_for_child(child: &mut std::process::Child, started: Instant, timeout: Duration) -> Option<std::process::ExitStatus> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if started.elapsed() < timeout => std::thread::sleep(Duration::from_millis(10)),
+            _ => { let _ = child.kill(); let _ = child.wait(); return None; }
+        }
+    }
+}
+
+fn valid_response(result: &TypeScriptResult, request: &TypeScriptRequest<'_>) -> bool {
     match result.status.as_str() {
-        "incomplete" if result.reason.is_some() && result.calls.is_none() => Some(result),
+        "incomplete" if result.reason.is_some() && result.calls.is_none() => true,
         "ok" if result.reason.is_none() && result.calls.as_ref().is_some_and(|calls| {
             calls.len() == request.calls.len() && calls.iter().zip(request.calls).all(|(actual, expected)| {
                 actual.path == expected.path && actual.start == expected.start && actual.source_sha256 == expected.source_sha256
                     && matches!(actual.status.as_str(), "promise_like" | "not_proven" | "unavailable" | "source_changed")
             })
-        }) => Some(result),
-        _ => None,
+        }) => true,
+        _ => false,
     }
 }
 
-/// Keep only checker-confirmed candidates. Unverified positions retain their
-/// coverage limitations. This does not select or trust a compiler for users.
-pub fn verify_candidates(
-    node: &str, compiler: &str, config: &str, root: &Path, units: &[KeyedUnit<'_, '_, '_>],
-    discovery: FactorySourceDiscovery, timeout: Duration,
-) -> FactorySourceDiscovery {
-    let mut verified = BTreeMap::<usize, BTreeSet<usize>>::new();
-    let mut limitations = discovery.limitations;
-    let Some(root_abs) = (if root.is_absolute() { Some(root.to_path_buf()) } else { std::env::current_dir().ok().map(|cwd| cwd.join(root)) }) else {
-        limitations.push(checker_limitation());
-        return FactorySourceDiscovery { candidates: verified, limitations };
-    };
-    let Some(root) = root_abs.canonicalize().ok() else {
-        limitations.push(checker_limitation());
-        return FactorySourceDiscovery { candidates: verified, limitations };
-    };
-    let mut positions = Vec::new();
-    let mut calls = Vec::new();
-    for (unit_index, offsets) in &discovery.candidates {
-        let Some(unit) = units.get(*unit_index) else { continue };
-        let file = root_abs.join(unit.path);
-        if !file.canonicalize().is_ok_and(|resolved| resolved.starts_with(&root)) { continue; }
-        let Some(path) = file.to_str() else { continue };
-        let digest = format!("{:x}", Sha256::digest(unit.source));
-        for &start in offsets {
-            if start >= unit.source.len() { continue; }
-            positions.push((*unit_index, start));
-            calls.push(TypeScriptCall { path: path.to_owned(), start, source_sha256: digest.clone() });
-        }
-    }
-    if !calls.is_empty() {
-        let request = TypeScriptRequest { typescript_module: compiler, config, calls: &calls };
-        match check(node, &request, timeout) {
-            Some(result) if result.status == "ok" => {
-                for ((unit, start), result) in positions.iter().copied().zip(result.calls.unwrap_or_default()) {
-                    if result.status == "promise_like" { verified.entry(unit).or_default().insert(start); }
-                }
-            }
-            _ => limitations.push(checker_limitation()),
-        }
-    }
-    let mut unresolved = BTreeSet::new();
-    for (unit_index, offsets) in &discovery.candidates {
-        if let Some(unit) = units.get(*unit_index) {
-            for &start in offsets {
-                if !verified.get(unit_index).is_some_and(|sites| sites.contains(&start)) {
-                    let line = unit.source.get(..start).map(|bytes| bytes.iter().filter(|byte| **byte == b'\n').count() as u32 + 1);
-                    unresolved.insert((unit.path.to_owned(), line));
-                }
-            }
-        }
-    }
-    if discovery.candidates.keys().all(|index| *index < units.len()) {
-        limitations.retain(|issue| issue.reason != "promise_type_unresolved" || issue.path.as_ref().is_none_or(|path| unresolved.contains(&(path.clone(), issue.line))));
-    } else {
-        limitations.push(checker_limitation());
-    }
-    FactorySourceDiscovery { candidates: verified, limitations }
-}
-
-fn checker_limitation() -> KeyedLimitation {
-    KeyedLimitation { reason: "typescript_checker_incomplete", path: None, line: None }
-}
+mod verification;
+pub use verification::{verify_candidates, CheckerConfig};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+    use sha2::{Digest, Sha256};
+    use autoreview_dataflow::call_order::{FactorySourceDiscovery, KeyedLimitation, KeyedUnit};
 
     #[test]
     fn checker_proves_a_call_and_fails_closed() {
@@ -162,8 +108,7 @@ mod tests {
         let source = "declare function f(): Promise<void>;\nf();\n";
         std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true},"files":["sample.ts"]}"#).unwrap();
         std::fs::write(&file, source).unwrap();
-        use sha2::{Digest, Sha256};
-        let calls = [TypeScriptCall { path: file.to_string_lossy().into_owned(), start: source.rfind("f()").unwrap(), source_sha256: format!("{:x}", Sha256::digest(source.as_bytes())) }];
+                let calls = [TypeScriptCall { path: file.to_string_lossy().into_owned(), start: source.rfind("f()").unwrap(), source_sha256: format!("{:x}", Sha256::digest(source.as_bytes())) }];
         let config = config.to_string_lossy();
         let request = TypeScriptRequest { typescript_module: &compiler, config: &config, calls: &calls };
         let result = check("node", &request, Duration::from_secs(20)).unwrap();
@@ -203,12 +148,13 @@ mod tests {
             ],
         };
         let config = config.to_str().unwrap();
-        let result = verify_candidates("node", &compiler, config, dir.path(), &units, discovery(), Duration::from_secs(20));
+        let options = CheckerConfig { node: "node", compiler: &compiler, config, root: dir.path(), timeout: Duration::from_secs(20) };
+        let result = verify_candidates(&options, &units, discovery());
         assert_eq!(result.candidates[&0], BTreeSet::from([pending]));
         assert_eq!(result.limitations.len(), 1);
         assert_eq!(result.limitations[0].line, Some(4));
         std::fs::write(&file, format!("{source}\n")).unwrap();
-        let changed = verify_candidates("node", &compiler, config, dir.path(), &units, discovery(), Duration::from_secs(20));
+        let changed = verify_candidates(&options, &units, discovery());
         assert!(changed.candidates.is_empty());
         assert_eq!(changed.limitations.len(), 2);
     }
@@ -242,14 +188,16 @@ mod tests {
         let config = config_path.to_str().unwrap();
         let candidates = discover_factory_sources(&spec, &modules, &units);
         assert_eq!(candidates.candidates[&0].len(), 1);
-        let verified = verify_candidates("node", &compiler, config, dir.path(), &units, candidates, Duration::from_secs(20));
+        let options = CheckerConfig { node: "node", compiler: &compiler, config, root: dir.path(), timeout: Duration::from_secs(20) };
+        let verified = verify_candidates(&options, &units, candidates);
         assert!(verified.limitations.is_empty());
         let outcome = check_keyed_units_with_verified_sources(&spec, &units, verified);
         assert_eq!(outcome.hits.len(), 1);
         assert_eq!(outcome.hits[0].trigger_call, "upload");
         assert!(outcome.limitations.is_empty(), "{:?}", outcome.limitations.iter().map(|issue| issue.reason).collect::<Vec<_>>());
         let candidates = discover_factory_sources(&spec, &modules, &units);
-        let unavailable = verify_candidates("node", "missing-autoreview-typescript", config, dir.path(), &units, candidates, Duration::from_secs(20));
+        let unavailable_options = CheckerConfig { compiler: "missing-autoreview-typescript", ..options };
+        let unavailable = verify_candidates(&unavailable_options, &units, candidates);
         let outcome = check_keyed_units_with_verified_sources(&spec, &units, unavailable);
         assert!(outcome.hits.is_empty());
         assert!(outcome.limitations.iter().any(|item| item.reason == "promise_type_unresolved"));

@@ -5,7 +5,12 @@
 //! treating annotation evidence as a runtime promise fact.
 
 use tree_sitter::Node;
-use crate::call_order::{resolve_declaration_import, KeyedDeclaration, KeyedImport, KeyedUnit};
+use crate::call_order::{resolve_declaration_import, KeyedDeclaration, KeyedUnit};
+#[cfg(test)]
+mod direct;
+mod annotations;
+pub use annotations::{declared_return, unshadowed_promise_name};
+use annotations::parameter_bounds;
 
 /// How a declaration syntactically describes its returned value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,39 +151,6 @@ fn module_function<'a>(module: &TypeModule<'a>, name: &str) -> Option<Node<'a>> 
     }).find(|node| node.kind() == "function_declaration" && node.child_by_field_name("name").is_some_and(|value| value.utf8_text(module.source) == Ok(name)))
 }
 
-/// Resolve an immutable binding initialized by a directly imported factory.
-/// The import must come from the repository's verified module resolver. The
-/// result is syntactic evidence only: the caller must also resolve ambient
-/// type declarations before treating `Promise` as the standard type.
-pub fn imported_factory_return(
-    caller: &TypeModule<'_>, binding: &FactoryBinding, import: &KeyedImport, provider: &TypeModule<'_>,
-) -> Option<PromiseReturn> {
-    if caller.root.has_error() || provider.root.has_error() || import.local != binding.callee
-        || import.path != provider.path || !import.exported || import.owner.is_some()
-        || !binding_belongs_to(caller, binding)
-        || may_reassign(caller.root, caller.source, &binding.callee)
-        || may_reassign(caller.root, caller.source, &binding.name)
-        || !unshadowed_promise_name(provider.root, provider.source)
-        || !unique_import(caller.root, caller.source, &binding.callee)
-    {
-        return None;
-    }
-    let name = import.name.as_deref()?;
-    let function = direct_exported_factory(provider.root, provider.source, name)?;
-    if let Some(local) = function.child_by_field_name("name") {
-        let name = local.utf8_text(provider.source).ok()?;
-        if may_reassign(provider.root, provider.source, name)
-            || !unique_provider_binding(provider.root, provider.source, function, name)
-        { return None; }
-    }
-    let (minimum, maximum) = parameter_bounds(function, provider.source)?;
-    if !(minimum..=maximum).contains(&binding.arguments) { return None; }
-    match declared_return(function, provider.source)? {
-        shape @ PromiseReturn::FactoryAnnotation { .. } => Some(shape),
-        _ => None,
-    }
-}
-
 fn binding_belongs_to(module: &TypeModule<'_>, binding: &FactoryBinding) -> bool {
     if module.root.kind() != "program" { return false; }
     let Some(call) = module.root.named_descendant_for_byte_range(binding.call_start, binding.call_start.saturating_add(1)) else {
@@ -217,43 +189,6 @@ fn unique_import(root: Node<'_>, source: &[u8], name: &str) -> bool {
         if top_level_may_bind(declaration, source, name) { return false; }
     }
     imports == 1
-}
-
-fn direct_exported_factory<'tree>(root: Node<'tree>, source: &[u8], imported: &str) -> Option<Node<'tree>> {
-    let mut selected = None;
-    for statement in root.named_children(&mut root.walk()).filter(|node| node.kind() == "export_statement") {
-        let default = statement.children(&mut statement.walk()).any(|child| child.kind() == "default");
-        let Some(function) = statement.child_by_field_name("declaration").filter(|node| node.kind() == "function_declaration") else { continue };
-        let name = function.child_by_field_name("name").and_then(|name| name.utf8_text(source).ok());
-        if ((imported == "default" && default) || (!default && name == Some(imported)))
-            && selected.replace(function).is_some() {
-            return None;
-        }
-    }
-    let function = selected?;
-    let owner = function.parent()?;
-    if root.named_children(&mut root.walk()).any(|statement| {
-        statement != owner && statement.kind() == "export_statement"
-            && explicit_export_may_match(statement, source, imported)
-    }) {
-        return None;
-    }
-    Some(function)
-}
-
-fn explicit_export_may_match(statement: Node<'_>, source: &[u8], imported: &str) -> bool {
-    let default = statement.children(&mut statement.walk()).any(|child| child.kind() == "default");
-    if default { return imported == "default"; }
-    if imported != "default" {
-        if let Some(declaration) = statement.child_by_field_name("declaration") {
-            return top_level_may_bind(declaration, source, imported);
-        }
-    }
-    statement.named_children(&mut statement.walk()).filter(|node| node.kind() == "export_clause")
-        .flat_map(|clause| clause.named_children(&mut clause.walk()).collect::<Vec<_>>())
-        .filter(|item| item.kind() == "export_specifier")
-        .any(|item| item.child_by_field_name("alias").or_else(|| item.child_by_field_name("name"))
-            .is_none_or(|name| name.utf8_text(source) == Ok(imported)))
 }
 
 pub fn factory_binding(node: Node<'_>, source: &[u8]) -> Option<FactoryBinding> {
@@ -360,82 +295,10 @@ fn contains_identifier(node: Node<'_>, source: &[u8], name: &str) -> bool {
     false
 }
 
-/// Inspect a callable declaration without resolving its type names.
-pub fn declared_return(node: Node<'_>, source: &[u8]) -> Option<PromiseReturn> {
-    if !matches!(node.kind(), "function_declaration" | "function_expression" | "function_signature" | "arrow_function" | "method_definition" | "method_signature")
-        || node.children(&mut node.walk()).any(|child| child.kind() == "*")
-    {
-        return None;
-    }
-    if node.children(&mut node.walk()).any(|child| child.kind() == "async") {
-        return Some(PromiseReturn::AsyncFunction);
-    }
-    let annotation = node.child_by_field_name("return_type")?;
-    let value = unwrap_type(annotation)?;
-    if promise_type(value, source) {
-        return Some(PromiseReturn::PromiseAnnotation);
-    }
-    if value.kind() == "function_type"
-        && value.child_by_field_name("return_type").and_then(unwrap_type).is_some_and(|value| promise_type(value, source))
-    {
-        let (minimum, maximum) = parameter_bounds(value, source)?;
-        return Some(PromiseReturn::FactoryAnnotation { minimum, maximum });
-    }
-    None
-}
-
-fn parameter_bounds(function: Node<'_>, source: &[u8]) -> Option<(usize, usize)> {
-    let parameters = function.child_by_field_name("parameters")?;
-    let mut minimum = 0;
-    let mut maximum = 0;
-    let mut optional_seen = false;
-    for parameter in parameters.named_children(&mut parameters.walk()).filter(|node| node.kind() != "comment") {
-        let pattern = parameter.child_by_field_name("pattern")?;
-        if pattern.kind() != "identifier" { return None; }
-        if pattern.utf8_text(source) == Ok("this") { continue; }
-        match parameter.kind() {
-            "required_parameter" if !optional_seen => minimum += 1,
-            "optional_parameter" => optional_seen = true,
-            _ => return None,
-        }
-        maximum += 1;
-    }
-    Some((minimum, maximum))
-}
-
-/// Conservatively rule out local bindings named `Promise` in a source unit.
-///
-/// This deliberately treats other non-type references as uncertain too; it is
-/// a syntactic guard, not a substitute for project-wide TypeScript resolution.
-pub fn unshadowed_promise_name(root: Node<'_>, source: &[u8]) -> bool {
-    let mut pending = vec![root];
-    while let Some(node) = pending.pop() {
-        if matches!(node.kind(), "identifier" | "type_identifier" | "shorthand_property_identifier_pattern")
-            && node.utf8_text(source) == Ok("Promise")
-            && !node.parent().is_some_and(|parent| parent.kind() == "generic_type" && parent.child_by_field_name("name") == Some(node))
-        {
-            return false;
-        }
-        pending.extend(node.named_children(&mut node.walk()));
-    }
-    true
-}
-
-fn unwrap_type(mut node: Node<'_>) -> Option<Node<'_>> {
-    while matches!(node.kind(), "type_annotation" | "parenthesized_type") {
-        node = node.named_child(0)?;
-    }
-    Some(node)
-}
-
-fn promise_type(node: Node<'_>, source: &[u8]) -> bool {
-    node.kind() == "generic_type"
-        && node.child_by_field_name("name").is_some_and(|name| name.utf8_text(source) == Ok("Promise"))
-        && node.child_by_field_name("type_arguments").is_some_and(|arguments| arguments.named_child_count() == 1)
-}
-
 #[cfg(test)]
 mod tests {
+    use super::direct::imported_factory_return;
+    use crate::call_order::KeyedImport;
     use super::*;
     use autoreview_langsupport::{parser_for, Language};
 

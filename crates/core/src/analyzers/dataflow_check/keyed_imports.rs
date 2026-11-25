@@ -1,8 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, check_keyed_units_with_verified_sources, discover_factory_sources, keyed_flow_exhausted, KeyedCheckResult, KeyedExport, KeyedFunction, KeyedImport, KeyedUnit};
-use autoreview_dataflow::promise_types::TypeModule;
+use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, keyed_flow_exhausted, KeyedExport, KeyedFunction, KeyedImport, KeyedUnit};
 use autoreview_dataflow::lower;
 use autoreview_dataflow::cfg::{Cfg, Stmt};
 use autoreview_langsupport::{language_for_path, Language};
@@ -19,6 +18,8 @@ mod go;
 mod jvm;
 mod rust;
 mod web;
+mod typed;
+use typed::{check_typed_rule, TrustedTypeScript};
 
 const UNIT_LIMIT: usize = 64;
 
@@ -165,33 +166,6 @@ fn run_sources(
         }));
     }
     findings
-}
-
-struct TrustedTypeScript {
-    node: String,
-    compiler: String,
-    config: String,
-}
-
-impl TrustedTypeScript {
-    fn from_environment(root: &Path) -> Option<Self> {
-        let compiler = std::env::var("AUTOREVIEW_TYPESCRIPT_MODULE").ok()?;
-        if !Path::new(&compiler).is_absolute() { return None; }
-        let config = std::env::var("AUTOREVIEW_TYPESCRIPT_CONFIG").ok().map(PathBuf::from).unwrap_or_else(|| root.join("tsconfig.json"));
-        if !config.is_absolute() { return None; }
-        Some(Self { node: std::env::var("AUTOREVIEW_NODE_BINARY").unwrap_or_else(|_| "node".into()), compiler, config: config.to_str()?.to_owned() })
-    }
-}
-
-fn check_typed_rule(
-    spec: &autoreview_dataflow::call_order::CallOrderSpec,
-    units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, root: &Path, checker: Option<&TrustedTypeScript>,
-) -> KeyedCheckResult {
-    let Some(checker) = checker else { return check_keyed_units_with_coverage(spec, units); };
-    let modules: Vec<_> = sources.iter().map(|(path, file)| TypeModule { path, source: file.parsed.0.as_bytes(), root: file.parsed.1.root_node() }).collect();
-    let candidates = discover_factory_sources(spec, &modules, units);
-    let verified = crate::analyzers::typescript_checker::verify_candidates(&checker.node, &checker.compiler, &checker.config, root, units, candidates, std::time::Duration::from_secs(30));
-    check_keyed_units_with_verified_sources(spec, units, verified)
 }
 
 fn record_flow_limits(
