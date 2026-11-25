@@ -13,6 +13,13 @@ optional argument, and that `removeRemote` is an immutable binding initialized
 by a one-argument call to that factory. This verifies the syntax probe only; it
 does not resolve the cross-file binding or score the historical case.
 
+A later exploratory graph probe used the pinned caller, barrel, remove helper,
+and factory source files and resolved `removeRemote` to the annotated factory
+with one required and one optional returned-function argument. The graph was
+manually restricted to that route and omitted other barrel exports, so this is
+not evidence that automatic dependency discovery resolves the real project or
+that the bug is detected. The case remains unscored.
+
 ## Deliverables
 
 1. Represent proven promise-returning callable signatures as reusable facts.

@@ -56,7 +56,7 @@ pub fn module_bindings(module: &TypeModule<'_>, unit: usize) -> Option<Vec<Keyed
                 let name = node.child_by_field_name("name")?;
                 bindings.push(module_binding(unit, name, node.start_byte(), module.source)?);
             }
-            "ambient_declaration" | "internal_module" | "module" => return None,
+            "ambient_declaration" | "internal_module" | "module" | "function_signature" => return None,
             "import_statement" | "type_alias_declaration" | "interface_declaration" => {}
             _ if has_hoisted_var(node) => return None,
             _ => {}
@@ -72,7 +72,7 @@ fn module_binding(unit: usize, name: Node<'_>, start: usize, source: &[u8]) -> O
 fn has_hoisted_var(node: Node<'_>) -> bool {
     let mut pending = vec![node];
     while let Some(node) = pending.pop() {
-        if node.kind() == "variable_declaration" { return true; }
+        if matches!(node.kind(), "variable_declaration" | "internal_module" | "module" | "ambient_declaration") { return true; }
         if matches!(node.kind(), "function_declaration" | "function_expression" | "arrow_function" | "method_definition" | "class_declaration" | "class") { continue; }
         pending.extend(node.named_children(&mut node.walk()));
     }
@@ -504,7 +504,7 @@ function nested() { const local = createHandler({}); }
             let bindings = module_bindings(&module, 7).unwrap();
             assert_eq!(bindings.iter().map(|binding| binding.name.as_str()).collect::<Vec<_>>(), ["upload", "mutable", "helper", "Owner"]);
             assert!(bindings.iter().all(|binding| binding.unit == 7 && binding.minimum == 0 && binding.maximum == usize::MAX));
-            for source in ["const { upload } = source;", "if (condition) { var upload = source; }"] {
+            for source in ["const { upload } = source;", "if (condition) { var upload = source; }", "namespace App { export const upload = 1; }"] {
                 let tree = parser_for(language).unwrap().parse(source, None).unwrap();
                 let module = TypeModule { path: "test", source: source.as_bytes(), root: tree.root_node() };
                 assert!(module_bindings(&module, 0).is_none(), "{source}");
