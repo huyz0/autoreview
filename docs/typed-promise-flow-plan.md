@@ -96,7 +96,7 @@ An isolated TypeScript 5.9.3 probe uses the documented `getAwaitedType` checker
 API and rejects `any`, unknown, generic, and mixed promise/synchronous unions.
 The prototype in `crates/core/src/analyzers/typescript_promise_probe.cjs` also
 declines projects with compiler errors and reports missing call locations. It
-is not invoked by review rules or a complete type-safety proof. The Rust
+is not yet used by a built-in rule or a complete type-safety proof. The Rust
 prototype embeds the script, limits request and response sizes and process
 time, and requires an explicitly supplied trusted compiler path. It does not
 yet contain descendant processes or resolve the compiler automatically; do
@@ -105,7 +105,14 @@ integration, decide how to supply and trust the compiler, handle subprocess
 containment, report checker failures, and measure cost. Its project-wide error
 gate is conservative and may skip valid calls in projects with unrelated
 errors. The Node and Rust tests use `AUTOREVIEW_TEST_TYPESCRIPT` to select an
-installed compiler; the Linux CI job installs a pinned version for them.
+installed compiler; the Linux CI job installs a pinned version for them. A
+typed contract can opt in through `AUTOREVIEW_TYPESCRIPT_MODULE`, an absolute
+path to a trusted TypeScript installation. `AUTOREVIEW_TYPESCRIPT_CONFIG` can
+select an absolute config path; otherwise the repository-root `tsconfig.json`
+is used. `AUTOREVIEW_NODE_BINARY` optionally selects Node. Without the trusted
+compiler configuration the typed contract is reported as skipped. This is an
+experimental interface; compiler selection, descendant-process containment,
+and normal review and replay coverage still require validation.
 
 ## Evidence and release gate
 

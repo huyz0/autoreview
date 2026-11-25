@@ -43,6 +43,22 @@ pub fn discover_factory_sources(
         };
     }
     let program = Program::new(spec, units);
+    let functions: Vec<_> = units.iter().flat_map(|unit| unit.functions.iter()).collect();
+    let mut pending: Vec<_> = program.frames.iter().enumerate().filter_map(|(index, frame)| units[frame.unit].entry.then_some(index)).collect();
+    let mut reachable = BTreeSet::new();
+    while let Some(index) = pending.pop() {
+        if !reachable.insert(index) { continue; }
+        let frame = &program.frames[index];
+        let parent = functions[index].node;
+        pending.extend(functions.iter().enumerate().filter_map(|(other, function)| {
+            (other != index && program.frames[other].unit == frame.unit
+                && function.node.start_byte() >= parent.start_byte() && function.node.end_byte() <= parent.end_byte())
+                .then_some(other)
+        }));
+        if let Some(plan) = &frame.plan {
+            pending.extend(program.resolved_calls(index, frame.graph, plan).into_iter().map(|(_, target)| target));
+        }
+    }
     let mut result = BTreeMap::<usize, BTreeSet<usize>>::new();
     let mut limitations = Vec::new();
     for (index, module) in modules.iter().enumerate() {
@@ -51,7 +67,8 @@ pub fn discover_factory_sources(
         }
     }
     let mut cache = BTreeMap::<(usize, String, usize), bool>::new();
-    for (function, frame) in units.iter().flat_map(|unit| unit.functions.iter()).zip(&program.frames) {
+    for (index, (function, frame)) in functions.iter().zip(&program.frames).enumerate() {
+        if !reachable.contains(&index) { continue; }
         let Some(plan) = &frame.plan else { continue };
         let unit = &units[frame.unit];
         let mut pending = vec![function.node];

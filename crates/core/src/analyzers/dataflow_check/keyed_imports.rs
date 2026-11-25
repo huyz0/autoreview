@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, keyed_flow_exhausted, KeyedExport, KeyedFunction, KeyedImport, KeyedUnit};
+use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, check_keyed_units_with_verified_sources, discover_factory_sources, keyed_flow_exhausted, KeyedCheckResult, KeyedExport, KeyedFunction, KeyedImport, KeyedUnit};
+use autoreview_dataflow::promise_types::TypeModule;
 use autoreview_dataflow::lower;
 use autoreview_dataflow::cfg::{Cfg, Stmt};
 use autoreview_langsupport::{language_for_path, Language};
@@ -49,6 +50,7 @@ pub(super) fn run(
     rules: &[CallOrderRuleDef],
     caches: &SummaryCaches<'_>,
 ) -> (Vec<AgentFinding>, Vec<AnalysisCoverageIssue>) {
+    let source_root = if root.is_absolute() { root.to_path_buf() } else { std::env::current_dir().unwrap_or_default().join(root) };
     let rules: Vec<_> = rules
         .iter()
         .filter_map(|rule| {
@@ -79,7 +81,8 @@ pub(super) fn run(
         })
         .collect();
     let (sources, mut coverage) = resolver.load(&entries);
-    let findings = run_sources(&sources, &entries, &rules, &mut coverage);
+    let checker = TrustedTypeScript::from_environment(&source_root);
+    let findings = run_sources(&sources, &entries, &rules, &source_root, checker.as_ref(), &mut coverage);
     (findings, coverage)
 }
 
@@ -87,6 +90,8 @@ fn run_sources(
     sources: &BTreeMap<String, Source>,
     entries: &BTreeSet<String>,
     rules: &[(&CallOrderRuleDef, Language)],
+    root: &Path,
+    checker: Option<&TrustedTypeScript>,
     coverage: &mut Vec<AnalysisCoverageIssue>,
 ) -> Vec<AgentFinding> {
     let lowered: Vec<_> = sources
@@ -138,7 +143,11 @@ fn run_sources(
                 entry: entries.contains(path) && file.language.matches_rule_language(declared),
             })
             .collect();
-        let result = check_keyed_units_with_coverage(&rule.spec, &units);
+        let result = if rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory) {
+            check_typed_rule(&rule.spec, &units, sources, root, checker)
+        } else {
+            check_keyed_units_with_coverage(&rule.spec, &units)
+        };
         record_rule_limits(coverage, &rule.id, result.limitations);
         findings.extend(result.hits.iter().map(|hit| {
             let path = hit.path.as_deref().unwrap_or_default();
@@ -156,6 +165,33 @@ fn run_sources(
         }));
     }
     findings
+}
+
+struct TrustedTypeScript {
+    node: String,
+    compiler: String,
+    config: String,
+}
+
+impl TrustedTypeScript {
+    fn from_environment(root: &Path) -> Option<Self> {
+        let compiler = std::env::var("AUTOREVIEW_TYPESCRIPT_MODULE").ok()?;
+        if !Path::new(&compiler).is_absolute() { return None; }
+        let config = std::env::var("AUTOREVIEW_TYPESCRIPT_CONFIG").ok().map(PathBuf::from).unwrap_or_else(|| root.join("tsconfig.json"));
+        if !config.is_absolute() { return None; }
+        Some(Self { node: std::env::var("AUTOREVIEW_NODE_BINARY").unwrap_or_else(|_| "node".into()), compiler, config: config.to_str()?.to_owned() })
+    }
+}
+
+fn check_typed_rule(
+    spec: &autoreview_dataflow::call_order::CallOrderSpec,
+    units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, root: &Path, checker: Option<&TrustedTypeScript>,
+) -> KeyedCheckResult {
+    let Some(checker) = checker else { return check_keyed_units_with_coverage(spec, units); };
+    let modules: Vec<_> = sources.iter().map(|(path, file)| TypeModule { path, source: file.parsed.0.as_bytes(), root: file.parsed.1.root_node() }).collect();
+    let candidates = discover_factory_sources(spec, &modules, units);
+    let verified = crate::analyzers::typescript_checker::verify_candidates(&checker.node, &checker.compiler, &checker.config, root, units, candidates, std::time::Duration::from_secs(30));
+    check_keyed_units_with_verified_sources(spec, units, verified)
 }
 
 fn record_flow_limits(
@@ -186,6 +222,10 @@ fn record_rule_limits(coverage: &mut Vec<AnalysisCoverageIssue>, rule_id: &str, 
             "unresolved_helper_target" => "The helper target is ambiguous or depends on unavailable exports; cross-file call-sequence analysis may be incomplete.",
             "reexport_resolution_limit" => "The re-export resolution budget was exhausted; cross-file call-sequence analysis may be incomplete.",
             "typed_promise_source_unavailable" => "Typed promise source verification is not configured; this rule was skipped.",
+            "factory_binding_inventory_incomplete" => "The module's bindings could not be inventoried completely; typed promise analysis may be incomplete.",
+            "factory_module_graph_incomplete" => "The module graph does not match the parsed sources; typed promise analysis was skipped.",
+            "promise_type_unresolved" => "The promise type could not be verified at this call; typed promise analysis may be incomplete.",
+            "typescript_checker_incomplete" => "The configured TypeScript checker failed or could not complete; typed promise analysis may be incomplete.",
             _ => "The rule could not model a path safely; analysis of the affected root was skipped.",
         };
         let mut record = issue(limitation.path.as_deref(), limitation.reason,
@@ -377,6 +417,43 @@ mod budget_tests {
         let (complete, issues) = resolver.load_with_limit(&entries, 2);
         assert_eq!(complete.len(), 3);
         assert!(!issues.iter().any(|issue| issue.reason == "dependency_limit"));
+    }
+
+    #[test]
+    fn typed_rule_runs_with_trusted_checker_and_reports_missing_configuration() {
+        use autoreview_dataflow::call_order::{CallOrderSpec, ContractLanguage, ContractMode, ResultContract};
+        use autoreview_schema::Severity;
+        let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let files = [
+            ("main.ts", "import { upload } from './barrel'; export function run() { upload('x'); }"),
+            ("barrel.ts", "export * from './binding';"),
+            ("binding.ts", "import create from './factory'; export const upload = create({});"),
+            ("factory.ts", "export default function create(x: object): (ctx: string) => Promise<void> { throw new Error(); }"),
+        ];
+        for (path, source) in files { std::fs::write(dir.path().join(path), source).unwrap(); }
+        let config = dir.path().join("tsconfig.json");
+        std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true},"include":["*.ts"]}"#).unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let parse = ParseCache::new();
+        let persistent = PersistentSummaryCache::load(&root, &root);
+        let caches = SummaryCaches { parse: &parse, persistent: &persistent, java_kotlin_packages: Default::default() };
+        let resolver = Resolver { root, cache: &parse, packages: &caches };
+        let entries = BTreeSet::from(["main.ts".to_owned()]);
+        let (sources, issues) = resolver.load(&entries);
+        assert!(issues.is_empty());
+        let rule = CallOrderRuleDef { id: "test-typed".into(), language: "TypeScript".into(), category: "correctness".into(), severity: Severity::Medium, message: "unused promise".into(), pack_id: None, metadata: None,
+            spec: CallOrderSpec { rule_id: "test-typed".into(), after: vec![], unless: vec![], before: vec![], check_before_return: false, identity: None, contract: Some(ResultContract { mode: ContractMode::MustUse, language: ContractLanguage::Web, import: String::new(), methods: vec![], borrows: vec![], acquire_awaited: false, complete_observed: false, typed_promise_factory: true }) } };
+        let rules = [(&rule, Language::TypeScript)];
+        let mut coverage = Vec::new();
+        assert!(run_sources(&sources, &entries, &rules, dir.path(), None, &mut coverage).is_empty());
+        assert!(coverage.iter().any(|issue| issue.reason == "typed_promise_source_unavailable"));
+        let checker = TrustedTypeScript { node: "node".into(), compiler, config: config.to_str().unwrap().into() };
+        let mut coverage = Vec::new();
+        let findings = run_sources(&sources, &entries, &rules, dir.path(), Some(&checker), &mut coverage);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].source.rule_id.as_deref(), Some("test-typed"));
+        assert!(coverage.is_empty(), "{:?}", coverage.iter().map(|issue| &issue.reason).collect::<Vec<_>>());
     }
 }
 
