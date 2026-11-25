@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, keyed_flow_exhausted, KeyedExport, KeyedFunction, KeyedImport, KeyedUnit};
+use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, KeyedExport, KeyedFunction, KeyedImport, KeyedUnit};
 use autoreview_dataflow::lower;
 use autoreview_dataflow::cfg::{Cfg, Stmt};
 use autoreview_langsupport::{language_for_path, Language};
@@ -19,6 +19,8 @@ mod jvm;
 mod rust;
 mod web;
 mod typed;
+mod coverage;
+use coverage::{record_flow_limits, record_rule_limits};
 use typed::{check_typed_rule, TrustedTypeScript};
 
 const UNIT_LIMIT: usize = 64;
@@ -166,48 +168,6 @@ fn run_sources(
         }));
     }
     findings
-}
-
-fn record_flow_limits(
-    sources: &BTreeMap<String, Source>,
-    lowered: &[LoweredFile<'_>],
-    rules: &[(&CallOrderRuleDef, Language)],
-    coverage: &mut Vec<AnalysisCoverageIssue>,
-) {
-    for ((path, file), (_, graphs)) in sources.iter().zip(lowered) {
-        if !rules.iter().any(|(_, language)| file.language.matches_rule_language(*language)) {
-            continue;
-        }
-        for (node, graph) in graphs {
-            if keyed_flow_exhausted(graph) {
-                let mut limitation = issue(Some(path), "control_flow_limit", "function", "The finally-path lowering budget was exhausted; call-sequence analysis skipped this function.");
-                limitation.line = Some(node.start_position().row as u32 + 1);
-                coverage.push(limitation);
-            }
-        }
-    }
-}
-
-fn record_rule_limits(coverage: &mut Vec<AnalysisCoverageIssue>, rule_id: &str, limitations: Vec<autoreview_dataflow::call_order::KeyedLimitation>) {
-    for limitation in limitations {
-        let detail = match limitation.reason {
-            "path_budget" => "The path-state budget was exhausted; this rule skipped the affected root.",
-            "helper_summary_limit" => "Helper summaries did not converge within the analysis budget; cross-file result tracking was skipped.",
-            "unresolved_helper_target" => "The helper target is ambiguous or depends on unavailable exports; cross-file call-sequence analysis may be incomplete.",
-            "reexport_resolution_limit" => "The re-export resolution budget was exhausted; cross-file call-sequence analysis may be incomplete.",
-            "typed_promise_source_unavailable" => "Typed promise source verification is not configured; this rule was skipped.",
-            "factory_binding_inventory_incomplete" => "The module's bindings could not be inventoried completely; typed promise analysis may be incomplete.",
-            "factory_module_graph_incomplete" => "The module graph does not match the parsed sources; typed promise analysis was skipped.",
-            "promise_type_unresolved" => "The promise type could not be verified at this call; typed promise analysis may be incomplete.",
-            "typescript_checker_incomplete" => "The configured TypeScript checker failed or could not complete; typed promise analysis may be incomplete.",
-            _ => "The rule could not model a path safely; analysis of the affected root was skipped.",
-        };
-        let mut record = issue(limitation.path.as_deref(), limitation.reason,
-            if limitation.path.is_some() { "function" } else { "rule" }, detail);
-        record.line = limitation.line.filter(|line| *line > 0);
-        record.rule = Some(rule_id.to_owned());
-        coverage.push(record);
-    }
 }
 
 impl Resolver<'_> {
@@ -373,24 +333,29 @@ mod budget_tests {
     use super::*;
     use super::super::cache::PersistentSummaryCache;
 
+    fn with_resolver<T>(dir: &Path, run: impl FnOnce(&Resolver<'_>) -> T) -> T {
+        let root = dir.canonicalize().unwrap();
+        let parse = ParseCache::new();
+        let persistent = PersistentSummaryCache::load(&root, &root);
+        let caches = SummaryCaches { parse: &parse, persistent: &persistent, java_kotlin_packages: Default::default() };
+        run(&Resolver { root, cache: &parse, packages: &caches })
+    }
+
     #[test]
     fn dependency_budget_reports_only_unvisited_sources() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.ts"), "import { b } from './b'; b();").unwrap();
         std::fs::write(dir.path().join("b.ts"), "import { c } from './c'; export function b() { c(); }").unwrap();
         std::fs::write(dir.path().join("c.ts"), "export function c() {}").unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        let parse = ParseCache::new();
-        let persistent = PersistentSummaryCache::load(&root, &root);
-        let caches = SummaryCaches { parse: &parse, persistent: &persistent, java_kotlin_packages: Default::default() };
-        let resolver = Resolver { root, cache: &parse, packages: &caches };
         let entries = BTreeSet::from(["a.ts".to_owned()]);
-        let (limited, issues) = resolver.load_with_limit(&entries, 1);
-        assert_eq!(limited.len(), 2);
-        assert!(issues.iter().any(|issue| issue.reason == "dependency_limit"));
-        let (complete, issues) = resolver.load_with_limit(&entries, 2);
-        assert_eq!(complete.len(), 3);
-        assert!(!issues.iter().any(|issue| issue.reason == "dependency_limit"));
+        with_resolver(dir.path(), |resolver| {
+            let (limited, issues) = resolver.load_with_limit(&entries, 1);
+            assert_eq!(limited.len(), 2);
+            assert!(issues.iter().any(|issue| issue.reason == "dependency_limit"));
+            let (complete, issues) = resolver.load_with_limit(&entries, 2);
+            assert_eq!(complete.len(), 3);
+            assert!(!issues.iter().any(|issue| issue.reason == "dependency_limit"));
+        });
     }
 
     #[test]
@@ -408,13 +373,8 @@ mod budget_tests {
         for (path, source) in files { std::fs::write(dir.path().join(path), source).unwrap(); }
         let config = dir.path().join("tsconfig.json");
         std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true},"include":["*.ts"]}"#).unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        let parse = ParseCache::new();
-        let persistent = PersistentSummaryCache::load(&root, &root);
-        let caches = SummaryCaches { parse: &parse, persistent: &persistent, java_kotlin_packages: Default::default() };
-        let resolver = Resolver { root, cache: &parse, packages: &caches };
         let entries = BTreeSet::from(["main.ts".to_owned()]);
-        let (sources, issues) = resolver.load(&entries);
+        let (sources, issues) = with_resolver(dir.path(), |resolver| resolver.load(&entries));
         assert!(issues.is_empty());
         let rule = CallOrderRuleDef { id: "test-typed".into(), language: "TypeScript".into(), category: "correctness".into(), severity: Severity::Medium, message: "unused promise".into(), pack_id: None, metadata: None,
             spec: CallOrderSpec { rule_id: "test-typed".into(), after: vec![], unless: vec![], before: vec![], check_before_return: false, identity: None, contract: Some(ResultContract { mode: ContractMode::MustUse, language: ContractLanguage::Web, import: String::new(), methods: vec![], borrows: vec![], acquire_awaited: false, complete_observed: false, typed_promise_factory: true }) } };
@@ -444,13 +404,8 @@ mod budget_tests {
                 for path in ["binding.ts", "factory.ts"] { std::fs::copy(fixtures.join(path), dir.path().join(path)).unwrap(); }
                 let config = dir.path().join("tsconfig.json");
                 std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true,"jsx":"preserve"},"include":["*.ts","*.tsx"]}"#).unwrap();
-                let root = dir.path().canonicalize().unwrap();
-                let parse = ParseCache::new();
-                let persistent = PersistentSummaryCache::load(&root, &root);
-                let caches = SummaryCaches { parse: &parse, persistent: &persistent, java_kotlin_packages: Default::default() };
-                let resolver = Resolver { root, cache: &parse, packages: &caches };
                 let entries = BTreeSet::from([entry]);
-                let (sources, mut coverage) = resolver.load(&entries);
+                let (sources, mut coverage) = with_resolver(dir.path(), |resolver| resolver.load(&entries));
                 let checker = TrustedTypeScript { node: "node".into(), compiler: compiler.clone(), config: config.to_str().unwrap().into() };
                 let found = run_sources(&sources, &entries, &[(rule, Language::TypeScript)], dir.path(), Some(&checker), &mut coverage);
                 assert_eq!(found.len(), expected, "{fixture}.{extension}");

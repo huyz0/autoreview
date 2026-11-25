@@ -10,7 +10,9 @@ mod syntax;
 #[cfg(test)]
 mod test_support;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
+#[cfg(test)]
+use std::collections::BTreeSet;
 
 use crate::cfg::{Cfg, EdgeKind, NodeId, Stmt};
 
@@ -23,92 +25,8 @@ use places::Place;
 mod sources;
 pub use sources::{discover_factory_sources, FactorySourceDiscovery};
 
-pub(super) fn check_units(
-    spec: &CallOrderSpec,
-    units: &[KeyedUnit<'_, '_, '_>],
-) -> (Vec<CallOrderHit>, bool, Vec<super::keyed::KeyedLimitation>) {
-    check_units_with_sources(spec, units, &BTreeMap::new())
-}
-
-pub(super) fn check_units_with_sources(
-    spec: &CallOrderSpec,
-    units: &[KeyedUnit<'_, '_, '_>],
-    sources: &BTreeMap<usize, BTreeSet<usize>>,
-) -> (Vec<CallOrderHit>, bool, Vec<super::keyed::KeyedLimitation>) {
-    let mut hits = Vec::new();
-    let mut program = Program::new(spec, units);
-    for frame in &mut program.frames {
-        if let (Some(plan), Some(offsets)) = (&mut frame.plan, sources.get(&frame.unit)) {
-            plan.extra_sources.clone_from(offsets);
-        }
-    }
-    if !program
-        .frames
-        .iter()
-        .filter_map(|frame| frame.plan.as_ref())
-        .any(Plan::has_registration)
-    {
-        return (hits, false, Vec::new());
-    }
-    let (summaries, summary_limit) = summaries::build(&program, units);
-    let mut frame_index = 0;
-    for unit in units {
-        for function in unit.functions {
-            let frame = &program.frames[frame_index];
-            let current = frame_index;
-            frame_index += 1;
-            if !unit.entry {
-                continue;
-            }
-            let Some(plan) = frame.plan.as_ref() else {
-                continue;
-            };
-            let calls =
-                summaries::resolved_helpers(&program, current, function.graph, plan, &summaries);
-            if !plan.has_registration() && calls.is_empty() {
-                continue;
-            }
-            let analysis = effects::lower(plan, function, unit.source, false, &calls);
-            hits.extend(analysis.unused().map(|(node, origin)| {
-                CallOrderHit {
-                    trigger_call: origin.call,
-                    node,
-                    source_line: origin.line,
-                    path: origin
-                        .path
-                        .or_else(|| (!unit.path.is_empty()).then(|| unit.path.to_owned())),
-                    entry: None,
-                    related_calls: origin
-                        .calls
-                        .iter()
-                        .filter_map(|&(unit_index, offset)| {
-                            let unit = units.get(unit_index)?;
-                            let before = unit.source.get(..offset)?;
-                            let line =
-                                before.iter().filter(|byte| **byte == b'\n').count() as u32 + 1;
-                            (!unit.path.is_empty()).then(|| (unit.path.to_owned(), line))
-                        })
-                        .collect(),
-                }
-            }));
-        }
-    }
-    let mut combined = BTreeMap::new();
-    for hit in hits {
-        let key = (hit.path.clone(), hit.source_line, hit.trigger_call.clone());
-        combined
-            .entry(key)
-            .and_modify(|previous: &mut CallOrderHit| {
-                previous
-                    .related_calls
-                    .extend(hit.related_calls.iter().cloned());
-                previous.related_calls.sort();
-                previous.related_calls.dedup();
-            })
-            .or_insert(hit);
-    }
-    (combined.into_values().collect(), summary_limit, program.resolution_limitations())
-}
+mod checks;
+pub(super) use checks::{check_units, check_units_with_sources};
 
 type Live = HashSet<Place>;
 

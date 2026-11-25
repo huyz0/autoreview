@@ -142,12 +142,17 @@ fn factory_signature(
     let factory_decl = declarations.get(factory_index)?;
     let provider = modules.get(factory_decl.unit)?;
     let factory = declaration_at(provider, factory_decl.start, "function_declaration")?;
-    if !unshadowed_promise_name(provider.root, provider.source) || may_reassign(provider.root, provider.source, &factory_decl.name)
-        || !unique_provider_binding(provider.root, provider.source, factory, &factory_decl.name) { return None; }
+    if !valid_factory_declaration(provider, factory, &factory_decl.name) { return None; }
     let (args_min, args_max) = parameter_bounds(factory, provider.source)?;
     if !(args_min..=args_max).contains(&binding.arguments) { return None; }
     let PromiseReturn::FactoryAnnotation { minimum, maximum } = declared_return(factory, provider.source)? else { return None; };
     Some((factory_decl.unit, factory_decl.start, minimum, maximum))
+}
+
+fn valid_factory_declaration(module: &TypeModule<'_>, function: Node<'_>, name: &str) -> bool {
+    unshadowed_promise_name(module.root, module.source)
+        && !may_reassign(module.root, module.source, name)
+        && unique_provider_binding(module.root, module.source, function, name)
 }
 
 fn declaration_at<'a>(module: &TypeModule<'a>, start: usize, kind: &str) -> Option<Node<'a>> {
@@ -237,22 +242,7 @@ pub fn local_factory_return(root: Node<'_>, source: &[u8], binding: &FactoryBind
     {
         return None;
     }
-    let mut selected = None;
-    for statement in root.named_children(&mut root.walk()) {
-        let declaration = if statement.kind() == "export_statement" {
-            statement.child_by_field_name("declaration").unwrap_or(statement)
-        } else {
-            statement
-        };
-        if declaration.kind() == "function_declaration"
-            && declaration.child_by_field_name("name").is_some_and(|name| name.utf8_text(source) == Ok(binding.callee.as_str()))
-        {
-            if selected.replace(declaration).is_some() { return None; }
-        } else if top_level_may_bind(declaration, source, &binding.callee) {
-            return None;
-        }
-    }
-    let function = selected?;
+    let function = unique_local_factory(root, source, &binding.callee)?;
     let (minimum, maximum) = parameter_bounds(function, source)?;
     if !(minimum..=maximum).contains(&binding.arguments) { return None; }
     match declared_return(function, source)? {
@@ -261,9 +251,27 @@ pub fn local_factory_return(root: Node<'_>, source: &[u8], binding: &FactoryBind
     }
 }
 
+fn unique_local_factory<'tree>(root: Node<'tree>, source: &[u8], name: &str) -> Option<Node<'tree>> {
+    let mut selected = None;
+    for statement in root.named_children(&mut root.walk()) {
+        let declaration = if statement.kind() == "export_statement" {
+            statement.child_by_field_name("declaration").unwrap_or(statement)
+        } else {
+            statement
+        };
+        if declaration.kind() == "function_declaration"
+            && declaration.child_by_field_name("name").is_some_and(|item| item.utf8_text(source) == Ok(name))
+        {
+            if selected.replace(declaration).is_some() { return None; }
+        } else if top_level_may_bind(declaration, source, name) {
+            return None;
+        }
+    }
+    selected
+}
+
 fn may_reassign(root: Node<'_>, source: &[u8], name: &str) -> bool {
-    let mut pending = vec![root];
-    while let Some(node) = pending.pop() {
+    any_node(root, |node| {
         let target = match node.kind() {
             "assignment_expression" | "augmented_assignment_expression" => node.child_by_field_name("left"),
             "update_expression" => node.child_by_field_name("argument").or_else(|| node.named_child(0)),
@@ -275,10 +283,8 @@ fn may_reassign(root: Node<'_>, source: &[u8], name: &str) -> bool {
         {
             return true;
         }
-        if target.is_some_and(|target| contains_identifier(target, source, name)) { return true; }
-        pending.extend(node.named_children(&mut node.walk()));
-    }
-    false
+        target.is_some_and(|target| contains_identifier(target, source, name))
+    })
 }
 
 fn top_level_may_bind(node: Node<'_>, source: &[u8], name: &str) -> bool {
@@ -297,9 +303,13 @@ fn top_level_may_bind(node: Node<'_>, source: &[u8], name: &str) -> bool {
 }
 
 fn contains_identifier(node: Node<'_>, source: &[u8], name: &str) -> bool {
+    any_node(node, |node| matches!(node.kind(), "identifier" | "type_identifier") && node.utf8_text(source) == Ok(name))
+}
+
+fn any_node(node: Node<'_>, predicate: impl Fn(Node<'_>) -> bool) -> bool {
     let mut pending = vec![node];
     while let Some(node) = pending.pop() {
-        if matches!(node.kind(), "identifier" | "type_identifier") && node.utf8_text(source) == Ok(name) { return true; }
+        if predicate(node) { return true; }
         pending.extend(node.named_children(&mut node.walk()));
     }
     false
@@ -309,6 +319,15 @@ fn contains_identifier(node: Node<'_>, source: &[u8], name: &str) -> bool {
 mod tests {
     use super::direct::imported_factory_return;
     use crate::call_order::KeyedImport;
+
+    fn find_binding(root: Node<'_>, source: &[u8]) -> FactoryBinding {
+        let mut pending = vec![root];
+        while let Some(node) = pending.pop() {
+            if let Some(binding) = factory_binding(node, source) { return binding; }
+            pending.extend(node.named_children(&mut node.walk()));
+        }
+        panic!("expected factory binding")
+    }
     use super::*;
     use autoreview_langsupport::{parser_for, Language};
 
@@ -457,13 +476,8 @@ function nested() { const local = createHandler({}); }
         ] {
             let source = format!("{prefix}\nexport const upload = createHandler({{}});\n");
             let tree = parser_for(Language::TypeScript).unwrap().parse(&source, None).unwrap();
-            let mut pending = vec![tree.root_node()];
-            let mut binding = None;
-            while let Some(node) = pending.pop() {
-                binding = binding.or_else(|| factory_binding(node, source.as_bytes()));
-                pending.extend(node.named_children(&mut node.walk()));
-            }
-            let shape = local_factory_return(tree.root_node(), source.as_bytes(), &binding.unwrap());
+            let binding = find_binding(tree.root_node(), source.as_bytes());
+            let shape = local_factory_return(tree.root_node(), source.as_bytes(), &binding);
             assert_eq!(shape.is_some(), expected, "{source}: {shape:?}");
         }
     }
@@ -473,14 +487,8 @@ function nested() { const local = createHandler({}); }
         let caller_source = "import create from './factory';\nexport const upload = create({});\n";
         let caller_tree = parser_for(Language::TypeScript).unwrap().parse(caller_source, None).unwrap();
         let caller = TypeModule { path: "caller.ts", source: caller_source.as_bytes(), root: caller_tree.root_node() };
-        let mut nodes = vec![caller.root];
-        let mut binding = None;
-        while let Some(node) = nodes.pop() {
-            binding = binding.or_else(|| factory_binding(node, caller.source));
-            nodes.extend(node.named_children(&mut node.walk()));
-        }
-        let binding = binding.unwrap();
-        let import = KeyedImport { local: "create".into(), path: "factory.ts".into(), name: Some("default".into()), owner: None, exported: true };
+        let binding = find_binding(caller.root, caller.source);
+                let import = KeyedImport { local: "create".into(), path: "factory.ts".into(), name: Some("default".into()), owner: None, exported: true };
         for (provider_source, expected) in [
             ("export default function make(x: object): (ctx: string, opt?: string) => Promise<void> { throw 1; }", true),
             ("export function make(x: object): (ctx: string) => Promise<void> { throw 1; }", false),
@@ -515,13 +523,8 @@ function nested() { const local = createHandler({}); }
         ] {
             let tree = parser_for(Language::TypeScript).unwrap().parse(source, None).unwrap();
             let caller = TypeModule { path: "caller.ts", source: source.as_bytes(), root: tree.root_node() };
-            let mut pending = vec![caller.root];
-            let mut binding = None;
-            while let Some(node) = pending.pop() {
-                binding = binding.or_else(|| factory_binding(node, caller.source));
-                pending.extend(node.named_children(&mut node.walk()));
-            }
-            assert!(imported_factory_return(&caller, &binding.unwrap(), &import, &provider).is_none(), "{source}");
+            let binding = find_binding(caller.root, caller.source);
+            assert!(imported_factory_return(&caller, &binding, &import, &provider).is_none(), "{source}");
         }
     }
 
@@ -534,14 +537,9 @@ function nested() { const local = createHandler({}); }
             let provider_tree = parser_for(language).unwrap().parse(provider_source, None).unwrap();
             let caller = TypeModule { path: "caller.ts", source: source.as_bytes(), root: tree.root_node() };
             let provider = TypeModule { path: "factory.ts", source: provider_source.as_bytes(), root: provider_tree.root_node() };
-            let mut pending = vec![caller.root];
-            let mut binding = None;
-            while let Some(node) = pending.pop() {
-                binding = binding.or_else(|| factory_binding(node, caller.source));
-                pending.extend(node.named_children(&mut node.walk()));
-            }
+            let binding = find_binding(caller.root, caller.source);
             let import = KeyedImport { local: "create".into(), path: "factory.ts".into(), name: Some("make".into()), owner: None, exported: true };
-            assert_eq!(imported_factory_return(&caller, &binding.unwrap(), &import, &provider), Some(PromiseReturn::FactoryAnnotation { minimum: 1, maximum: 1 }));
+            assert_eq!(imported_factory_return(&caller, &binding, &import, &provider), Some(PromiseReturn::FactoryAnnotation { minimum: 1, maximum: 1 }));
         }
     }
 
@@ -549,12 +547,7 @@ function nested() { const local = createHandler({}); }
     fn rejects_local_factory_binding_reassignment() {
         let source = "function create(x: object): (ctx: string) => Promise<void> { throw 1; } const upload = create({}); upload = other;";
         let tree = parser_for(Language::TypeScript).unwrap().parse(source, None).unwrap();
-        let mut pending = vec![tree.root_node()];
-        let mut binding = None;
-        while let Some(node) = pending.pop() {
-            binding = binding.or_else(|| factory_binding(node, source.as_bytes()));
-            pending.extend(node.named_children(&mut node.walk()));
-        }
-        assert!(local_factory_return(tree.root_node(), source.as_bytes(), &binding.unwrap()).is_none());
+        let binding = find_binding(tree.root_node(), source.as_bytes());
+        assert!(local_factory_return(tree.root_node(), source.as_bytes(), &binding).is_none());
     }
 }

@@ -27,25 +27,37 @@ pub fn discover_factory_sources(
     let program = Program::new(spec, units);
     let functions: Vec<_> = units.iter().flat_map(|unit| unit.functions.iter()).collect();
     let reachable = reachable_frames(&program, units, &functions);
-    let mut result = BTreeMap::<usize, BTreeSet<usize>>::new();
-    let mut limitations = inventory_limitations(modules);
-    let mut cache = BTreeMap::<(usize, String, usize), bool>::new();
+    let mut scan = CandidateScan { modules, units, cache: BTreeMap::new(), discovery: FactorySourceDiscovery { candidates: BTreeMap::new(), limitations: inventory_limitations(modules) } };
     for (index, (function, frame)) in functions.iter().zip(&program.frames).enumerate() {
         if !reachable.contains(&index) { continue; }
         let Some(plan) = &frame.plan else { continue };
-        let unit = &units[frame.unit];
-        let mut pending = vec![function.node];
+        scan.frame(frame.unit, function.node, plan);
+    }
+    scan.discovery
+}
+
+struct CandidateScan<'a, 'm, 's, 't, 'g> {
+    modules: &'a [crate::promise_types::TypeModule<'m>],
+    units: &'a [KeyedUnit<'s, 't, 'g>],
+    cache: BTreeMap<(usize, String, usize), bool>,
+    discovery: FactorySourceDiscovery,
+}
+
+impl CandidateScan<'_, '_, '_, '_, '_> {
+    fn frame(&mut self, unit_index: usize, function: tree_sitter::Node<'_>, plan: &super::Plan<'_, '_>) {
+        let unit = &self.units[unit_index];
+        let mut pending = vec![function];
         while let Some(node) = pending.pop() {
             let candidate = direct_call(node, unit.source).filter(|(name, _)| {
-                !plan.syntax.shadows_api(name) && !enclosing_scope_shadows(function.node, unit.source, name)
+                !plan.syntax.shadows_api(name) && !enclosing_scope_shadows(function, unit.source, name)
                     && unit.imports.iter().any(|binding| binding.local == *name && binding.name.is_some() && binding.owner.is_none() && binding.exported)
             });
             if let Some((name, arity)) = candidate {
-                let valid = *cache.entry((frame.unit, name.to_owned(), arity)).or_insert_with(|| {
-                    crate::promise_types::imported_factory_evidence(modules, units, frame.unit, name, arity).is_some()
+                let valid = *self.cache.entry((unit_index, name.to_owned(), arity)).or_insert_with(|| {
+                    crate::promise_types::imported_factory_evidence(self.modules, self.units, unit_index, name, arity).is_some()
                 });
-                if valid && result.entry(frame.unit).or_default().insert(node.start_byte()) {
-                    limitations.push(KeyedLimitation {
+                if valid && self.discovery.candidates.entry(unit_index).or_default().insert(node.start_byte()) {
+                    self.discovery.limitations.push(KeyedLimitation {
                         reason: "promise_type_unresolved", path: Some(unit.path.to_owned()),
                         line: Some(node.start_position().row as u32 + 1),
                     });
@@ -54,7 +66,6 @@ pub fn discover_factory_sources(
             pending.extend(node.named_children(&mut node.walk()));
         }
     }
-    FactorySourceDiscovery { candidates: result, limitations }
 }
 
 fn reachable_frames(

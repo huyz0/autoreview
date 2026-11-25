@@ -1,0 +1,58 @@
+use std::collections::BTreeMap;
+use autoreview_langsupport::Language;
+use autoreview_schema::AnalysisCoverageIssue;
+use autoreview_dataflow::call_order::keyed_flow_exhausted;
+use super::{issue, CallOrderRuleDef, LoweredFile, Source};
+
+pub(super) fn record_flow_limits(
+    sources: &BTreeMap<String, Source>,
+    lowered: &[LoweredFile<'_>],
+    rules: &[(&CallOrderRuleDef, Language)],
+    coverage: &mut Vec<AnalysisCoverageIssue>,
+) {
+    for ((path, file), (_, graphs)) in sources.iter().zip(lowered) {
+        if !rules.iter().any(|(_, language)| file.language.matches_rule_language(*language)) {
+            continue;
+        }
+        for (node, graph) in graphs {
+            if keyed_flow_exhausted(graph) {
+                let mut limitation = issue(Some(path), "control_flow_limit", "function", "The finally-path lowering budget was exhausted; call-sequence analysis skipped this function.");
+                limitation.line = Some(node.start_position().row as u32 + 1);
+                coverage.push(limitation);
+            }
+        }
+    }
+}
+
+pub(super) fn record_rule_limits(coverage: &mut Vec<AnalysisCoverageIssue>, rule_id: &str, limitations: Vec<autoreview_dataflow::call_order::KeyedLimitation>) {
+    for limitation in limitations {
+        let detail = limitation_detail(limitation.reason);
+        let mut record = issue(limitation.path.as_deref(), limitation.reason,
+            if limitation.path.is_some() { "function" } else { "rule" }, detail);
+        record.line = limitation.line.filter(|line| *line > 0);
+        record.rule = Some(rule_id.to_owned());
+        coverage.push(record);
+    }
+}
+
+fn limitation_detail(reason: &str) -> &'static str {
+    typed_detail(reason).unwrap_or(match reason {
+            "path_budget" => "The path-state budget was exhausted; this rule skipped the affected root.",
+            "helper_summary_limit" => "Helper summaries did not converge within the analysis budget; cross-file result tracking was skipped.",
+            "unresolved_helper_target" => "The helper target is ambiguous or depends on unavailable exports; cross-file call-sequence analysis may be incomplete.",
+            "reexport_resolution_limit" => "The re-export resolution budget was exhausted; cross-file call-sequence analysis may be incomplete.",
+            _ => "The rule could not model a path safely; analysis of the affected root was skipped.",
+    })
+}
+
+fn typed_detail(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+            "typed_promise_source_unavailable" => "Typed promise source verification is not configured; this rule was skipped.",
+            "factory_binding_inventory_incomplete" => "The module's bindings could not be inventoried completely; typed promise analysis may be incomplete.",
+            "factory_module_graph_incomplete" => "The module graph does not match the parsed sources; typed promise analysis was skipped.",
+            "promise_type_unresolved" => "The promise type could not be verified at this call; typed promise analysis may be incomplete.",
+            "typescript_checker_incomplete" => "The configured TypeScript checker failed or could not complete; typed promise analysis may be incomplete.",
+            _ => return None,
+    })
+}
+

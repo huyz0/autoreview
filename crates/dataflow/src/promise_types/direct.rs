@@ -8,23 +8,12 @@ use crate::call_order::KeyedImport;
 pub(super) fn imported_factory_return(
     caller: &TypeModule<'_>, binding: &FactoryBinding, import: &KeyedImport, provider: &TypeModule<'_>,
 ) -> Option<PromiseReturn> {
-    if caller.root.has_error() || provider.root.has_error() || import.local != binding.callee
-        || import.path != provider.path || !import.exported || import.owner.is_some()
-        || !binding_belongs_to(caller, binding)
-        || may_reassign(caller.root, caller.source, &binding.callee)
-        || may_reassign(caller.root, caller.source, &binding.name)
-        || !unshadowed_promise_name(provider.root, provider.source)
-        || !unique_import(caller.root, caller.source, &binding.callee)
-    {
-        return None;
-    }
+    if !valid_import(caller, binding, import, provider) { return None; }
     let name = import.name.as_deref()?;
     let function = direct_exported_factory(provider.root, provider.source, name)?;
     if let Some(local) = function.child_by_field_name("name") {
         let name = local.utf8_text(provider.source).ok()?;
-        if may_reassign(provider.root, provider.source, name)
-            || !unique_provider_binding(provider.root, provider.source, function, name)
-        { return None; }
+        if !valid_factory_declaration(provider, function, name) { return None; }
     }
     let (minimum, maximum) = parameter_bounds(function, provider.source)?;
     if !(minimum..=maximum).contains(&binding.arguments) { return None; }
@@ -32,6 +21,22 @@ pub(super) fn imported_factory_return(
         shape @ PromiseReturn::FactoryAnnotation { .. } => Some(shape),
         _ => None,
     }
+}
+
+fn valid_import(caller: &TypeModule<'_>, binding: &FactoryBinding, import: &KeyedImport, provider: &TypeModule<'_>) -> bool {
+    import_matches(binding, import, provider) && caller_binding_valid(caller, binding)
+        && !provider.root.has_error() && unshadowed_promise_name(provider.root, provider.source)
+}
+
+fn import_matches(binding: &FactoryBinding, import: &KeyedImport, provider: &TypeModule<'_>) -> bool {
+    import.local == binding.callee && import.path == provider.path && import.exported && import.owner.is_none()
+}
+
+fn caller_binding_valid(caller: &TypeModule<'_>, binding: &FactoryBinding) -> bool {
+    !caller.root.has_error() && binding_belongs_to(caller, binding)
+        && !may_reassign(caller.root, caller.source, &binding.callee)
+        && !may_reassign(caller.root, caller.source, &binding.name)
+        && unique_import(caller.root, caller.source, &binding.callee)
 }
 
 fn direct_exported_factory<'tree>(root: Node<'tree>, source: &[u8], imported: &str) -> Option<Node<'tree>> {
