@@ -45,30 +45,3 @@ impl Flow<'_> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use autoreview_langsupport::Language;
-
-    #[test]
-    fn supports_pure_literal_switches_but_not_jumps_or_calls() {
-        let examples = [
-            (r#"package p
-func f(x string) { switch x { case "p\n", "q": return; default: return } }"#, true),
-            ("package p\nfunc f(x int) { switch x { case 1: fallthrough; default: return } }", false),
-            ("package p\nfunc f(x int) { switch x { case call(): return } }", false),
-            ("package p\nfunc f(x int) { switch x { case 1: break } }", false),
-            ("package p\nfunc f() { switch x := call(); x { case 1: return } }", false),
-        ];
-        for (source, expected) in examples {
-            let tree = autoreview_langsupport::parser_for(Language::Go).unwrap().parse(source, None).unwrap();
-            let mut nodes = vec![tree.root_node()];
-            let found = loop {
-                let node = nodes.pop().unwrap();
-                if node.kind() == "expression_switch_statement" { break node; }
-                nodes.extend(node.named_children(&mut node.walk()));
-            };
-            assert_eq!(supports_go_switch(found), expected, "{source}");
-        }
-    }
-}

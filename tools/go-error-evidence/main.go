@@ -131,7 +131,10 @@ func callStatus(node *ast.CallExpr, info *types.Info) (string, int, []int) {
 	if !ok {
 		return "not_proven", 0, nil
 	}
-	results := signature.Results()
+	return resultStatus(signature.Results())
+}
+
+func resultStatus(results *types.Tuple) (string, int, []int) {
 	var errors []int
 	for index := 0; index < results.Len(); index++ {
 		if types.Identical(results.At(index).Type(), types.Universe.Lookup("error").Type()) {

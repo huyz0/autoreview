@@ -26,7 +26,9 @@ mod sources;
 pub use sources::{discover_factory_sources, FactorySourceDiscovery};
 
 mod checks;
-pub(super) use checks::{check_units, check_units_with_sources, check_units_with_components};
+pub(super) use checks::{check_units, check_units_with_components};
+#[cfg(test)]
+use checks::check_units_with_sources;
 
 type Live = HashSet<Place>;
 
@@ -366,6 +368,28 @@ mod tests {
             let root_offsets = BTreeMap::from([(0, BTreeSet::from([texts[1].find("acquire()").unwrap()]))]);
             assert!(check_units_with_sources(spec, &entries, &root_offsets).2.iter().any(|issue| issue.reason == "verified_source_unmodeled"));
         });
+    }
+
+    #[test]
+    fn supports_pure_literal_switches_but_not_jumps_or_calls() {
+        let examples = [
+            (r#"package p
+func f(x string) { switch x { case "p\n", "q": return; default: return } }"#, true),
+            ("package p\nfunc f(x int) { switch x { case 1: fallthrough; default: return } }", false),
+            ("package p\nfunc f(x int) { switch x { case call(): return } }", false),
+            ("package p\nfunc f(x int) { switch x { case 1: break } }", false),
+            ("package p\nfunc f() { switch x := call(); x { case 1: return } }", false),
+        ];
+        for (source, expected) in examples {
+            let tree = autoreview_langsupport::parser_for(Language::Go).unwrap().parse(source, None).unwrap();
+            let mut nodes = vec![tree.root_node()];
+            let found = loop {
+                let node = nodes.pop().unwrap();
+                if node.kind() == "expression_switch_statement" { break node; }
+                nodes.extend(node.named_children(&mut node.walk()));
+            };
+            assert_eq!(crate::lower::keyed_flow::supports_go_switch(found), expected, "{source}");
+        }
     }
 
     #[test]

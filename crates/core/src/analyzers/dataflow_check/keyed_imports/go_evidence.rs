@@ -65,6 +65,27 @@ struct Group {
     expected: BTreeMap<String, String>,
 }
 
+struct Verified {
+    discovery: FactorySourceDiscovery,
+    components: BTreeMap<usize, BTreeMap<usize, ResultComponents>>,
+}
+
+impl Verified {
+    fn record(&mut self, unit: &KeyedUnit<'_, '_, '_>, file: &Source, position: (usize, usize), result: CallResult) {
+        let (index, start) = position;
+        match result.status.as_str() {
+            "error" => { self.discovery.candidates.entry(index).or_default().insert(start); }
+            "multi_error" if multi_supported(file, start, result.result_count) => {
+                self.discovery.candidates.entry(index).or_default().insert(start);
+                self.components.entry(index).or_default().insert(start, ResultComponents { count: result.result_count, indices: result.error_indexes });
+            }
+            "multi_error" => self.discovery.limitations.push(multi_limitation(unit, start)),
+            "not_proven" => {}
+            _ => self.discovery.limitations.push(limitation(Some(unit.path))),
+        }
+    }
+}
+
 pub(super) fn check_go_rule(
     spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, root: &Path,
 ) -> KeyedCheckResult {
@@ -75,35 +96,22 @@ pub(super) fn check_go_rule(
 fn check_with_probe(
     spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, root: &Path, checker: &TrustedGo,
 ) -> KeyedCheckResult {
-    let mut discovery = FactorySourceDiscovery { candidates: BTreeMap::new(), limitations: Vec::new() };
-    let mut components = BTreeMap::<usize, BTreeMap<usize, ResultComponents>>::new();
-    let groups = collect_groups(units, sources, root, &mut discovery.limitations);
+    let mut verified = Verified { discovery: FactorySourceDiscovery { candidates: BTreeMap::new(), limitations: Vec::new() }, components: BTreeMap::new() };
+    let groups = collect_groups(units, sources, root, &mut verified.discovery.limitations);
     for (index, (dir, group)) in groups.into_iter().filter(|(_, group)| !group.calls.is_empty()).enumerate() {
         if index >= PACKAGE_LIMIT || group.calls.len() > CALL_LIMIT {
-            discovery.limitations.push(limitation(None));
+            verified.discovery.limitations.push(limitation(None));
             continue;
         }
         let request = Request { package_dir: &dir, go_binary: &checker.go, expected_sources: group.expected, calls: group.calls };
         match verify(&checker.probe, &request) {
             Some(results) => for ((unit, start), result) in group.indices.into_iter().zip(results) {
-                match result.status.as_str() {
-                    "error" => { discovery.candidates.entry(unit).or_default().insert(start); }
-                    "multi_error" => {
-                        if multi_supported(&sources[units[unit].path], start, result.result_count) {
-                            discovery.candidates.entry(unit).or_default().insert(start);
-                            components.entry(unit).or_default().insert(start, ResultComponents { count: result.result_count, indices: result.error_indexes });
-                        } else {
-                            discovery.limitations.push(multi_limitation(&units[unit], start));
-                        }
-                    }
-                    "not_proven" => {}
-                    _ => discovery.limitations.push(limitation(Some(units[unit].path))),
-                }
+                verified.record(&units[unit], &sources[units[unit].path], (unit, start), result);
             },
-            None => discovery.limitations.push(limitation(None)),
+            None => verified.discovery.limitations.push(limitation(None)),
         }
     }
-    check_keyed_units_with_verified_components(spec, units, discovery, &components)
+    check_keyed_units_with_verified_components(spec, units, verified.discovery, &verified.components)
 }
 
 fn collect_groups(
@@ -158,10 +166,16 @@ fn multi_supported(file: &Source, start: usize, count: usize) -> bool {
     let Some(mut call) = std::iter::successors(Some(inner), |node| node.parent())
         .find(|node| node.kind() == "call_expression" && node.start_byte() == start) else { return false; };
     while let Some(parent) = call.parent().filter(|node| node.kind() == "parenthesized_expression") { call = parent; }
-    let Some(parent) = call.parent() else { return false; };
-    if matches!(parent.kind(), "expression_statement" | "defer_statement" | "go_statement") { return true; }
-    if parent.kind() != "expression_list" || parent.named_children(&mut parent.walk()).filter(|node| node.kind() != "comment").count() != 1 { return false; }
-    let Some(owner) = parent.parent() else { return false; };
+    call.parent().is_some_and(|parent| match parent.kind() {
+        "expression_statement" | "defer_statement" | "go_statement" => true,
+        "expression_list" => multi_list_supported(parent, count),
+        _ => false,
+    })
+}
+
+fn multi_list_supported(list: tree_sitter::Node<'_>, count: usize) -> bool {
+    if list.named_children(&mut list.walk()).filter(|node| node.kind() != "comment").count() != 1 { return false; }
+    let Some(owner) = list.parent() else { return false; };
     match owner.kind() {
         "return_statement" => true,
         "short_var_declaration" | "assignment_statement" => owner.child_by_field_name("left")
