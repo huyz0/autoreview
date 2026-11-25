@@ -28,10 +28,7 @@ pub(super) fn export(node: Node<'_>, source: &[u8], name: String) -> Export {
     let visible = match node.kind() {
         "method_declaration" => has(b"static") && !has(b"private"),
         "function_item" => has(b"pub"),
-        "arrow_function" | "function_expression" if parent.is_some_and(|parent| parent.kind() == "variable_declarator") => parent
-            .and_then(|node| node.parent())
-            .and_then(|node| node.parent())
-            .is_some_and(|parent| parent.kind() == "export_statement"),
+        "arrow_function" | "function_expression" => web_value_visible(parent),
         _ if parent.is_some_and(|parent| parent.kind() == "export_statement") => true,
         _ if node
             .child_by_field_name("parameters")
@@ -53,6 +50,12 @@ pub(super) fn export(node: Node<'_>, source: &[u8], name: String) -> Export {
         visible,
         default,
     }
+}
+
+fn web_value_visible(parent: Option<Node<'_>>) -> bool {
+    parent.is_some_and(|parent| parent.kind() == "export_statement"
+        || (parent.kind() == "variable_declarator"
+            && parent.parent().and_then(|node| node.parent()).is_some_and(|node| node.kind() == "export_statement")))
 }
 
 pub(super) fn candidate(node: Node<'_>, source: &[u8]) -> Option<String> {
