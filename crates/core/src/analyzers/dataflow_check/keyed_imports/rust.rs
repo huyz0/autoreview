@@ -65,8 +65,12 @@ fn valid_name(name: &str) -> bool {
 }
 
 fn reexport_module(resolver: &Resolver<'_>, path: &Path, module: &str) -> Option<PathBuf> {
-    if module == "crate" { return crate_root(resolver, path); }
-    if module.starts_with("crate::") { return verified_namespace(resolver, path, module); }
+    if module == "crate" { crate_root(resolver, path) }
+    else if module.starts_with("crate::") { verified_namespace(resolver, path, module) }
+    else { relative_module(resolver, path, module) }
+}
+
+fn relative_module(resolver: &Resolver<'_>, path: &Path, module: &str) -> Option<PathBuf> {
     crate_root(resolver, path)?;
     let mut parts = module.split("::");
     let mut current = match parts.next()? {
@@ -154,7 +158,7 @@ fn resolve_use_module(resolver: &Resolver<'_>, path: &Path, dir: &Path, module: 
 fn record_unresolved(input: &ImportSource<'_>, node: Node<'_>, local: &str, coverage: &mut Vec<AnalysisCoverageIssue>) {
     if !namespace_called(input.node, local, input.source) { return; }
     let mut record = issue(input.resolver.relative(input.path).as_deref(), "unresolved_rust_module_import", "dependency",
-        "A used Rust module import could not be resolved safely; cross-file call-sequence analysis may be incomplete.");
+        "A used Rust import or associated call could not be resolved safely; cross-file call-sequence analysis may be incomplete.");
     record.line = Some(node.start_position().row as u32 + 1);
     if !coverage.contains(&record) { coverage.push(record); }
 }
