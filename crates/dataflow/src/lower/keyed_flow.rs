@@ -152,14 +152,7 @@ fn nested_arguments(cfg: &mut Cfg<Stmt>, call: Node<'_>, source: &[u8], mut curr
         return current;
     }
     let Some(arguments) = site::arguments(call) else { return current };
-    for argument in site::children(arguments) {
-        let Some(value) = site::argument(argument).and_then(keyed_syntax::expression_value) else { continue };
-        if !matches!(value.kind(), "call_expression" | "method_invocation") {
-            continue;
-        }
-        if site::capture(value, source).is_none() {
-            continue;
-        }
+    for value in site::children(arguments).filter_map(|argument| nested_call(argument, source)) {
         current = nested_arguments(cfg, value, source, current);
         if cfg.keyed_exceptions {
             if let Some(call) = throwing_call(value, source) {
@@ -171,6 +164,12 @@ fn nested_arguments(cfg: &mut Cfg<Stmt>, call: Node<'_>, source: &[u8], mut curr
         }
     }
     current
+}
+
+fn nested_call<'tree>(argument: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
+    let value = site::argument(argument).and_then(keyed_syntax::expression_value)?;
+    (matches!(value.kind(), "call_expression" | "method_invocation") && site::capture(value, source).is_some())
+        .then_some(value)
 }
 
 fn positioned_call(node: Node<'_>, source: &[u8]) -> Option<Stmt> {
