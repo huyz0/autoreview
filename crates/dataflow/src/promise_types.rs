@@ -5,7 +5,7 @@
 //! treating annotation evidence as a runtime promise fact.
 
 use tree_sitter::Node;
-use crate::call_order::KeyedImport;
+use crate::call_order::{KeyedDeclaration, KeyedImport};
 
 /// How a declaration syntactically describes its returned value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +33,50 @@ pub struct TypeModule<'a> {
     pub path: &'a str,
     pub source: &'a [u8],
     pub root: Node<'a>,
+}
+
+/// Enumerate module-local runtime declarations for export resolution.
+/// Argument bounds are intentionally unknown until callable evidence is
+/// resolved. Unsupported declaration patterns make the inventory incomplete.
+pub fn module_bindings(module: &TypeModule<'_>, unit: usize) -> Option<Vec<KeyedDeclaration>> {
+    if module.root.kind() != "program" || module.root.has_error() { return None; }
+    let mut bindings = Vec::new();
+    for statement in module.root.named_children(&mut module.root.walk()) {
+        let node = if statement.kind() == "export_statement" {
+            match statement.child_by_field_name("declaration") { Some(node) => node, None => continue }
+        } else { statement };
+        match node.kind() {
+            "lexical_declaration" | "variable_declaration" => {
+                for item in node.named_children(&mut node.walk()).filter(|item| item.kind() == "variable_declarator") {
+                    let name = item.child_by_field_name("name").filter(|name| name.kind() == "identifier")?;
+                    bindings.push(module_binding(unit, name, item.start_byte(), module.source)?);
+                }
+            }
+            "function_declaration" | "generator_function_declaration" | "class_declaration" | "enum_declaration" => {
+                let name = node.child_by_field_name("name")?;
+                bindings.push(module_binding(unit, name, node.start_byte(), module.source)?);
+            }
+            "ambient_declaration" | "internal_module" | "module" => return None,
+            "import_statement" | "type_alias_declaration" | "interface_declaration" => {}
+            _ if has_hoisted_var(node) => return None,
+            _ => {}
+        }
+    }
+    Some(bindings)
+}
+
+fn module_binding(unit: usize, name: Node<'_>, start: usize, source: &[u8]) -> Option<KeyedDeclaration> {
+    Some(KeyedDeclaration { unit, name: name.utf8_text(source).ok()?.to_owned(), start, minimum: 0, maximum: usize::MAX })
+}
+
+fn has_hoisted_var(node: Node<'_>) -> bool {
+    let mut pending = vec![node];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "variable_declaration" { return true; }
+        if matches!(node.kind(), "function_declaration" | "function_expression" | "arrow_function" | "method_definition" | "class_declaration" | "class") { continue; }
+        pending.extend(node.named_children(&mut node.walk()));
+    }
+    false
 }
 
 /// Resolve an immutable binding initialized by a directly imported factory.
@@ -382,6 +426,45 @@ function nested() { const local = createHandler({}); }
         assert_eq!(bindings[0].name, "upload");
         assert_eq!(bindings[0].callee, "createHandler");
         assert_eq!(bindings[0].arguments, 1);
+    }
+
+    #[test]
+    fn inventories_runtime_bindings_and_declines_unknown_patterns() {
+        for language in [Language::TypeScript, Language::Tsx] {
+            let source = "import { make } from './factory'; export const upload = make({}); let mutable = other; function helper() {} class Owner {} type Shape = string;";
+            let tree = parser_for(language).unwrap().parse(source, None).unwrap();
+            let module = TypeModule { path: "test", source: source.as_bytes(), root: tree.root_node() };
+            let bindings = module_bindings(&module, 7).unwrap();
+            assert_eq!(bindings.iter().map(|binding| binding.name.as_str()).collect::<Vec<_>>(), ["upload", "mutable", "helper", "Owner"]);
+            assert!(bindings.iter().all(|binding| binding.unit == 7 && binding.minimum == 0 && binding.maximum == usize::MAX));
+            for source in ["const { upload } = source;", "if (condition) { var upload = source; }"] {
+                let tree = parser_for(language).unwrap().parse(source, None).unwrap();
+                let module = TypeModule { path: "test", source: source.as_bytes(), root: tree.root_node() };
+                assert!(module_bindings(&module, 0).is_none(), "{source}");
+            }
+        }
+    }
+
+    #[test]
+    fn resolves_inventoried_factory_binding_through_a_barrel() {
+        use crate::call_order::{resolve_declaration_import, KeyedExport, KeyedUnit};
+        let source = "import create from './factory'; export const upload = create({});";
+        let tree = parser_for(Language::TypeScript).unwrap().parse(source, None).unwrap();
+        let module = TypeModule { path: "binding.ts", source: source.as_bytes(), root: tree.root_node() };
+        let declarations = module_bindings(&module, 2).unwrap();
+        let imports = [KeyedImport { local: "upload".into(), path: "barrel.ts".into(), name: Some("upload".into()), owner: None, exported: true }];
+        let barrel = [KeyedExport::Star { path: "binding.ts".into() }];
+        let exports = [KeyedExport::Named { exported: "upload".into(), local: "upload".into(), path: None }];
+        let units = [
+            KeyedUnit { path: "caller.ts", source: b"", functions: &[], imports: &imports, exports: &[], entry: true },
+            KeyedUnit { path: "barrel.ts", source: b"", functions: &[], imports: &[], exports: &barrel, entry: false },
+            KeyedUnit { path: "binding.ts", source: source.as_bytes(), functions: &[], imports: &[], exports: &exports, entry: false },
+        ];
+        let index = resolve_declaration_import(&units, &declarations, 0, "upload", 1).declaration.unwrap();
+        assert_eq!(declarations[index].name, "upload");
+        let node = tree.root_node().named_descendant_for_byte_range(declarations[index].start, declarations[index].start + 1).unwrap();
+        let declaration = std::iter::successors(Some(node), Node::parent).find(|node| node.kind() == "variable_declarator").unwrap();
+        assert_eq!(factory_binding(declaration, source.as_bytes()).unwrap().callee, "create");
     }
 
     #[test]
