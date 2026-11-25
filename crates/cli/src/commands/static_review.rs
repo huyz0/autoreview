@@ -4,7 +4,7 @@ use std::process::Command;
 
 use autoreview_core::{run_ast_grep, run_golangci_lint, FileChange, ResolvedRulePack};
 use autoreview_langsupport::Language;
-use autoreview_schema::{AgentFinding, ArtifactChecksConfig};
+use autoreview_schema::{AgentFinding, AnalysisCoverageIssue, ArtifactChecksConfig};
 
 pub(super) struct ReviewInput<'a> {
     pub repo_root: &'a Path,
@@ -27,10 +27,11 @@ pub(super) fn collect(
     input: ReviewInput<'_>,
     changed_files: &[String],
     packs: &[ResolvedRulePack],
-) -> (Vec<AgentFinding>, Vec<String>) {
+) -> (Vec<AgentFinding>, Vec<String>, Vec<AnalysisCoverageIssue>) {
     let languages =
         autoreview_langsupport::languages_present(changed_files.iter().map(String::as_str));
     let mut warnings = Vec::new();
+    let mut coverage = Vec::new();
     let mut findings = lint(
         input.source_root,
         changed_files,
@@ -59,8 +60,8 @@ pub(super) fn collect(
         changed_files,
         &mut warnings,
     ));
-    findings.extend(cross_file(&input, changed_files, packs));
-    (findings, warnings)
+    findings.extend(cross_file(&input, changed_files, packs, &mut warnings, &mut coverage));
+    (findings, warnings, coverage)
 }
 
 fn record_warning(warnings: &mut Vec<String>, message: String) {
@@ -247,6 +248,8 @@ fn cross_file(
     input: &ReviewInput<'_>,
     changed_files: &[String],
     registered_packs: &[ResolvedRulePack],
+    warnings: &mut Vec<String>,
+    coverage: &mut Vec<AnalysisCoverageIssue>,
 ) -> Vec<AgentFinding> {
     let ReviewInput {
         repo_root,
@@ -268,12 +271,19 @@ fn cross_file(
         changed_files,
         tier4_go,
     ));
-    findings.extend(autoreview_core::run_dataflow_check_for_snapshot(
+    let dataflow = autoreview_core::run_dataflow_check_with_coverage(
         repo_root,
         source_root,
         changed_files,
         registered_packs,
-    ));
+    );
+    findings.extend(dataflow.findings);
+    for issue in dataflow.coverage {
+        let location = issue.path.as_deref().unwrap_or("dataflow");
+        let rule = issue.rule.as_deref().map_or(String::new(), |rule| format!(" [{rule}]"));
+        record_warning(warnings, format!("{location}{rule}: {}", issue.detail));
+        coverage.push(issue);
+    }
     findings.extend(autoreview_core::run_framework_checks(source_root, changed_files));
     findings.extend(autoreview_core::detect_shotgun_surgery(files));
     findings.extend(autoreview_core::run_divergent_change_check(

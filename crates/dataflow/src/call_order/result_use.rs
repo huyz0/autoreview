@@ -21,10 +21,10 @@ use places::Place;
 pub(super) fn check_units(
     spec: &CallOrderSpec,
     units: &[KeyedUnit<'_, '_, '_>],
-) -> Vec<CallOrderHit> {
+) -> (Vec<CallOrderHit>, bool) {
     let mut hits = Vec::new();
     let program = Program::new(spec, units);
-    let summaries = summaries::build(&program, units);
+    let (summaries, summary_limit) = summaries::build(&program, units);
     let mut frame_index = 0;
     for unit in units {
         for function in unit.functions {
@@ -81,7 +81,7 @@ pub(super) fn check_units(
             })
             .or_insert(hit);
     }
-    combined.into_values().collect()
+    (combined.into_values().collect(), summary_limit)
 }
 
 type Live = HashSet<Place>;

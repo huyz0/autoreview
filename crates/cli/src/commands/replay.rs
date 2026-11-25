@@ -1,7 +1,7 @@
 mod rule;
 mod report;
 
-use report::{replay_report, Evidence};
+use report::{replay_report, Evidence, GateReport};
 
 use rule::{Rule, Tool};
 
@@ -176,7 +176,7 @@ fn replay_side(
             let changed: Vec<_> = facts.files.into_iter().map(|file| file.path).collect();
             super::revision::compare_java_nullability(repo, snapshot, base, &commit, &changed)?
         }
-        None => rule.tool.scan(snapshot, std::slice::from_ref(&label.path))?,
+        None => rule.tool.scan(snapshot, std::slice::from_ref(&label.path), &BTreeSet::from([rule.id.clone()]))?,
     };
     let lines = findings
         .into_iter()
@@ -359,14 +359,51 @@ fn validate_gate_rule(rule: &Rule) -> anyhow::Result<Vec<Language>> {
     }
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GateReport {
-    base: String,
-    head: String,
-    evidence: Vec<RuleScore>,
-    passed: bool,
-    findings: Vec<AgentFinding>,
+fn gate_paths(snapshot: &Path, root: &Path, files: &[autoreview_core::FileChange], languages: &[Language]) -> anyhow::Result<Vec<String>> {
+    let mut paths = Vec::new();
+    for file in files {
+        let relative = Path::new(&file.path);
+        if !language_for_path(relative).is_some_and(|language| languages.contains(&language)) {
+            continue;
+        }
+        let file_path = snapshot.join(relative);
+        match file_path.symlink_metadata() {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Ok(meta) if meta.is_file() && file_path.canonicalize()?.starts_with(root) => {}
+            _ => anyhow::bail!("cannot analyze '{}' as a regular source file", file.path),
+        }
+        let source = std::fs::read_to_string(&file_path)?;
+        ensure!(
+            autoreview_core::parses_cleanly(relative, &source) == Some(true),
+            "cannot qualify gate coverage for '{}': source does not parse",
+            file.path
+        );
+        paths.push(file.path.clone());
+    }
+    Ok(paths)
+}
+
+fn gate_evidence(repo: &Path, suite: &Suite) -> anyhow::Result<Vec<RuleScore>> {
+    let evidence = scores(&replay(repo, suite, true)?);
+    for rule in &suite.gate {
+        let qualified = evidence
+            .iter()
+            .find(|entry| &entry.rule == rule)
+            .is_some_and(|entry| {
+                let score = &entry.score;
+                score.distinct_fix_pairs >= MIN_GATE_PAIRS
+                    && score.false_negatives == 0
+                    && score
+                        .precision
+                        .is_some_and(|precision| precision >= MIN_GATE_PRECISION as f64 / 100.0)
+            });
+        if !qualified {
+            println!("{}", serde_json::to_string_pretty(&evidence)?);
+            anyhow::bail!("gate rule '{}' needs {MIN_GATE_PAIRS} distinct verified fix pairs, at least {MIN_GATE_PRECISION}% labelled precision, and zero missed labels", rule.id);
+        }
+    }
+
+    Ok(evidence)
 }
 
 pub(crate) fn run_gate(repo: &Path, base: &str, head: &str) -> anyhow::Result<()> {
@@ -393,24 +430,7 @@ pub(crate) fn run_gate(repo: &Path, base: &str, head: &str) -> anyhow::Result<()
             .or_default()
             .extend(validate_gate_rule(rule)?);
     }
-    let evidence = scores(&replay(repo, &suite, true)?);
-    for rule in &suite.gate {
-        let qualified = evidence
-            .iter()
-            .find(|entry| &entry.rule == rule)
-            .is_some_and(|entry| {
-                let score = &entry.score;
-                score.distinct_fix_pairs >= MIN_GATE_PAIRS
-                    && score.false_negatives == 0
-                    && score
-                        .precision
-                        .is_some_and(|precision| precision >= MIN_GATE_PRECISION as f64 / 100.0)
-            });
-        if !qualified {
-            println!("{}", serde_json::to_string_pretty(&evidence)?);
-            anyhow::bail!("gate rule '{}' needs {MIN_GATE_PAIRS} distinct verified fix pairs, at least {MIN_GATE_PRECISION}% labelled precision, and zero missed labels", rule.id);
-        }
-    }
+    let evidence = gate_evidence(repo, &suite)?;
 
     let facts = autoreview_core::collect_diff_facts(&repo.to_string_lossy(), &base, &head, None)?;
     let lines = ChangedLines::load(repo, &base, &head)?;
@@ -418,31 +438,12 @@ pub(crate) fn run_gate(repo: &Path, base: &str, head: &str) -> anyhow::Result<()
     let root = snapshot.path().canonicalize()?;
     let mut findings = Vec::new();
     for (tool, languages) in tool_languages {
-        let mut paths = Vec::new();
-        for file in &facts.files {
-            let relative = Path::new(&file.path);
-            if !language_for_path(relative).is_some_and(|language| languages.contains(&language)) {
-                continue;
-            }
-            let file_path = snapshot.path().join(relative);
-            match file_path.symlink_metadata() {
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                Ok(meta) if meta.is_file() && file_path.canonicalize()?.starts_with(&root) => {}
-                _ => anyhow::bail!("cannot analyze '{}' as a regular source file", file.path),
-            }
-            let source = std::fs::read_to_string(&file_path)?;
-            ensure!(
-                autoreview_core::parses_cleanly(relative, &source) == Some(true),
-                "cannot qualify gate coverage for '{}': source does not parse",
-                file.path
-            );
-            paths.push(file.path.clone());
-        }
+        let paths = gate_paths(snapshot.path(), &root, &facts.files, &languages)?;
         if paths.is_empty() {
             continue;
         }
         findings.extend(
-            tool.scan(snapshot.path(), &paths)?
+            tool.scan(snapshot.path(), &paths, &suite.gate.iter().filter(|rule| rule.tool == tool).map(|rule| rule.id.clone()).collect())?
                 .into_iter()
                 .filter(|finding| {
                     lines.contains_finding(finding)

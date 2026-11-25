@@ -79,12 +79,7 @@ pub fn render_index(report: &ReviewReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    use autoreview_schema::{
-        CostEntry, DiffStats, FindingFingerprints, FindingSource, FindingSourceKind, Location, LocationRange, PlanBudgets, ReviewPlan, ReviewSummary,
-        ReviewTarget, RunCosts, Side, SuppressedFinding, SuppressedReason, Tier,
-    };
+    use autoreview_schema::{FindingFingerprints, FindingSource, FindingSourceKind, Location, LocationRange, Side, SuppressedFinding, SuppressedReason, Tier};
 
     fn make_finding(id: &str, category: &str, path: &str, line: u32, severity: Severity) -> Finding {
         Finding {
@@ -105,19 +100,12 @@ mod tests {
     }
 
     fn make_report(findings: Vec<Finding>, suppressed: Vec<SuppressedFinding>) -> ReviewReport {
-        ReviewReport {
-            schema_version: "1".into(),
-            run_id: "run-1".into(),
-            created_at: "2026-01-01T00:00:00Z".into(),
-            target: ReviewTarget { repo_root: "/repo".into(), base_ref: "main~1".into(), head_ref: "main".into(), commits: None, diff_stats: DiffStats { files: 1, additions: 1, deletions: 0, languages: HashMap::new() } },
-            plan: ReviewPlan { tier: Tier::Standard, score: 1.0, signals: vec![], specialists: vec![], budgets: PlanBudgets { max_agents: 1, total_token_cap: 1, wall_clock_sec: 1 }, overrides: vec![] },
-            findings,
-            suppressed,
-            costs: RunCosts { total: CostEntry { input_tokens: 0, output_tokens: 0, usd: None, wall_ms: 0 }, per_stage: HashMap::new() },
-            summary: ReviewSummary { by_severity: HashMap::new(), by_category: HashMap::new(), gate: None },
-            analyzer_warnings: vec![],
-            spec_verdicts: vec![],
-        }
+        let mut report = autoreview_test_support::sample_review_report();
+        report.created_at = "2026-01-01T00:00:00Z".into();
+        report.plan.tier = Tier::Standard;
+        report.findings = findings;
+        report.suppressed = suppressed;
+        report
     }
 
     #[test]

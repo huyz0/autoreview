@@ -82,44 +82,14 @@ pub fn append_event_log(history_dir: &Path, date: &str, host: &str, events: &[Ev
 #[cfg(test)]
 mod tests {
     use super::*;
-    use autoreview_schema::{
-        CostEntry, DiffStats, Finding, FindingFingerprints, FindingSource, FindingSourceKind, Location, LocationRange, PlanBudgets, ReviewPlan,
-        ReviewSummary, ReviewTarget, RunCosts, Severity, Side, Tier,
-    };
-    use std::collections::HashMap;
+    use autoreview_schema::Finding;
 
     fn make_report(findings: Vec<Finding>) -> ReviewReport {
-        ReviewReport {
-            schema_version: "1".into(),
-            run_id: "run-1".into(),
-            created_at: "2026-07-12T00:00:00Z".into(),
-            target: ReviewTarget { repo_root: "/repo".into(), base_ref: "main~1".into(), head_ref: "main".into(), commits: None, diff_stats: DiffStats { files: 1, additions: 1, deletions: 0, languages: HashMap::new() } },
-            plan: ReviewPlan { tier: Tier::Quick, score: 1.0, signals: vec![], specialists: vec![], budgets: PlanBudgets { max_agents: 1, total_token_cap: 1, wall_clock_sec: 1 }, overrides: vec![] },
-            findings,
-            suppressed: vec![],
-            costs: RunCosts { total: CostEntry { input_tokens: 0, output_tokens: 0, usd: None, wall_ms: 0 }, per_stage: HashMap::new() },
-            summary: ReviewSummary { by_severity: HashMap::new(), by_category: HashMap::new(), gate: None },
-            analyzer_warnings: vec![],
-            spec_verdicts: vec![],
-        }
+        ReviewReport { findings, ..autoreview_test_support::sample_review_report() }
     }
 
     fn make_finding(fingerprint: &str, rule_id: Option<&str>, aspect: Option<&str>) -> Finding {
-        Finding {
-            id: format!("f-{fingerprint}"),
-            fingerprints: FindingFingerprints { primary: fingerprint.to_string(), secondary: None },
-            source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "ast-grep".into(), rule_id: rule_id.map(String::from), aspect: aspect.map(String::from), backend: None },
-            category: "correctness".into(),
-            severity: Severity::Medium,
-            confidence: 1.0,
-            title: "t".into(),
-            message: "m".into(),
-            location: Location { path: "a.go".into(), range: LocationRange { start_line: 1, start_col: None, end_line: None, end_col: None }, snippet: "x".into(), side: Side::New },
-            related_locations: None,
-            suggestion: None,
-            tags: None,
-            meta: None,
-        }
+        autoreview_test_support::sample_finding(fingerprint, rule_id, aspect)
     }
 
     #[test]

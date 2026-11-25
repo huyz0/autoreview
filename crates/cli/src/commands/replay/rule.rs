@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::process::Command;
+use std::collections::BTreeSet;
 
 use anyhow::ensure;
 use autoreview_schema::AgentFinding;
@@ -18,7 +19,7 @@ pub(super) enum Tool {
 }
 
 impl Tool {
-    pub(super) fn scan(self, source: &Path, paths: &[String]) -> anyhow::Result<Vec<AgentFinding>> {
+    pub(super) fn scan(self, source: &Path, paths: &[String], rules: &BTreeSet<String>) -> anyhow::Result<Vec<AgentFinding>> {
         let findings = match self {
             Self::AstGrep => {
                 ensure!(
@@ -32,13 +33,27 @@ impl Tool {
             }
             Self::AutoreviewComplexity => autoreview_core::run_complexity_check(source, paths, &[]),
             Self::AutoreviewArchgraph => autoreview_core::run_archgraph_check(source, paths),
-            Self::AutoreviewDataflow => autoreview_core::run_dataflow_check(source, paths, &[]),
+            Self::AutoreviewDataflow => {
+                let result = autoreview_core::run_dataflow_check_with_coverage(source, source, paths, &[]);
+                let relevant: Vec<_> = result.coverage.iter().filter(|issue| affects_rules(issue, rules)).collect();
+                ensure!(relevant.is_empty(), "dataflow analysis was incomplete: {}",
+                    relevant.iter().map(|issue| format!("{}: {}", issue.path.as_deref().unwrap_or("repository"), issue.detail)).collect::<Vec<_>>().join("; "));
+                result.findings
+            }
             Self::AutoreviewDuplication => autoreview_core::run_duplication_check(source, paths),
             Self::AutoreviewFrameworks => autoreview_core::run_framework_checks(source, paths),
             Self::AutoreviewRust => autoreview_core::run_rust_review(source, paths),
         };
         Ok(findings)
     }
+}
+
+fn affects_rules(issue: &autoreview_schema::AnalysisCoverageIssue, rules: &BTreeSet<String>) -> bool {
+    if let Some(rule) = &issue.rule {
+        return rules.contains(rule);
+    }
+    issue.analyzer != "call-sequence" || rules.iter().any(|id|
+        autoreview_core::find_rule_definition(id, &[]).is_some_and(|rule| rule.kind == "call-sequence"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
@@ -88,5 +103,28 @@ impl Rule {
             self.tool
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dataflow_replay_rejects_incomplete_analysis() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("main.go"), "package main\nfunc main( {\n").unwrap();
+        let error = Tool::AutoreviewDataflow.scan(root.path(), &["main.go".into()], &BTreeSet::from(["go-os-rename-discarded-error".into()])).unwrap_err();
+        assert!(error.to_string().contains("dataflow analysis was incomplete"));
+    }
+
+    #[test]
+    fn rule_specific_limitations_do_not_block_unrelated_rules() {
+        let issue = autoreview_schema::AnalysisCoverageIssue {
+            analyzer: "call-sequence".into(), reason: "path_budget".into(), scope: "function".into(),
+            path: Some("main.go".into()), line: Some(1), rule: Some("rule-a".into()), detail: "skipped".into(),
+        };
+        assert!(affects_rules(&issue, &BTreeSet::from(["rule-a".into()])));
+        assert!(!affects_rules(&issue, &BTreeSet::from(["rule-b".into()])));
     }
 }

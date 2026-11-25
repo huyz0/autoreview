@@ -159,10 +159,7 @@ pub fn run_history_sync(repo_root: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use autoreview_schema::{
-        DiffStats, FindingFingerprints, FindingSource, FindingSourceKind, Location, LocationRange, PlanBudgets, ReviewPlan, ReviewSummary, ReviewTarget, RunCosts, Severity, Side, Tier,
-    };
-    use std::collections::HashMap;
+    use autoreview_schema::{FindingFingerprints, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
     fn make_finding(id: &str) -> Finding {
         Finding {
@@ -186,17 +183,7 @@ mod tests {
         let run_dir = history_dir.join("runs").join(run_id);
         std::fs::create_dir_all(&run_dir).unwrap();
         let report = autoreview_schema::ReviewReport {
-            schema_version: "1".into(),
-            run_id: run_id.into(),
-            created_at: "2026-07-12T00:00:00Z".into(),
-            target: ReviewTarget { repo_root: "/repo".into(), base_ref: "main~1".into(), head_ref: "main".into(), commits: None, diff_stats: DiffStats { files: 1, additions: 1, deletions: 0, languages: HashMap::new() } },
-            plan: ReviewPlan { tier: Tier::Quick, score: 1.0, signals: vec![], specialists: vec![], budgets: PlanBudgets { max_agents: 1, total_token_cap: 1, wall_clock_sec: 1 }, overrides: vec![] },
-            findings,
-            suppressed: vec![],
-            costs: RunCosts { total: autoreview_schema::CostEntry { input_tokens: 0, output_tokens: 0, usd: None, wall_ms: 0 }, per_stage: HashMap::new() },
-            summary: ReviewSummary { by_severity: HashMap::new(), by_category: HashMap::new(), gate: None },
-            analyzer_warnings: vec![],
-            spec_verdicts: vec![],
+            run_id: run_id.into(), findings, ..autoreview_test_support::sample_review_report()
         };
         std::fs::write(run_dir.join("report.json"), serde_json::to_string(&report).unwrap()).unwrap();
     }

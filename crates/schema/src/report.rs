@@ -147,6 +147,21 @@ pub struct ReviewSummary {
     pub gate: Option<Gate>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisCoverageIssue {
+    pub analyzer: String,
+    pub reason: String,
+    pub scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewReport {
@@ -159,6 +174,8 @@ pub struct ReviewReport {
     pub suppressed: Vec<SuppressedFinding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub analyzer_warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub analysis_coverage: Vec<AnalysisCoverageIssue>,
     pub costs: RunCosts,
     pub summary: ReviewSummary,
     /// Empty when no `.autoreview/spec.md` was present (the common case

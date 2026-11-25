@@ -1,5 +1,6 @@
 use autoreview_dataflow::lower;
 use autoreview_langsupport::{language_for_path, Language};
+use autoreview_schema::AnalysisCoverageIssue;
 
 use super::dsl::{run_call_order_rules, run_taint_rules};
 use super::functions::{function_declarations, go_functions, java_functions, rust_functions};
@@ -7,7 +8,7 @@ use super::go_practices::{run_append_shared_backing_array, run_loopvar_checks};
 use super::{
     call_order_rules, read_and_parse, run_npe_risk, run_typed_nil_interface_return, taint_rules,
     AgentFinding, Cfg, Node, ParseCache, Path, PersistentSummaryCache, ResolvedRulePack, Stmt,
-    SummaryCaches, SummarySource,
+    DataflowReviewResult, SummaryCaches, SummarySource,
 };
 
 pub(super) fn run(
@@ -15,7 +16,7 @@ pub(super) fn run(
     root: &Path,
     paths: &[String],
     packs: &[ResolvedRulePack],
-) -> Vec<AgentFinding> {
+) -> DataflowReviewResult {
     let parse = ParseCache::new();
     let persistent = PersistentSummaryCache::load(repo, root);
     let review = DataflowReview {
@@ -29,14 +30,21 @@ pub(super) fn run(
             java_kotlin_packages: Default::default(),
         },
     };
-    let mut findings: Vec<_> = paths
-        .iter()
-        .filter_map(|path| review.check_file(path))
-        .flatten()
-        .collect();
-    findings.extend(super::keyed_imports::run(root, paths, &review.call_sequences, &review.caches));
+    let mut findings = Vec::new();
+    let mut coverage = Vec::new();
+    for path in paths {
+        if let Some((file_findings, issue)) = review.check_file(path) {
+            findings.extend(file_findings);
+            coverage.extend(issue);
+        }
+    }
+    let (cross_file, limitations) = super::keyed_imports::run(root, paths, &review.call_sequences, &review.caches);
+    findings.extend(cross_file);
+    coverage.extend(limitations);
+    coverage.sort();
+    coverage.dedup();
     persistent.save();
-    findings
+    DataflowReviewResult { findings, coverage }
 }
 
 struct DataflowReview<'a> {
@@ -48,11 +56,20 @@ struct DataflowReview<'a> {
 }
 
 impl DataflowReview<'_> {
-    fn check_file(&self, path: &str) -> Option<Vec<AgentFinding>> {
+    fn check_file(&self, path: &str) -> Option<(Vec<AgentFinding>, Option<AnalysisCoverageIssue>)> {
         let language = language_for_path(Path::new(path))?;
         let (extract, lower) = profile(language);
-        let parsed = read_and_parse(self.root, path, language, self.caches.parse)?;
+        let parsed = match read_and_parse(self.root, path, language, self.caches.parse) {
+            Some(parsed) => parsed,
+            None if self.root.join(path).exists() => return Some((Vec::new(), Some(coverage_issue(
+                path, "source_unavailable", "The source could not be read or parsed; dataflow checks skipped this file."
+            )))),
+            None => return None,
+        };
         let (content, tree) = parsed.as_ref();
+        let issue = tree.root_node().has_error().then(|| coverage_issue(
+            path, "syntax_errors", "The source has syntax errors; dataflow results may be incomplete."
+        ));
         let lowered: Vec<_> = extract(tree)
             .into_iter()
             .map(|node| (node, lower(content.as_bytes(), node)))
@@ -74,7 +91,14 @@ impl DataflowReview<'_> {
             &lowered,
             &self.call_sequences,
         ));
-        Some(findings)
+        Some((findings, issue))
+    }
+}
+
+fn coverage_issue(path: &str, reason: &str, detail: &str) -> AnalysisCoverageIssue {
+    AnalysisCoverageIssue {
+        analyzer: "dataflow".into(), reason: reason.into(), scope: "file".into(),
+        path: Some(path.into()), line: None, rule: None, detail: detail.into(),
     }
 }
 

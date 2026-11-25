@@ -28,6 +28,16 @@ pub(super) struct ReplayReport {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct GateReport {
+    pub(super) base: String,
+    pub(super) head: String,
+    pub(super) evidence: Vec<RuleScore>,
+    pub(super) passed: bool,
+    pub(super) findings: Vec<AgentFinding>,
+}
+
+#[derive(Serialize)]
 struct LanguageScore {
     language: String,
     rules: Vec<RuleScore>,

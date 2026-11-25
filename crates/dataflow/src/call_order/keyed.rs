@@ -9,6 +9,8 @@ use super::plan::Plan;
 use super::{CallOrderHit, CallOrderSpec, EntryHit};
 
 mod contracts;
+mod coverage;
+pub use coverage::{check_keyed_units, check_keyed_units_with_coverage, keyed_flow_exhausted, KeyedCheckResult, KeyedLimitation};
 mod helpers;
 pub(super) mod program;
 mod state;
@@ -54,13 +56,13 @@ pub fn check_keyed_file(
     )
 }
 
-/// Follow direct helper calls across the supplied source units.
-pub fn check_keyed_units(
-    spec: &CallOrderSpec,
-    units: &[KeyedUnit<'_, '_, '_>],
-) -> Vec<CallOrderHit> {
+fn check_with_budget(spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], budget: usize) -> KeyedCheckResult {
     if spec.tracks_result_use() {
-        return super::result_use::check_units(spec, units);
+        let (hits, exhausted) = super::result_use::check_units(spec, units);
+        let limitations = exhausted.then_some(KeyedLimitation {
+            reason: "helper_summary_limit", path: None, line: None,
+        }).into_iter().collect();
+        return KeyedCheckResult { hits, limitations };
     }
     let program = Program::new(spec, units);
     if !program
@@ -69,22 +71,28 @@ pub fn check_keyed_units(
         .filter_map(|frame| frame.plan.as_ref())
         .any(Plan::has_registration)
     {
-        return Vec::new();
+        return KeyedCheckResult { hits: Vec::new(), limitations: Vec::new() };
     }
-    program
-        .roots()
-        .into_iter()
-        .filter_map(|root| {
-            let mut engine = Engine {
-                program: &program,
-                active: vec![root],
-                remaining: PATH_BUDGET,
-                hits: Vec::new(),
-            };
-            engine.check(root)
-        })
-        .flatten()
-        .collect()
+    let mut hits = Vec::new();
+    let mut limitations = Vec::new();
+    for root in program.roots() {
+        if program.frames[root].plan.is_none() {
+            continue;
+        }
+        let mut engine = Engine { program: &program, active: vec![root], remaining: budget, hits: Vec::new() };
+        match engine.check(root) {
+            Some(found) => hits.extend(found),
+            None => {
+                let frame = &program.frames[root];
+                limitations.push(KeyedLimitation {
+                    reason: if engine.remaining == 0 { "path_budget" } else { "unmodeled_path" },
+                    path: program.path(frame.unit),
+                    line: frame.graph.nodes.get(frame.graph.entry).map(|node| node.source_line),
+                });
+            }
+        }
+    }
+    KeyedCheckResult { hits, limitations }
 }
 
 struct Engine<'program, 'spec, 'src, 'graph> {
@@ -364,5 +372,35 @@ impl Engine<'_, '_, '_, '_> {
                 registration_path: self.program.path(registration.unit),
             }),
         });
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::call_order::{CollectionSelector, EntryIdentity};
+    use crate::taint::NamePattern;
+    use autoreview_langsupport::Language;
+
+    #[test]
+    fn reports_path_budget_exhaustion_for_the_affected_root() {
+        let source = "function run(map, key) { map.set(key, 1); }";
+        let mut parser = autoreview_langsupport::parser_for(Language::JavaScript).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let function = tree.root_node().named_child(0).unwrap();
+        let graph = crate::lower::keyed_variant(Language::JavaScript, source.as_bytes(), function);
+        let functions = [KeyedFunction { node: function, graph: &graph }];
+        let units = [KeyedUnit { path: "main.js", source: source.as_bytes(), functions: &functions, imports: &[], entry: true }];
+        let spec = CallOrderSpec {
+            rule_id: "test".into(), after: vec![NamePattern::suffix("set")],
+            unless: vec![NamePattern::suffix("delete")], before: vec![], check_before_return: true,
+            identity: Some(EntryIdentity { collection: CollectionSelector::Receiver, key_argument: 0 }), contract: None,
+        };
+        let result = check_with_budget(&spec, &units, 0);
+        assert!(result.hits.is_empty());
+        assert_eq!(result.limitations.len(), 1);
+        assert_eq!(result.limitations[0].reason, "path_budget");
+        assert_eq!(result.limitations[0].path.as_deref(), Some("main.js"));
+        assert!(check_with_budget(&spec, &units, PATH_BUDGET).limitations.is_empty());
     }
 }

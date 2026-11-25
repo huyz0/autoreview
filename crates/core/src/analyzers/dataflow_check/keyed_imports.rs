@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use autoreview_dataflow::call_order::{check_keyed_units, KeyedFunction, KeyedImport, KeyedUnit};
+use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, keyed_flow_exhausted, KeyedFunction, KeyedImport, KeyedUnit};
 use autoreview_dataflow::lower;
+use autoreview_dataflow::cfg::{Cfg, Stmt};
 use autoreview_langsupport::{language_for_path, Language};
+use autoreview_schema::AnalysisCoverageIssue;
 use tree_sitter::Node;
 
 use super::cache::{ParseCache, ParsedFile, SummaryCaches};
@@ -25,6 +27,8 @@ struct Source {
     imports: Vec<KeyedImport>,
 }
 
+type LoweredFile<'tree> = (usize, Vec<(Node<'tree>, Cfg<Stmt>)>);
+
 struct ImportSource<'a> {
     resolver: &'a Resolver<'a>,
     path: &'a Path,
@@ -43,7 +47,7 @@ pub(super) fn run(
     paths: &[String],
     rules: &[CallOrderRuleDef],
     caches: &SummaryCaches<'_>,
-) -> Vec<AgentFinding> {
+) -> (Vec<AgentFinding>, Vec<AnalysisCoverageIssue>) {
     let rules: Vec<_> = rules
         .iter()
         .filter_map(|rule| {
@@ -52,10 +56,10 @@ pub(super) fn run(
         })
         .collect();
     if rules.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let Ok(root) = root.canonicalize() else {
-        return Vec::new();
+        return (Vec::new(), vec![issue(None, "source_root_unavailable", "repository", "The source root could not be resolved; call-sequence analysis was skipped.")]);
     };
     let resolver = Resolver {
         root,
@@ -73,13 +77,16 @@ pub(super) fn run(
                 .flatten()
         })
         .collect();
-    run_sources(&resolver.load(&entries), &entries, &rules)
+    let (sources, mut coverage) = resolver.load(&entries);
+    let findings = run_sources(&sources, &entries, &rules, &mut coverage);
+    (findings, coverage)
 }
 
 fn run_sources(
     sources: &BTreeMap<String, Source>,
     entries: &BTreeSet<String>,
     rules: &[(&CallOrderRuleDef, Language)],
+    coverage: &mut Vec<AnalysisCoverageIssue>,
 ) -> Vec<AgentFinding> {
     let lowered: Vec<_> = sources
         .values()
@@ -98,6 +105,7 @@ fn run_sources(
             (ordinary, graphs)
         })
         .collect();
+    record_flow_limits(sources, &lowered, rules, coverage);
     let functions: Vec<_> = lowered
         .iter()
         .map(|(ordinary, file)| {
@@ -120,7 +128,9 @@ fn run_sources(
                 entry: entries.contains(path) && file.language.matches_rule_language(declared),
             })
             .collect();
-        findings.extend(check_keyed_units(&rule.spec, &units).iter().map(|hit| {
+        let result = check_keyed_units_with_coverage(&rule.spec, &units);
+        record_rule_limits(coverage, &rule.id, result.limitations);
+        findings.extend(result.hits.iter().map(|hit| {
             let path = hit.path.as_deref().unwrap_or_default();
             let origin = hit
                 .entry
@@ -138,21 +148,51 @@ fn run_sources(
     findings
 }
 
+fn record_flow_limits(
+    sources: &BTreeMap<String, Source>,
+    lowered: &[LoweredFile<'_>],
+    rules: &[(&CallOrderRuleDef, Language)],
+    coverage: &mut Vec<AnalysisCoverageIssue>,
+) {
+    for ((path, file), (_, graphs)) in sources.iter().zip(lowered) {
+        if !rules.iter().any(|(_, language)| file.language.matches_rule_language(*language)) {
+            continue;
+        }
+        for (node, graph) in graphs {
+            if keyed_flow_exhausted(graph) {
+                let mut limitation = issue(Some(path), "control_flow_limit", "function", "The finally-path lowering budget was exhausted; call-sequence analysis skipped this function.");
+                limitation.line = Some(node.start_position().row as u32 + 1);
+                coverage.push(limitation);
+            }
+        }
+    }
+}
+
+fn record_rule_limits(coverage: &mut Vec<AnalysisCoverageIssue>, rule_id: &str, limitations: Vec<autoreview_dataflow::call_order::KeyedLimitation>) {
+    for limitation in limitations {
+        let detail = match limitation.reason {
+            "path_budget" => "The path-state budget was exhausted; this rule skipped the affected root.",
+            "helper_summary_limit" => "Helper summaries did not converge within the analysis budget; cross-file result tracking was skipped.",
+            _ => "The rule could not model a path safely; analysis of the affected root was skipped.",
+        };
+        let mut record = issue(limitation.path.as_deref(), limitation.reason,
+            if limitation.path.is_some() { "function" } else { "rule" }, detail);
+        record.line = limitation.line.filter(|line| *line > 0);
+        record.rule = Some(rule_id.to_owned());
+        coverage.push(record);
+    }
+}
+
 impl Resolver<'_> {
-    fn load(&self, entries: &BTreeSet<String>) -> BTreeMap<String, Source> {
+    fn load(&self, entries: &BTreeSet<String>) -> (BTreeMap<String, Source>, Vec<AnalysisCoverageIssue>) {
         let mut pending: VecDeque<_> = entries.iter().cloned().collect();
         let mut sources = BTreeMap::new();
+        let mut coverage = Vec::new();
         while let Some(path) = pending.pop_front() {
             if sources.contains_key(&path) {
                 continue;
             }
-            let full = self.root.join(&path);
-            let Some(language) = language_for_path(&full) else {
-                continue;
-            };
-            let Some(parsed) = self.cache.get(&full, language) else {
-                continue;
-            };
+            let Some((full, language, parsed)) = self.parse_dependency(&path, entries, &mut coverage) else { continue };
             let imports = self.imports(&full, language, &parsed);
             if sources.len() < entries.len().saturating_add(UNIT_LIMIT) {
                 pending.extend(imports.iter().map(|binding| binding.path.clone()));
@@ -166,10 +206,31 @@ impl Resolver<'_> {
                 },
             );
             if sources.len() >= entries.len().saturating_add(UNIT_LIMIT) {
+                if let Some(skipped) = pending.iter().find(|path| !sources.contains_key(*path)) {
+                    coverage.push(issue(Some(skipped), "dependency_limit", "dependency", "The cross-file call-sequence source limit was reached; remaining dependencies were not analyzed."));
+                }
                 break;
             }
         }
-        sources
+        (sources, coverage)
+    }
+
+    fn parse_dependency(&self, path: &str, entries: &BTreeSet<String>, coverage: &mut Vec<AnalysisCoverageIssue>) -> Option<(PathBuf, Language, ParsedFile)> {
+        let full = self.root.join(path);
+        let language = language_for_path(&full)?;
+        let parsed = match self.cache.get(&full, language) {
+            Some(parsed) => parsed,
+            None => {
+                if !entries.contains(path) {
+                    coverage.push(issue(Some(path), "dependency_unavailable", "dependency", "The imported source could not be read or parsed; cross-file call-sequence analysis may be incomplete."));
+                }
+                return None;
+            }
+        };
+        if !entries.contains(path) && parsed.1.root_node().has_error() {
+            coverage.push(issue(Some(path), "dependency_syntax_errors", "dependency", "The imported source has syntax errors; cross-file call-sequence analysis may be incomplete."));
+        }
+        Some((full, language, parsed))
     }
 
     fn imports(&self, path: &Path, language: Language, parsed: &ParsedFile) -> Vec<KeyedImport> {
@@ -234,6 +295,13 @@ impl Resolver<'_> {
             owner: owner.map(str::to_owned),
             exported,
         })
+    }
+}
+
+fn issue(path: Option<&str>, reason: &str, scope: &str, detail: &str) -> AnalysisCoverageIssue {
+    AnalysisCoverageIssue {
+        analyzer: "call-sequence".into(), reason: reason.into(), scope: scope.into(),
+        path: path.map(str::to_owned), line: None, rule: None, detail: detail.into(),
     }
 }
 

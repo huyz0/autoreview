@@ -5,6 +5,36 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Minimal complete report that tests can customize with struct update syntax.
+pub fn sample_review_report() -> autoreview_schema::ReviewReport {
+    use autoreview_schema::{CostEntry, DiffStats, PlanBudgets, ReviewPlan, ReviewReport, ReviewSummary, ReviewTarget, RunCosts, Tier};
+    use std::collections::HashMap;
+    ReviewReport {
+        schema_version: "1".into(), run_id: "run-1".into(), created_at: "2026-07-12T00:00:00Z".into(),
+        target: ReviewTarget { repo_root: "/repo".into(), base_ref: "main~1".into(), head_ref: "main".into(), commits: None,
+            diff_stats: DiffStats { files: 1, additions: 1, deletions: 0, languages: HashMap::new() } },
+        plan: ReviewPlan { tier: Tier::Quick, score: 1.0, signals: vec![], specialists: vec![],
+            budgets: PlanBudgets { max_agents: 1, total_token_cap: 1, wall_clock_sec: 1 }, overrides: vec![] },
+        findings: vec![], suppressed: vec![],
+        costs: RunCosts { total: CostEntry { input_tokens: 0, output_tokens: 0, usd: None, wall_ms: 0 }, per_stage: HashMap::new() },
+        summary: ReviewSummary { by_severity: HashMap::new(), by_category: HashMap::new(), gate: None },
+        analyzer_warnings: vec![], analysis_coverage: vec![], spec_verdicts: vec![],
+    }
+}
+
+pub fn sample_finding(fingerprint: &str, rule_id: Option<&str>, aspect: Option<&str>) -> autoreview_schema::Finding {
+    use autoreview_schema::{Finding, FindingFingerprints, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
+    Finding {
+        id: format!("f-{fingerprint}"),
+        fingerprints: FindingFingerprints { primary: fingerprint.into(), secondary: None },
+        source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "ast-grep".into(), rule_id: rule_id.map(str::to_owned), aspect: aspect.map(str::to_owned), backend: None },
+        category: "correctness".into(), severity: Severity::Medium, confidence: 1.0,
+        title: "t".into(), message: "m".into(),
+        location: Location { path: "a.go".into(), range: LocationRange { start_line: 1, ..Default::default() }, snippet: "x".into(), side: Side::New },
+        related_locations: None, suggestion: None, tags: None, meta: None,
+    }
+}
+
 pub struct TestRepo {
     dir: tempfile::TempDir,
 }
