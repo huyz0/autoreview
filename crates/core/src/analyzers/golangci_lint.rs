@@ -149,7 +149,11 @@ fn run_golangci_lint_once(repo_root: &Path, go_files: &[&str], targets: &[&str])
         Err(_) => return Err(GolangciRunError::Retryable(String::from_utf8_lossy(&output.stderr).to_string())),
     };
 
-    let mut parsed: GolangciOutput = serde_json::from_str(&json_text).map_err(|err| GolangciRunError::Other(err.into()))?;
+    process_output(repo_root, go_files, &output, &json_text).map(Some)
+}
+
+fn process_output(repo_root: &Path, go_files: &[&str], output: &std::process::Output, json_text: &str) -> Result<Vec<AgentFinding>, GolangciRunError> {
+    let mut parsed: GolangciOutput = serde_json::from_str(json_text).map_err(|err| GolangciRunError::Other(err.into()))?;
     let report_error = parsed.report.as_ref().and_then(|r| r.error.as_ref());
     if let Some(report_error) = report_error {
         // Newer versions put compiler diagnostics under Report.Error.
@@ -170,7 +174,7 @@ fn run_golangci_lint_once(repo_root: &Path, go_files: &[&str], targets: &[&str])
     if !output.status.success() && parsed.issues.is_empty() {
         return Err(GolangciRunError::Other(anyhow::anyhow!("golangci-lint failed without reporting issues: {}", String::from_utf8_lossy(&output.stderr))));
     }
-    Ok(Some(findings))
+    Ok(findings)
 }
 
 fn filter_findings(repo_root: &Path, issues: &[GolangciIssue], changed: &HashSet<&str>) -> (Vec<AgentFinding>, Option<String>) {
