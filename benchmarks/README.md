@@ -4,13 +4,13 @@ These cases reference public repositories and pinned commits; they do not
 copy the source files into Autoreview. Check each project's license before
 adding cases. Labels cover an entire file, not only the changed lines.
 
-The initial corpus contains one Apache-2.0 Go case. It is too small to
-estimate general accuracy. On main commit `6f2f63b`, with ast-grep installed,
-the existing Testify rule misses the labelled line: one false negative,
-zero true positives, and zero false positives. Precision is undefined for
-this sample, and recall is zero for this one label. The replay exits nonzero
-because the actual result differs from the label; that exit is expected until
-the rule can follow this alias.
+The Apache-2.0 Iceberg case records a Testify assertion comparing a range
+value with the same slice element. The `go-testify-range-element-self-comparison`
+framework check now finds the labeled line before the fix and no findings in the
+fixed file. This single historical fix pair is too small to estimate general
+precision or recall. The check is intentionally limited to a locally declared,
+known slice and conservative syntactic mutation and shadowing checks; it does
+not prove absence of indirect mutation or model arbitrary aliases.
 
 To reproduce with Git and Autoreview installed, run from a temporary directory:
 
