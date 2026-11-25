@@ -5,7 +5,7 @@
 //! treating annotation evidence as a runtime promise fact.
 
 use tree_sitter::Node;
-use crate::call_order::{KeyedDeclaration, KeyedImport};
+use crate::call_order::{resolve_declaration_import, KeyedDeclaration, KeyedImport, KeyedUnit};
 
 /// How a declaration syntactically describes its returned value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +77,73 @@ fn has_hoisted_var(node: Node<'_>) -> bool {
         pending.extend(node.named_children(&mut node.walk()));
     }
     false
+}
+
+/// Syntactic evidence for an imported callable produced by a factory.
+/// Project-wide resolution of the `Promise` type remains the caller's duty.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ImportedFactoryEvidence {
+    pub binding_unit: usize,
+    pub binding_start: usize,
+    pub factory_unit: usize,
+    pub factory_start: usize,
+    pub minimum: usize,
+    pub maximum: usize,
+}
+
+/// Resolve an imported factory-produced binding through module exports.
+/// Every module must have a complete binding inventory and match its graph
+/// unit. A result is annotation evidence, not a resolved ambient type.
+pub fn imported_factory_evidence(
+    modules: &[TypeModule<'_>], units: &[KeyedUnit<'_, '_, '_>], caller: usize, name: &str, arity: usize,
+) -> Option<ImportedFactoryEvidence> {
+    if modules.len() != units.len() || modules.iter().zip(units).any(|(module, unit)| module.path != unit.path || module.source != unit.source) {
+        return None;
+    }
+    let caller_module = modules.get(caller)?;
+    if !unique_import(caller_module.root, caller_module.source, name) || may_reassign(caller_module.root, caller_module.source, name) {
+        return None;
+    }
+    let declarations = modules.iter().enumerate().try_fold(Vec::new(), |mut all, (unit, module)| {
+        all.extend(module_bindings(module, unit)?);
+        Some(all)
+    })?;
+    let index = resolve_declaration_import(units, &declarations, caller, name, arity).declaration?;
+    let selected = declarations.get(index)?;
+    let binding_module = modules.get(selected.unit)?;
+    let node = declaration_at(binding_module, selected.start, "variable_declarator")?;
+    let binding = factory_binding(node, binding_module.source)?;
+    if !binding_belongs_to(binding_module, &binding) || may_reassign(binding_module.root, binding_module.source, &binding.name) {
+        return None;
+    }
+    if let Some(PromiseReturn::FactoryAnnotation { minimum, maximum }) = local_factory_return(binding_module.root, binding_module.source, &binding) {
+        if !(minimum..=maximum).contains(&arity) { return None; }
+        let factory = module_function(binding_module, &binding.callee)?;
+        return Some(ImportedFactoryEvidence { binding_unit: selected.unit, binding_start: selected.start, factory_unit: selected.unit, factory_start: factory.start_byte(), minimum, maximum });
+    }
+    if !unique_import(binding_module.root, binding_module.source, &binding.callee) || may_reassign(binding_module.root, binding_module.source, &binding.callee) { return None; }
+    let factory_index = resolve_declaration_import(units, &declarations, selected.unit, &binding.callee, binding.arguments).declaration?;
+    let factory_decl = declarations.get(factory_index)?;
+    let provider = modules.get(factory_decl.unit)?;
+    let factory = declaration_at(provider, factory_decl.start, "function_declaration")?;
+    if !unshadowed_promise_name(provider.root, provider.source) || may_reassign(provider.root, provider.source, &factory_decl.name)
+        || !unique_provider_binding(provider.root, provider.source, factory, &factory_decl.name) { return None; }
+    let (args_min, args_max) = parameter_bounds(factory, provider.source)?;
+    if !(args_min..=args_max).contains(&binding.arguments) { return None; }
+    let PromiseReturn::FactoryAnnotation { minimum, maximum } = declared_return(factory, provider.source)? else { return None; };
+    if !(minimum..=maximum).contains(&arity) { return None; }
+    Some(ImportedFactoryEvidence { binding_unit: selected.unit, binding_start: selected.start, factory_unit: factory_decl.unit, factory_start: factory_decl.start, minimum, maximum })
+}
+
+fn declaration_at<'a>(module: &TypeModule<'a>, start: usize, kind: &str) -> Option<Node<'a>> {
+    let node = module.root.named_descendant_for_byte_range(start, start.checked_add(1)?)?;
+    std::iter::successors(Some(node), Node::parent).find(|node| node.start_byte() == start && node.kind() == kind)
+}
+
+fn module_function<'a>(module: &TypeModule<'a>, name: &str) -> Option<Node<'a>> {
+    module.root.named_children(&mut module.root.walk()).filter_map(|statement| {
+        if statement.kind() == "export_statement" { statement.child_by_field_name("declaration") } else { Some(statement) }
+    }).find(|node| node.kind() == "function_declaration" && node.child_by_field_name("name").is_some_and(|value| value.utf8_text(module.source) == Ok(name)))
 }
 
 /// Resolve an immutable binding initialized by a directly imported factory.
@@ -465,6 +532,37 @@ function nested() { const local = createHandler({}); }
         let node = tree.root_node().named_descendant_for_byte_range(declarations[index].start, declarations[index].start + 1).unwrap();
         let declaration = std::iter::successors(Some(node), Node::parent).find(|node| node.kind() == "variable_declarator").unwrap();
         assert_eq!(factory_binding(declaration, source.as_bytes()).unwrap().callee, "create");
+    }
+
+    #[test]
+    fn resolves_factory_signature_through_two_imports_and_a_barrel() {
+        use crate::call_order::{KeyedExport, KeyedUnit};
+        let sources = [
+            "import { upload } from './barrel'; function run() { upload('x'); }",
+            "export * from './binding';",
+            "import create from './factory'; export const upload = create({});",
+            "export default function create(x: object): (ctx: string, opt?: string) => Promise<void> { throw 1; }",
+        ];
+        for language in [Language::TypeScript, Language::Tsx] {
+            let trees: Vec<_> = sources.iter().map(|source| parser_for(language).unwrap().parse(source, None).unwrap()).collect();
+            let paths = ["caller", "barrel", "binding", "factory"];
+            let modules: Vec<_> = sources.iter().zip(&trees).zip(paths).map(|((source, tree), path)| TypeModule { path, source: source.as_bytes(), root: tree.root_node() }).collect();
+            let imports = [
+                vec![KeyedImport { local: "upload".into(), path: "barrel".into(), name: Some("upload".into()), owner: None, exported: true }],
+                vec![],
+                vec![KeyedImport { local: "create".into(), path: "factory".into(), name: Some("default".into()), owner: None, exported: true }],
+                vec![],
+            ];
+            let mut exports = [vec![], vec![KeyedExport::Star { path: "binding".into() }], vec![KeyedExport::Named { exported: "upload".into(), local: "upload".into(), path: None }], vec![KeyedExport::Named { exported: "default".into(), local: "create".into(), path: None }]];
+            let units: Vec<_> = modules.iter().enumerate().map(|(i, module)| KeyedUnit { path: module.path, source: module.source, functions: &[], imports: &imports[i], exports: &exports[i], entry: i == 0 }).collect();
+            let result = imported_factory_evidence(&modules, &units, 0, "upload", 1).unwrap();
+            assert_eq!((result.binding_unit, result.factory_unit, result.minimum, result.maximum), (2, 3, 1, 2));
+            assert!(imported_factory_evidence(&modules, &units, 0, "upload", 3).is_none());
+            drop(units);
+            exports[1].push(KeyedExport::Star { path: "missing".into() });
+            let units: Vec<_> = modules.iter().enumerate().map(|(i, module)| KeyedUnit { path: module.path, source: module.source, functions: &[], imports: &imports[i], exports: &exports[i], entry: i == 0 }).collect();
+            assert!(imported_factory_evidence(&modules, &units, 0, "upload", 1).is_none());
+        }
     }
 
     #[test]
