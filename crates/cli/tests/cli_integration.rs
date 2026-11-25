@@ -28,7 +28,8 @@ fn current_commit(repo: &std::path::Path) -> String {
 fn replay_reports_analysis_failures_without_losing_successful_cases() {
     let bad = "package main\nimport \"os\"\nfunc move(a, b string) { os.Rename(a, b) }\n";
     let fixed = "package main\nimport \"os\"\nfunc move(a, b string) error { return os.Rename(a, b) }\n";
-    let repo = init_repo(&[("move.go", bad)]);
+    let missing_helper = "import { run } from './missing';\nexport function main() { run(); }\n";
+    let repo = init_repo(&[("move.go", bad), ("main.js", missing_helper)]);
     let before = current_commit(repo.path());
     repo.commit(&[("move.go", fixed)], "check rename error");
     let after = current_commit(repo.path());
@@ -38,7 +39,10 @@ fn replay_reports_analysis_failures_without_losing_successful_cases() {
          "before": {"commit": before, "path": "move.go", "lines": [3]},
          "after": {"commit": after, "path": "move.go", "lines": []}},
         {"name": "missing revision", "rule": rule, "before": {"commit": "missing-revision", "path": "move.go", "lines": [3]},
-         "after": {"commit": after, "path": "move.go", "lines": []}}
+         "after": {"commit": after, "path": "move.go", "lines": []}},
+        {"name": "incomplete helper", "rule": {"tool": "autoreview-dataflow", "id": "javascript-node-fs-discarded-promise"},
+         "before": {"commit": before, "path": "main.js", "lines": []},
+         "after": {"commit": after, "path": "main.js", "lines": []}}
     ]});
     std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
     let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
@@ -50,6 +54,19 @@ fn replay_reports_analysis_failures_without_losing_successful_cases() {
     assert_eq!(report["evidenceKinds"][0]["kind"], "synthetic");
     assert_eq!(report["failures"][0]["name"], "missing revision");
     assert_eq!(report["failures"][0]["language"], "Go");
+    assert_eq!(report["failures"][0]["kind"], "error");
+    assert_eq!(report["coverage"][0]["language"], "Go");
+    assert_eq!(report["coverage"][0]["rule"]["id"], "go-os-rename-discarded-error");
+    assert_eq!(report["coverage"][0]["attempted"], 2);
+    assert_eq!(report["coverage"][0]["completed"], 1);
+    assert_eq!(report["coverage"][0]["incomplete"], 0);
+    assert_eq!(report["coverage"][0]["failed"], 1);
+    assert_eq!(report["failures"][1]["kind"], "incomplete-analysis");
+    assert_eq!(report["coverage"][1]["language"], "JavaScript");
+    assert_eq!(report["coverage"][1]["attempted"], 1);
+    assert_eq!(report["coverage"][1]["completed"], 0);
+    assert_eq!(report["coverage"][1]["incomplete"], 1);
+    assert_eq!(report["coverage"][1]["failed"], 0);
     assert_eq!(report["cases"].as_array().unwrap().len(), 1);
 }
 

@@ -23,6 +23,7 @@ pub(super) struct ReplayReport {
     pub(super) rules: Vec<RuleScore>,
     languages: Vec<LanguageScore>,
     evidence_kinds: Vec<EvidenceScore>,
+    coverage: Vec<CoverageScore>,
     cases: Vec<CaseResult>,
     pub(super) failures: Vec<CaseFailure>,
 }
@@ -49,6 +50,30 @@ struct EvidenceScore {
     rules: Vec<RuleScore>,
 }
 
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CoverageCounts {
+    attempted: usize,
+    completed: usize,
+    incomplete: usize,
+    failed: usize,
+}
+
+#[derive(Serialize)]
+struct CoverageScore {
+    rule: Rule,
+    language: String,
+    #[serde(flatten)]
+    counts: CoverageCounts,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum FailureKind {
+    IncompleteAnalysis,
+    Error,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct CaseFailure {
@@ -58,6 +83,7 @@ pub(super) struct CaseFailure {
     before_path: String,
     after_path: String,
     error: String,
+    kind: FailureKind,
 }
 
 pub(super) fn replay_report(repo: &Path, suite: &Suite) -> anyhow::Result<ReplayReport> {
@@ -88,6 +114,7 @@ pub(super) fn replay_report(repo: &Path, suite: &Suite) -> anyhow::Result<Replay
                 name: case.name.clone(), rule: case.rule.clone(),
                 language: case_language(&case.before.path, &case.after.path),
                 before_path: case.before.path.clone(), after_path: case.after.path.clone(),
+                kind: if error.downcast_ref::<super::rule::IncompleteAnalysis>().is_some() { FailureKind::IncompleteAnalysis } else { FailureKind::Error },
                 error: format!("{error:#}"),
             }),
         }
@@ -110,7 +137,8 @@ pub(super) fn replay_report(repo: &Path, suite: &Suite) -> anyhow::Result<Replay
     let evidence_kinds = evidence_groups.into_iter().map(|(kind, cases)| EvidenceScore {
         kind, rules: scores(&cases),
     }).collect();
-    Ok(ReplayReport { rules: scores(&cases), languages, evidence_kinds, cases, failures })
+    let coverage = coverage_scores(&cases, &failures);
+    Ok(ReplayReport { rules: scores(&cases), languages, evidence_kinds, coverage, cases, failures })
 }
 
 fn case_language(before: &str, after: &str) -> String {
@@ -123,3 +151,21 @@ fn case_language(before: &str, after: &str) -> String {
     }
 }
 
+
+fn coverage_scores(cases: &[CaseResult], failures: &[CaseFailure]) -> Vec<CoverageScore> {
+    let mut groups = BTreeMap::<(Rule, String), CoverageCounts>::new();
+    for case in cases {
+        let counts = groups.entry((case.rule.clone(), case_language(&case.before.path, &case.after.path))).or_default();
+        counts.attempted += 1;
+        counts.completed += 1;
+    }
+    for failure in failures {
+        let counts = groups.entry((failure.rule.clone(), failure.language.clone())).or_default();
+        counts.attempted += 1;
+        match failure.kind {
+            FailureKind::IncompleteAnalysis => counts.incomplete += 1,
+            FailureKind::Error => counts.failed += 1,
+        }
+    }
+    groups.into_iter().map(|((rule, language), counts)| CoverageScore { rule, language, counts }).collect()
+}

@@ -18,6 +18,17 @@ pub(super) enum Tool {
     AutoreviewRust,
 }
 
+#[derive(Debug)]
+pub(super) struct IncompleteAnalysis(pub(super) String);
+
+impl std::fmt::Display for IncompleteAnalysis {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "dataflow analysis was incomplete: {}", self.0)
+    }
+}
+
+impl std::error::Error for IncompleteAnalysis {}
+
 impl Tool {
     pub(super) fn scan(self, source: &Path, paths: &[String], rules: &BTreeSet<String>) -> anyhow::Result<Vec<AgentFinding>> {
         let findings = match self {
@@ -36,8 +47,9 @@ impl Tool {
             Self::AutoreviewDataflow => {
                 let result = autoreview_core::run_dataflow_check_with_coverage(source, source, paths, &[]);
                 let relevant: Vec<_> = result.coverage.iter().filter(|issue| affects_rules(issue, rules)).collect();
-                ensure!(relevant.is_empty(), "dataflow analysis was incomplete: {}",
-                    relevant.iter().map(|issue| format!("{}: {}", issue.path.as_deref().unwrap_or("repository"), issue.detail)).collect::<Vec<_>>().join("; "));
+                if !relevant.is_empty() {
+                    return Err(IncompleteAnalysis(relevant.iter().map(|issue| format!("{}: {}", issue.path.as_deref().unwrap_or("repository"), issue.detail)).collect::<Vec<_>>().join("; ")).into());
+                }
                 result.findings
             }
             Self::AutoreviewDuplication => autoreview_core::run_duplication_check(source, paths),

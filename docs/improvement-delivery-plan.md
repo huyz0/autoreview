@@ -53,6 +53,30 @@ regressions against the baseline, and document supported language and framework
 shapes. Exercise query-count fixtures before broadening implicit ORM N+1
 findings.
 
+### Project-defined Go error results
+
+The `taigrr/yq` candidate discards errors at three call sites in one file;
+see `benchmark-candidates.md` for pinned revisions. First establish a trusted
+Go type-checking path that identifies the resolved callee and its actual result
+types. A spelling-based `error` annotation is insufficient because declarations,
+imports, and build constraints can change its meaning or the selected function.
+Do not infer a package-wide fact from the current helper loader: it deliberately
+filters files that do not appear to supply helpers.
+
+Connect proven single-error results to the existing result-use analysis and
+preserve source identities through callers and helper summaries. Extend to
+multi-result calls only after individual result positions can be tracked; a
+used non-error result must not hide a discarded error. Model explicit `_`,
+`defer`, `go`, aliases, reassignment, shadowing, generics, method and interface
+dispatch conservatively. Record incomplete type checking and unsupported call
+shapes against the affected rule and file, rather than counting them as clean.
+
+Use the three yq lines and the entire corrected file as one historical pair,
+add independent fixes and clean examples, and check build tags, package and
+import ambiguity, changed-line reporting, and unavailable dependencies. Compare
+the replay and runtime against the current baseline before enabling the rule;
+this single pair cannot establish general precision or recall.
+
 ## 5. Release readiness
 
 Exercise install, doctor, a representative diff review, replay, and SARIF on
