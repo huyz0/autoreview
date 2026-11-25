@@ -568,3 +568,37 @@ class App {
         7
     );
 }
+
+#[test]
+fn testify_range_comparison_requires_unmodified_known_slice_and_import() {
+    let good = r#"package test
+import check "github.com/stretchr/testify/assert"
+type Items []int
+func test(t interface{}) {
+    var values Items
+    for i, item := range values {
+        switch i { default: check.Equal(t, item, values[i]) }
+    }
+}
+"#;
+    let found = scan(&[("slice.go", good)], &["slice.go"]);
+    assert_eq!(found.iter().filter(|item| item.source.rule_id.as_deref() == Some("go-testify-range-element-self-comparison")).count(), 1, "{found:#?}");
+    for replacement in [
+        "values[i] = 3; check.Equal(t, item, values[i])",
+        "i++; check.Equal(t, item, values[i])",
+        "item = 3; check.Equal(t, item, values[i])",
+        "alias := values; alias[i] = 3; check.Equal(t, item, values[i])",
+        "modify(&values[i]); check.Equal(t, item, values[i])",
+        "item.Mutate(); check.Equal(t, item, values[i])",
+        "values[i].Mutate(); check.Equal(t, item, values[i])",
+        "check.Equal(t, item, expected[i])",
+    ] {
+        let bad = good.replace("check.Equal(t, item, values[i])", replacement);
+        let found = scan(&[("slice.go", &bad)], &["slice.go"]);
+        assert!(!found.iter().any(|item| item.source.rule_id.as_deref() == Some("go-testify-range-element-self-comparison")), "{replacement}: {found:#?}");
+    }
+    for bad in [good.replace("type Items []int", "type Items string"), good.replace("github.com/stretchr/testify/assert", "example.test/assert"), good.replace("var values Items", "var values Items; check := fake"), good.replace("var values Items", "var values Items; values = other"), good.replace("var values Items", "var values Items; type Items string")] {
+        let found = scan(&[("slice.go", &bad)], &["slice.go"]);
+        assert!(!found.iter().any(|item| item.source.rule_id.as_deref() == Some("go-testify-range-element-self-comparison")), "{found:#?}");
+    }
+}

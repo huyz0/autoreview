@@ -1,6 +1,7 @@
 mod flow;
 mod http;
 mod package;
+mod range_assert;
 mod span;
 mod transactions;
 
@@ -12,6 +13,7 @@ use tree_sitter::Node;
 
 use super::{location, Rule};
 pub(super) use http::RULE as HTTP_RULE;
+pub(super) use range_assert::RULE as RANGE_ASSERT_RULE;
 pub(super) use span::RULE as SPAN_RULE;
 pub(super) use span::TRACE_PARENT_RULE;
 pub(super) use transactions::RULE as TRANSACTION_RULE;
@@ -54,6 +56,7 @@ fn package_findings(peers: &[&package::File], paths: &[String]) -> Vec<AgentFind
             findings.extend(span::findings(file));
             findings.extend(http::findings(file));
             findings.extend(transactions::findings(file));
+            findings.extend(range_assert::findings(file, peers));
         }
         for (binding, exit, used) in package::leaks(file, &helpers) {
             let sources: Vec<_> = helpers.evidence(used).collect();

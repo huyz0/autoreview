@@ -28,6 +28,7 @@ fn rules() -> impl Iterator<Item = &'static Rule> {
         &go_cancel::TRACE_PARENT_RULE,
         &go_cancel::TRANSACTION_RULE,
         &go_cancel::HTTP_RULE,
+        &go_cancel::RANGE_ASSERT_RULE,
         &java::SPRING_RULE,
         &java::HIBERNATE_RULE,
         &java::OTEL_RULE,

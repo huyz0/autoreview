@@ -1,6 +1,6 @@
 cases:
   - name: iceberg test compares aliases of the same value
-    rule: {tool: ast-grep, id: go-tautological-testify-assertion}
+    rule: {tool: autoreview-frameworks, id: go-testify-range-element-self-comparison}
     evidence:
       kind: historical
       source: https://github.com/apache/iceberg-go/commit/b66585bfee314c8676ad1bff30b5162de4314338
