@@ -280,7 +280,8 @@ module extensions such as `.mjs` and `.mts`. Rules with
 TSX. [DSL reference](.claude/skills/authoring-rules/reference/rule-dsl.md)
 
 Rust call-sequence helper tracking follows supported explicit imports and
-unambiguous `crate::` module aliases. Conditional modules, custom paths,
+unambiguous `crate::` module aliases, and supported named or wildcard
+`pub use` re-exports. Conditional modules, custom paths,
 ambiguous crate roots, and other import forms can limit coverage; a used
 unsupported module alias is reported as incomplete where recognized.
 

@@ -28,7 +28,9 @@ cannot be identified, including files that cannot be bound to an import.
 Rust discovery reports a used `crate::` module import that cannot be resolved
 through an unambiguous chain of ordinary external module declarations. This
 includes conditional imports, `#[path]`, and ambiguous crate roots; other Rust
-import shapes remain outside this diagnostic.
+import shapes remain outside this diagnostic. Supported named and wildcard
+`pub use` chains are followed; unresolved or unsupported exports reached by a
+helper call are reported as incomplete.
 JavaScript and TypeScript discovery reports unresolved relative code imports
 with runtime bindings. Side-effect, type-only, asset, and bare-package imports
 are outside this particular diagnostic.

@@ -490,6 +490,62 @@ fn dropped(path: &str) { tasks::remove(path); }
 }
 
 #[test]
+fn rust_reexported_helpers_preserve_result_usage() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::write(root.path().join("src/lib.rs"), "mod support; mod api; mod worker;\n").unwrap();
+    std::fs::write(root.path().join("src/support.rs"), RUST_RESULT_HELPERS).unwrap();
+    std::fs::write(root.path().join("src/api.rs"), "pub(crate) use crate::support::{discard as ignore, forward, remove};\n").unwrap();
+    std::fs::write(root.path().join("src/worker.rs"), r#"use crate::api as tasks;
+use std::fs::remove_file;
+fn unused(path: &str) {
+    let result = remove_file(path);
+    tasks::ignore(result);
+}
+fn used(path: &str) -> std::io::Result<()> {
+    let result = remove_file(path);
+    tasks::forward(result)
+}
+fn dropped(path: &str) { tasks::remove(path); }
+"#).unwrap();
+    let expected = &[("src/support.rs", 4), ("src/worker.rs", 4)];
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", expected);
+    let worker = std::fs::read_to_string(root.path().join("src/worker.rs")).unwrap();
+    let imports = "use crate::api::{ignore, forward, remove};";
+    let direct = worker.replace("use crate::api as tasks;", imports).replace("tasks::", "");
+    std::fs::write(root.path().join("src/worker.rs"), direct).unwrap();
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", expected);
+    std::fs::write(root.path().join("src/worker.rs"), worker.replace("tasks::ignore", "tasks::discard")).unwrap();
+    std::fs::write(root.path().join("src/api.rs"), "pub(crate) use crate::support::*;\n").unwrap();
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", expected);
+    std::fs::write(root.path().join("src/worker.rs"), &worker).unwrap();
+    std::fs::write(root.path().join("src/lib.rs"), "mod support; mod layer; mod api; mod worker;\n").unwrap();
+    std::fs::write(root.path().join("src/layer.rs"), "pub(crate) use crate::support::{discard as ignore, forward, remove};\n").unwrap();
+    std::fs::write(root.path().join("src/api.rs"), "pub(crate) use crate::layer::{ignore, forward, remove};\n").unwrap();
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", expected);
+    std::fs::create_dir(root.path().join("src/api")).unwrap();
+    std::fs::write(root.path().join("src/api/inner.rs"), RUST_RESULT_HELPERS).unwrap();
+    std::fs::write(root.path().join("src/api.rs"), "mod inner; pub(crate) use self::inner::{discard as ignore, forward, remove};\n").unwrap();
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", &[("src/api/inner.rs", 4), ("src/worker.rs", 4)]);
+    std::fs::write(root.path().join("src/support2.rs"), RUST_RESULT_HELPERS).unwrap();
+    std::fs::write(root.path().join("src/lib.rs"), "mod support; mod support2; mod layer; mod api; mod worker;\n").unwrap();
+    std::fs::write(root.path().join("src/api.rs"), "pub(crate) use crate::support::*; pub(crate) use crate::support2::*;\n").unwrap();
+    std::fs::write(root.path().join("src/worker.rs"), worker.replace("tasks::ignore", "tasks::discard")).unwrap();
+    let ambiguous = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
+    assert!(ambiguous.coverage.iter().any(|issue| issue.reason == "unresolved_helper_target"), "{:?}", ambiguous.coverage);
+    assert!(!ambiguous.findings.iter().any(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result")), "{:#?}", ambiguous.findings);
+    std::fs::write(root.path().join("src/worker.rs"), &worker).unwrap();
+    std::fs::write(root.path().join("src/api.rs"), "pub(crate) use crate::support::{discard as ignore, forward, remove}; pub(crate) use crate::support2::*;\n").unwrap();
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", expected);
+    for reexport in ["pub(crate) use crate::missing::*;\n", "#[cfg(feature = \"x\")] pub(crate) use crate::support::*;\n", "pub(super) use crate::support::*;\n"] {
+        std::fs::write(root.path().join("src/api.rs"), reexport).unwrap();
+        let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
+        assert!(result.coverage.iter().any(|issue| issue.reason == "unresolved_helper_target"), "{reexport}: {:?}", result.coverage);
+        assert!(!result.findings.iter().any(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result")), "{reexport}: {:#?}", result.findings);
+    }
+}
+
+#[test]
 fn recursive_helpers_propagate_argument_use_and_returned_results() {
     let source = r#"package storage
 import "os"

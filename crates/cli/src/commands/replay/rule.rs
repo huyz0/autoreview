@@ -180,6 +180,18 @@ mod tests {
     }
 
     #[test]
+    fn dataflow_replay_rejects_unresolved_rust_reexport() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join("src/lib.rs"), "mod api; mod worker;\n").unwrap();
+        std::fs::write(root.path().join("src/api.rs"), "pub(crate) use crate::missing::*;\n").unwrap();
+        std::fs::write(root.path().join("src/worker.rs"), "use crate::api as helpers;\nfn run() { helpers::discard(std::fs::remove_file(\"file\")); }\n").unwrap();
+        let error = Tool::AutoreviewDataflow.scan(root.path(), &["src/worker.rs".into()],
+            &BTreeSet::from(["rust-discarded-remove-file-result".into()])).unwrap_err();
+        assert!(error.to_string().contains("incomplete"), "{error}");
+    }
+
+    #[test]
     fn rule_specific_limitations_do_not_block_unrelated_rules() {
         let issue = autoreview_schema::AnalysisCoverageIssue {
             analyzer: "call-sequence".into(), reason: "path_budget".into(), scope: "function".into(),
