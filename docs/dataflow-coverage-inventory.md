@@ -42,6 +42,13 @@ includes directly called imported helpers, conditional imports, `#[path]`, and a
 import shapes remain outside this diagnostic. Supported named and wildcard
 `pub use` chains are followed; unresolved or unsupported exports reached by a
 helper call are reported as incomplete.
+For an immediate child using a parent's private module import, discovery also
+follows a single unconditional import to a verified module file. Conditional,
+ambiguous, wildcard, and unsupported imports remain unresolved. On the same
+Autoreview diff, name-specific diagnostics showed eight unresolved names before
+this change and six afterward; the two resolved names were private parent
+module imports. The six remaining names were associated calls on imported types.
+This single comparison does not establish general recall or precision.
 JavaScript and TypeScript discovery reports unresolved relative code imports
 with runtime bindings. Side-effect, type-only, asset, and bare-package imports
 are outside this particular diagnostic.

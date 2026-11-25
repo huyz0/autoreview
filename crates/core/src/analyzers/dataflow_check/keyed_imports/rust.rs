@@ -153,7 +153,8 @@ fn rust_uses(
             (module, module.rsplit("::").next().unwrap_or(module))
         } else { (qualified, member) };
         let local = format!("{}::", alias.unwrap_or(default));
-        let namespace = (!conditional).then(|| reexport_module(resolver, path, module_path)).flatten();
+        let namespace = (!conditional).then(|| reexport_module(resolver, path, module_path)
+            .or_else(|| private_parent_namespace(resolver, path, module_path))).flatten();
         if let Some(file) = namespace {
             if let Some(binding) = resolver.binding(&file, &local, None, None, true) { bindings.push(binding); }
         } else if is_relative(module_path) {
@@ -169,6 +170,44 @@ fn rust_uses(
 
 fn is_relative(path: &str) -> bool {
     matches!(path.split("::").next(), Some("crate" | "self" | "super"))
+}
+
+// Children can use a private name imported by their immediate parent. Follow
+// only one unambiguous, unconditional module import to a verified module file;
+// unmodeled imports and declarations must not turn into guessed targets.
+fn private_parent_namespace(resolver: &Resolver<'_>, path: &Path, qualified: &str) -> Option<PathBuf> {
+    let name = qualified.strip_prefix("super::")?;
+    if !valid_name(name) { return None; }
+    let parent = parent_module(resolver, path)?;
+    let parsed = resolver.cache.get(&parent, Language::Rust)?;
+    let root = parsed.1.root_node();
+    if root.has_error() { return None; }
+    let mut matches = Vec::new();
+    for node in children(root) {
+        if node.kind() != "use_declaration" {
+            if node.kind() == "macro_invocation" || (node.kind() == "expression_statement"
+                && children(node).iter().any(|part| part.kind() == "macro_invocation")) { return None; }
+            if node.child_by_field_name("name").and_then(|part| text(part, &parsed.0)) == Some(name) { return None; }
+            continue;
+        }
+        let usage = node.child_by_field_name("argument").and_then(|part| text(part, &parsed.0))?;
+        if usage.matches('{').count() > 1 || usage.matches('}').count() > 1 { return None; }
+        let paths = rust_paths(usage.trim());
+        if paths.is_empty() { return None; }
+        for usage in paths {
+            let (target, alias) = usage.split_once(" as ").map_or((usage.as_str(), None), |(target, alias)| (target.trim(), Some(alias.trim())));
+            let (module, member) = target.rsplit_once("::")?;
+            if member == "*" { return None; }
+            let default = if member == "self" { module.rsplit("::").next()? } else { member };
+            if alias.unwrap_or(default) == name {
+                if has_attributes(node) { return None; }
+                let target = if member == "self" { module } else { target };
+                matches.push(reexport_module(resolver, &parent, target)?);
+            }
+        }
+    }
+    let [target] = matches.as_slice() else { return None };
+    Some(target.clone())
 }
 
 fn resolve_use_module(resolver: &Resolver<'_>, path: &Path, dir: &Path, module: &str) -> Option<PathBuf> {
