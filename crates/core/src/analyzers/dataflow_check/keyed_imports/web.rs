@@ -52,6 +52,10 @@ impl ImportSource<'_> {
             }
             return exports;
         }
+        self.runtime_reexports(node, clause, star, namespace, coverage)
+    }
+
+    fn runtime_reexports(&self, node: Node<'_>, clause: Option<Node<'_>>, star: bool, namespace: bool, coverage: &mut Vec<AnalysisCoverageIssue>) -> Vec<KeyedExport> {
         let names = exported_names(clause, self.source);
         if names.is_empty() && !star && !namespace {
             return Vec::new();
