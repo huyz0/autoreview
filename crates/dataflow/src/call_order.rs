@@ -11,12 +11,19 @@ mod identity;
 mod plan;
 mod keyed;
 
-pub use keyed::{check_keyed, check_keyed_file, check_keyed_units, check_keyed_units_with_coverage, check_keyed_units_with_verified_sources, keyed_flow_exhausted, resolve_declaration_import, DeclarationResolution, KeyedCheckResult, KeyedDeclaration, KeyedExport, KeyedFunction, KeyedImport, KeyedLimitation, KeyedUnit};
+pub use keyed::{check_keyed, check_keyed_file, check_keyed_units, check_keyed_units_with_coverage, check_keyed_units_with_verified_sources, check_keyed_units_with_verified_components, keyed_flow_exhausted, resolve_declaration_import, DeclarationResolution, KeyedCheckResult, KeyedDeclaration, KeyedExport, KeyedFunction, KeyedImport, KeyedLimitation, KeyedUnit};
 
 use crate::cfg::{Cfg, CfgNode, NodeId, Stmt};
 use crate::lattice::Lattice;
 use crate::solver;
 use crate::taint::NamePattern;
+
+/// Verified positions in a multi-result call that carry independent obligations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultComponents {
+    pub count: usize,
+    pub indices: Vec<usize>,
+}
 
 #[derive(Debug, Clone)]
 pub struct CallOrderSpec {

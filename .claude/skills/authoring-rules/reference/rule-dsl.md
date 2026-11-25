@@ -345,7 +345,8 @@ web promise satisfies the contract. Omit `unless` and `borrows` for this mode.
 
 Experimental typed sources use `source` instead of API names. A Go `must-use`
 contract may specify `source: typed-go-error` to use independently verified
-single-`error` call results. It requires a trusted configured Go evidence probe
+single-`error` results and error positions in supported multi-result calls. It
+requires a trusted configured Go evidence probe
 and reports unavailable or unmodeled analysis; it does not cover every Go
 package or result shape. A TypeScript or TSX contract may use
 `source: typed-promise-factory` for verified factory-created promise calls.

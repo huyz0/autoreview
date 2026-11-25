@@ -17,7 +17,8 @@ pub(crate) fn supports_go_switch(node: Node<'_>) -> bool {
 }
 
 fn pure(node: Node<'_>) -> bool {
-    matches!(node.kind(), "expression_list" | "identifier" | "selector_expression" | "field_identifier" | "int_literal" | "float_literal" | "imaginary_literal" | "rune_literal" | "raw_string_literal" | "interpreted_string_literal" | "true" | "false" | "nil")
+    if matches!(node.kind(), "int_literal" | "float_literal" | "imaginary_literal" | "rune_literal" | "raw_string_literal" | "interpreted_string_literal" | "true" | "false" | "nil") { return true; }
+    matches!(node.kind(), "expression_list" | "identifier" | "selector_expression" | "field_identifier")
         && site::children(node).all(pure)
 }
 

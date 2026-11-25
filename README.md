@@ -32,8 +32,8 @@ deep tier.
   `AUTOREVIEW_TYPESCRIPT_CONFIG` names an absolute config path. Without a
   configured checker, coverage reports identify the skipped rule. This check
   only covers supported, unambiguous factory and import shapes.
-- **Experimental Go error checks** can flag unused single `error` results
-  from type-checked calls. Build the probe in `tools/go-error-evidence` and set
+- **Experimental Go error checks** can flag unused `error` results from type-checked calls, including
+  supported multi-result assignments. Build the probe in `tools/go-error-evidence` and set
   `AUTOREVIEW_GO_ERROR_PROBE` and `AUTOREVIEW_GO_BINARY` to absolute paths of
   trusted executables. Package loading runs Go build tools against the project;
   use only trusted projects. Missing configuration or incomplete analysis is

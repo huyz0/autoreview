@@ -1,7 +1,7 @@
 # Experimental Go error type evidence
 
 This experimental probe uses `go/types` to check whether specified calls
-return exactly one predeclared `error`. Autoreview can invoke package mode when
+return one or more predeclared `error` results. Autoreview can invoke package mode when
 explicitly configured with trusted probe and Go executable paths; the probe
 itself does not decide whether a result is discarded. It has two input modes:
 caller-supplied source files and experimental package loading. Both use JSON on
@@ -34,12 +34,13 @@ child timeout does not yet contain descendant processes.
 
 Each `start` is a zero-based UTF-8 byte offset of the call expression, not a
 line or character number. Responses retain request order and report `error`
-only when a callable has exactly one result identical to Go's predeclared
-`error`; `not_proven` means a resolved call does not meet that condition, while
-`unavailable` means the requested call was not found. Syntax, type-checking,
+for a single predeclared `error` result, or `multi_error` with the result count
+and zero-based error indexes for multi-result calls. `not_proven` means a
+resolved call does not have such a result; `unavailable` means the requested
+call was not found. Syntax, type-checking,
 package-load, or source-identity failures produce an `incomplete` response.
-Multi-result calls and `error` conversions are not classified as single-error
-calls.
+`error` conversions are not classified as calls returning errors. Unsupported
+multi-result contexts are reported as incomplete by Autoreview.
 
 The caller must analyze an immutable package snapshot: other package files and
 cached dependency exports can change during or after loading. Source-file mode
@@ -61,3 +62,6 @@ Run the tests with a Go toolchain:
 cd tools/go-error-evidence
 GOPROXY=off GOSUMDB=off go test ./...
 ```
+
+The response protocol is versioned. Rebuild the probe after updating Autoreview;
+an older probe is rejected as incomplete rather than silently missing results.

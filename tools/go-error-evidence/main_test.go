@@ -24,7 +24,7 @@ func run() {
 }
 `
 	snippets := []string{"operation()\n", "other()\n", "good()\n", "customResult()\n", "aliased()\n", "error(nil)"}
-	want := []string{"error", "not_proven", "not_proven", "not_proven", "error", "not_proven"}
+	want := []string{"error", "multi_error", "not_proven", "not_proven", "error", "not_proven"}
 	req := request{Files: []sourceFile{{Path: "main.go", Source: src}}}
 	for _, snippet := range snippets {
 		pos := strings.LastIndex(src, snippet)
@@ -36,6 +36,9 @@ func run() {
 	got := analyze(req)
 	if got.Status != "ok" {
 		t.Fatalf("unexpected result: %+v", got)
+	}
+	if got.Calls[1].ResultCount != 2 || len(got.Calls[1].ErrorIndexes) != 1 || got.Calls[1].ErrorIndexes[0] != 1 {
+		t.Fatalf("multi-result positions: %+v", got.Calls[1])
 	}
 	for i, expected := range want {
 		if got.Calls[i].Status != expected {

@@ -70,10 +70,10 @@ The checker reports unavailable or unmodeled evidence and is not a complete
 replacement for Go tooling. Its README records package, snapshot, and process
 containment limits.
 
-Connect proven single-error results to the existing result-use analysis and
-preserve source identities through callers and helper summaries. Extend to
-multi-result calls only after individual result positions can be tracked; a
-used non-error result must not hide a discarded error. Model explicit `_`,
+The experimental rule tracks single-error calls and independent error positions
+in supported multi-result assignments; a used non-error result does not hide a
+discarded error. Continue preserving source identities through callers and
+helper summaries, including unsupported multi-result argument contexts. Model explicit `_`,
 `defer`, `go`, aliases, reassignment, shadowing, generics, method and interface
 dispatch conservatively. Record incomplete type checking and unsupported call
 shapes against the affected rule and file, rather than counting them as clean.

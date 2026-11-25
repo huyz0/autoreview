@@ -172,6 +172,9 @@ impl Lower<'_, '_, '_> {
         }
         let targets = assignment_targets(node, target);
         let values = value.map_or_else(Vec::new, assignment_items);
+        if let Some(call) = (values.len() == 1).then(|| transparent(values[0])) {
+            if self.component_assignment(&targets, call, reassignment, effects) { return; }
+        }
         // A tuple-valued expression can be consumed, but its component
         // identities are outside this single-result contract.
         let paired = targets.len() == values.len();
@@ -196,6 +199,24 @@ impl Lower<'_, '_, '_> {
             writes.extend(initialized);
         }
         effects.push(Effect::Write(writes));
+    }
+
+    fn component_assignment(&self, targets: &[Node<'_>], call: Node<'_>, reassignment: bool, effects: &mut Vec<Effect>) -> bool {
+        let Some(shape) = self.plan.result_components.get(&call.start_byte()) else { return false; };
+        if shape.count != targets.len() { return false; }
+        let Some(origin) = self.origin(call) else { return false; };
+        self.reads(call, effects);
+        let writes = targets.iter().enumerate().filter_map(|(index, target)| {
+            let mut write = self.write(*target, None, reassignment, effects)?;
+            if shape.indices.contains(&index) {
+                let mut component = origin.clone();
+                component.component = Some(index);
+                write.value = Value::Source(component);
+            }
+            Some(write)
+        }).collect();
+        effects.push(Effect::Write(writes));
+        true
     }
 
     fn write(
@@ -308,6 +329,7 @@ impl Lower<'_, '_, '_> {
         Some(Origin {
             call,
             start: node.start_byte(),
+            component: None,
             line: node.start_position().row as u32 + 1,
             path: None,
             calls: Vec::new(),

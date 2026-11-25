@@ -33,14 +33,17 @@ type request struct {
 	ExpectedSources map[string]string `json:"expectedSources,omitempty"`
 }
 type callResult struct {
-	Path   string `json:"path"`
-	Start  int    `json:"start"`
-	Status string `json:"status"`
+	Path         string `json:"path"`
+	Start        int    `json:"start"`
+	Status       string `json:"status"`
+	ResultCount  int    `json:"resultCount,omitempty"`
+	ErrorIndexes []int  `json:"errorIndexes,omitempty"`
 }
 type response struct {
-	Status string       `json:"status"`
-	Reason string       `json:"reason,omitempty"`
-	Calls  []callResult `json:"calls,omitempty"`
+	Version int          `json:"version"`
+	Status  string       `json:"status"`
+	Reason  string       `json:"reason,omitempty"`
+	Calls   []callResult `json:"calls,omitempty"`
 }
 
 func analyze(req request) response {
@@ -59,9 +62,10 @@ func analyze(req request) response {
 		return incomplete("type_errors")
 	}
 	indexes := indexCalls(fset, byPath)
-	result := response{Status: "ok", Calls: make([]callResult, 0, len(req.Calls))}
+	result := response{Version: 2, Status: "ok", Calls: make([]callResult, 0, len(req.Calls))}
 	for _, call := range req.Calls {
-		result.Calls = append(result.Calls, callResult{Path: call.Path, Start: call.Start, Status: callStatus(indexes[call.Path][call.Start], info)})
+		status, count, indexes := callStatus(indexes[call.Path][call.Start], info)
+		result.Calls = append(result.Calls, callResult{Path: call.Path, Start: call.Start, Status: status, ResultCount: count, ErrorIndexes: indexes})
 	}
 	return result
 }
@@ -115,22 +119,40 @@ func indexCalls(fset *token.FileSet, files map[string]*ast.File) map[string]map[
 	return indexes
 }
 
-func callStatus(node *ast.CallExpr, info *types.Info) string {
+func callStatus(node *ast.CallExpr, info *types.Info) (string, int, []int) {
 	if node == nil {
-		return "unavailable"
+		return "unavailable", 0, nil
 	}
 	funType := info.TypeOf(node.Fun)
 	if funType == nil {
-		return "unavailable"
+		return "unavailable", 0, nil
 	}
 	signature, ok := funType.Underlying().(*types.Signature)
-	if ok && signature.Results().Len() == 1 && types.Identical(signature.Results().At(0).Type(), types.Universe.Lookup("error").Type()) {
-		return "error"
+	if !ok {
+		return "not_proven", 0, nil
 	}
-	return "not_proven"
+	return resultStatus(signature.Results())
 }
 
-func incomplete(reason string) response { return response{Status: "incomplete", Reason: reason} }
+func resultStatus(results *types.Tuple) (string, int, []int) {
+	var errors []int
+	for index := 0; index < results.Len(); index++ {
+		if types.Identical(results.At(index).Type(), types.Universe.Lookup("error").Type()) {
+			errors = append(errors, index)
+		}
+	}
+	if results.Len() == 1 && len(errors) == 1 {
+		return "error", 0, nil
+	}
+	if results.Len() > 1 && len(errors) > 0 {
+		return "multi_error", results.Len(), errors
+	}
+	return "not_proven", 0, nil
+}
+
+func incomplete(reason string) response {
+	return response{Version: 2, Status: "incomplete", Reason: reason}
+}
 
 func main() {
 	data, err := io.ReadAll(io.LimitReader(os.Stdin, maxInput+1))

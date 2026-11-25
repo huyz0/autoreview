@@ -108,7 +108,7 @@ impl CandidateScan<'_, '_, '_, '_, '_> {
     }
 }
 
-fn reachable_frames(
+pub(super) fn reachable_frames(
     program: &Program<'_, '_, '_>, units: &[KeyedUnit<'_, '_, '_>], functions: &[&super::super::KeyedFunction<'_, '_>],
 ) -> BTreeSet<usize> {
     let mut pending: Vec<_> = program.frames.iter().enumerate().filter_map(|(index, frame)| units[frame.unit].entry.then_some(index)).collect();

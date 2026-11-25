@@ -13,10 +13,18 @@ pub(in crate::call_order) fn check_units_with_sources(
     units: &[KeyedUnit<'_, '_, '_>],
     sources: &BTreeMap<usize, BTreeSet<usize>>,
 ) -> (Vec<CallOrderHit>, bool, Vec<super::super::keyed::KeyedLimitation>) {
+    check_units_with_components(spec, units, sources, &BTreeMap::new())
+}
+
+pub(in crate::call_order) fn check_units_with_components(
+    spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<usize, BTreeSet<usize>>,
+    components: &BTreeMap<usize, BTreeMap<usize, super::super::ResultComponents>>,
+) -> (Vec<CallOrderHit>, bool, Vec<super::super::keyed::KeyedLimitation>) {
     let mut program = Program::new(spec, units);
     for frame in &mut program.frames {
-        if let (Some(plan), Some(offsets)) = (&mut frame.plan, sources.get(&frame.unit)) {
-            plan.extra_sources.clone_from(offsets);
+        if let Some(plan) = &mut frame.plan {
+            if let Some(offsets) = sources.get(&frame.unit) { plan.extra_sources.clone_from(offsets); }
+            if let Some(shapes) = components.get(&frame.unit) { plan.result_components.clone_from(shapes); }
         }
     }
     let mut limitations = unmodeled_sources(&program, units, sources);
@@ -45,6 +53,8 @@ fn unmodeled_sources(
     program: &Program<'_, '_, '_>, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<usize, BTreeSet<usize>>,
 ) -> Vec<super::super::keyed::KeyedLimitation> {
     let mut limitations = Vec::new();
+    let functions: Vec<_> = units.iter().flat_map(|unit| unit.functions.iter()).collect();
+    let reachable = super::sources::reachable_frames(program, units, &functions);
     if sources.keys().any(|index| *index >= units.len()) {
         limitations.push(super::super::keyed::KeyedLimitation { reason: "verified_source_unmodeled", path: None, line: None });
     }
@@ -55,6 +65,7 @@ fn unmodeled_sources(
                 let owner = unit.functions.iter().enumerate()
                     .filter(|(_, function)| function.node.start_byte() <= start && start < function.node.end_byte())
                     .min_by_key(|(_, function)| function.node.end_byte() - function.node.start_byte());
+                if owner.is_some_and(|(index, _)| !reachable.contains(&(base + index))) || (owner.is_none() && !unit.entry) { continue; }
                 let modeled = owner.is_some_and(|(index, function)| {
                     let frame = &program.frames[base + index];
                     let call = function.node.descendant_for_byte_range(start, start.saturating_add(1))
