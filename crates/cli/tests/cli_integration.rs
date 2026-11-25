@@ -271,6 +271,35 @@ fn rust_module_alias_results_reach_the_review_report() {
 }
 
 #[test]
+fn rust_review_finds_helper_after_many_unreferenced_modules() {
+    let mut files = Vec::new();
+    let mut modules = String::new();
+    for index in 0..80 {
+        let name = format!("unused_{index:03}");
+        modules.push_str(&format!("mod {name};\n"));
+        files.push((format!("src/{name}.rs"), format!("pub fn spare_{index}() {{}}\n")));
+    }
+    modules.push_str("mod zhelper;\n");
+    files.push(("src/lib.rs".into(), modules.clone()));
+    files.push(("src/zhelper.rs".into(), "use std::fs::remove_file;\npub fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n".into()));
+    let refs: Vec<_> = files.iter().map(|(path, source)| (path.as_str(), source.as_str())).collect();
+    let repo = init_repo(&refs);
+    let base = current_commit(repo.path());
+    let after = format!("{modules}fn run() {{ zhelper::remove(\"file\"); }}\n");
+    repo.commit(&[("src/lib.rs", &after)], "call helper");
+    let run = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["diff", "--base", &base, "--head", "HEAD", "--static-only"])
+        .assert().success();
+    let path = report_path_from_stdout(&String::from_utf8_lossy(&run.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert!(report["findings"].as_array().unwrap().iter().any(|finding|
+        finding["source"]["ruleId"] == "rust-discarded-remove-file-result"
+            && finding["location"]["path"] == "src/zhelper.rs"), "{report}");
+    assert!(!report.get("analysisCoverage").and_then(|items| items.as_array()).is_some_and(|items|
+        items.iter().any(|issue| issue["reason"] == "dependency_limit")), "{report}");
+}
+
+#[test]
 fn rust_relative_module_results_reach_the_review_report() {
     let root = "mod support; mod worker;\n";
     let support = "use std::fs::remove_file;\npub(crate) fn discard(value: std::io::Result<()>) {}\npub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n";
