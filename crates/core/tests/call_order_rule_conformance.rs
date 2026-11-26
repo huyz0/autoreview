@@ -325,11 +325,8 @@ fn helper_conditional_returns_respect_constant_arguments() {
         let root = assert_boolean_helper_guard(path, rule, source);
         let later = source.replace("export function run(a, b) { return consume(rename(a, b), true); }", "export async function run(a, b) { const value = rename(a, b); consume(value, false); await value; }");
         std::fs::write(root.path().join(path), later).unwrap();
-        let result = conditional_test_result(&root, path);
-        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
-        let extension = path.rsplit('.').next().unwrap();
-        std::fs::write(root.path().join(format!("helper.{extension}")), "export function consume(value, flag) { if (flag) return value; }\n").unwrap();
-        let imported = source.replace("function consume(value, flag) { if (flag) return value; }", "import { consume } from './helper';");
+        assert_no_helper_finding(&root, path, rule);
+        let imported = import_guarded_helper(&root, path, source);
         std::fs::write(root.path().join(path), imported.replace(", true)", ", false)")).unwrap();
         let result = conditional_test_result(&root, path);
         assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
@@ -385,6 +382,12 @@ fn assert_correlated_helper_pair(root: &tempfile::TempDir, path: &str, rule: &st
 fn assert_no_helper_finding(root: &tempfile::TempDir, path: &str, rule: &str) {
     let result = conditional_test_result(root, path);
     assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+}
+
+fn import_guarded_helper(root: &tempfile::TempDir, path: &str, source: &str) -> String {
+    let extension = path.rsplit('.').next().unwrap();
+    std::fs::write(root.path().join(format!("helper.{extension}")), "export function consume(value, flag) { if (flag) return value; }\n").unwrap();
+    source.replace("function consume(value, flag) { if (flag) return value; }", "import { consume } from './helper';")
 }
 
 fn assert_assigned_helper_pair(root: &tempfile::TempDir, path: &str, rule: &str, source: &str) {
@@ -456,11 +459,8 @@ fn assigned_helper_result_respects_correlated_guards() {
         assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
         let alias = source.replace("await forwarded;", "const copy = forwarded; await copy;");
         std::fs::write(root.path().join(path), alias).unwrap();
-        let result = conditional_test_result(&root, path);
-        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
-        let extension = path.rsplit('.').next().unwrap();
-        std::fs::write(root.path().join(format!("helper.{extension}")), "export function consume(value, flag) { if (flag) return value; }\n").unwrap();
-        let imported = source.replace("function consume(value, flag) { if (flag) return value; }", "import { consume } from './helper';");
+        assert_no_helper_finding(&root, path, rule);
+        let imported = import_guarded_helper(&root, path, source);
         assert_assigned_helper_pair(&root, path, rule, &imported);
     }
 }

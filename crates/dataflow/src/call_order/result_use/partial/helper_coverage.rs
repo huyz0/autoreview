@@ -243,11 +243,7 @@ fn direct_helper_observes(
     if value == Some(false) && !conditional {
         return true;
     }
-    *evidence = if !conditional && guarded == Some(true) && *evidence != Evidence::Unknown {
-        Evidence::Definite
-    } else {
-        Evidence::Unknown
-    };
+    record_evidence(evidence, !conditional && guarded == Some(true));
     false
 }
 
@@ -276,12 +272,16 @@ fn slot_observes(
     } else {
         guarded_observed == Some(true)
     };
-    *evidence = if !conditional && proven_skip && *evidence != Evidence::Unknown {
+    record_evidence(evidence, !conditional && proven_skip);
+    false
+}
+
+fn record_evidence(evidence: &mut Evidence, proven_skip: bool) {
+    *evidence = if proven_skip && *evidence != Evidence::Unknown {
         Evidence::Definite
     } else {
         Evidence::Unknown
     };
-    false
 }
 
 fn guarded_value(
