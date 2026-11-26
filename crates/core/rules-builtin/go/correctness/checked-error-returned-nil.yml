@@ -1,0 +1,29 @@
+id: go-checked-error-returned-nil
+language: Go
+category: correctness
+severity: warning
+message: >-
+  This branch checks err and immediately returns nil. Confirm that suppressing
+  the failed call is intentional; otherwise return or wrap the error.
+metadata:
+  subcategory: [correctness.error-handling]
+  confidence: MEDIUM
+  cwe: ["CWE-390"]
+rule:
+  all:
+    - pattern:
+        context: 'func f() { if $ERR := $CALL; $ERR != nil { return nil } }'
+        selector: if_statement
+    - inside:
+        stopBy:
+          kind: func_literal
+        any:
+          - pattern: 'func $NAME($$$ARGS) error { $$$BODY }'
+          - pattern: 'func ($RECEIVER $TYPE) $NAME($$$ARGS) error { $$$BODY }'
+constraints:
+  ERR:
+    regex: '^err$'
+  CALL:
+    has:
+      kind: call_expression
+      stopBy: neighbor
