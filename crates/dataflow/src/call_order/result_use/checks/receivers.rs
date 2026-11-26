@@ -33,7 +33,7 @@ fn scan_frame(program: &Program<'_, '_, '_>, unit: &KeyedUnit<'_, '_, '_>, funct
         if node != function.node && nested_function(node) { continue; }
         if let Some((outer, wrapped)) = receiver(node, unit.source, plan) {
             let reached = frame.graph.nodes.iter().zip(&flow.reachable).any(|(block, reached)| *reached && block.evaluations.iter().any(|evaluation| evaluation.span.start <= outer.start_byte() && outer.end_byte() <= evaluation.span.end));
-            let modeled = !wrapped && calls.iter().any(|(start, target)| *start == outer.start_byte() && program.frames[*target].plan.is_some());
+            let modeled = !wrapped && modeled_receiver(program, &calls, outer.start_byte());
             if reached && !modeled {
                 limitations.push(KeyedLimitation { reason: if wrapped { "wrapped_result_receiver" } else { "unresolved_result_receiver" }, path: Some(unit.path.to_owned()), line: Some(node.start_position().row as u32 + 1) });
             }
@@ -41,6 +41,10 @@ fn scan_frame(program: &Program<'_, '_, '_>, unit: &KeyedUnit<'_, '_, '_>, funct
         pending.extend(node.named_children(&mut node.walk()));
     }
     limitations
+}
+
+fn modeled_receiver(program: &Program<'_, '_, '_>, calls: &BTreeSet<(usize, usize)>, start: usize) -> bool {
+    calls.iter().any(|(position, target)| *position == start && program.frames[*target].plan.is_some())
 }
 
 fn nested_function(node: Node<'_>) -> bool {
