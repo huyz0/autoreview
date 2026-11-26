@@ -677,6 +677,7 @@ mod tests {
         assert!(ids.contains("go-nested-loop-linear-search"));
         assert!(ids.contains("java-object-instantiation-in-loop"));
         assert!(ids.contains("go-unclosed-http-response-body"));
+        assert!(ids.contains("go-checked-error-returned-nil"));
         assert!(!ids.contains("go-no-self-comparison"), "a plain rule with no semantic: true field must not be included");
     }
 

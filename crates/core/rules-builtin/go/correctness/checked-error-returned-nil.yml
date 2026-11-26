@@ -2,9 +2,11 @@ id: go-checked-error-returned-nil
 language: Go
 category: correctness
 severity: warning
+semantic: true
 message: >-
   This branch checks err and immediately returns nil. Confirm that suppressing
-  the failed call is intentional; otherwise return or wrap the error.
+  the failed call is intentional; otherwise return or wrap the error. For
+  context cancellation, check whether the call can also return other errors.
 metadata:
   subcategory: [correctness.error-handling]
   confidence: MEDIUM
