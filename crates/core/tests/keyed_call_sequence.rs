@@ -88,6 +88,10 @@ fn conditional_assignment_preserves_collection_identity_per_branch() {
         assert!(findings(language, path, &constant, RECEIVER, true).is_empty(), "{path}");
         let reassigned = source.replace("const chosen = flag ? root : other;", "let chosen = root; chosen = flag ? root : other;");
         assert_eq!(findings(language, path, &reassigned, RECEIVER, true).len(), 1, "{path}");
+        let keyed = "function pending(root, key, other, flag) {\n const chosen = flag ? key : other;\n root.register(chosen);\n root.remove(key);\n}\n";
+        assert_eq!(findings(language, path, keyed, RECEIVER, true).len(), 1, "{path}");
+        let same_key = keyed.replace("root.remove(key)", "root.remove(chosen)");
+        assert!(findings(language, path, &same_key, RECEIVER, true).is_empty(), "{path}");
     }
 }
 
