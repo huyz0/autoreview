@@ -45,8 +45,7 @@ func isBindingContext(ident *ast.Ident, stack []ast.Node, info *types.Info, summ
 	if !ok || bindings[variable] != call {
 		return false
 	}
-	index, ok := forwardedParameter(call, info, summaries)
-	return ok && call.Args[index] == ident
+	return callPassesContext(call, ident, info, summaries)
 }
 
 func isBoundError(expr ast.Expr, info *types.Info, bindings map[*types.Var]*ast.CallExpr) bool {

@@ -155,6 +155,10 @@ func isForwardedContext(ident *ast.Ident, stack []ast.Node, info *types.Info, su
 	if !ok || call == nil || len(ret.Results) != 1 || ret.Results[0] != call {
 		return false
 	}
+	return callPassesContext(call, ident, info, summaries)
+}
+
+func callPassesContext(call *ast.CallExpr, ident *ast.Ident, info *types.Info, summaries map[callee]*errorOrigin) bool {
 	index, ok := forwardedParameter(call, info, summaries)
 	return ok && call.Args[index] == ident
 }
