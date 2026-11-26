@@ -5,6 +5,7 @@ use crate::cfg::{CallTarget, Cfg, EdgeKind, NodeId, Stmt, ThrowingCall};
 use super::{keyed_syntax, line, site, StatementLowerer};
 
 mod handlers;
+mod conditional;
 mod switch;
 pub(crate) use switch::supports_go_switch;
 pub(crate) mod loops;
@@ -64,6 +65,7 @@ impl Flow<'_> {
 
     fn ordinary_statement(&self, cfg: &mut Cfg<Stmt>, node: Node<'_>, current: NodeId) -> NodeId {
         if supports_go_switch(node) { return self.go_switch(cfg, node, current); }
+        if let Some(end) = conditional::lower(cfg, node, self.source, current) { return end; }
         let current = keyed_syntax::expression(node).map_or(current, |expr| nested_arguments(cfg, expr, self.source, current));
         let current = self.exceptional_edge(cfg, node, current);
         let conditional = matches!(node.kind(), "if_statement" | "if_expression");

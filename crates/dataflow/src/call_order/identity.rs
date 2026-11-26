@@ -126,7 +126,7 @@ impl<'src> Syntax<'src> {
                     self.calls.push((node.start_byte(), name));
                 }
             }
-            "if_statement" | "if_expression" => {
+            "if_statement" | "if_expression" | "ternary_expression" => {
                 if let Some((name, _)) = crate::lower::keyed_syntax::condition(node, source) {
                     *self.guards.entry(name).or_default() += 1;
                 }

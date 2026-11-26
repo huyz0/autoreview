@@ -184,6 +184,37 @@ fn unsupported_contract_handle_storage_reports_incomplete_analysis() {
 }
 
 #[test]
+fn discarded_results_in_conditional_statements_are_tracked() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nexport function run(a, b, flag) {\n flag ? rename(a, b) : null;\n}\n";
+        let root = write_single_file(path, source);
+        let check = || autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &[path.into()], &[]);
+        let result = check();
+        let hits: Vec<_> = result.findings.iter().filter(|hit| hit.source.rule_id.as_deref() == Some(rule)).collect();
+        assert_eq!(hits.len(), 1, "{path}: {hits:#?} {:?}", result.coverage);
+        assert_eq!(hits[0].location.range.start_line, 3);
+        std::fs::write(root.path().join(path), source.replace("flag ? rename(a, b) : null;", "((flag ? (rename(a, b)) : null));")).unwrap();
+        let result = check();
+        assert_eq!(result.findings.iter().filter(|hit| hit.source.rule_id.as_deref() == Some(rule)).count(), 1, "{path}: {:?}", result.coverage);
+        std::fs::write(root.path().join(path), source.replace("flag ?", "false ?")).unwrap();
+        let result = check();
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        std::fs::write(root.path().join(path), source.replace("flag ?", "(flag && a) ?")).unwrap();
+        let result = check();
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule))
+            || result.coverage.iter().any(|issue| issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        std::fs::write(root.path().join(path), source.replace("flag ?", "check(flag) ?")).unwrap();
+        let result = check();
+        assert!(result.coverage.iter().any(|issue| issue.rule.as_deref() == Some(rule)
+            && issue.reason == "unmodeled_conditional_result" && issue.line == Some(3)), "{path}: {:?}", result.coverage);
+        std::fs::write(root.path().join(path), source.replace("rename(a, b)", "wrap(rename(a, b))")).unwrap();
+        let result = check();
+        assert!(result.coverage.iter().any(|issue| issue.rule.as_deref() == Some(rule)
+            && issue.reason == "unmodeled_conditional_result" && issue.line == Some(3)), "{path}: {:?}", result.coverage);
+    }
+}
+
+#[test]
 fn unlowered_contract_cleanup_reports_incomplete_analysis() {
     let source = "import java.util.concurrent.CompletableFuture;\nclass Main {\n Object run(Runnable work, boolean flag) {\n  var task = CompletableFuture.runAsync(work);\n  return flag ? task.join() : null;\n }\n}\n";
     let root = write_single_file("Main.java", source);
