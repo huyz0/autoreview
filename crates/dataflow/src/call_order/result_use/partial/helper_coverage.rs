@@ -18,9 +18,9 @@ pub(in crate::call_order::result_use) fn helper_paths(
     cfg: &Cfg<Stmt>,
     plan: &Plan<'_, '_>,
     syntax: (Node<'_>, &[u8]),
-    unused: &[(NodeId, Origin)],
-    has_closures: bool,
+    options: (&[(NodeId, Origin)], bool),
 ) -> (Vec<(NodeId, Origin)>, bool) {
+    let (unused, has_closures) = options;
     let edges = outgoing(body, cfg);
     let precise = !has_closures
         && !cyclic(body)
@@ -125,17 +125,35 @@ fn uncertain_path(
         {
             return evidence;
         }
-        let stable = supported_edges(cfg, plan, node, &edges[node], 2);
-        pending.extend(edges[node].iter().filter_map(|&(to, edge)| {
-            if stable {
-                branch(state.clone(), cfg, plan, node, edge)
-            } else {
-                Some(state.clone())
-            }
-            .map(|next| (to, next, evidence))
-        }));
+        extend_paths(
+            &mut pending,
+            (cfg, plan),
+            node,
+            &edges[node],
+            (state, evidence),
+        );
     }
     Evidence::None
+}
+
+fn extend_paths(
+    pending: &mut Vec<(NodeId, State, Evidence)>,
+    context: (&Cfg<Stmt>, &Plan<'_, '_>),
+    node: NodeId,
+    edges: &[(NodeId, EdgeKind)],
+    current: (State, Evidence),
+) {
+    let (cfg, plan) = context;
+    let (state, evidence) = current;
+    let stable = supported_edges(cfg, plan, node, edges, 2);
+    pending.extend(edges.iter().filter_map(|&(to, edge)| {
+        if stable {
+            branch(state.clone(), cfg, plan, node, edge)
+        } else {
+            Some(state.clone())
+        }
+        .map(|next| (to, next, evidence))
+    }));
 }
 
 fn process(
@@ -175,35 +193,32 @@ fn helper_observes(
             Demand::Discarded => call.unobserved_discarded.get(index),
             Demand::Slot(_) => None,
         };
-        let specialized = match call.demand {
-            Demand::Observed => call.conditional_observed.as_ref(),
-            Demand::Discarded => call.conditional_discarded.as_ref(),
-            Demand::Slot(_) => None,
-        };
-        let guarded = call
-            .guard
-            .as_ref()
-            .and_then(|guard| state.guards.get(guard))
-            .and_then(|truth| {
-                specialized.and_then(|summary| {
-                    if *truth {
-                        summary.when_true.get(index)
-                    } else {
-                        summary.when_false.get(index)
-                    }
-                })
-            })
-            .filter(|value| value.is_some());
-        let value = guarded.or(base);
-        if value == Some(&Some(false)) && !conditional {
+        let guarded = guarded_value(call, state, index);
+        let value = guarded.or_else(|| base.copied().flatten());
+        if value == Some(false) && !conditional {
             return true;
         }
-        *evidence =
-            if !conditional && guarded == Some(&Some(true)) && *evidence != Evidence::Unknown {
-                Evidence::Definite
-            } else {
-                Evidence::Unknown
-            };
+        *evidence = if !conditional && guarded == Some(true) && *evidence != Evidence::Unknown {
+            Evidence::Definite
+        } else {
+            Evidence::Unknown
+        };
     }
     false
+}
+
+fn guarded_value(call: &super::super::HelperCall, state: &State, index: usize) -> Option<bool> {
+    let truth = state.guards.get(call.guard.as_ref()?)?;
+    let summary = match call.demand {
+        Demand::Observed => call.conditional_observed.as_ref(),
+        Demand::Discarded => call.conditional_discarded.as_ref(),
+        Demand::Slot(_) => None,
+    }?;
+    if *truth {
+        summary.when_true.get(index)
+    } else {
+        summary.when_false.get(index)
+    }
+    .copied()
+    .flatten()
 }

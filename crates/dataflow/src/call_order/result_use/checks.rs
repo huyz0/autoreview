@@ -162,7 +162,7 @@ fn collect_hits(
             let unused: Vec<_> = analysis.unused().collect();
             let syntax = (function.node, unit.source);
             let (partial, status) = super::partial::unused(&analysis.owner, function.graph, plan, syntax, !analysis.closures.is_empty());
-            let (helper_hits, helper_incomplete) = super::partial::helper_paths(&analysis.owner, function.graph, plan, syntax, &unused, !analysis.closures.is_empty());
+            let (helper_hits, helper_incomplete) = super::partial::helper_paths(&analysis.owner, function.graph, plan, syntax, (&unused, !analysis.closures.is_empty()));
             let known_unused: Vec<_> = unused.iter().chain(&helper_hits).cloned().collect();
             let reason = partial_reason(status, &analysis.owner, function.graph, syntax, &known_unused)
                 .or_else(|| helper_incomplete.then_some("result_use_path_unmodeled"));

@@ -41,6 +41,13 @@ fn boolean_value(argument: Node<'_>, source: &[u8], kotlin: bool, syntax: &crate
 }
 
 impl Lower<'_, '_, '_> {
+    fn helper_guard(&self, summary: &super::HelperSummary, arguments: &[Node<'_>]) -> Option<crate::cfg::IdentityOperand> {
+        let conditional = summary.when_observed.conditional_parameters.as_ref()?;
+        let argument = transparent(*arguments.get(conditional.guard_index)?);
+        if argument.kind() != "identifier" { return None; }
+        self.plan.syntax.stable_identity(argument.utf8_text(self.source).ok()?, argument.start_byte())
+    }
+
     pub(super) fn helper_call<'tree>(&self, node: Node<'tree>) -> Option<(Vec<Node<'tree>>, &super::HelperSummary)> {
         let summary = self.helpers.get(&node.start_byte())?;
         let arguments = site::arguments(node)?;
@@ -103,10 +110,7 @@ impl Lower<'_, '_, '_> {
         // Go permits shadowing its predeclared boolean names, including where
         // the syntax tree gives them literal-shaped nodes.
         let shadowed = language == Some(crate::call_order::ContractLanguage::Go);
-        let guard = (!shadowed).then(|| summary.when_observed.conditional_parameters.as_ref()
-            .and_then(|conditional| arguments.get(conditional.guard_index).copied())
-            .map(transparent).filter(|argument| argument.kind() == "identifier")
-            .and_then(|argument| argument.utf8_text(self.source).ok().and_then(|name| self.plan.syntax.stable_identity(name, argument.start_byte())))).flatten();
+        let guard = (!shadowed).then(|| self.helper_guard(summary, &arguments)).flatten();
         let (discarded, observed) = if shadowed {
             ((summary.when_discarded.parameters.clone(), summary.when_discarded.unobserved_parameters.clone()),
              (summary.when_observed.parameters.clone(), summary.when_observed.unobserved_parameters.clone()))
