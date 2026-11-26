@@ -16,14 +16,7 @@ fn specialize(outcome: &super::super::HelperOutcome, arguments: &[Node<'_>], sou
     let mut unobserved = outcome.unobserved_parameters.clone();
     let Some(conditional) = &outcome.conditional_parameters else { return (used, unobserved); };
     let Some(argument) = arguments.get(conditional.guard_index).copied().map(transparent) else { return (used, unobserved); };
-    let kind = if (kotlin && argument.kind() == "identifier") || argument.kind() == "boolean_literal" { argument.utf8_text(source).unwrap_or("") } else { argument.kind() };
-    let truth = match kind {
-        "true" => Some(true),
-        "false" => Some(false),
-        _ if argument.kind() == "identifier" => argument.utf8_text(source).ok().and_then(|name| syntax.stable_boolean(name, argument.start_byte())),
-        _ => None,
-    };
-    let values = match truth {
+    let values = match boolean_value(argument, source, kotlin, syntax) {
         Some(true) => &conditional.when_true,
         Some(false) => &conditional.when_false,
         _ => return (used, unobserved),
@@ -35,6 +28,16 @@ fn specialize(outcome: &super::super::HelperOutcome, arguments: &[Node<'_>], sou
         }
     }
     (used, unobserved)
+}
+
+fn boolean_value(argument: Node<'_>, source: &[u8], kotlin: bool, syntax: &crate::call_order::identity::Syntax<'_>) -> Option<bool> {
+    let kind = if (kotlin && argument.kind() == "identifier") || argument.kind() == "boolean_literal" { argument.utf8_text(source).ok()? } else { argument.kind() };
+    match kind {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ if argument.kind() == "identifier" => argument.utf8_text(source).ok().and_then(|name| syntax.stable_boolean(name, argument.start_byte())),
+        _ => None,
+    }
 }
 
 impl Lower<'_, '_, '_> {

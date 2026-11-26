@@ -341,27 +341,34 @@ fn helper_conditional_returns_respect_constant_arguments() {
     }
 }
 
+fn assert_bound_helper_guard(path: &str, rule: &str, source: &str) -> tempfile::TempDir {
+    let root = write_single_file(path, source);
+    let result = conditional_test_result(&root, path);
+    assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+    assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+    std::fs::write(root.path().join(path), source.replace("enabled = true", "enabled = false")).unwrap();
+    let result = conditional_test_result(&root, path);
+    assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+    root
+}
+
+fn assert_uncertain_helper_guard(root: &tempfile::TempDir, path: &str, rule: &str) {
+    let result = conditional_test_result(root, path);
+    assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+    assert_partial_helper_coverage(root, path, rule);
+}
+
 #[test]
 fn helper_guards_follow_stable_boolean_bindings() {
     for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
         let source = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b) { const enabled = true; return consume(rename(a, b), enabled); }\n";
-        let root = write_single_file(path, source);
-        let result = conditional_test_result(&root, path);
-        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
-        assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
-        std::fs::write(root.path().join(path), source.replace("enabled = true", "enabled = false")).unwrap();
-        let result = conditional_test_result(&root, path);
-        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let root = assert_bound_helper_guard(path, rule, source);
         let reassigned = source.replace("const enabled = true;", "let enabled = false; enabled = true;");
         std::fs::write(root.path().join(path), reassigned).unwrap();
-        let result = conditional_test_result(&root, path);
-        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
-        assert_partial_helper_coverage(&root, path, rule);
+        assert_uncertain_helper_guard(&root, path, rule);
         let captured = source.replace("const enabled = true;", "let enabled = false; function update() { enabled = true; } update();");
         std::fs::write(root.path().join(path), captured).unwrap();
-        let result = conditional_test_result(&root, path);
-        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
-        assert_partial_helper_coverage(&root, path, rule);
+        assert_uncertain_helper_guard(&root, path, rule);
     }
 }
 
@@ -369,9 +376,7 @@ fn helper_guards_follow_stable_boolean_bindings() {
 fn mutable_rust_borrow_keeps_helper_guard_uncertain() {
     let source = "use std::fs::remove_file;\nfn consume(value: std::io::Result<()>, flag: bool) -> std::io::Result<()> { if flag { return value; } Ok(()) }\nfn run(path: &str) -> std::io::Result<()> { let mut enabled = false; let alias = &mut enabled; *alias = true; consume(remove_file(path), enabled) }\n";
     let root = write_single_file("lib.rs", source);
-    let result = conditional_test_result(&root, "lib.rs");
-    assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result")), "{:?}", result.findings);
-    assert_partial_helper_coverage(&root, "lib.rs", "rust-discarded-remove-file-result");
+    assert_uncertain_helper_guard(&root, "lib.rs", "rust-discarded-remove-file-result");
 }
 
 #[test]
@@ -382,13 +387,7 @@ fn helper_stable_guards_follow_jvm_and_rust_bindings() {
         ("lib.rs", "rust-discarded-remove-file-result", "use std::fs::remove_file;\nfn consume(value: std::io::Result<()>, flag: bool) -> std::io::Result<()> { if flag { return value; } Ok(()) }\nfn run(path: &str) -> std::io::Result<()> { let enabled = true; consume(remove_file(path), enabled) }\n"),
     ];
     for (path, rule, source) in cases {
-        let root = write_single_file(path, source);
-        let result = conditional_test_result(&root, path);
-        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
-        assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
-        std::fs::write(root.path().join(path), source.replace("enabled = true", "enabled = false")).unwrap();
-        let result = conditional_test_result(&root, path);
-        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        assert_bound_helper_guard(path, rule, source);
     }
 }
 
