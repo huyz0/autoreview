@@ -28,7 +28,7 @@ impl std::fmt::Display for IncompleteAnalysis {
             let location = issue.line.map_or_else(|| path.to_owned(), |line| format!("{path}:{line}"));
             format!("{location}: {}", issue.detail)
         }).collect::<Vec<_>>().join("; ");
-        write!(formatter, "dataflow analysis was incomplete: {details}")
+        write!(formatter, "analysis was incomplete: {details}")
     }
 }
 
@@ -49,17 +49,14 @@ impl Tool {
                         .is_ok_and(|output| output.status.success()),
                     "ast-grep is required for this rule"
                 );
-                autoreview_core::run_ast_grep(source, paths, packs)?
+                let result = autoreview_core::run_ast_grep_with_coverage(source, paths, packs)?;
+                completed_findings(result.findings, result.coverage, rules, packs)?
             }
             Self::AutoreviewComplexity => autoreview_core::run_complexity_check(source, paths, packs),
             Self::AutoreviewArchgraph => autoreview_core::run_archgraph_check(source, paths),
             Self::AutoreviewDataflow => {
                 let result = autoreview_core::run_dataflow_check_with_coverage(source, source, paths, packs);
-                let relevant: Vec<_> = result.coverage.into_iter().filter(|issue| affects_rules(issue, rules, packs)).collect();
-                if !relevant.is_empty() {
-                    return Err(IncompleteAnalysis(relevant).into());
-                }
-                result.findings
+                completed_findings(result.findings, result.coverage, rules, packs)?
             }
             Self::AutoreviewDuplication => autoreview_core::run_duplication_check(source, paths),
             Self::AutoreviewFrameworks => autoreview_core::run_framework_checks(source, paths),
@@ -67,6 +64,14 @@ impl Tool {
         };
         Ok(findings)
     }
+}
+
+fn completed_findings(findings: Vec<AgentFinding>, coverage: Vec<autoreview_schema::AnalysisCoverageIssue>, rules: &BTreeSet<String>, packs: &[autoreview_core::ResolvedRulePack]) -> anyhow::Result<Vec<AgentFinding>> {
+    let relevant: Vec<_> = coverage.into_iter().filter(|issue| affects_rules(issue, rules, packs)).collect();
+    if !relevant.is_empty() {
+        return Err(IncompleteAnalysis(relevant).into());
+    }
+    Ok(findings)
 }
 
 pub(super) fn validated_source(snapshot: &Path, name: &str, commit: &str, tool: Tool) -> anyhow::Result<String> {
@@ -166,7 +171,7 @@ mod tests {
         located.path = Some("src/main.ts".into());
         located.line = Some(12);
         let error = IncompleteAnalysis(vec![issue, located]);
-        assert_eq!(error.to_string(), "dataflow analysis was incomplete: repository: unavailable; src/main.ts:12: unavailable");
+        assert_eq!(error.to_string(), "analysis was incomplete: repository: unavailable; src/main.ts:12: unavailable");
     }
 
     #[test]
@@ -174,7 +179,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("main.go"), "package main\nfunc main( {\n").unwrap();
         let error = Tool::AutoreviewDataflow.scan(root.path(), &["main.go".into()], &BTreeSet::from(["go-os-rename-discarded-error".into()])).unwrap_err();
-        assert!(error.to_string().contains("dataflow analysis was incomplete"));
+        assert!(error.to_string().contains("analysis was incomplete"));
     }
 
     #[test]
@@ -184,7 +189,7 @@ mod tests {
         std::fs::write(root.path().join("broken.go"), [0xff, 0xfe]).unwrap();
         let error = Tool::AutoreviewDataflow.scan(root.path(), &["main.go".into()], &BTreeSet::from(["go-os-rename-discarded-error".into()])).unwrap_err();
         assert!(error.to_string().contains("broken.go"), "{error}");
-        assert!(error.to_string().contains("dataflow analysis was incomplete"), "{error}");
+        assert!(error.to_string().contains("analysis was incomplete"), "{error}");
     }
 
     #[test]
@@ -198,7 +203,7 @@ mod tests {
             std::fs::write(root.path().join(path), "import { run } from './missing';\nexport function main() { run(); }\n").unwrap();
             let error = Tool::AutoreviewDataflow.scan(root.path(), &[path.into()], &BTreeSet::from([rule.into()])).unwrap_err();
             assert!(error.to_string().contains("./missing"), "{path}: {error}");
-            assert!(error.to_string().contains("dataflow analysis was incomplete"), "{path}: {error}");
+            assert!(error.to_string().contains("analysis was incomplete"), "{path}: {error}");
         }
     }
 

@@ -1,4 +1,5 @@
 mod catalog;
+mod callback_coverage;
 
 pub use catalog::{find_rule_definition, list_builtin_rules, semantic_rule_ids, RuleCatalogEntry, RuleDefinition, RuleMeta, RuleMetadataBlock};
 pub(crate) use catalog::{metadata_to_meta_map, walk_rule_contents};
@@ -10,7 +11,7 @@ use std::path::Path;
 use include_dir::{include_dir, Dir};
 
 use autoreview_langsupport::Language;
-use autoreview_schema::{AgentFinding, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
+use autoreview_schema::{AgentFinding, AnalysisCoverageIssue, FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
 
 use super::rule_pack::{run_ast_grep_scan, write_rule_file};
 use crate::rule_packs::{ResolvedRulePack, MANIFEST_FILE_NAME};
@@ -89,12 +90,21 @@ pub(crate) fn title_from_rule_id(rule_id: &str) -> String {
 /// or if the `ast-grep` binary isn't on PATH — Stage 1 is meant to degrade
 /// gracefully, not block the rest of the review.
 pub fn run_ast_grep(repo_root: &Path, changed_files: &[String], registered_packs: &[ResolvedRulePack]) -> anyhow::Result<Vec<AgentFinding>> {
+    Ok(run_ast_grep_with_coverage(repo_root, changed_files, registered_packs)?.findings)
+}
+
+pub struct PatternReviewResult {
+    pub findings: Vec<AgentFinding>,
+    pub coverage: Vec<AnalysisCoverageIssue>,
+}
+
+pub fn run_ast_grep_with_coverage(repo_root: &Path, changed_files: &[String], registered_packs: &[ResolvedRulePack]) -> anyhow::Result<PatternReviewResult> {
     // A deleted file's path still shows up in `git diff --numstat` — ast-grep
     // tolerates a missing path (skips it with a stderr warning, still scans
     // the rest), but filtering up front avoids the noise and the wasted work.
     let relevant: Vec<&str> = changed_files.iter().map(String::as_str).filter(|p| is_relevant_source_file(p) && repo_root.join(p).exists()).collect();
     if relevant.is_empty() {
-        return Ok(vec![]);
+        return Ok(PatternReviewResult { findings: vec![], coverage: vec![] });
     }
 
     // Extract builtin rules for the languages present in the diff.
@@ -107,18 +117,20 @@ pub fn run_ast_grep(repo_root: &Path, changed_files: &[String], registered_packs
     let roots = rule_roots(registered_packs);
     let written = extract_pattern_rules(&roots, &rules_dir, &languages_present)?;
     if written == 0 {
-        return Ok(vec![]);
+        return Ok(PatternReviewResult { findings: vec![], coverage: vec![] });
     }
 
     let matches = match run_ast_grep_scan(temp_dir.path(), repo_root, &relevant)? {
         Some(matches) => matches,
-        None => return Ok(vec![]),
+        None => return Ok(PatternReviewResult { findings: vec![], coverage: vec![] }),
     };
 
     let categories = rule_categories(&roots);
     let metadata = rule_metadata(&roots);
     let pack_provenance = pack_rule_provenance(registered_packs);
-    Ok(matches.iter().filter_map(|m| match_to_finding(m, &categories, &metadata, &pack_provenance)).collect())
+    let mut findings: Vec<_> = matches.iter().filter_map(|m| match_to_finding(m, &categories, &metadata, &pack_provenance)).collect();
+    let coverage = callback_coverage::annotate(repo_root, &mut findings);
+    Ok(PatternReviewResult { findings, coverage })
 }
 
 /// Maps each registered pack's own declared rule ids back to the pack's

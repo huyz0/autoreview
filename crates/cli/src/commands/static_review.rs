@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 
-use autoreview_core::{run_ast_grep, run_golangci_lint, FileChange, ResolvedRulePack};
+use autoreview_core::{run_ast_grep_with_coverage, run_golangci_lint, FileChange, ResolvedRulePack};
 use autoreview_langsupport::Language;
 use autoreview_schema::{AgentFinding, AnalysisCoverageIssue, ArtifactChecksConfig};
 
@@ -137,16 +137,20 @@ fn lint(
         record_tool_issue(warnings, coverage, "golangci-lint", "tool_unavailable",
             "golangci-lint is unavailable. Go linter checks were skipped.".into());
     }
-    let results = [
-        ("ast-grep", run_ast_grep(root, files, packs)),
-        ("golangci-lint", run_golangci_lint(root, files)),
-    ];
     let mut findings = Vec::new();
-    for (tool, result) in results {
-        match result {
-            Ok(items) => findings.extend(items),
-            Err(err) => record_tool_issue(warnings, coverage, tool, "tool_failed", format!("{tool} run failed: {err}")),
+    match run_ast_grep_with_coverage(root, files, packs) {
+        Ok(result) => {
+            findings.extend(result.findings);
+            for issue in result.coverage {
+                record_warning(warnings, format!("{} [{}]: {}", issue.path.as_deref().unwrap_or("ast-grep"), issue.rule.as_deref().unwrap_or("pattern"), issue.detail));
+                coverage.push(issue);
+            }
         }
+        Err(err) => record_tool_issue(warnings, coverage, "ast-grep", "tool_failed", format!("ast-grep run failed: {err}")),
+    }
+    match run_golangci_lint(root, files) {
+        Ok(items) => findings.extend(items),
+        Err(err) => record_tool_issue(warnings, coverage, "golangci-lint", "tool_failed", format!("golangci-lint run failed: {err}")),
     }
     match autoreview_core::run_clippy_with_status(root, files) {
         Ok(result) => {

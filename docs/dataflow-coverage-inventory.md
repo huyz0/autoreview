@@ -3,6 +3,14 @@
 This inventory records paths that can make a clean dataflow review incomplete.
 It does not claim that every unsupported construct has been catalogued.
 
+The four Kotlin coroutine pattern rules also report
+`callback_execution_unresolved` when a matched operation occurs inside a
+lambda within a suspend function. The finding is retained with reduced
+confidence because the callback may execute inline or later. Replay and gates
+exclude the affected rule's incomplete scope from verified results. This is
+limited to existing pattern matches: it does not inventory unmatched syntax,
+resolve callback identities, or prove that a lambda is immediate or deferred.
+
 Result-use analysis checks partial observation for directly tracked local
 results on bounded, acyclic paths with supported simple guards. It preserves
 correlated, stable guards, so `const p = task(); if (flag) await p;` is
