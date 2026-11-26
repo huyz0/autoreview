@@ -1,7 +1,7 @@
 use super::{Bindings, EdgeKind, Lower, Node, NodeId};
 use crate::cfg::{BindingWrite, IdentityOperand, Stmt};
 
-// A final wildcard guarantees an arm. Guard evaluation remains unsupported.
+// A final unguarded wildcard guarantees an arm.
 pub(super) fn supports(node: Node<'_>) -> bool {
     if node.kind() != "match_expression" || node.has_error()
         || !node.parent().is_some_and(non_tail_statement)
@@ -21,7 +21,7 @@ fn non_tail_statement(parent: Node<'_>) -> bool {
 fn pattern(arm: Node<'_>) -> Option<Node<'_>> {
     if arm.kind() != "match_arm" || arm.child_by_field_name("value").is_none() { return None; }
     let pattern = arm.child_by_field_name("pattern")?;
-    (pattern.child_by_field_name("condition").is_none() && arm.child_by_field_name("value").is_some_and(simple_arm)).then_some(pattern)
+    (pattern.child_by_field_name("condition").is_none_or(simple_value) && arm.child_by_field_name("value").is_some_and(simple_arm)).then_some(pattern)
 }
 
 // Only accept arm statements whose nested calls the Rust lowerer traverses.
@@ -52,9 +52,12 @@ fn simple_call(node: Node<'_>) -> bool {
 }
 
 fn supported_arm(arm: Node<'_>) -> bool {
-    pattern(arm).is_some_and(|pattern| pattern.named_child_count() == 1
-        && pattern.named_child(0).is_some_and(|part| matches!(part.kind(), "integer_literal" | "boolean_literal" | "char_literal" | "string_literal" | "scoped_identifier")
-            || tuple_bindings(part).is_some()))
+    pattern(arm).is_some_and(|pattern| {
+        let guard = pattern.child_by_field_name("condition");
+        let parts: Vec<_> = pattern.named_children(&mut pattern.walk()).filter(|part| Some(*part) != guard).collect();
+        matches!(parts.as_slice(), [part] if matches!(part.kind(), "integer_literal" | "boolean_literal" | "char_literal" | "string_literal" | "scoped_identifier")
+            || tuple_bindings(*part).is_some())
+    })
 }
 
 fn tuple_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
@@ -94,7 +97,8 @@ pub(super) fn binding_lines(function: Node<'_>) -> Vec<u32> {
 }
 
 fn wildcard_arm(arm: Node<'_>) -> bool {
-    pattern(arm).is_some_and(|pattern| pattern.child_count() == 1 && pattern.child(0).is_some_and(|part| part.kind() == "_"))
+    pattern(arm).is_some_and(|pattern| pattern.child_by_field_name("condition").is_none()
+        && pattern.child_count() == 1 && pattern.child(0).is_some_and(|part| part.kind() == "_"))
 }
 
 impl Lower<'_> {
@@ -102,10 +106,15 @@ impl Lower<'_> {
         let evaluated = self.evaluate(node.child_by_field_name("value"), at, names);
         let body = node.child_by_field_name("body")?;
         let mut ends = Vec::new();
-        for arm in body.named_children(&mut body.walk()).filter(|item| item.kind() == "match_arm") {
+        let arms: Vec<_> = body.named_children(&mut body.walk()).filter(|item| item.kind() == "match_arm").collect();
+        let mut next = evaluated;
+        for (index, arm) in arms.iter().copied().enumerate() {
             let value = arm.child_by_field_name("value")?;
             let start = self.cfg.push_node(super::line(value));
-            self.edge(evaluated, start, EdgeKind::Fallthrough);
+            let last = index + 1 == arms.len();
+            let fallback = (!last).then(|| self.cfg.push_node(super::line(arm)));
+            self.edge(next, start, if last { EdgeKind::Fallthrough } else { EdgeKind::True });
+            if let Some(fallback) = fallback { self.edge(next, fallback, EdgeKind::False); }
             let mut arm_names = names.clone();
             for binding in arm_bindings(arm) {
                 let name = self.text(binding).to_owned();
@@ -115,7 +124,16 @@ impl Lower<'_> {
                         value: Some(IdentityOperand::Fresh { name, start: binding.start_byte(), age: 0, unit: 0 }) }), super::line(binding));
                 }
             }
-            if let Some(end) = self.statement(value, start, &mut arm_names) { ends.push(end); }
+            let guard = arm.child_by_field_name("pattern").and_then(|pattern| pattern.child_by_field_name("condition"));
+            let body_start = if let Some(guard) = guard {
+                let checked = self.evaluate(Some(guard), start, &arm_names);
+                let selected = self.cfg.push_node(super::line(value));
+                self.edge(checked, selected, EdgeKind::True);
+                self.edge(checked, fallback?, EdgeKind::False);
+                selected
+            } else { start };
+            if let Some(end) = self.statement(value, body_start, &mut arm_names) { ends.push(end); }
+            if let Some(fallback) = fallback { next = fallback; }
         }
         if ends.is_empty() { return None; }
         let join = self.cfg.push_node(super::line(node));

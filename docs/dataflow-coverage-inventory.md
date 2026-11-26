@@ -21,10 +21,11 @@ qualified unit variants, and simple tuple variants such as `Some(_)` or
 `Some(value)`. Arm-local names receive distinct identities, but the analyzer
 does not connect them to the matched value or resolve whether an identifier
 pattern denotes a constant: those cases report `rust_match_binding_projection`
-and replay remains incomplete. Arm bodies must
-use supported simple statements and calls, without guards. The analyzer
-explores each arm conservatively. Tail matches, complex scrutinees or arm
-expressions, guards, and more complex binding patterns remain limitations.
+and replay remains incomplete. Arm bodies and guards must use supported
+simple expressions and calls, and the final wildcard must be unguarded. The
+analyzer explores pattern outcomes conservatively and carries guard effects to
+later arms when the guard fails. Tail matches, complex scrutinees, guards or
+arm expressions, and more complex binding patterns remain limitations.
 
 Report scopes should distinguish an entire file, a function or root, a rule,
 and an imported dependency. Findings from unaffected scopes remain useful.
