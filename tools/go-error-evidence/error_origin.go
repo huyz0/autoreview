@@ -34,19 +34,8 @@ func indexErrorOrigins(files []*ast.File, info *types.Info, enabled bool) map[ca
 }
 
 func indexErrorOrigin(item ast.Decl, info *types.Info, result map[callee]*errorOrigin) bool {
-	decl, ok := item.(*ast.FuncDecl)
-	if !ok || decl.Body == nil {
-		return false
-	}
-	function, ok := info.Defs[decl.Name].(*types.Func)
-	if !ok {
-		return false
-	}
-	identity := functionIdentity(function)
-	if identity == nil {
-		return false
-	}
-	if result[*identity] != nil {
+	decl, function, identity := originDeclaration(item, info)
+	if identity == nil || result[*identity] != nil {
 		return false
 	}
 	if origin := summarizeContextReturns(decl, function, info, result); origin != nil {
@@ -54,6 +43,18 @@ func indexErrorOrigin(item ast.Decl, info *types.Info, result map[callee]*errorO
 		return true
 	}
 	return false
+}
+
+func originDeclaration(item ast.Decl, info *types.Info) (*ast.FuncDecl, *types.Func, *callee) {
+	decl, ok := item.(*ast.FuncDecl)
+	if !ok || decl.Body == nil {
+		return nil, nil, nil
+	}
+	function, ok := info.Defs[decl.Name].(*types.Func)
+	if !ok {
+		return nil, nil, nil
+	}
+	return decl, function, functionIdentity(function)
 }
 
 func summarizeContextReturns(decl *ast.FuncDecl, function *types.Func, info *types.Info, summaries map[callee]*errorOrigin) *errorOrigin {

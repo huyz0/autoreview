@@ -22,12 +22,7 @@ func shadowNil(ctx context.Context) error { nil := errors.New("other"); if ctx.E
 func run(ctx context.Context) { safe(ctx, true); direct(ctx); other(ctx); reassigned(ctx, ctx); escaped(ctx); named(ctx); deferred(ctx); wrapped(ctx); shadowNil(ctx) }
 `
 	snippets := []string{"safe(ctx, true)", "direct(ctx)", "other(ctx)", "reassigned(ctx, ctx)", "escaped(ctx)", "named(ctx)", "deferred(ctx)", "wrapped(ctx)", "shadowNil(ctx)"}
-	req := callsInSource(t, src, snippets, false)
-	req.IncludeErrorOrigins = true
-	got := analyze(req)
-	if got.Status != "ok" || len(got.Calls) != len(snippets) {
-		t.Fatalf("result: %+v", got)
-	}
+	got := analyzeOrigins(t, src, snippets)
 	for i, call := range got.Calls {
 		if i < 2 {
 			if call.ErrorOrigin == nil || call.ErrorOrigin.Kind != "context_error_or_nil" || call.ErrorOrigin.ContextParameter != 0 {
@@ -91,12 +86,7 @@ func cycle(ctx context.Context) error { return cyclic(ctx) }
 func run(ctx context.Context, w worker, f func(context.Context) error) { outer(ctx); w.method(ctx); expression(w, ctx); unrelated(ctx); otherContext(ctx, ctx); dynamic(ctx, f); cyclic(ctx) }
 `
 	snippets := []string{"outer(ctx);", "w.method(ctx);", "expression(w, ctx);", "unrelated(ctx);", "otherContext(ctx, ctx);", "dynamic(ctx, f);", "cyclic(ctx) }"}
-	req := callsInSource(t, src, snippets, false)
-	req.IncludeErrorOrigins = true
-	got := analyze(req)
-	if got.Status != "ok" {
-		t.Fatalf("result: %+v", got)
-	}
+	got := analyzeOrigins(t, src, snippets)
 	for i, call := range got.Calls {
 		if i < 3 || i == 4 {
 			want := 0
@@ -110,4 +100,15 @@ func run(ctx context.Context, w worker, f func(context.Context) error) { outer(c
 			t.Errorf("unproven %s: %+v", snippets[i], call)
 		}
 	}
+}
+
+func analyzeOrigins(t *testing.T, src string, snippets []string) response {
+	t.Helper()
+	req := callsInSource(t, src, snippets, false)
+	req.IncludeErrorOrigins = true
+	got := analyze(req)
+	if got.Status != "ok" || len(got.Calls) != len(snippets) {
+		t.Fatalf("result: %+v", got)
+	}
+	return got
 }
