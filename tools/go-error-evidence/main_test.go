@@ -25,14 +25,7 @@ func run() {
 `
 	snippets := []string{"operation()\n", "other()\n", "good()\n", "customResult()\n", "aliased()\n", "error(nil)"}
 	want := []string{"error", "multi_error", "not_proven", "not_proven", "error", "not_proven"}
-	req := request{Files: []sourceFile{{Path: "main.go", Source: src}}}
-	for _, snippet := range snippets {
-		pos := strings.LastIndex(src, snippet)
-		if pos < 0 {
-			t.Fatalf("missing %q", snippet)
-		}
-		req.Calls = append(req.Calls, callSite{Path: "main.go", Start: pos})
-	}
+	req := callsInSource(t, src, snippets, false)
 	got := analyze(req)
 	if got.Status != "ok" {
 		t.Fatalf("unexpected result: %+v", got)
@@ -102,5 +95,83 @@ func use() {
 	got := analyze(req)
 	if got.Status != "ok" || len(got.Calls) != 2 || got.Calls[0].Status != "error" || got.Calls[1].Status != "error" {
 		t.Fatalf("method, generic, and UTF-8 call offsets: %+v", got)
+	}
+}
+
+func TestResolvedCalleesDoNotGuessDynamicDispatch(t *testing.T) {
+	src := `package p
+import "strings"
+type waiter interface { Wait() error }
+type worker struct{}
+func (worker) Wait() error { return nil }
+type wrapper struct { waiter }
+func local() error { return nil }
+func use(w worker, i waiter, x wrapper, f func() error) {
+ local(); w.Wait(); i.Wait(); x.Wait(); f(); strings.TrimSpace(" x ")
+}
+`
+	snippets := []string{"local();", "w.Wait();", "i.Wait();", "x.Wait();", "f();", `strings.TrimSpace(" x ")`}
+	req := callsInSource(t, src, snippets, true)
+	got := analyze(req)
+	if got.Status != "ok" {
+		t.Fatalf("unexpected result: %+v", got)
+	}
+	assertCallee(t, got.Calls[0], callee{Package: "autoreview.local/package", Name: "local"})
+	assertCallee(t, got.Calls[1], callee{Package: "autoreview.local/package", Name: "Wait", Receiver: "worker"})
+	for _, i := range []int{2, 3, 4} {
+		if got.Calls[i].Callee != nil {
+			t.Errorf("dynamic call %s resolved: %+v", snippets[i], got.Calls[i])
+		}
+	}
+	assertCallee(t, got.Calls[5], callee{Package: "strings", Name: "TrimSpace"})
+	req.IncludeCallees = false
+	for _, call := range analyze(req).Calls {
+		if call.Callee != nil {
+			t.Fatal("callee evidence must be opt-in")
+		}
+	}
+}
+
+func TestResolvedCalleesGenericAndIndexedFunctionValues(t *testing.T) {
+	src := `package p
+func generic[T any](v T) error { return nil }
+func pair[A, B any](a A, b B) error { return nil }
+func use(fs []func() error, i int) {
+ generic[int](1); pair[int, string](1, ""); (generic[int])(1); fs[i]()
+}
+`
+	snippets := []string{"generic[int](1);", `pair[int, string](1, "");`, "(generic[int])(1);", "fs[i]()"}
+	req := callsInSource(t, src, snippets, true)
+	got := analyze(req)
+	if got.Status != "ok" || len(got.Calls) != 4 {
+		t.Fatalf("unexpected result: %+v", got)
+	}
+	for i, name := range []string{"generic", "pair", "generic"} {
+		if got.Calls[i].Callee == nil || got.Calls[i].Callee.Name != name {
+			t.Errorf("%s: %+v", snippets[i], got.Calls[i])
+		}
+	}
+	if got.Calls[3].Callee != nil {
+		t.Fatalf("indexed function value resolved: %+v", got.Calls[3])
+	}
+}
+
+func callsInSource(t *testing.T, src string, snippets []string, includeCallees bool) request {
+	t.Helper()
+	req := request{Files: []sourceFile{{Path: "main.go", Source: src}}, IncludeCallees: includeCallees}
+	for _, snippet := range snippets {
+		pos := strings.LastIndex(src, snippet)
+		if pos < 0 {
+			t.Fatalf("missing %q", snippet)
+		}
+		req.Calls = append(req.Calls, callSite{Path: "main.go", Start: pos})
+	}
+	return req
+}
+
+func assertCallee(t *testing.T, got callResult, expected callee) {
+	t.Helper()
+	if got.Callee == nil || *got.Callee != expected {
+		t.Fatalf("callee: got %+v, expected %+v", got, expected)
 	}
 }

@@ -365,6 +365,7 @@ impl Engine<'_, '_, '_, '_> {
         self.hits.push(CallOrderHit {
             trigger_call: call.to_owned(),
             node: location.node,
+            source_start: None,
             source_line: location.line,
             path: self.program.path(self.program.frames[frame].unit),
             related_calls: Vec::new(),

@@ -31,13 +31,20 @@ type request struct {
 	PackageDir      string            `json:"packageDir,omitempty"`
 	GoBinary        string            `json:"goBinary,omitempty"`
 	ExpectedSources map[string]string `json:"expectedSources,omitempty"`
+	IncludeCallees  bool              `json:"includeCallees,omitempty"`
+}
+type callee struct {
+	Package  string `json:"package"`
+	Name     string `json:"name"`
+	Receiver string `json:"receiver,omitempty"`
 }
 type callResult struct {
-	Path         string `json:"path"`
-	Start        int    `json:"start"`
-	Status       string `json:"status"`
-	ResultCount  int    `json:"resultCount,omitempty"`
-	ErrorIndexes []int  `json:"errorIndexes,omitempty"`
+	Path         string  `json:"path"`
+	Start        int     `json:"start"`
+	Status       string  `json:"status"`
+	ResultCount  int     `json:"resultCount,omitempty"`
+	ErrorIndexes []int   `json:"errorIndexes,omitempty"`
+	Callee       *callee `json:"callee,omitempty"`
 }
 type response struct {
 	Version int          `json:"version"`
@@ -58,14 +65,81 @@ func analyze(req request) response {
 		return incomplete(reason)
 	}
 	info := &types.Info{Types: make(map[ast.Expr]types.TypeAndValue)}
+	if req.IncludeCallees {
+		info.Uses = make(map[*ast.Ident]types.Object)
+		info.Selections = make(map[*ast.SelectorExpr]*types.Selection)
+	}
 	if _, err := config.Check(loaded.path, fset, files, info); err != nil {
 		return incomplete("type_errors")
 	}
 	indexes := indexCalls(fset, byPath)
 	result := response{Version: 2, Status: "ok", Calls: make([]callResult, 0, len(req.Calls))}
 	for _, call := range req.Calls {
-		status, count, indexes := callStatus(indexes[call.Path][call.Start], info)
-		result.Calls = append(result.Calls, callResult{Path: call.Path, Start: call.Start, Status: status, ResultCount: count, ErrorIndexes: indexes})
+		node := indexes[call.Path][call.Start]
+		status, count, indexes := callStatus(node, info)
+		item := callResult{Path: call.Path, Start: call.Start, Status: status, ResultCount: count, ErrorIndexes: indexes}
+		if req.IncludeCallees {
+			item.Callee = resolvedCallee(node, info)
+		}
+		result.Calls = append(result.Calls, item)
+	}
+	return result
+}
+
+// resolvedCallee identifies only statically bound calls. Interface calls and
+// function-valued variables can dispatch to an unknown implementation.
+func resolvedCallee(call *ast.CallExpr, info *types.Info) *callee {
+	if call == nil {
+		return nil
+	}
+	return resolveFunctionExpr(call.Fun, info)
+}
+
+func resolveFunctionExpr(expr ast.Expr, info *types.Info) *callee {
+	var object types.Object
+	switch fun := expr.(type) {
+	case *ast.ParenExpr:
+		return resolveFunctionExpr(fun.X, info)
+	case *ast.IndexExpr:
+		return resolveFunctionExpr(fun.X, info)
+	case *ast.IndexListExpr:
+		return resolveFunctionExpr(fun.X, info)
+	case *ast.Ident:
+		object = info.Uses[fun]
+	case *ast.SelectorExpr:
+		if selection := info.Selections[fun]; selection != nil {
+			recv := selection.Recv()
+			if pointer, ok := recv.(*types.Pointer); ok {
+				recv = pointer.Elem()
+			}
+			if _, ok := recv.Underlying().(*types.Interface); ok {
+				return nil
+			}
+			object = selection.Obj()
+		} else {
+			object = info.Uses[fun.Sel]
+		}
+	default:
+		return nil
+	}
+	function, ok := object.(*types.Func)
+	if !ok || function.Pkg() == nil {
+		return nil
+	}
+	result := &callee{Package: function.Pkg().Path(), Name: function.Name()}
+	if signature, ok := function.Type().(*types.Signature); ok && signature.Recv() != nil {
+		receiver := signature.Recv().Type()
+		if pointer, ok := receiver.(*types.Pointer); ok {
+			receiver = pointer.Elem()
+		}
+		if _, ok := receiver.Underlying().(*types.Interface); ok {
+			return nil
+		}
+		named, ok := receiver.(*types.Named)
+		if !ok || named.Obj().Pkg() == nil {
+			return nil
+		}
+		result.Receiver = named.Obj().Name()
 	}
 	return result
 }
@@ -78,7 +152,7 @@ func preparePackage(fset *token.FileSet, req request) (loadedPackage, string) {
 		return loadedPackage{}, "invalid_request"
 	}
 	loaded, reason := loadPackage(fset, req.PackageDir, req.GoBinary)
-	if reason == "" && !matchesExpectedSources(loaded.files, req.Calls, req.ExpectedSources) {
+	if reason == "" && !matchesExpectedSources(loaded.files, req.Calls, req.ExpectedSources, req.IncludeCallees) {
 		return loadedPackage{}, "source_mismatch"
 	}
 	return loaded, reason

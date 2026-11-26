@@ -10,7 +10,6 @@ use tree_sitter::Node;
 
 use super::cache::{ParseCache, ParsedFile, SummaryCaches};
 use super::dispatch::profile;
-use super::dsl::call_order_finding;
 use super::functions::{web_named_functions, web_result_functions};
 use super::{call_order_rules::CallOrderRuleDef, AgentFinding};
 
@@ -170,12 +169,12 @@ fn run_sources(
             })
             .collect();
         if !units.iter().any(|unit| unit.entry) { continue; }
-        let result = if typed {
-            check_typed_rule(&rule.spec, &units, sources, root, checker)
+        let (result, callees) = if typed {
+            (check_typed_rule(&rule.spec, &units, sources, root, checker), BTreeMap::new())
         } else if go_typed {
             go_evidence::check_go_rule(&rule.spec, &units, sources, root)
         } else {
-            check_keyed_units_with_coverage(&rule.spec, &units)
+            (check_keyed_units_with_coverage(&rule.spec, &units), BTreeMap::new())
         };
         record_rule_limits(coverage, &rule.id, result.limitations);
         findings.extend(result.hits.iter().map(|hit| {
@@ -185,16 +184,18 @@ fn run_sources(
                 .as_ref()
                 .and_then(|entry| entry.registration_path.as_deref())
                 .unwrap_or(path);
-            call_order_finding(
+            go_evidence::finding(
                 path,
                 sources.get(origin).map(|file| file.parsed.0.as_str()),
                 rule,
                 hit,
+                &callees,
             )
         }));
     }
     findings
 }
+
 
 impl Resolver<'_> {
     fn load(&self, entries: &BTreeSet<String>) -> (BTreeMap<String, Source>, Vec<AnalysisCoverageIssue>) {

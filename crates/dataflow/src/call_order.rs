@@ -110,6 +110,8 @@ pub struct CallOrderHit {
     pub trigger_call: String,
     pub node: NodeId,
     pub source_line: u32,
+    /// Byte offset of a tracked result's originating call, when available.
+    pub source_start: Option<usize>,
     pub path: Option<String>,
     pub entry: Option<EntryHit>,
     pub related_calls: Vec<(String, u32)>,
@@ -131,10 +133,10 @@ pub fn check(spec: &CallOrderSpec, cfg: &Cfg<Stmt>) -> Vec<CallOrderHit> {
         for (index, stmt) in node.stmts.iter().enumerate() {
             match stmt {
                 Stmt::Call { target: crate::cfg::CallTarget::Named(name), .. } if pending && spec.before.iter().any(|p| p.matches(name)) => {
-                    hits.push(CallOrderHit { trigger_call: name.clone(), node: node_id, source_line: node.statement_line(index), entry: None, path: None, related_calls: Vec::new() });
+                    hits.push(CallOrderHit { trigger_call: name.clone(), node: node_id, source_line: node.statement_line(index), source_start: None, entry: None, path: None, related_calls: Vec::new() });
                 }
                 Stmt::Return { .. } if pending && spec.check_before_return => {
-                    hits.push(CallOrderHit { trigger_call: "return".to_string(), node: node_id, source_line: node.statement_line(index), entry: None, path: None, related_calls: Vec::new() });
+                    hits.push(CallOrderHit { trigger_call: "return".to_string(), node: node_id, source_line: node.statement_line(index), source_start: None, entry: None, path: None, related_calls: Vec::new() });
                 }
                 _ => {}
             }

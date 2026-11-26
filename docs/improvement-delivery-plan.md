@@ -120,6 +120,29 @@ import ambiguity, changed-line reporting, and unavailable dependencies. Compare
 the replay and runtime against the current baseline before enabling the rule;
 this single pair cannot establish general precision or recall.
 
+### Checked errors and cancellation
+
+The checked-error-to-nil heuristic has a known Cilium cancellation false
+positive. Its limiter's `Wait` calls `WaitN(ctx, 1)`; `WaitN` has a separate
+burst-exceeded error, ruled out at that call site by the local burst-one
+constructor. A method named `Wait` is not evidence that errors are limited to
+cancellation. The static rule must continue warning unless the receiver,
+configuration, and possible error paths are established.
+
+The experimental Go probe can optionally identify a statically bound callee;
+the Go result-use rule can attach it to finding metadata without changing
+the finding decision. Before using it to suppress
+a warning, negotiate probe capability without breaking older probes; validate
+call locations and source identities; trace the actual receiver and constant
+constructor arguments; and compute conservative summaries of all reachable
+error paths through the relevant source and dependencies. Unknown interface
+dispatch, mutable receiver state, missing code, unsupported control flow,
+changed snapshots, or incomplete dependencies must keep the warning. Test an
+unrelated `Wait` implementation and a limiter whose request exceeds its burst,
+then rerun the pinned Cilium positive and cancellation cases along with other
+independent real fixes. Optional model verification is separate and has not
+been measured against this benchmark.
+
 ## 5. Release readiness
 
 Exercise install, doctor, a representative diff review, replay, and SARIF on
