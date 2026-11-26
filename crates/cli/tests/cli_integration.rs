@@ -24,6 +24,12 @@ fn current_commit(repo: &std::path::Path) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
+fn failed_replay_report(repo: &std::path::Path) -> serde_json::Value {
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo)
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
+    serde_json::from_slice(&result.get_output().stdout).unwrap()
+}
+
 #[test]
 fn replay_reports_analysis_failures_without_losing_successful_cases() {
     let bad = "package main\nimport \"os\"\nfunc move(a, b string) { os.Rename(a, b) }\n";
@@ -45,9 +51,7 @@ fn replay_reports_analysis_failures_without_losing_successful_cases() {
          "after": {"commit": after, "path": "main.js", "lines": []}}
     ]});
     std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
-    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
-        .args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
-    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    let report = failed_replay_report(repo.path());
     assert_eq!(report["rules"][0]["truePositives"], 1);
     assert_eq!(report["languages"][0]["language"], "Go");
     assert_eq!(report["cases"][0]["evidence"]["kind"], "synthetic");
@@ -90,9 +94,7 @@ fn replay_excludes_ambiguous_helpers_even_without_a_known_result_source() {
         {"name":"ambiguous", "rule":rule, "before":{"commit":ambiguous,"path":"main.js","lines":[]}, "after":{"commit":clean_after,"path":"main.js","lines":[]}}
     ]});
     std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
-    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
-        .args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
-    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    let report = failed_replay_report(repo.path());
     assert_eq!(report["cases"].as_array().unwrap().len(), 1, "{report}");
     assert_eq!(report["cases"][0]["name"], "resolved");
     assert_eq!(report["failures"][0]["name"], "ambiguous");
