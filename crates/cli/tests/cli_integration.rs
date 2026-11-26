@@ -183,6 +183,8 @@ fn replay_tracks_boolean_helper_guard() {
 fn replay_tracks_correlated_caller_helper_guards() {
     let bad = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b, flag) { if (!flag) return consume(rename(a, b), flag); }\n";
     assert_conditional_replay(bad, &bad.replace("if (!flag) return consume", "if (flag) return consume"), 3, false);
+    let assigned = bad.replace("if (!flag) return consume(rename(a, b), flag);", "if (!flag) { const value = rename(a, b); return consume(value, flag); }");
+    assert_conditional_replay(&assigned, &assigned.replace("if (!flag) { const value", "if (flag) { const value"), 3, false);
 }
 
 #[test]

@@ -13,28 +13,24 @@ enum Evidence {
     Definite,
 }
 
+pub(in crate::call_order::result_use) struct HelperPaths {
+    pub hits: Vec<(NodeId, Origin)>,
+    pub observed: Vec<(NodeId, Origin)>,
+    pub incomplete: bool,
+}
+
 pub(in crate::call_order::result_use) fn helper_paths(
     body: &Body,
     cfg: &Cfg<Stmt>,
     plan: &Plan<'_, '_>,
     syntax: (Node<'_>, &[u8]),
     options: (&[(NodeId, Origin)], bool),
-) -> (Vec<(NodeId, Origin)>, bool) {
+) -> HelperPaths {
     let (unused, has_closures) = options;
     let edges = outgoing(body, cfg);
-    let precise = !has_closures
-        && !cyclic(body)
-        && edges
-            .iter()
-            .enumerate()
-            .all(|(node, out)| supported_edges(cfg, plan, node, out, 2))
-        && body.effects.iter().flatten().all(precise_effect)
-        && !cfg
-            .nodes
-            .iter()
-            .enumerate()
-            .any(|(node, _)| body.flow.reachable[node] && hidden_at(cfg, node, syntax));
+    let precise = !has_closures && precisely_modeled((body, cfg, plan, syntax), &edges);
     let mut hits = Vec::new();
+    let mut observed = Vec::new();
     let mut incomplete = false;
     for (node, origin) in source_origins(body, |place| {
         matches!(
@@ -46,12 +42,35 @@ pub(in crate::call_order::result_use) fn helper_paths(
             continue;
         }
         match uncertain_path((body, cfg, plan, syntax), &edges, &origin) {
-            Evidence::Definite if precise => hits.push((node, origin)),
-            Evidence::Definite | Evidence::Unknown => incomplete = true,
-            Evidence::None => {}
+            (Evidence::Definite, _) if precise => hits.push((node, origin)),
+            (Evidence::Definite | Evidence::Unknown, _) => incomplete = true,
+            (Evidence::None, true) if precise => observed.push((node, origin)),
+            (Evidence::None, _) => {}
         }
     }
-    (hits, incomplete)
+    HelperPaths {
+        hits,
+        observed,
+        incomplete,
+    }
+}
+
+fn precisely_modeled(
+    context: (&Body, &Cfg<Stmt>, &Plan<'_, '_>, (Node<'_>, &[u8])),
+    edges: &[Vec<(NodeId, EdgeKind)>],
+) -> bool {
+    let (body, cfg, plan, syntax) = context;
+    !cyclic(body)
+        && edges
+            .iter()
+            .enumerate()
+            .all(|(node, out)| supported_edges(cfg, plan, node, out, 2))
+        && body.effects.iter().flatten().all(precise_effect)
+        && !cfg
+            .nodes
+            .iter()
+            .enumerate()
+            .any(|(node, _)| body.flow.reachable[node] && hidden_at(cfg, node, syntax))
 }
 
 fn precise_effect(effect: &Effect) -> bool {
@@ -87,14 +106,14 @@ fn uncertain_path(
     context: (&Body, &Cfg<Stmt>, &Plan<'_, '_>, (Node<'_>, &[u8])),
     edges: &[Vec<(NodeId, EdgeKind)>],
     origin: &Origin,
-) -> Evidence {
+) -> (Evidence, bool) {
     let (body, cfg, plan, syntax) = context;
     let mut pending = vec![(body.flow.entry, State::default(), Evidence::None)];
     let mut visited = BTreeSet::new();
-    let mut found = Evidence::None;
+    let mut unsettled = false;
     while let Some((node, mut state, mut evidence)) = pending.pop() {
         match visit(&mut visited, cfg, node, &state, evidence) {
-            None => return found,
+            None => return (Evidence::Unknown, false),
             Some(false) => continue,
             Some(true) => {}
         }
@@ -108,14 +127,12 @@ fn uncertain_path(
         ) {
             continue;
         }
-        if evidence != Evidence::None {
-            found = Evidence::Unknown;
-        }
-        if state.active
-            && (state.aliases.is_empty() || node == body.flow.exit)
-            && evidence != Evidence::None
-        {
-            return evidence;
+        if state.active && (state.aliases.is_empty() || node == body.flow.exit) {
+            if evidence != Evidence::None {
+                return (evidence, false);
+            }
+            unsettled = true;
+            continue;
         }
         extend_paths(
             &mut pending,
@@ -125,7 +142,7 @@ fn uncertain_path(
             (state, evidence),
         );
     }
-    Evidence::None
+    (Evidence::None, !unsettled)
 }
 
 fn visit(
