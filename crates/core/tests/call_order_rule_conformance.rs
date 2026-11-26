@@ -262,6 +262,11 @@ fn assert_partial_helper_coverage(root: &tempfile::TempDir, path: &str, rule: &s
     assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
 }
 
+fn assert_partial_helper_source(path: &str, rule: &str, source: &str) {
+    let root = write_single_file(path, source);
+    assert_partial_helper_coverage(&root, path, rule);
+}
+
 #[test]
 fn partial_helper_observation_reports_incomplete_analysis() {
     for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
@@ -299,8 +304,7 @@ fn partial_helper_observation_reports_incomplete_across_languages() {
         ("lib.rs", "rust-discarded-remove-file-result", "use std::fs::remove_file;\nfn consume(value: std::io::Result<()>, flag: bool) -> std::io::Result<()> { if flag { return value; } Ok(()) }\nfn run(path: &str, flag: bool) -> std::io::Result<()> { let value = remove_file(path); consume(value, flag) }\n"),
     ];
     for (path, rule, source) in cases {
-        let root = write_single_file(path, source);
-        assert_partial_helper_coverage(&root, path, rule);
+        assert_partial_helper_source(path, rule, source);
     }
 }
 
