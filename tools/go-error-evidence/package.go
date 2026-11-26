@@ -47,11 +47,14 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	return b.Buffer.Write(p)
 }
 
-func loadPackage(fset *token.FileSet, dir, binary string) (loadedPackage, string) {
-	if !filepath.IsAbs(dir) || !filepath.IsAbs(binary) {
-		return loadedPackage{}, "invalid_package_config"
+func loadPackage(fset *token.FileSet, dir, binary, mode string) (loadedPackage, string) {
+	if reason := packageConfigError(dir, binary, mode); reason != "" {
+		return loadedPackage{}, reason
 	}
-	packages, ok := listPackages(dir, binary)
+	if mode == "" {
+		mode = "readonly"
+	}
+	packages, ok := listPackages(dir, binary, mode)
 	if !ok {
 		return loadedPackage{}, "package_load_failed"
 	}
@@ -60,6 +63,16 @@ func loadPackage(fset *token.FileSet, dir, binary string) (loadedPackage, string
 		return loadedPackage{}, "package_load_incomplete"
 	}
 	return assemblePackage(fset, target, exports)
+}
+
+func packageConfigError(dir, binary, mode string) string {
+	if !filepath.IsAbs(dir) || !filepath.IsAbs(binary) {
+		return "invalid_package_config"
+	}
+	if mode != "" && mode != "readonly" && mode != "vendor" {
+		return "invalid_module_mode"
+	}
+	return ""
 }
 
 func assemblePackage(fset *token.FileSet, target listedPackage, exports map[string]string) (loadedPackage, string) {
@@ -76,12 +89,12 @@ func assemblePackage(fset *token.FileSet, target listedPackage, exports map[stri
 	return loadedPackage{files: sources, importer: importer.ForCompiler(fset, "gc", lookup), path: target.ImportPath}, ""
 }
 
-func listPackages(dir, binary string) ([]listedPackage, bool) {
+func listPackages(dir, binary, mode string) ([]listedPackage, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, binary, "list", "-deps", "-export", "-json", ".")
 	command.Dir = dir
-	command.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "GOFLAGS=-mod=readonly")
+	command.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "GOFLAGS=-mod="+mode)
 	var output limitedBuffer
 	output.limit = maxListOutput
 	command.Stdout = &output

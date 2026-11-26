@@ -32,6 +32,7 @@ type request struct {
 	GoBinary        string            `json:"goBinary,omitempty"`
 	ExpectedSources map[string]string `json:"expectedSources,omitempty"`
 	PackageSources  map[string]string `json:"packageSources,omitempty"`
+	ModuleMode      string            `json:"moduleMode,omitempty"`
 	IncludeCallees  bool              `json:"includeCallees,omitempty"`
 }
 type callee struct {
@@ -147,12 +148,15 @@ func resolveFunctionExpr(expr ast.Expr, info *types.Info) *callee {
 
 func preparePackage(fset *token.FileSet, req request) (loadedPackage, string) {
 	if req.PackageDir == "" && req.GoBinary == "" {
+		if req.ModuleMode != "" {
+			return loadedPackage{}, "invalid_request"
+		}
 		return loadedPackage{files: req.Files, importer: importer.Default(), path: "autoreview.local/package"}, ""
 	}
 	if len(req.Files) != 0 {
 		return loadedPackage{}, "invalid_request"
 	}
-	loaded, reason := loadPackage(fset, req.PackageDir, req.GoBinary)
+	loaded, reason := loadPackage(fset, req.PackageDir, req.GoBinary, req.ModuleMode)
 	if reason == "" && (!matchesExpectedSources(loaded.files, req.Calls, req.ExpectedSources, false) ||
 		req.IncludeCallees && !matchesPackageSources(loaded.files, req.PackageSources, req.ExpectedSources)) {
 		return loadedPackage{}, "source_mismatch"

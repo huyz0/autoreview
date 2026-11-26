@@ -119,3 +119,38 @@ func assertSourceMismatch(t *testing.T, req request, label string) {
 		t.Fatalf("%s: %+v", label, got)
 	}
 }
+
+func TestPackageModeLoadsVendoredDependenciesOffline(t *testing.T) {
+	binary := goBinary(t)
+	dir := t.TempDir()
+	files := map[string]string{
+		"go.mod":             "module example.test/vendorprobe\n\ngo 1.22\n\nrequire example.invalid/offline-dep v1.0.0\n",
+		"vendor/modules.txt": "# example.invalid/offline-dep v1.0.0\n## explicit; go 1.22\nexample.invalid/offline-dep\n",
+		"vendor/example.invalid/offline-dep/dep.go": "package dep\nfunc Operation() error { return nil }\n",
+		"main.go": "package sample\nimport dep \"example.invalid/offline-dep\"\nfunc run() { dep.Operation() }\n",
+	}
+	for name, data := range files {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := files["main.go"]
+	sum := sha256.Sum256([]byte(src))
+	req := request{PackageDir: dir, GoBinary: binary, ExpectedSources: map[string]string{"main.go": hex.EncodeToString(sum[:])}, Calls: []callSite{{"main.go", strings.Index(src, "dep.Operation()")}}, ModuleMode: "vendor", IncludeCallees: true}
+	got := analyze(req)
+	if got.Status != "ok" || len(got.Calls) != 1 || got.Calls[0].Status != "error" || got.Calls[0].Callee == nil || got.Calls[0].Callee.Package != "example.invalid/offline-dep" {
+		t.Fatalf("vendor evidence: %+v", got)
+	}
+	req.ModuleMode = "readonly"
+	if got := analyze(req); got.Status != "incomplete" || got.Reason != "package_load_failed" {
+		t.Fatalf("offline readonly unexpectedly succeeded: %+v", got)
+	}
+	req.ModuleMode = "unexpected"
+	if got := analyze(req); got.Status != "incomplete" || got.Reason != "invalid_module_mode" {
+		t.Fatalf("invalid mode: %+v", got)
+	}
+}

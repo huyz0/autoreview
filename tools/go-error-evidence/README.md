@@ -32,6 +32,14 @@ execute processes and read project configuration; use only trusted tools and
 projects in an appropriately contained environment. The 60-second direct
 child timeout does not yet contain descendant processes.
 
+To use an existing consistent vendor tree, set `moduleMode` to `vendor` in a
+package-mode request, or set `AUTOREVIEW_GO_MODULE_MODE=vendor` when invoking
+the probe through Autoreview. The Go command then uses `-mod=vendor`; network
+downloads remain disabled. Other values are rejected, except `readonly` and
+the empty default. An older probe that cannot accept the mode reports
+incomplete analysis rather than silently changing dependency sources. Vendor
+files and dependency exports are not yet verified as an immutable snapshot.
+
 Each `start` is a zero-based UTF-8 byte offset of the call expression, not a
 line or character number. Responses retain request order and report `error`
 for a single predeclared `error` result, or `multi_error` with the result count
