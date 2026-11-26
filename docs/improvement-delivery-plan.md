@@ -36,8 +36,12 @@ limitation and replay excludes the incomplete case from scoring. Rust calls
 such as `Type::method()` through an imported type remain a separate gap:
 the helper resolver does not generally model associated functions. Its
 unresolved-import warnings must remain until supported declarations and
-dispatch can be identified without guessing. Trait implementations, aliases,
-conditional compilation and ambiguous declarations require explicit tests.
+dispatch can be identified without guessing. Direct imports and aliases of a
+non-generic local struct or enum can now resolve unconditional, non-generic
+inherent associated functions with `pub` or `pub(crate)` visibility. The
+current coverage warning remains conservative even for these supported calls.
+Trait dispatch, generic types and implementations, conditional compilation,
+re-exported types and ambiguous declarations need further work.
 
 ## 2. Measure rule accuracy
 

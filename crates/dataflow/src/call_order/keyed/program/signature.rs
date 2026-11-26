@@ -10,12 +10,12 @@ pub(super) struct Export {
 
 pub(super) fn export(node: Node<'_>, source: &[u8], name: String) -> Export {
     let parent = node.parent();
-    let owner = parent
+    let owner = rust_associated_owner(node, source).or_else(|| parent
         .filter(|parent| matches!(parent.kind(), "class_body" | "interface_body" | "enum_body"))
         .and_then(|parent| parent.parent())
         .and_then(|parent| parent.child_by_field_name("name"))
         .and_then(|name| name.utf8_text(source).ok())
-        .map(str::to_owned);
+        .map(str::to_owned));
     let signature = node
         .child_by_field_name("name")
         .and_then(|name| source.get(node.start_byte()..name.start_byte()))
@@ -27,6 +27,8 @@ pub(super) fn export(node: Node<'_>, source: &[u8], name: String) -> Export {
     };
     let visible = match node.kind() {
         "method_declaration" => has(b"static") && !has(b"private"),
+        "function_item" if owner.is_some() => children(node).find(|child| child.kind() == "visibility_modifier")
+            .and_then(|visibility| visibility.utf8_text(source).ok()).is_some_and(|visibility| matches!(visibility, "pub" | "pub(crate)")),
         "function_item" => has(b"pub"),
         "arrow_function" | "function_expression" => web_value_visible(parent),
         _ if parent.is_some_and(|parent| parent.kind() == "export_statement") => true,
@@ -71,7 +73,7 @@ pub(super) fn candidate(node: Node<'_>, source: &[u8]) -> Option<String> {
             owner.kind(),
             "source_file" | "program" | "export_statement" | "class_body"
         ),
-        "function_item" => owner.kind() == "source_file",
+        "function_item" => owner.kind() == "source_file" || rust_associated_owner(node, source).is_some(),
         _ => false,
     };
     if !local_owner
@@ -89,6 +91,26 @@ pub(super) fn candidate(node: Node<'_>, source: &[u8]) -> Option<String> {
         return None;
     }
     Some(name.utf8_text(source).ok()?.to_owned())
+}
+
+// Only unconditional inherent methods of a simple local type are candidates.
+// Trait dispatch, generic implementations and conditional declarations need
+// additional type and configuration evidence before they can be resolved.
+fn rust_associated_owner(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if node.kind() != "function_item" || has_attributes(node) || node.child_by_field_name("type_parameters").is_some() { return None; }
+    let body = node.parent().filter(|parent| parent.kind() == "declaration_list")?;
+    let implementation = body.parent().filter(|parent| parent.kind() == "impl_item")?;
+    if implementation.parent()?.kind() != "source_file" || implementation.child_by_field_name("trait").is_some()
+        || implementation.child_by_field_name("type_parameters").is_some() || has_attributes(implementation)
+        || children(implementation).any(|child| child.kind() == "where_clause") { return None; }
+    let ty = implementation.child_by_field_name("type").filter(|ty| ty.kind() == "type_identifier")?;
+    Some(ty.utf8_text(source).ok()?.to_owned())
+}
+
+fn has_attributes(node: Node<'_>) -> bool {
+    std::iter::successors(node.prev_named_sibling(), |node| node.prev_named_sibling())
+        .take_while(|node| matches!(node.kind(), "attribute_item" | "line_comment" | "block_comment"))
+        .any(|node| node.kind() == "attribute_item")
 }
 
 fn web_binding_name(node: Node<'_>, source: &[u8]) -> Option<String> {
