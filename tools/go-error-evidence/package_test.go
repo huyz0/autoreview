@@ -25,15 +25,19 @@ func TestPackageModeUsesBuildFilesAndLocalDependencies(t *testing.T) {
 		}
 	}
 	write("go.mod", "module example.test/probe\n\ngo 1.22\n")
-	write("dep/dep.go", "package dep\nfunc Operation() error { return nil }\n")
-	src := "package sample\nimport \"example.test/probe/dep\"\nfunc run() { dep.Operation() }\n"
+	write("dep/dep.go", "package dep\nfunc Operation() error { return nil }\ntype Worker struct{}\nfunc (Worker) Wait() error { return nil }\n")
+	src := "package sample\nimport alias \"example.test/probe/dep\"\nfunc run(w alias.Worker) { alias.Operation(); w.Wait() }\n"
 	write("main.go", src)
 	write("ignored.go", "//go:build never\n\npackage sample\nthis is not Go\n")
 	sum := sha256.Sum256([]byte(src))
-	req := request{PackageDir: dir, GoBinary: binary, ExpectedSources: map[string]string{"main.go": hex.EncodeToString(sum[:])}, Calls: []callSite{{"main.go", strings.Index(src, "dep.Operation()")}}}
+	req := request{PackageDir: dir, GoBinary: binary, ExpectedSources: map[string]string{"main.go": hex.EncodeToString(sum[:])}, Calls: []callSite{{"main.go", strings.Index(src, "alias.Operation()")}, {"main.go", strings.Index(src, "w.Wait()")}}, IncludeCallees: true}
 	got := analyze(req)
-	if got.Status != "ok" || len(got.Calls) != 1 || got.Calls[0].Status != "error" {
+	if got.Status != "ok" || len(got.Calls) != 2 || got.Calls[0].Status != "error" {
 		t.Fatalf("package evidence: %+v", got)
+	}
+	if got.Calls[0].Callee == nil || *got.Calls[0].Callee != (callee{Package: "example.test/probe/dep", Name: "Operation"}) ||
+		got.Calls[1].Callee == nil || *got.Calls[1].Callee != (callee{Package: "example.test/probe/dep", Name: "Wait", Receiver: "Worker"}) {
+		t.Fatalf("package callee evidence: %+v", got.Calls)
 	}
 	req.ExpectedSources["main.go"] = strings.Repeat("0", 64)
 	if got := analyze(req); got.Status != "incomplete" || got.Reason != "source_mismatch" {
@@ -41,9 +45,22 @@ func TestPackageModeUsesBuildFilesAndLocalDependencies(t *testing.T) {
 	}
 	req.ExpectedSources["main.go"] = hex.EncodeToString(sum[:])
 	write("other.go", "package sample\nfunc helper() {}\n")
+	if got := analyze(req); got.Status != "incomplete" || got.Reason != "source_mismatch" {
+		t.Fatalf("callee evidence requires hashes for all selected files: %+v", got)
+	}
+	otherSum := sha256.Sum256([]byte("package sample\nfunc helper() {}\n"))
+	req.ExpectedSources["other.go"] = hex.EncodeToString(otherSum[:])
+	if got := analyze(req); got.Status != "ok" {
+		t.Fatalf("complete package hashes: %+v", got)
+	}
 	req.ExpectedSources["other.go"] = strings.Repeat("0", 64)
 	if got := analyze(req); got.Status != "incomplete" || got.Reason != "source_mismatch" {
 		t.Fatalf("changed helper source: %+v", got)
+	}
+	delete(req.ExpectedSources, "other.go")
+	req.IncludeCallees = false
+	if got := analyze(req); got.Status != "ok" {
+		t.Fatalf("legacy call-site hash requirement: %+v", got)
 	}
 	req.ExpectedSources = nil
 	if got := analyze(req); got.Status != "incomplete" || got.Reason != "source_mismatch" {

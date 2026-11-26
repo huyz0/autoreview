@@ -49,6 +49,10 @@ deep tier.
   use only trusted projects. Missing configuration or incomplete analysis is
   reported as coverage limitations. Test packages, cgo, explicit build tags,
   full snapshot verification, and process-tree containment remain unsupported.
+  Optionally set `AUTOREVIEW_GO_CALLEE_EVIDENCE=1` to include supported resolved
+  call identities in finding metadata; this does not change rule decisions.
+  The probe requires hashes for every selected package file for this evidence,
+  and falls back to result-type analysis if that evidence is unavailable.
 - **Framework checks** flag Go context cancellation missed on a branch or
   through a same-package helper, Java Spring transaction self-invocation,
   and Hibernate reads that initialize a mapped lazy collection for each

@@ -46,6 +46,7 @@ pub(in crate::call_order) fn check_units_with_components(
         combined
             .entry(key)
             .and_modify(|previous: &mut CallOrderHit| {
+                if previous.source_start != hit.source_start { previous.source_start = None; }
                 previous.related_calls.extend(hit.related_calls.iter().cloned());
                 previous.related_calls.sort();
                 previous.related_calls.dedup();
@@ -170,7 +171,7 @@ fn make_hit(node: crate::cfg::NodeId, origin: Origin, unit: &KeyedUnit<'_, '_, '
         (!unit.path.is_empty()).then(|| (unit.path.to_owned(), line))
     }).collect();
     CallOrderHit {
-        trigger_call: origin.call, node, source_line: origin.line,
+        trigger_call: origin.call, node, source_line: origin.line, source_start: Some(origin.start),
         path: origin.path.or_else(|| (!unit.path.is_empty()).then(|| unit.path.to_owned())),
         entry: None, related_calls,
     }

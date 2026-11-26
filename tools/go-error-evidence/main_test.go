@@ -104,3 +104,73 @@ func use() {
 		t.Fatalf("method, generic, and UTF-8 call offsets: %+v", got)
 	}
 }
+
+func TestResolvedCalleesDoNotGuessDynamicDispatch(t *testing.T) {
+	src := `package p
+import "strings"
+type waiter interface { Wait() error }
+type worker struct{}
+func (worker) Wait() error { return nil }
+type wrapper struct { waiter }
+func local() error { return nil }
+func use(w worker, i waiter, x wrapper, f func() error) {
+ local(); w.Wait(); i.Wait(); x.Wait(); f(); strings.TrimSpace(" x ")
+}
+`
+	snippets := []string{"local();", "w.Wait();", "i.Wait();", "x.Wait();", "f();", `strings.TrimSpace(" x ")`}
+	req := request{Files: []sourceFile{{Path: "main.go", Source: src}}, IncludeCallees: true}
+	for _, snippet := range snippets {
+		req.Calls = append(req.Calls, callSite{Path: "main.go", Start: strings.LastIndex(src, snippet)})
+	}
+	got := analyze(req)
+	if got.Status != "ok" {
+		t.Fatalf("unexpected result: %+v", got)
+	}
+	if got.Calls[0].Callee == nil || *got.Calls[0].Callee != (callee{Package: "autoreview.local/package", Name: "local"}) {
+		t.Fatalf("local: %+v", got.Calls[0])
+	}
+	if got.Calls[1].Callee == nil || *got.Calls[1].Callee != (callee{Package: "autoreview.local/package", Name: "Wait", Receiver: "worker"}) {
+		t.Fatalf("method: %+v", got.Calls[1])
+	}
+	for _, i := range []int{2, 3, 4} {
+		if got.Calls[i].Callee != nil {
+			t.Errorf("dynamic call %s resolved: %+v", snippets[i], got.Calls[i])
+		}
+	}
+	if got.Calls[5].Callee == nil || *got.Calls[5].Callee != (callee{Package: "strings", Name: "TrimSpace"}) {
+		t.Fatalf("import: %+v", got.Calls[5])
+	}
+	req.IncludeCallees = false
+	for _, call := range analyze(req).Calls {
+		if call.Callee != nil {
+			t.Fatal("callee evidence must be opt-in")
+		}
+	}
+}
+
+func TestResolvedCalleesGenericAndIndexedFunctionValues(t *testing.T) {
+	src := `package p
+func generic[T any](v T) error { return nil }
+func pair[A, B any](a A, b B) error { return nil }
+func use(fs []func() error, i int) {
+ generic[int](1); pair[int, string](1, ""); (generic[int])(1); fs[i]()
+}
+`
+	snippets := []string{"generic[int](1);", `pair[int, string](1, "");`, "(generic[int])(1);", "fs[i]()"}
+	req := request{Files: []sourceFile{{Path: "main.go", Source: src}}, IncludeCallees: true}
+	for _, snippet := range snippets {
+		req.Calls = append(req.Calls, callSite{Path: "main.go", Start: strings.LastIndex(src, snippet)})
+	}
+	got := analyze(req)
+	if got.Status != "ok" || len(got.Calls) != 4 {
+		t.Fatalf("unexpected result: %+v", got)
+	}
+	for i, name := range []string{"generic", "pair", "generic"} {
+		if got.Calls[i].Callee == nil || got.Calls[i].Callee.Name != name {
+			t.Errorf("%s: %+v", snippets[i], got.Calls[i])
+		}
+	}
+	if got.Calls[3].Callee != nil {
+		t.Fatalf("indexed function value resolved: %+v", got.Calls[3])
+	}
+}

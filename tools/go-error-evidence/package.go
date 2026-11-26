@@ -175,7 +175,7 @@ func sourcePath(dir, name string, remaining int64) (string, int64, bool) {
 	return path, info.Size(), true
 }
 
-func matchesExpectedSources(files []sourceFile, calls []callSite, expected map[string]string) bool {
+func matchesExpectedSources(files []sourceFile, calls []callSite, expected map[string]string, requireAll bool) bool {
 	hashes := make(map[string]string, len(files))
 	for _, file := range files {
 		hash := sha256.Sum256([]byte(file.Source))
@@ -185,6 +185,9 @@ func matchesExpectedSources(files []sourceFile, calls []callSite, expected map[s
 		if hash == "" || hash != hashes[path] {
 			return false
 		}
+	}
+	if requireAll && len(expected) != len(hashes) {
+		return false
 	}
 	for _, call := range calls {
 		if expected[call.Path] == "" {

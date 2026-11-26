@@ -31,6 +31,8 @@ struct Request<'a> {
     go_binary: &'a Path,
     expected_sources: BTreeMap<String, String>,
     calls: Vec<Call>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    include_callees: bool,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -57,7 +59,14 @@ struct CallResult {
     result_count: usize,
     #[serde(default)]
     error_indexes: Vec<usize>,
+    #[serde(default)]
+    callee: Option<Callee>,
 }
+
+#[derive(Clone, Deserialize, Serialize)]
+struct Callee { package: String, name: String, #[serde(default, skip_serializing_if = "String::is_empty")] receiver: String }
+
+pub(super) type CalleeEvidence = BTreeMap<(String, usize), serde_json::Value>;
 
 struct Group {
     indices: Vec<(usize, usize)>,
@@ -68,11 +77,17 @@ struct Group {
 struct Verified {
     discovery: FactorySourceDiscovery,
     components: BTreeMap<usize, BTreeMap<usize, ResultComponents>>,
+    callees: CalleeEvidence,
 }
 
 impl Verified {
     fn record(&mut self, unit: &KeyedUnit<'_, '_, '_>, file: &Source, position: (usize, usize), result: CallResult) {
         let (index, start) = position;
+        if let Some(callee) = &result.callee {
+            if valid_callee(callee) {
+                if let Ok(value) = serde_json::to_value(callee) { self.callees.insert((unit.path.to_owned(), start), value); }
+            }
+        }
         match result.status.as_str() {
             "error" => { self.discovery.candidates.entry(index).or_default().insert(start); }
             "multi_error" if multi_supported(file, start, result.result_count) => {
@@ -88,30 +103,41 @@ impl Verified {
 
 pub(super) fn check_go_rule(
     spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, root: &Path,
-) -> KeyedCheckResult {
-    let Some(checker) = TrustedGo::from_environment() else { return check_keyed_units_with_coverage(spec, units); };
-    check_with_probe(spec, units, sources, root, &checker)
+) -> (KeyedCheckResult, CalleeEvidence) {
+    let Some(checker) = TrustedGo::from_environment() else { return (check_keyed_units_with_coverage(spec, units), BTreeMap::new()); };
+    check_with_probe_and_callees(spec, units, sources, root, &checker, std::env::var_os("AUTOREVIEW_GO_CALLEE_EVIDENCE").is_some_and(|value| value == "1"))
 }
 
-fn check_with_probe(
-    spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, root: &Path, checker: &TrustedGo,
-) -> KeyedCheckResult {
-    let mut verified = Verified { discovery: FactorySourceDiscovery { candidates: BTreeMap::new(), limitations: Vec::new() }, components: BTreeMap::new() };
+fn check_with_probe_and_callees(
+    spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, root: &Path, checker: &TrustedGo, include_callees: bool,
+) -> (KeyedCheckResult, CalleeEvidence) {
+    let mut verified = Verified { discovery: FactorySourceDiscovery { candidates: BTreeMap::new(), limitations: Vec::new() }, components: BTreeMap::new(), callees: BTreeMap::new() };
     let groups = collect_groups(units, sources, root, &mut verified.discovery.limitations);
     for (index, (dir, group)) in groups.into_iter().filter(|(_, group)| !group.calls.is_empty()).enumerate() {
         if index >= PACKAGE_LIMIT || group.calls.len() > CALL_LIMIT {
             verified.discovery.limitations.push(limitation(None));
             continue;
         }
-        let request = Request { package_dir: &dir, go_binary: &checker.go, expected_sources: group.expected, calls: group.calls };
-        match verify(&checker.probe, &request) {
-            Some(results) => for ((unit, start), result) in group.indices.into_iter().zip(results) {
+        let mut request = Request { package_dir: &dir, go_binary: &checker.go, expected_sources: group.expected, calls: group.calls, include_callees };
+        let results = verify(&checker.probe, &request).or_else(|| {
+            if !request.include_callees { return None; }
+            request.include_callees = false;
+            verify(&checker.probe, &request)
+        });
+        match results {
+            Some(results) => for ((unit, start), mut result) in group.indices.into_iter().zip(results) {
+                if !request.include_callees { result.callee = None; }
                 verified.record(&units[unit], &sources[units[unit].path], (unit, start), result);
             },
             None => verified.discovery.limitations.push(limitation(None)),
         }
     }
-    check_keyed_units_with_verified_components(spec, units, verified.discovery, &verified.components)
+    (check_keyed_units_with_verified_components(spec, units, verified.discovery, &verified.components), verified.callees)
+}
+
+fn valid_callee(callee: &Callee) -> bool {
+    !callee.package.is_empty() && !callee.name.is_empty()
+        && [&callee.package, &callee.name, &callee.receiver].iter().all(|part| part.len() <= 1024 && !part.chars().any(char::is_control))
 }
 
 fn collect_groups(
@@ -231,7 +257,7 @@ mod tests {
 
     #[test]
     fn rejects_inconsistent_multi_result_evidence() {
-        let item = |count, indexes| CallResult { path: "main.go".into(), start: 1, status: "multi_error".into(), result_count: count, error_indexes: indexes };
+        let item = |count, indexes| CallResult { path: "main.go".into(), start: 1, status: "multi_error".into(), result_count: count, error_indexes: indexes, callee: None };
         assert!(valid_call_result(&item(3, vec![1, 2])));
         assert!(!valid_call_result(&item(1, vec![0])));
         assert!(!valid_call_result(&item(2, vec![])));
@@ -251,7 +277,46 @@ mod tests {
         assert!(result.limitations.iter().any(|item| item.reason == "go_multi_result_unmodeled" && item.line == Some(16)));
     }
 
+    #[test]
+    fn go_callee_evidence_tracks_exact_origin_and_keeps_dynamic_calls_unknown() {
+        let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
+        let checker = TrustedGo { probe: probe.into(), go: go.into() };
+        let source = "package sample\nfunc first() error { return nil }\nfunc second() error { return nil }\nfunc use(f func() error) { first(); second(); f() }\nfunc duplicate() { first(); first() }\n";
+        let (result, callees) = analyze_source_with_evidence(source, &checker, true);
+        assert_eq!(result.hits.len(), 4);
+        for (name, expected) in [("first()", "first"), ("second()", "second")] {
+            let start = source.find("func use").unwrap() + source[source.find("func use").unwrap()..].find(name).unwrap();
+            let hit = result.hits.iter().find(|hit| hit.source_start == Some(start)).unwrap();
+            let callee = &callees[&(hit.path.clone().unwrap(), start)];
+            assert_eq!(callee["package"], "example.test/probe");
+            assert_eq!(callee["name"], expected);
+        }
+        assert!(!callees.contains_key(&("main.go".to_owned(), source.rfind("f()").unwrap())));
+        assert!(result.hits.iter().any(|hit| hit.source_line == 5 && hit.source_start.is_none()));
+        let rules = crate::analyzers::call_order_rules::load_call_order_rules(&[]);
+        let rule = rules.iter().find(|rule| rule.id == "go-project-error-result-unobserved").unwrap();
+        let hit = result.hits.iter().find(|hit| hit.source_line == 4 && hit.trigger_call == "first").unwrap();
+        let mut finding = super::super::super::dsl::call_order_finding("main.go", Some(source), rule, hit);
+        super::super::attach_go_callee(&mut finding, "main.go", hit.source_start, &callees);
+        assert_eq!(finding.meta.unwrap()["goTypeCheckedCallee"]["name"], "first");
+    }
+
+    #[test]
+    fn old_go_probe_falls_back_to_result_type_analysis() {
+        let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_LEGACY_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
+        let checker = TrustedGo { probe: probe.into(), go: go.into() };
+        let source = "package sample\nfunc operation() error { return nil }\nfunc use() { operation() }\n";
+        let (result, callees) = analyze_source_with_evidence(source, &checker, true);
+        assert_eq!(result.hits.len(), 1);
+        assert!(result.limitations.is_empty());
+        assert!(callees.is_empty());
+    }
+
     fn analyze_source(source: &str, checker: &TrustedGo) -> KeyedCheckResult {
+        analyze_source_with_evidence(source, checker, false).0
+    }
+
+    fn analyze_source_with_evidence(source: &str, checker: &TrustedGo, include_callees: bool) -> (KeyedCheckResult, CalleeEvidence) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("go.mod"), "module example.test/probe\n\ngo 1.22\n").unwrap();
         std::fs::write(dir.path().join("main.go"), source).unwrap();
@@ -266,6 +331,6 @@ mod tests {
         let units = [KeyedUnit { path: "main.go", source: source.as_bytes(), functions: &functions, imports: &[], exports: &[], entry: true }];
         let rules = crate::analyzers::call_order_rules::load_call_order_rules(&[]);
         let rule = rules.iter().find(|rule| rule.id == "go-project-error-result-unobserved").unwrap();
-        check_with_probe(&rule.spec, &units, &sources, dir.path(), checker)
+        check_with_probe_and_callees(&rule.spec, &units, &sources, dir.path(), checker, include_callees)
     }
 }

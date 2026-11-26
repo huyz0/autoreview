@@ -170,12 +170,12 @@ fn run_sources(
             })
             .collect();
         if !units.iter().any(|unit| unit.entry) { continue; }
-        let result = if typed {
-            check_typed_rule(&rule.spec, &units, sources, root, checker)
+        let (result, callees) = if typed {
+            (check_typed_rule(&rule.spec, &units, sources, root, checker), BTreeMap::new())
         } else if go_typed {
             go_evidence::check_go_rule(&rule.spec, &units, sources, root)
         } else {
-            check_keyed_units_with_coverage(&rule.spec, &units)
+            (check_keyed_units_with_coverage(&rule.spec, &units), BTreeMap::new())
         };
         record_rule_limits(coverage, &rule.id, result.limitations);
         findings.extend(result.hits.iter().map(|hit| {
@@ -185,15 +185,23 @@ fn run_sources(
                 .as_ref()
                 .and_then(|entry| entry.registration_path.as_deref())
                 .unwrap_or(path);
-            call_order_finding(
+            let mut finding = call_order_finding(
                 path,
                 sources.get(origin).map(|file| file.parsed.0.as_str()),
                 rule,
                 hit,
-            )
+            );
+            attach_go_callee(&mut finding, path, hit.source_start, &callees);
+            finding
         }));
     }
     findings
+}
+
+fn attach_go_callee(finding: &mut AgentFinding, path: &str, start: Option<usize>, callees: &go_evidence::CalleeEvidence) {
+    if let Some(callee) = start.and_then(|start| callees.get(&(path.to_owned(), start))) {
+        finding.meta.get_or_insert_with(Default::default).insert("goTypeCheckedCallee".into(), callee.clone());
+    }
 }
 
 impl Resolver<'_> {

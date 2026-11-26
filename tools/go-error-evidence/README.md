@@ -42,6 +42,23 @@ package-load, or source-identity failures produce an `incomplete` response.
 `error` conversions are not classified as calls returning errors. Unsupported
 multi-result contexts are reported as incomplete by Autoreview.
 
+Requests may set `includeCallees` to `true` to include the declaring package,
+function name, and (for methods) receiver type name for supported statically
+bound calls, including explicit generic instantiations. Missing `callee` means
+the target was not established; interface dispatch and function-valued
+variables are deliberately unresolved. This identifies a declaration,
+not the errors it can return or a guarantee about unverified dependencies.
+In package mode, a request for callee evidence must supply matching hashes for
+every build-selected source file in the target package. It still does not
+verify the contents of dependency exports or prevent subsequent changes.
+With `AUTOREVIEW_GO_CALLEE_EVIDENCE=1`, Autoreview requests this evidence for
+the experimental Go result-use rule and attaches available identities to
+finding metadata as `goTypeCheckedCallee`. It matches the original call's byte
+offset and omits ambiguous merged findings. If the probe is older or the
+package hashes are incomplete, Autoreview retries without callee evidence;
+the existing result-use analysis remains available. This evidence does not
+suppress findings or establish a callee's error behavior.
+
 The caller must analyze an immutable package snapshot: other package files and
 cached dependency exports can change during or after loading. Source-file mode
 still relies on the caller to provide the complete build-selected package.
