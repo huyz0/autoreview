@@ -92,6 +92,18 @@ summaries as `goErrorOrigin` metadata on experimental result-use findings.
 This does not change finding decisions. Unsupported or older probes fall back
 to the existing analysis without that metadata.
 
+To include explicitly selected repository dependencies, set
+`AUTOREVIEW_GO_ERROR_ORIGIN_DEPENDENCIES` to a JSON object mapping canonical Go
+import paths to repository-relative package directories, for example
+`{"golang.org/x/sync/semaphore":"vendor/golang.org/x/sync/semaphore"}`.
+Autoreview hashes the candidate sources; the probe verifies all build-selected
+files against the actual dependency graph and limits requests to eight packages
+and 16 MiB of selected dependency source. Invalid, missing, mismatched, or
+unsupported dependency evidence is reported as incomplete, and result-use
+analysis falls back without these summaries. Dependency exports and subsequent
+filesystem changes are not verified as an immutable snapshot. These summaries
+remain informational and are not proof that an error can be discarded.
+
 The caller must analyze an immutable package snapshot: other package files and
 cached dependency exports can change during or after loading. Source-file mode
 still relies on the caller to provide the complete build-selected package.

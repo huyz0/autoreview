@@ -16,8 +16,13 @@ const errorOriginPassLimit = 16
 
 func indexErrorOrigins(files []*ast.File, info *types.Info, enabled bool) map[callee]*errorOrigin {
 	result := make(map[callee]*errorOrigin)
+	indexErrorOriginsInto(files, info, enabled, result)
+	return result
+}
+
+func indexErrorOriginsInto(files []*ast.File, info *types.Info, enabled bool, result map[callee]*errorOrigin) {
 	if !enabled {
-		return result
+		return
 	}
 	for pass := 0; pass < errorOriginPassLimit; pass++ {
 		changed := false
@@ -30,7 +35,6 @@ func indexErrorOrigins(files []*ast.File, info *types.Info, enabled bool) map[ca
 			break
 		}
 	}
-	return result
 }
 
 func indexErrorOrigin(item ast.Decl, info *types.Info, result map[callee]*errorOrigin) bool {

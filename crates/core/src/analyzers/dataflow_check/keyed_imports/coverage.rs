@@ -55,6 +55,7 @@ fn verified_detail(reason: &str) -> Option<&'static str> {
             "invalid_result_components" => "Verified result component information was invalid; analysis skipped the affected call.",
             "go_multi_result_unmodeled" => "A multi-result Go call with an error occurs in an unsupported context; result-use analysis skipped this call.",
             "go_error_checker_incomplete" => "Go error type verification could not complete for this package; result-use analysis may be incomplete.",
+            "go_dependency_evidence_incomplete" => "Requested Go dependency error-origin evidence could not be verified; summaries are incomplete.",
             _ => return None,
     })
 }
