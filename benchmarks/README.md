@@ -42,6 +42,12 @@ accuracy scores. Incomplete and failed cases are excluded from precision and
 recall, and make replay exit unsuccessfully. These are case counts, not file
 or finding counts.
 
+For an incomplete dataflow case, each entry in `failures` includes an
+`analysisCoverage` array with the analyzer, reason, scope, and available
+path, line, and rule. The `error` text also includes line numbers when known.
+Replay stops that case at the first failing revision, so these details do not
+imply that the other revision was analyzed.
+
 `azure-iot-matches.yaml` records an MIT-licensed Rust test fix in the Azure IoT
 Operations SDK. Six `test_case` tests discarded `matches!` predicates before
 the fix; replay detects all six and none in the fixed file. This is one fix
@@ -134,9 +140,17 @@ snapshot's nested configuration without a configuration adapter.
 `checkout-promise.yaml` exercises the experimental general promise source on
 the MIT-licensed actions/checkout fix documented in `docs/benchmark-candidates.md`.
 The normal replay currently exits nonzero and marks both cases incomplete due
-to unresolved call types; they are not included in accuracy scores. To reproduce
-from a fresh clone, set `AUTOREVIEW_ROOT` to the absolute path of this Autoreview
-checkout and run:
+to unresolved call types; they are not included in accuracy scores.
+
+On main at `8af2697` with TypeScript 5.6.3 and the setup below, the before
+revision reported three unresolved call locations for the deletion case and 21
+for the token-replacement case, including imported dependencies. Examples are
+`src/github-api-helper.ts:39` and `src/fs-helper.ts:10`. These counts describe
+this run's reported issues, not precision or recall, and the first failure in
+each case prevented replay from evaluating its after revision.
+
+To reproduce from a fresh clone, set `AUTOREVIEW_ROOT` to the absolute path of
+this Autoreview checkout and run:
 
 ```sh
 git clone https://github.com/actions/checkout.git checkout

@@ -19,11 +19,16 @@ pub(super) enum Tool {
 }
 
 #[derive(Debug)]
-pub(super) struct IncompleteAnalysis(pub(super) String);
+pub(super) struct IncompleteAnalysis(pub(super) Vec<autoreview_schema::AnalysisCoverageIssue>);
 
 impl std::fmt::Display for IncompleteAnalysis {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "dataflow analysis was incomplete: {}", self.0)
+        let details = self.0.iter().map(|issue| {
+            let path = issue.path.as_deref().unwrap_or("repository");
+            let location = issue.line.map_or_else(|| path.to_owned(), |line| format!("{path}:{line}"));
+            format!("{location}: {}", issue.detail)
+        }).collect::<Vec<_>>().join("; ");
+        write!(formatter, "dataflow analysis was incomplete: {details}")
     }
 }
 
@@ -50,9 +55,9 @@ impl Tool {
             Self::AutoreviewArchgraph => autoreview_core::run_archgraph_check(source, paths),
             Self::AutoreviewDataflow => {
                 let result = autoreview_core::run_dataflow_check_with_coverage(source, source, paths, packs);
-                let relevant: Vec<_> = result.coverage.iter().filter(|issue| affects_rules(issue, rules, packs)).collect();
+                let relevant: Vec<_> = result.coverage.into_iter().filter(|issue| affects_rules(issue, rules, packs)).collect();
                 if !relevant.is_empty() {
-                    return Err(IncompleteAnalysis(relevant.iter().map(|issue| format!("{}: {}", issue.path.as_deref().unwrap_or("repository"), issue.detail)).collect::<Vec<_>>().join("; ")).into());
+                    return Err(IncompleteAnalysis(relevant).into());
                 }
                 result.findings
             }
@@ -153,6 +158,16 @@ impl Rule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incomplete_analysis_formats_optional_locations() {
+        let issue = autoreview_schema::AnalysisCoverageIssue { analyzer: "test".into(), reason: "skipped".into(), scope: "repository".into(), path: None, line: None, rule: None, detail: "unavailable".into() };
+        let mut located = issue.clone();
+        located.path = Some("src/main.ts".into());
+        located.line = Some(12);
+        let error = IncompleteAnalysis(vec![issue, located]);
+        assert_eq!(error.to_string(), "dataflow analysis was incomplete: repository: unavailable; src/main.ts:12: unavailable");
+    }
 
     #[test]
     fn dataflow_replay_rejects_incomplete_analysis() {
