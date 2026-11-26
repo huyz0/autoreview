@@ -673,7 +673,7 @@ fn unresolved_imported_associated_methods_report_coverage() {
     std::fs::create_dir(&src).unwrap();
     std::fs::write(src.join("lib.rs"), "mod support; mod worker;\n").unwrap();
     std::fs::write(src.join("support.rs"), "pub(crate) struct Files;\nimpl Files { pub(crate) fn known() {} }\n").unwrap();
-    for call in ["Store::unknown();", "Store::known(1);", "Store::unknown::<u8>();", "let f = || Store::unknown(); f();", "let _ = async { Store::unknown(); };", "if true { Store::unknown(); }"] {
+    for call in ["Store::unknown();", "Store::unknown()", "Store::known(1);", "Store::unknown::<u8>();", "let f = || Store::unknown(); f();", "let _ = async { Store::unknown(); };", "if true { Store::unknown(); }"] {
         std::fs::write(src.join("worker.rs"), format!("use crate::support::Files as Store;\nfn run() {{ {call} }}\n")).unwrap();
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| matches!(issue.reason.as_str(), "unresolved_rust_module_import" | "unresolved_helper_target") && issue.path.as_deref() == Some("src/worker.rs")), "{call}: {:?}", result.coverage);
