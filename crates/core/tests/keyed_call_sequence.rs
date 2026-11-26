@@ -78,6 +78,30 @@ const RECEIVER: &str = "{receiver: true, keyArgument: 0}";
 const ARGUMENT: &str = "{collectionArgument: 0, keyArgument: 2}";
 
 #[test]
+fn unlowered_cleanup_reports_incomplete_analysis() {
+    let source = "function pending(root, key, flag) {\n root.register(key);\n const result = flag ? root.remove(key) : undefined;\n return result;\n}\n";
+    let repo = tempfile::tempdir().unwrap();
+    let pack = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("main.js"), source).unwrap();
+    std::fs::write(pack.path().join("pending.yml"), "id: pending-entry\nkind: call-sequence\nlanguage: JavaScript\ncategory: correctness\nseverity: warning\nmessage: Clean up\nafter: [{call: register}]\nunless: [{call: remove}]\ncheckBeforeReturn: true\nidentity: {receiver: true, keyArgument: 0}\n").unwrap();
+    let check = || autoreview_core::run_dataflow_check_with_coverage(repo.path(), repo.path(), &["main.js".into()], &[ResolvedRulePack {
+        id: "entries".into(), local_path: pack.path().into(), trust: RulePackTrust::Full,
+    }]);
+    let result = check();
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_cleanup_call"
+        && issue.rule.as_deref() == Some("pending-entry") && issue.path.as_deref() == Some("main.js") && issue.line == Some(3)), "{:?}", result.coverage);
+    std::fs::write(repo.path().join("main.js"), "function pending(root, key) { root.register(key); root.remove(key); }\n").unwrap();
+    assert!(!check().coverage.iter().any(|issue| issue.reason == "unmodeled_cleanup_call"));
+    std::fs::write(repo.path().join("helper.js"), "export function cleanup(root, key, flag) {\n return flag ? root.remove(key) : undefined;\n}\n").unwrap();
+    std::fs::write(repo.path().join("main.js"), "import { cleanup } from './helper';\nexport function pending(root, key, flag) { root.register(key); cleanup(root, key, flag); }\n").unwrap();
+    let result = check();
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_cleanup_call"
+        && issue.path.as_deref() == Some("helper.js") && issue.line == Some(2)), "{:?}", result.coverage);
+    std::fs::write(repo.path().join("main.js"), "import { cleanup } from './helper';\nexport function pending(root, key) { root.register(key); root.remove(key); }\n").unwrap();
+    assert!(!check().coverage.iter().any(|issue| issue.reason == "unmodeled_cleanup_call"));
+}
+
+#[test]
 fn rust_match_bindings_do_not_borrow_outer_key_identity() {
     let same = "fn pending(root: &mut Registry, value: Option<&str>) {\n match value { Some(key) => { root.register(key); root.remove(key); }, _ => {} };\n}\n";
     assert!(findings("Rust", "lib.rs", same, RECEIVER, true).is_empty());
