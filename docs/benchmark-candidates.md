@@ -71,14 +71,11 @@ restores the older compiler's catch-variable behavior without disabling
 declaration checks. The opt-in regression below checks the labeled files'
 SHA-256 hashes and requires the unresolved-type warnings to remain visible.
 
-For a reproducible local observation, from a temporary parent directory:
+For a reproducible source-level observation, first follow the clone, checkout,
+and dependency installation steps for this case in [the benchmark README](../benchmarks/README.md).
+Then, from the `checkout` directory:
 
 ```sh
-git clone https://github.com/actions/checkout.git checkout
-cd checkout
-git checkout --detach 5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f
-npm ci --ignore-scripts --no-audit --no-fund
-npm install --prefix "$PWD/../ts-5.6.3" --no-save --ignore-scripts --no-audit --no-fund typescript@5.6.3
 mkdir -p .autoreview-replay-tmp/checkout-before .autoreview-replay-tmp/checkout-after
 git archive c952173edf28a2bd22e1a4926590c1ac39630461 | tar -x -C .autoreview-replay-tmp/checkout-before
 git archive 5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f | tar -x -C .autoreview-replay-tmp/checkout-after

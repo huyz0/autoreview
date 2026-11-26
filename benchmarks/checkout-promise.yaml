@@ -1,6 +1,6 @@
 cases:
   - name: checkout discarded recursive deletions
-    rule: {tool: autoreview-dataflow, id: benchmark-typescript-unobserved-promise}
+    rule: &promise_rule {tool: autoreview-dataflow, id: benchmark-typescript-unobserved-promise}
     evidence:
       kind: historical
       source: https://github.com/actions/checkout/commit/5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f
@@ -15,12 +15,8 @@ cases:
       path: src/github-api-helper.ts
       lines: []
   - name: checkout discarded token replacement
-    rule: {tool: autoreview-dataflow, id: benchmark-typescript-unobserved-promise}
-    evidence:
-      kind: historical
-      source: https://github.com/actions/checkout/commit/5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f
-      license: MIT
-      rationale: The fix awaits the token replacement; labels cover the entire file.
+    rule: *promise_rule
+    evidence: {kind: historical, source: 'https://github.com/actions/checkout/commit/5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f', license: MIT, rationale: 'The fix awaits the token replacement; labels cover the entire file.'}
     before:
       commit: c952173edf28a2bd22e1a4926590c1ac39630461
       path: src/git-auth-helper.ts
