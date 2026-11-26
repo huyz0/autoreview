@@ -731,7 +731,7 @@ fn rust_literal_match_tracks_results_across_arms() {
 
 #[test]
 fn rust_unmodeled_matches_remain_incomplete() {
-    for body in ["match x { 0 if check() => {}, _ => {} };", "match x { value => {} };", "match x { Some(ref value) => {}, _ => {} };", "match x { 0 => {} };", "match check(risky() + 1) { _ => {} };", "match x { _ => { let y = risky() + 1; } };", "match x { _ => {} }"] {
+    for body in ["match x { 0 if check() && other() => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { Some(ref value) => {}, _ => {} };", "match x { 0 => {} };", "match check(risky() + 1) { _ => {} };", "match x { _ => { let y = risky() + 1; } };", "match x { _ => {} }"] {
         let root = write_single_file("lib.rs", &format!("fn run(x: u8) {{ {body} }}\n"));
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("lib.rs")), "{body}: {:?}", result.coverage);
@@ -768,23 +768,66 @@ fn rust_unbound_enum_match_tracks_results() {
     }
 }
 
-#[test]
-fn rust_literal_match_checks_cleanup_on_each_arm() {
+fn assert_rust_match_cleanup(rule: &str, source: &str) {
     use autoreview_core::ResolvedRulePack;
     use autoreview_schema::RulePackTrust;
     let repo = tempfile::tempdir().unwrap();
     let pack = tempfile::tempdir().unwrap();
-    std::fs::write(pack.path().join("rust.yml"), "id: rust-match-cleanup\nkind: call-sequence\nlanguage: Rust\ncategory: correctness\nseverity: warning\nmessage: Finish before leaving\nafter: [{call: begin}]\nunless: [{call: finish}]\ncheckBeforeReturn: true\n").unwrap();
-    let source = "fn partial() {\n match begin() { Some(_) => { finish(); }, _ => {} };\n}\nfn closed() {\n match begin() { Some(_) => { finish(); }, _ => { finish(); } };\n}\n";
+    std::fs::write(pack.path().join("rust.yml"), format!("id: {rule}\nkind: call-sequence\nlanguage: Rust\ncategory: correctness\nseverity: warning\nmessage: Finish before leaving\nafter: [{{call: begin}}]\nunless: [{{call: finish}}]\ncheckBeforeReturn: true\n")).unwrap();
     std::fs::write(repo.path().join("lib.rs"), source).unwrap();
     let result = run_dataflow_check_with_coverage(repo.path(), repo.path(), &["lib.rs".into()], &[ResolvedRulePack {
         id: "match-cleanup".into(), local_path: pack.path().to_owned(), trust: RulePackTrust::Full,
     }]);
-    let lines: Vec<_> = result.findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some("rust-match-cleanup"))
+    let lines: Vec<_> = result.findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some(rule))
         .map(|finding| finding.location.range.start_line).collect();
     assert_eq!(lines.len(), 1, "{lines:?}: {:#?}", result.findings);
     assert!(lines[0] <= 3, "{lines:?}");
     assert!(!result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", result.coverage);
+}
+
+#[test]
+fn rust_literal_match_checks_cleanup_on_each_arm() {
+    let source = "fn partial() {\n match begin() { Some(_) => { finish(); }, _ => {} };\n}\nfn closed() {\n match begin() { Some(_) => { finish(); }, _ => { finish(); } };\n}\n";
+    assert_rust_match_cleanup("rust-match-cleanup", source);
+}
+
+#[test]
+fn rust_match_guard_side_effects_reach_later_arms() {
+    let source = "fn partial(flag: u8) {\n match flag { 0 if begin() => { finish(); }, _ => {} };\n}\nfn clean(flag: u8) {\n match flag { 0 if begin() => { finish(); }, _ => { finish(); } };\n}\n";
+    assert_rust_match_cleanup("rust-guard-cleanup", source);
+}
+
+#[test]
+fn rust_match_guard_tracks_cleanup_through_a_helper() {
+    use autoreview_core::ResolvedRulePack;
+    use autoreview_schema::RulePackTrust;
+    let repo = tempfile::tempdir().unwrap();
+    let pack = tempfile::tempdir().unwrap();
+    std::fs::write(pack.path().join("rust.yml"), "id: rust-guard-helper\nkind: call-sequence\nlanguage: Rust\ncategory: correctness\nseverity: warning\nmessage: Remove before finishing\nafter: [{call: register}]\nunless: [{call: remove}]\nbefore: [{call: finish}]\nidentity: {receiver: true, keyArgument: 0}\n").unwrap();
+    let source = "fn gate(root: &mut Registry, key: &str) -> bool { root.register(key); true }\nfn run(root: &mut Registry, key: &str, flag: u8) {\n match flag { 0 if gate(root, key) => { root.remove(key); }, _ => {} };\n root.finish(key);\n}\n";
+    std::fs::write(repo.path().join("lib.rs"), source).unwrap();
+    let scan = || run_dataflow_check(repo.path(), &["lib.rs".into()], &[ResolvedRulePack {
+        id: "guard-helper".into(), local_path: pack.path().to_owned(), trust: RulePackTrust::Full,
+    }]);
+    let findings = scan();
+    assert_eq!(findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some("rust-guard-helper")).count(), 1, "{findings:#?}");
+    std::fs::write(repo.path().join("lib.rs"), source.replace("_ => {}", "_ => { root.remove(key); }")).unwrap();
+    let findings = scan();
+    assert!(!findings.iter().any(|finding| finding.source.rule_id.as_deref() == Some("rust-guard-helper")), "{findings:#?}");
+}
+
+#[test]
+fn rust_match_guard_tracks_results_passed_to_helpers() {
+    let source = "use std::fs::remove_file;\nfn ignore(_value: std::io::Result<()>) -> bool { true }\nfn run(path: &str, flag: u8) {\n    match flag { 0 if ignore(remove_file(path)) => {}, _ => {} };\n}\n";
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 4)]);
+    let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    assert!(!result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", result.coverage);
+    let bound = "use std::fs::remove_file;\nfn allowed(_path: &str) -> bool { true }\nfn run(value: Option<&str>) {\n    match value { Some(path) if allowed(path) => { remove_file(path); }, _ => {} };\n}\n";
+    std::fs::write(root.path().join("lib.rs"), bound).unwrap();
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 4)]);
+    let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    assert!(result.coverage.iter().any(|issue| issue.reason == "rust_match_binding_projection" && issue.line == Some(4)), "{:?}", result.coverage);
 }
 
 #[test]
