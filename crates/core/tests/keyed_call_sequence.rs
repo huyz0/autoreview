@@ -1402,41 +1402,20 @@ func pending(root *Registry, key string) {
 
 #[test]
 fn nested_throwing_helper_reaches_finally_before_exit() {
-    let source = r#"function choose(key, bad) { if (bad) throw new Error(); return key; }
+    let template = r#"function choose(key, bad) { if (bad) throw new Error(); return key; }
 function pending(root, key, bad) {
     root.register(key);
-    try { root.remove(choose(key, bad)); }
+    try { OPERATION }
     finally { root.remove(key); }
 }"#;
-    assert_clean_js(source);
-    let wrong = source.replace("finally { root.remove(key); }", "finally { root.remove('other'); }");
-    let hits = findings("JavaScript", "worker.js", &wrong, RECEIVER, true);
-    assert_eq!(one(&hits).message, "Clean up root and key before implicit throw");
-}
-
-#[test]
-fn array_element_helper_exceptions_reach_finally() {
-    let source = r#"function choose(key, bad) { if (bad) throw new Error(); return key; }
-function pending(root, key, bad) {
-    root.register(key);
-    try { const values = [choose(key, bad)]; }
-    finally { root.remove(key); }
-}"#;
-    assert_clean_js(source);
-    let wrong = source.replace("finally { root.remove(key); }", "finally { root.remove('other'); }");
-    let hits = findings("JavaScript", "worker.js", &wrong, RECEIVER, true);
-    assert!(hits.iter().any(|hit| hit.message == "Clean up root and key before implicit throw"), "{hits:?}");
-}
-
-#[test]
-fn optional_call_does_not_evaluate_array_element_cleanup() {
-    let source = r#"function cleanup(root, key) { root.remove(key); }
-function pending(root, key, maybe) {
-    root.register(key);
-    maybe?.([cleanup(root, key)]);
-}"#;
-    let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
-    assert!(hits.iter().any(|hit| hit.message == "Clean up root and key before fallthrough"), "{hits:?}");
+    for operation in ["root.remove(choose(key, bad));", "const values = [choose(key, bad)];"] {
+        let source = template.replace("OPERATION", operation);
+        assert_clean_js(&source);
+        let wrong = source.replace("finally { root.remove(key); }", "finally { root.remove('other'); }");
+        let hits = findings("JavaScript", "worker.js", &wrong, RECEIVER, true);
+        if operation.starts_with("root.remove") { assert_eq!(one(&hits).message, "Clean up root and key before implicit throw"); }
+        assert!(hits.iter().any(|hit| hit.message == "Clean up root and key before implicit throw"), "{hits:?}");
+    }
 }
 
 #[test]
@@ -1446,6 +1425,8 @@ function pending(root, key, maybe) {
     root.register(key);
     maybe?.(cleanup(root, key));
 }"#;
-    let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
-    assert!(hits.iter().any(|hit| hit.message == "Clean up root and key before fallthrough"), "{hits:?}");
+    for source in [source.to_owned(), source.replace("maybe?.(cleanup(root, key))", "maybe?.([cleanup(root, key)])")] {
+        let hits = findings("JavaScript", "worker.js", &source, RECEIVER, true);
+        assert!(hits.iter().any(|hit| hit.message == "Clean up root and key before fallthrough"), "{hits:?}");
+    }
 }
