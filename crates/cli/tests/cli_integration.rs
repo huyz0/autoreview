@@ -196,6 +196,19 @@ fn replay_excludes_unmodeled_partial_observation() {
 }
 
 #[test]
+fn replay_excludes_partial_helper_observation() {
+    let bad = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b, flag) { const pending = rename(a, b); return consume(pending, flag); }\n";
+    let fixed = bad.replace("if (flag) return value;", "return value;");
+    let repo = init_repo(&[("main.js", bad)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("main.js", &fixed)], "always forward result");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"partial helper observation", "rule":{"tool":"autoreview-dataflow","id":"javascript-node-fs-discarded-promise"}, "before":{"commit":before,"path":"main.js","lines":[]}, "after":{"commit":after,"path":"main.js","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    assert_incomplete_replay(&failed_replay_report(repo.path()), "result_use_path_unmodeled", "main.js", 3);
+}
+
+#[test]
 fn replay_detects_discarded_conditional_binding() {
     let bad = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = rename(a, b);\n flag ? pending : null;\n}\n";
     assert_conditional_replay(bad, &bad.replace("\n}\n", "\n await pending;\n}\n"), 3, false);

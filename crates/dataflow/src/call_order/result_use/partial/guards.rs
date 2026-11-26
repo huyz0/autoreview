@@ -1,6 +1,23 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Cfg, EdgeKind, IdentityOperand, NodeId, Plan, Stmt};
+use super::{
+    has_conditional, Cfg, EdgeKind, IdentityOperand, Node, NodeId, Plan, State, Stmt, PATH_LIMIT,
+};
+
+#[derive(Default)]
+pub(super) struct Visits(BTreeSet<(NodeId, State)>);
+
+impl Visits {
+    pub(super) fn enter(&mut self, cfg: &Cfg<Stmt>, node: NodeId, state: &State) -> Option<bool> {
+        if !self.0.insert((node, state.clone())) {
+            return Some(false);
+        }
+        if self.0.len() > PATH_LIMIT {
+            return None;
+        }
+        Some(!throws(cfg, node))
+    }
+}
 
 pub(super) fn supported_edges(
     cfg: &Cfg<Stmt>,
@@ -61,4 +78,18 @@ pub(super) fn guard(plan: &Plan<'_, '_>, name: &str) -> Option<IdentityOperand> 
         "false" => Some(IdentityOperand::Boolean(false)),
         _ => plan.syntax.resolve(&BTreeMap::new(), name, usize::MAX),
     }
+}
+
+pub(super) fn hidden_at(cfg: &Cfg<Stmt>, node: NodeId, syntax: (Node<'_>, &[u8])) -> bool {
+    cfg.nodes[node].evaluations.iter().any(|range| {
+        super::super::effects::evaluation(syntax.0, range)
+            .is_some_and(|value| has_conditional(value, syntax.1))
+    })
+}
+
+pub(super) fn throws(cfg: &Cfg<Stmt>, node: NodeId) -> bool {
+    cfg.nodes[node]
+        .stmts
+        .iter()
+        .any(|stmt| matches!(stmt, Stmt::Throw { .. }))
 }

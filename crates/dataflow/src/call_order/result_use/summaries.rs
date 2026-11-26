@@ -101,6 +101,7 @@ impl SummaryGraph {
 fn empty_summary(parameters: usize) -> HelperSummary {
     let empty = HelperOutcome {
         parameters: vec![false; parameters],
+        unobserved_parameters: vec![None; parameters],
         origins: Vec::new(),
         opaque_parameters: vec![false; parameters],
         opaque_origins: Vec::new(),
@@ -132,7 +133,15 @@ fn summarize(
                 .map(Place::Local)
         })
         .collect();
-    effects::lower(plan, function, unit.source, true, calls).helper_summary(&parameters)
+    let analysis = effects::lower(plan, function, unit.source, true, calls);
+    let mut summary = analysis.helper_summary(&parameters);
+    let syntax = (function.node, unit.source);
+    for (used, outcome) in [(false, &mut summary.when_discarded), (true, &mut summary.when_observed)] {
+        outcome.unobserved_parameters = super::partial::unobserved_parameters(
+            &analysis.owner, function.graph, plan, syntax, (&parameters, used, !analysis.closures.is_empty()),
+        );
+    }
+    summary
 }
 
 fn set_origin_paths(summary: &mut HelperSummary, path: &str) {
@@ -178,6 +187,36 @@ mod tests {
     use super::*;
     use crate::call_order::ContractLanguage;
     use autoreview_langsupport::Language;
+
+    #[test]
+    fn helper_parameter_paths_distinguish_partial_and_complete_returns() {
+        for (source, expected) in [
+            ("function helper(value, flag) { if (flag) return value; }", true),
+            ("function helper(value, flag) { if (flag) return value; else return value; }", false),
+            ("function helper(value, flag) { if (flag) { if (flag) return value; } else return value; }", false),
+        ] {
+            super::super::test_support::with_program((Language::JavaScript, ContractLanguage::Web), source, ("unused", "missing"), |program, units| {
+                let (summaries, exhausted) = build(program, units);
+                assert!(!exhausted);
+                assert_eq!(summaries[&0].when_observed.unobserved_parameters[0], Some(expected));
+                assert_eq!(summaries[&0].when_discarded.unobserved_parameters[0], Some(true));
+            });
+        }
+    }
+
+    #[test]
+    fn helper_parameter_paths_reject_unstable_or_cyclic_control_flow() {
+        for source in [
+            "function helper(value, flag) { if (flag) { flag = false; } if (flag) return value; }",
+            "function helper(value, flag) { while (flag) { value = value; } return value; }",
+        ] {
+            super::super::test_support::with_program((Language::JavaScript, ContractLanguage::Web), source, ("unused", "missing"), |program, units| {
+                let (summaries, exhausted) = build(program, units);
+                assert!(!exhausted);
+                assert_eq!(summaries[&0].when_observed.unobserved_parameters[0], None, "{source}");
+            });
+        }
+    }
 
     #[test]
     fn reports_summary_budget_exhaustion() {

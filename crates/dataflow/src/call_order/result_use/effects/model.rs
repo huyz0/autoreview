@@ -37,6 +37,8 @@ pub(in crate::call_order::result_use) struct HelperCall {
     pub(in crate::call_order::result_use) demand: Demand,
     pub(in crate::call_order::result_use) when_discarded: Vec<bool>,
     pub(in crate::call_order::result_use) when_observed: Vec<bool>,
+    pub(in crate::call_order::result_use) unobserved_discarded: Vec<Option<bool>>,
+    pub(in crate::call_order::result_use) unobserved_observed: Vec<Option<bool>>,
     pub(in crate::call_order::result_use) origins_discarded: Vec<(Origin, bool)>,
     pub(in crate::call_order::result_use) origins_observed: Vec<(Origin, bool)>,
     pub(in crate::call_order::result_use) opaque_discarded: Vec<bool>,

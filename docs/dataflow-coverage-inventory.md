@@ -13,6 +13,11 @@ complex or unstable guards, and nonlocal storage, still use the older merged
 liveness analysis and may miss a result observed on only one path. When a
 local source is treated as used but cannot be proved observed before the
 unsupported flow, `result_use_path_unmodeled` reports incomplete analysis.
+The same warning can identify a locally tracked result passed to a resolved
+helper that may leave its parameter unobserved, unless subsequent caller paths
+prove the result is used. Helper guard values are not yet mapped to caller
+arguments, so this is an incomplete-analysis warning, not a proven defect.
+This check does not cover every storage shape, helper chain, or expression.
 Merely intersecting liveness sets would produce false positives for correlated guards.
 Discarded conditional arms that reference a tracked binding are modeled when
 the conditional test and arms are supported. An unsupported conditional can

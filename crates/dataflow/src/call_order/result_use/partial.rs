@@ -4,10 +4,15 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 mod guards;
+mod helper_coverage;
+mod parameters;
 
-use super::{Body, Effect, Origin, Place, Plan, Value, Write};
+pub(super) use helper_coverage::has_partial_helper;
+pub(super) use parameters::unobserved_parameters;
+
+use super::{Body, Demand, Effect, Origin, Place, Plan, Value, Write};
 use crate::cfg::{Cfg, EdgeKind, IdentityOperand, NodeId, Stmt};
-use guards::{guard, supported_edges};
+use guards::{guard, hidden_at, supported_edges, throws, Visits};
 use tree_sitter::Node;
 
 const PATH_LIMIT: usize = 8192;
@@ -34,13 +39,11 @@ pub(super) fn unused(
     has_closures: bool,
 ) -> (Vec<(NodeId, Origin)>, Status) {
     let edges = outgoing(body, cfg);
-    let hidden = cfg.nodes.iter().enumerate().any(|(index, node)| {
-        body.flow.reachable[index]
-            && node.evaluations.iter().any(|range| {
-                super::effects::evaluation(syntax.0, range)
-                    .is_some_and(|node| has_conditional(node, syntax.1))
-            })
-    });
+    let hidden = cfg
+        .nodes
+        .iter()
+        .enumerate()
+        .any(|(index, _)| body.flow.reachable[index] && hidden_at(cfg, index, syntax));
     if !hidden
         && !edges
             .iter()
@@ -244,16 +247,19 @@ fn supported(
 }
 
 fn supported_effect(effect: &Effect) -> bool {
+    supported_effect_with_return(effect, false)
+}
+
+fn supported_effect_with_return(effect: &Effect, allow_return: bool) -> bool {
     match effect {
         Effect::Read(Place::Local(_)) => true,
         Effect::Write(writes) => writes.iter().all(|write| {
-            write
-                .target
-                .is_none_or(|place| matches!(place, Place::Local(_)))
-                && matches!(
-                    write.value,
-                    Value::Source(_) | Value::Copy(Place::Local(_)) | Value::Other
-                )
+            write.target.is_none_or(|place| {
+                matches!(place, Place::Local(_)) || (allow_return && place == Place::Return)
+            }) && matches!(
+                write.value,
+                Value::Source(_) | Value::Copy(Place::Local(_)) | Value::Other
+            )
         }),
         _ => false,
     }
@@ -293,20 +299,10 @@ fn unobserved_path(
     edges: &[Vec<(NodeId, EdgeKind)>],
     origin: &Origin,
 ) -> Option<bool> {
-    let mut seen = BTreeSet::new();
+    let mut seen = Visits::default();
     let mut pending = vec![(body.flow.entry, State::default())];
     while let Some((node, mut state)) = pending.pop() {
-        if !seen.insert((node, state.clone())) {
-            continue;
-        }
-        if seen.len() > PATH_LIMIT {
-            return None;
-        }
-        if cfg.nodes[node]
-            .stmts
-            .iter()
-            .any(|stmt| matches!(stmt, Stmt::Throw { .. }))
-        {
+        if !seen.enter(cfg, node, &state)? {
             continue;
         }
         if observed(&body.effects[node], origin, &mut state) {
