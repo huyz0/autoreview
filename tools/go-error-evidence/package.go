@@ -48,11 +48,8 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 }
 
 func loadPackage(fset *token.FileSet, dir, binary, mode string) (loadedPackage, string) {
-	if !filepath.IsAbs(dir) || !filepath.IsAbs(binary) {
-		return loadedPackage{}, "invalid_package_config"
-	}
-	if mode != "" && mode != "readonly" && mode != "vendor" {
-		return loadedPackage{}, "invalid_module_mode"
+	if reason := packageConfigError(dir, binary, mode); reason != "" {
+		return loadedPackage{}, reason
 	}
 	if mode == "" {
 		mode = "readonly"
@@ -66,6 +63,16 @@ func loadPackage(fset *token.FileSet, dir, binary, mode string) (loadedPackage, 
 		return loadedPackage{}, "package_load_incomplete"
 	}
 	return assemblePackage(fset, target, exports)
+}
+
+func packageConfigError(dir, binary, mode string) string {
+	if !filepath.IsAbs(dir) || !filepath.IsAbs(binary) {
+		return "invalid_package_config"
+	}
+	if mode != "" && mode != "readonly" && mode != "vendor" {
+		return "invalid_module_mode"
+	}
+	return ""
 }
 
 func assemblePackage(fset *token.FileSet, target listedPackage, exports map[string]string) (loadedPackage, string) {
