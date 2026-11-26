@@ -155,9 +155,9 @@ fn replay_side(
         snapshots.insert(commit.clone(), checkout_snapshot(repo, &commit)?);
     }
     let snapshot = snapshots[&commit].path();
-    let source = validated_source(snapshot, &label.path, &commit, rule.tool)?;
+    let source = rule::validated_source(snapshot, &label.path, &commit, rule.tool)?;
     if entry != label.path {
-        validated_source(snapshot, entry, &commit, rule.tool)?;
+        rule::validated_source(snapshot, entry, &commit, rule.tool)?;
     }
     ensure!(
         label
@@ -189,19 +189,6 @@ fn replay_side(
     ))
 }
 
-fn validated_source(snapshot: &Path, name: &str, commit: &str, tool: Tool) -> anyhow::Result<String> {
-    let path = Path::new(name);
-    let file = snapshot.join(path);
-    ensure!(file.symlink_metadata().is_ok_and(|meta| meta.is_file())
-        && file.canonicalize()?.starts_with(snapshot.canonicalize()?),
-        "'{}' must be a regular source file in {commit}", name);
-    let source = std::fs::read_to_string(file)?;
-    if tool != Tool::AutoreviewDuplication {
-        ensure!(autoreview_core::parses_cleanly(path, &source) == Some(true),
-            "'{}' must parse successfully in {commit}", name);
-    }
-    Ok(source)
-}
 
 fn replay(repo: &Path, suite: &Suite, gate_only: bool) -> anyhow::Result<Vec<CaseResult>> {
     replay_with_cache(repo, suite, gate_only, &mut BTreeMap::new(), &[])
