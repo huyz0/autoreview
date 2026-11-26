@@ -325,11 +325,8 @@ fn helper_conditional_returns_respect_constant_arguments() {
         let root = assert_boolean_helper_guard(path, rule, source);
         let later = source.replace("export function run(a, b) { return consume(rename(a, b), true); }", "export async function run(a, b) { const value = rename(a, b); consume(value, false); await value; }");
         std::fs::write(root.path().join(path), later).unwrap();
-        let result = conditional_test_result(&root, path);
-        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
-        let extension = path.rsplit('.').next().unwrap();
-        std::fs::write(root.path().join(format!("helper.{extension}")), "export function consume(value, flag) { if (flag) return value; }\n").unwrap();
-        let imported = source.replace("function consume(value, flag) { if (flag) return value; }", "import { consume } from './helper';");
+        assert_no_helper_finding(&root, path, rule);
+        let imported = import_guarded_helper(&root, path, source);
         std::fs::write(root.path().join(path), imported.replace(", true)", ", false)")).unwrap();
         let result = conditional_test_result(&root, path);
         assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
@@ -387,6 +384,23 @@ fn assert_no_helper_finding(root: &tempfile::TempDir, path: &str, rule: &str) {
     assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
 }
 
+fn import_guarded_helper(root: &tempfile::TempDir, path: &str, source: &str) -> String {
+    let extension = path.rsplit('.').next().unwrap();
+    std::fs::write(root.path().join(format!("helper.{extension}")), "export function consume(value, flag) { if (flag) return value; }\n").unwrap();
+    source.replace("function consume(value, flag) { if (flag) return value; }", "import { consume } from './helper';")
+}
+
+fn assert_assigned_helper_pair(root: &tempfile::TempDir, path: &str, rule: &str, source: &str) {
+    std::fs::write(root.path().join(path), source).unwrap();
+    let result = conditional_test_result(root, path);
+    assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+    assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+    let bad = source.replace("if (flag) { const pending", "if (!flag) { const pending").replace("if (flag) { ", "if (!flag) { ").replace("if flag { let value", "if !flag { let value");
+    std::fs::write(root.path().join(path), bad).unwrap();
+    let result = conditional_test_result(root, path);
+    assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+}
+
 #[test]
 fn caller_and_helper_guards_are_correlated() {
     for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
@@ -422,6 +436,45 @@ fn caller_and_helper_guards_are_correlated() {
         std::fs::write(root.path().join(format!("helper.{extension}")), "export function consume(value, flag) { if (flag) return value; }\n").unwrap();
         let imported = source.replace("function consume(value, flag) { if (flag) return value; }", "import { consume } from './helper';");
         assert_correlated_helper_pair(&root, path, rule, &imported);
+    }
+}
+
+#[test]
+fn assigned_helper_result_respects_correlated_guards() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport async function run(a, b, flag) { if (flag) { const pending = rename(a, b); const forwarded = consume(pending, flag); await forwarded; } }\n";
+        let root = write_single_file(path, source);
+        assert_assigned_helper_pair(&root, path, rule, source);
+        let later = source.replace("if (flag) { const pending", "if (!flag) { const pending").replace("await forwarded;", "await pending;");
+        std::fs::write(root.path().join(path), later).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        let overwritten = source.replace("const forwarded = consume(pending, flag); await forwarded;", "let forwarded = consume(pending, flag); forwarded = null; await forwarded;");
+        std::fs::write(root.path().join(path), overwritten).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let returned = source.replace("await forwarded;", "return forwarded;");
+        std::fs::write(root.path().join(path), returned).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        let alias = source.replace("await forwarded;", "const copy = forwarded; await copy;");
+        std::fs::write(root.path().join(path), alias).unwrap();
+        assert_no_helper_finding(&root, path, rule);
+        let imported = import_guarded_helper(&root, path, source);
+        assert_assigned_helper_pair(&root, path, rule, &imported);
+    }
+}
+
+#[test]
+fn assigned_helper_results_follow_jvm_and_rust_guards() {
+    let cases = [
+        ("Main.java", "java-discarded-objects-comparison", "import java.util.Objects;\nclass Main { static boolean consume(boolean value, boolean flag) { if (flag) return value; return false; }\nboolean run(Object a, Object b, boolean flag) { if (flag) { boolean value = Objects.equals(a,b); boolean forwarded = consume(value, flag); return forwarded; } return false; } }\n"),
+        ("Main.kt", "kotlin-discarded-run-catching-result", "import kotlin.runCatching\nfun consume(value: Result<Int>, flag: Boolean): Result<Int>? { if (flag) return value; return null }\nfun run(flag: Boolean): Result<Int>? { if (flag) { val value = runCatching { 1 }; val forwarded = consume(value, flag); return forwarded; }; return null }\n"),
+        ("lib.rs", "rust-discarded-remove-file-result", "use std::fs::remove_file;\nfn consume(value: std::io::Result<()>, flag: bool) -> std::io::Result<()> { if flag { return value; } Ok(()) }\nfn run(path: &str, flag: bool) -> std::io::Result<()> { if flag { let value = remove_file(path); let forwarded = consume(value, flag); return forwarded; } Ok(()) }\n"),
+    ];
+    for (path, rule, source) in cases {
+        let root = write_single_file(path, source);
+        assert_assigned_helper_pair(&root, path, rule, source);
     }
 }
 

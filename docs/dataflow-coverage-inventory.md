@@ -27,7 +27,9 @@ names can be shadowed and that binding is not yet verified for this check.
 For bounded acyclic callers with supported effects, the same helper guard can
 also be correlated with a stable caller branch or alias. This can report a
 discarded result on a proven path; unknown effects and unstable guards remain
-incomplete. A locally assigned result no longer receives the separate
+incomplete. When such a helper returns a tracked result into a local binding,
+supported paths also follow the returned value through copies, observation,
+return, and reassignment. A locally assigned result no longer receives the separate
 partial-observation warning when every reachable path is proved observed;
 unobserved paths and exhausted path budgets do not receive that exemption.
 Stable boolean alias chains are followed for up to 64 bindings. Writes or
