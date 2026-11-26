@@ -161,6 +161,10 @@ impl<'src> Syntax<'src> {
         self.bindings.names().any(|binding| binding == name)
     }
 
+    pub(super) fn stable_boolean(&self, name: &str, at: usize) -> Option<bool> {
+        self.bindings.stable_boolean(name, at)
+    }
+
     pub(super) fn local_result_binding(&self, name: &str, start: usize, defining: bool) -> Option<usize> {
         self.bindings.local_value(name, start, defining)
     }

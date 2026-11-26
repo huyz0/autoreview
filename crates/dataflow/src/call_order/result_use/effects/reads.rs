@@ -11,15 +11,21 @@ enum Visit<'tree> {
     Invoke(usize, Demand),
 }
 
-fn specialize(outcome: &super::super::HelperOutcome, arguments: &[Node<'_>], source: &[u8], kotlin: bool) -> (Vec<bool>, Vec<Option<bool>>) {
+fn specialize(outcome: &super::super::HelperOutcome, arguments: &[Node<'_>], source: &[u8], kotlin: bool, syntax: &crate::call_order::identity::Syntax<'_>) -> (Vec<bool>, Vec<Option<bool>>) {
     let mut used = outcome.parameters.clone();
     let mut unobserved = outcome.unobserved_parameters.clone();
     let Some(conditional) = &outcome.conditional_parameters else { return (used, unobserved); };
     let Some(argument) = arguments.get(conditional.guard_index).copied().map(transparent) else { return (used, unobserved); };
     let kind = if (kotlin && argument.kind() == "identifier") || argument.kind() == "boolean_literal" { argument.utf8_text(source).unwrap_or("") } else { argument.kind() };
-    let values = match kind {
-        "true" => &conditional.when_true,
-        "false" => &conditional.when_false,
+    let truth = match kind {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ if argument.kind() == "identifier" => argument.utf8_text(source).ok().and_then(|name| syntax.stable_boolean(name, argument.start_byte())),
+        _ => None,
+    };
+    let values = match truth {
+        Some(true) => &conditional.when_true,
+        Some(false) => &conditional.when_false,
         _ => return (used, unobserved),
     };
     for (index, value) in values.iter().enumerate() {
@@ -98,8 +104,8 @@ impl Lower<'_, '_, '_> {
             ((summary.when_discarded.parameters.clone(), summary.when_discarded.unobserved_parameters.clone()),
              (summary.when_observed.parameters.clone(), summary.when_observed.unobserved_parameters.clone()))
         } else {
-            (specialize(&summary.when_discarded, &arguments, self.source, kotlin),
-             specialize(&summary.when_observed, &arguments, self.source, kotlin))
+            (specialize(&summary.when_discarded, &arguments, self.source, kotlin, &self.plan.syntax),
+             specialize(&summary.when_observed, &arguments, self.source, kotlin, &self.plan.syntax))
         };
         let multi = (arguments.len() == 1).then(|| transparent(arguments[0]))
             .and_then(|call| self.plan.result_components.get(&call.start_byte()).map(|shape| (call, shape)));
