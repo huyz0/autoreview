@@ -82,6 +82,10 @@ fn unused_local(lambda: Node<'_>, source: &str, remaining_nodes: &mut usize) -> 
     let name = simple_val(declaration, expression, source)?.trim_matches('`');
     let scope = std::iter::successors(declaration.parent(), |node| node.parent())
         .find(|node| matches!(node.kind(), "function_declaration" | "anonymous_function"))?;
+    single_identifier(scope, name, source, remaining_nodes)
+}
+
+fn single_identifier(scope: Node<'_>, name: &str, source: &str, remaining_nodes: &mut usize) -> Option<bool> {
     let mut cursor = scope.walk();
     let mut count = 0;
     loop {
@@ -91,12 +95,16 @@ fn unused_local(lambda: Node<'_>, source: &str, remaining_nodes: &mut usize) -> 
             count += 1;
             if count > 1 { return Some(false); }
         }
-        if cursor.goto_first_child() { continue; }
-        loop {
-            if cursor.node() == scope { return Some(count == 1); }
-            if cursor.goto_next_sibling() { break; }
-            if !cursor.goto_parent() { return None; }
-        }
+        if !advance(&mut cursor, scope)? { return Some(count == 1); }
+    }
+}
+
+fn advance(cursor: &mut tree_sitter::TreeCursor<'_>, scope: Node<'_>) -> Option<bool> {
+    if cursor.goto_first_child() { return Some(true); }
+    loop {
+        if cursor.node() == scope { return Some(false); }
+        if cursor.goto_next_sibling() { return Some(true); }
+        if !cursor.goto_parent() { return None; }
     }
 }
 

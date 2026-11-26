@@ -30,6 +30,13 @@ fn failed_replay_report(repo: &std::path::Path) -> serde_json::Value {
     serde_json::from_slice(&result.get_output().stdout).unwrap()
 }
 
+fn successful_replay_report(repo: &std::path::Path, suite: &serde_json::Value) -> serde_json::Value {
+    std::fs::write(repo.join("suite.json"), suite.to_string()).unwrap();
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo)
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().success();
+    serde_json::from_slice(&output.get_output().stdout).unwrap()
+}
+
 fn assert_incomplete_replay(report: &serde_json::Value, reason: &str, path: &str, line: u32) {
     assert_eq!(report["coverage"][0]["incomplete"], 1, "{report}");
     assert_eq!(report["coverage"][0]["completed"], 0, "{report}");
@@ -534,10 +541,7 @@ fn unresolved_kotlin_callback_reaches_review_and_blocks_replay() {
     std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
     assert_incomplete_replay(&failed_replay_report(repo.path()), "callback_execution_unresolved", "Main.kt", 2);
     let unrelated = serde_json::json!({"cases": [{"name":"unrelated rule", "rule":{"tool":"ast-grep","id":"kotlin-thread-sleep-in-suspend"}, "before":{"commit":before,"path":"Main.kt","lines":[]}, "after":{"commit":after,"path":"Main.kt","lines":[]}}]});
-    std::fs::write(repo.path().join("suite.json"), unrelated.to_string()).unwrap();
-    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
-        .args(["rules", "replay", "--suite", "suite.json"]).assert().success();
-    let report: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    let report = successful_replay_report(repo.path(), &unrelated);
     assert_eq!(report["coverage"][0]["completed"], 1, "{report}");
 }
 
@@ -551,10 +555,7 @@ fn directly_invoked_kotlin_lambda_replays_without_hiding_outer_uncertainty() {
     repo.commit(&[("Main.kt", clean)], "remove blocking");
     let after = current_commit(repo.path());
     let mut suite = serde_json::json!({"cases": [{"name":"direct lambda", "rule":{"tool":"ast-grep","id":"kotlin-runblocking-in-suspend-function"}, "before":{"commit":before,"path":"Main.kt","lines":[2]}, "after":{"commit":after,"path":"Main.kt","lines":[]}}]});
-    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
-    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
-        .args(["rules", "replay", "--suite", "suite.json"]).assert().success();
-    let report: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    let report = successful_replay_report(repo.path(), &suite);
     assert_eq!(report["rules"][0]["truePositives"], 1, "{report}");
     repo.commit(&[("Main.kt", "suspend fun run() {\n register { ({ runBlocking { work() } })() }\n}\n")], "nest callback");
     suite["cases"][0]["before"]["commit"] = current_commit(repo.path()).into();
@@ -575,10 +576,7 @@ fn kotlin_literal_invoke_and_immutable_alias_replay() {
     repo.commit(&[("Main.kt", clean)], "remove blocking");
     let after = current_commit(repo.path());
     let suite = serde_json::json!({"cases": [{"name":"immediate invocation", "rule":{"tool":"ast-grep","id":"kotlin-runblocking-in-suspend-function"}, "before":{"commit":before,"path":"Main.kt","lines":[2,3]}, "after":{"commit":after,"path":"Main.kt","lines":[]}}]});
-    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
-    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
-        .args(["rules", "replay", "--suite", "suite.json"]).assert().success();
-    let report: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    let report = successful_replay_report(repo.path(), &suite);
     assert_eq!(report["rules"][0]["truePositives"], 2, "{report}");
 }
 
@@ -592,10 +590,7 @@ fn kotlin_unused_callback_is_clean_until_invoked() {
     repo.commit(&[("Main.kt", invoked)], "invoke callback");
     let after = current_commit(repo.path());
     let suite = serde_json::json!({"cases": [{"name":"local callback lifetime", "rule":{"tool":"ast-grep","id":"kotlin-runblocking-in-suspend-function"}, "before":{"commit":before,"path":"Main.kt","lines":[]}, "after":{"commit":after,"path":"Main.kt","lines":[2]}}]});
-    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
-    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
-        .args(["rules", "replay", "--suite", "suite.json"]).assert().success();
-    let report: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    let report = successful_replay_report(repo.path(), &suite);
     assert_eq!(report["rules"][0]["truePositives"], 1, "{report}");
     assert_eq!(report["coverage"][0]["completed"], 1, "{report}");
 }
