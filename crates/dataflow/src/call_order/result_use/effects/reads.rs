@@ -43,6 +43,7 @@ impl Lower<'_, '_, '_> {
     }
 
     fn visit<'tree>(&self, node: Node<'tree>, demand: Demand, todo: &mut Vec<Visit<'tree>>, effects: &mut Vec<Effect>) {
+        self.opaque_wrapped_arguments(node, effects);
         if self.add_helper_effect(node, demand, effects) { return; }
         if let Some(closure) = self.closures.literal(node) {
             let snapshots = closure
@@ -144,6 +145,24 @@ impl Lower<'_, '_, '_> {
                 self.reads_with(argument, &mut nested, Demand::Slot(temporary));
                 effects.push(Effect::OpaqueOnly(nested));
                 effects.push(Effect::OpaqueRead(temporary));
+            }
+        }
+    }
+
+    fn opaque_wrapped_arguments(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
+        if !matches!(node.kind(), "call_expression" | "method_invocation" | "new_expression") || self.origin(node).is_some() { return; }
+        let Some(arguments) = site::arguments(node) else { return; };
+        for argument in site::children(arguments).filter_map(site::argument) {
+            let argument = transparent(argument);
+            if !matches!(argument.kind(), "array" | "spread_element" | "spread_expression") { continue; }
+            let mut pending = vec![argument];
+            while let Some(current) = pending.pop() {
+                let current = transparent(current);
+                if let Some(place) = self.place(current, false) {
+                    effects.push(Effect::OpaqueRead(place));
+                } else if matches!(current.kind(), "array" | "spread_element" | "spread_expression") {
+                    pending.extend(site::children(current));
+                }
             }
         }
     }
