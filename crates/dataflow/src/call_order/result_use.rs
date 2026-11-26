@@ -53,6 +53,7 @@ struct HelperSummary {
 #[derive(Clone, PartialEq, Eq)]
 struct HelperOutcome {
     parameters: Vec<bool>,
+    unobserved_parameters: Vec<Option<bool>>,
     origins: Vec<(Origin, bool)>,
     opaque_parameters: Vec<bool>,
     opaque_origins: Vec<Origin>,
@@ -108,6 +109,7 @@ impl Analysis {
                 .iter()
                 .map(|parameter| parameter.is_none_or(|place| live.contains(&place)))
                 .collect(),
+            unobserved_parameters: vec![None; parameters.len()],
             origins: origins.into_values().collect(),
             opaque_parameters: parameters.iter().map(|parameter| parameter.is_none_or(|place| opaque_live.contains(&place))).collect(),
             opaque_origins: opaque_origins.into_values().collect(),
@@ -465,6 +467,8 @@ func f(x string) { switch x { case "p\n", "q": return; default: return } }"#, tr
             demand: Demand::Slot(output),
             when_discarded: vec![true, false],
             when_observed: vec![true, true],
+            unobserved_discarded: vec![None, None],
+            unobserved_observed: vec![None, None],
             origins_discarded: vec![],
             origins_observed: vec![],
             opaque_discarded: vec![false, false],

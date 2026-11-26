@@ -122,6 +122,8 @@ impl Lower<'_, '_, '_> {
             demand,
             when_discarded: summary.when_discarded.parameters.clone(),
             when_observed: summary.when_observed.parameters.clone(),
+            unobserved_discarded: summary.when_discarded.unobserved_parameters.clone(),
+            unobserved_observed: summary.when_observed.unobserved_parameters.clone(),
             origins_discarded: origins(&summary.when_discarded.origins),
             origins_observed: origins(&summary.when_observed.origins),
             opaque_discarded: summary.when_discarded.opaque_parameters.clone(),

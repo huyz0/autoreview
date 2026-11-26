@@ -162,7 +162,8 @@ fn collect_hits(
             let unused: Vec<_> = analysis.unused().collect();
             let syntax = (function.node, unit.source);
             let (partial, status) = super::partial::unused(&analysis.owner, function.graph, plan, syntax, !analysis.closures.is_empty());
-            let reason = partial_reason(status, &analysis.owner, function.graph, syntax, &unused);
+            let reason = partial_reason(status, &analysis.owner, function.graph, syntax, &unused)
+                .or_else(|| super::partial::has_partial_helper(&analysis.owner, function.graph, plan, syntax, &unused).then_some("result_use_path_unmodeled"));
             if let Some(reason) = reason {
                 limitations.push(super::super::keyed::KeyedLimitation { reason, path: Some(unit.path.to_owned()), line: Some(function.node.start_position().row as u32 + 1) });
             }

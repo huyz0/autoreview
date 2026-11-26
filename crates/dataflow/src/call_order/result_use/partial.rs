@@ -4,8 +4,13 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 mod guards;
+mod helper_coverage;
+mod parameters;
 
-use super::{Body, Effect, Origin, Place, Plan, Value, Write};
+pub(super) use helper_coverage::has_partial_helper;
+pub(super) use parameters::unobserved_parameters;
+
+use super::{Body, Demand, Effect, Origin, Place, Plan, Value, Write};
 use crate::cfg::{Cfg, EdgeKind, IdentityOperand, NodeId, Stmt};
 use guards::{guard, supported_edges};
 use tree_sitter::Node;
