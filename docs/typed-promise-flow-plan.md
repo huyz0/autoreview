@@ -133,8 +133,9 @@ compiler and tracks only confirmed promise-like returns. Known primitive
 non-promises are excluded; unknown types, unavailable sources, project errors,
 and unmodeled verified calls remain coverage limitations. Direct synchronous
 helpers whose sole return forwards a verified call preserve that call's origin,
-including simple multi-hop chains; cycles and other helper shapes keep the
-outer call as the origin. The source is not enabled as a built-in rule yet:
+including simple multi-hop chains. It also follows a single `if`/`else` tree
+when every branch returns a verified call. Cycles and other helper shapes keep
+the outer call as the origin. The source is not enabled as a built-in rule yet:
 its overlap with the factory rule, broader helper shapes, representative
 performance, and the independent historical candidate still need validation.
 
