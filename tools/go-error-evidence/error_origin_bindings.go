@@ -7,28 +7,44 @@ import (
 )
 
 // Bind only fresh, single-result locals; every subsequent use is checked below.
-func forwardedBindings(body *ast.BlockStmt, param *types.Var, info *types.Info, summaries map[callee]*errorOrigin) map[*types.Var]*ast.CallExpr {
+func forwardedBindings(body *ast.BlockStmt, param *types.Var, info *types.Info, summaries map[callee]*errorOrigin, unreachable map[ast.Node]bool) map[*types.Var]*ast.CallExpr {
 	bindings := make(map[*types.Var]*ast.CallExpr)
 	ast.Inspect(body, func(node ast.Node) bool {
-		assign, ok := node.(*ast.AssignStmt)
-		if !ok || assign.Tok != token.DEFINE || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
-			return true
+		if node != nil && unreachable[node] {
+			return false
 		}
-		ident, ok := assign.Lhs[0].(*ast.Ident)
-		if !ok {
-			return true
-		}
-		variable, ok := info.Defs[ident].(*types.Var)
-		if !ok || !types.Identical(variable.Type(), types.Universe.Lookup("error").Type()) {
-			return true
-		}
-		call, ok := assign.Rhs[0].(*ast.CallExpr)
-		if ok && isForwardedError(call, param, info, summaries) {
+		variable, call := forwardedBinding(node, param, info, summaries)
+		if variable != nil {
 			bindings[variable] = call
 		}
 		return true
 	})
 	return bindings
+}
+
+func forwardedBinding(node ast.Node, param *types.Var, info *types.Info, summaries map[callee]*errorOrigin) (*types.Var, *ast.CallExpr) {
+	assign, ok := node.(*ast.AssignStmt)
+	if !ok || assign.Tok != token.DEFINE || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+		return nil, nil
+	}
+	variable := definedErrorVariable(assign.Lhs[0], info)
+	call, ok := assign.Rhs[0].(*ast.CallExpr)
+	if variable == nil || !ok || !isForwardedError(call, param, info, summaries) {
+		return nil, nil
+	}
+	return variable, call
+}
+
+func definedErrorVariable(expr ast.Expr, info *types.Info) *types.Var {
+	ident, ok := expr.(*ast.Ident)
+	if !ok {
+		return nil
+	}
+	variable, ok := info.Defs[ident].(*types.Var)
+	if !ok || !types.Identical(variable.Type(), types.Universe.Lookup("error").Type()) {
+		return nil
+	}
+	return variable
 }
 
 func isBindingContext(ident *ast.Ident, stack []ast.Node, info *types.Info, summaries map[callee]*errorOrigin, bindings map[*types.Var]*ast.CallExpr) bool {

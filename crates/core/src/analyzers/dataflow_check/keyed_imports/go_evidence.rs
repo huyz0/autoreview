@@ -465,7 +465,7 @@ mod tests {
     fn context_error_evidence_reaches_result_finding() {
         let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
         let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
-        let source = "package sample\nimport \"context\"\nfunc operation(ctx context.Context) error { return ctx.Err() }\nfunc use(ctx context.Context) { operation(ctx) }\n";
+        let source = "package sample\nimport (\"context\"; \"errors\")\nfunc operation(ctx context.Context) error { if 1 > 1 { return errors.New(\"unreachable\") }; return ctx.Err() }\nfunc use(ctx context.Context) { operation(ctx) }\n";
         let (result, evidence) = analyze_source_with_origins(source, &checker, false, &[], true);
         assert_eq!(result.hits.len(), 1);
         let hit = &result.hits[0];

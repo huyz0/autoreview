@@ -80,7 +80,10 @@ means the supported explicit return expressions are the parameter's `Err()`,
 predeclared `nil`, or a direct call to a same-package helper with an already
 established summary and the same context parameter. A fresh, single-result
 error binding can also be returned after nil comparisons when it is never
-reassigned or otherwise used. Helper summaries use at
+reassigned or otherwise used. Branches that Go's type checker proves are
+unreachable because of a compile-time constant condition are excluded; their
+initializer statements are still analyzed. Receiver fields and runtime
+arguments are not treated as constants. Helper summaries use at
 most 16 passes; unresolved or recursive-only flows stay unknown. It does not
 prove that the context implementation is
 well behaved, that callers check the error, or that suppressing it is correct.
