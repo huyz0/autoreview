@@ -205,7 +205,7 @@ fn process(
 
 fn helper_observes(
     call: &super::super::HelperCall,
-    state: &State,
+    state: &mut State,
     evidence: &mut Evidence,
     conditional: bool,
 ) -> bool {
@@ -213,12 +213,18 @@ fn helper_observes(
         if !argument.is_some_and(|place| state.aliases.contains(&place)) {
             continue;
         }
+        if let Demand::Slot(slot) = call.demand {
+            if slot_observes(call, state, evidence, conditional, index, slot) {
+                return true;
+            }
+            continue;
+        }
         let base = match call.demand {
             Demand::Observed => call.unobserved_observed.get(index),
             Demand::Discarded => call.unobserved_discarded.get(index),
             Demand::Slot(_) => None,
         };
-        let guarded = guarded_value(call, state, index);
+        let guarded = guarded_value(call, state, index, matches!(call.demand, Demand::Observed));
         let value = guarded.or_else(|| base.copied().flatten());
         if value == Some(false) && !conditional {
             return true;
@@ -232,12 +238,50 @@ fn helper_observes(
     false
 }
 
-fn guarded_value(call: &super::super::HelperCall, state: &State, index: usize) -> Option<bool> {
+fn slot_observes(
+    call: &super::super::HelperCall,
+    state: &mut State,
+    evidence: &mut Evidence,
+    conditional: bool,
+    index: usize,
+    slot: Place,
+) -> bool {
+    let guarded_discarded = guarded_value(call, state, index, false);
+    let guarded_observed = guarded_value(call, state, index, true);
+    let discarded =
+        guarded_discarded.or_else(|| call.unobserved_discarded.get(index).copied().flatten());
+    let observed =
+        guarded_observed.or_else(|| call.unobserved_observed.get(index).copied().flatten());
+    if !conditional && discarded == Some(false) {
+        return true;
+    }
+    if !conditional && observed == Some(false) {
+        state.aliases.insert(slot);
+    }
+    let proven_skip = if observed == Some(false) {
+        guarded_discarded == Some(true)
+    } else {
+        guarded_observed == Some(true)
+    };
+    *evidence = if !conditional && proven_skip && *evidence != Evidence::Unknown {
+        Evidence::Definite
+    } else {
+        Evidence::Unknown
+    };
+    false
+}
+
+fn guarded_value(
+    call: &super::super::HelperCall,
+    state: &State,
+    index: usize,
+    observed: bool,
+) -> Option<bool> {
     let truth = state.guards.get(call.guard.as_ref()?)?;
-    let summary = match call.demand {
-        Demand::Observed => call.conditional_observed.as_ref(),
-        Demand::Discarded => call.conditional_discarded.as_ref(),
-        Demand::Slot(_) => None,
+    let summary = if observed {
+        call.conditional_observed.as_ref()
+    } else {
+        call.conditional_discarded.as_ref()
     }?;
     if *truth {
         summary.when_true.get(index)
