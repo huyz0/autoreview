@@ -1,5 +1,49 @@
 # Windows historical replay baseline
 
+## Current run: main 9db6cce
+
+On Windows, the debug CLI built from main commit
+`9db6ccea09881a5290d61cbe1db7cc8d0ed527a0` replayed the following pinned
+manifests. Git was 2.56.0.windows.1, Rust 1.99.1, ast-grep 0.51.3,
+Go 1.27.4, and Node 26.12.1. The Go probe was built from that same commit.
+The TypeScript factory case used TypeScript 5.9.3; the experimental general
+case used 5.6.3 with the documented legacy-catch adapter.
+
+| Manifest | Completed / attempted | Incomplete | Failed | TP | FP | FN |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `azure-iot-matches.yaml` | 1 / 1 | 0 | 0 | 6 | 0 | 0 |
+| `iceberg-go.yaml` | 1 / 1 | 0 | 0 | 1 | 0 | 0 |
+| `jplag-trim.yaml` | 1 / 1 | 0 | 0 | 1 | 0 | 0 |
+| `go-tools.yaml` | 1 / 1 | 0 | 0 | 0 | 0 | 0 |
+| `uwas-rename.yaml` | 1 / 1 | 0 | 0 | 1 | 0 | 0 |
+| `niverwizard-msw-delay.yaml` | 3 / 3 | 0 | 0 | 4 | 0 | 0 |
+| `syzkaller-swallowed-error.yaml` | 1 / 1 | 0 | 0 | 1 | 0 | 0 |
+| `cilium-swallowed-error.yaml` | 2 / 2 | 0 | 0 | 1 | 2 | 0 |
+| `silphscope-digest.yaml` | 1 / 1 | 0 | 0 | 1 | 0 | 0 |
+| `yq-error.yaml` | 1 / 1 | 0 | 0 | 3 | 0 | 0 |
+| `yq-multi-error.yaml` | 1 / 1 | 0 | 0 | 5 | 0 | 0 |
+| `sftp-promise.yaml` | 1 / 1 | 0 | 0 | 2 | 0 | 0 |
+| `checkout-promise.yaml` | 0 / 2 | 2 | 0 | — | — | — |
+
+The checkout cases remain unscored: replay reported unresolved type evidence
+at two locations in one case and 21 in the other, and stopped each case at its
+first incomplete revision. The Cilium replay exits unsuccessfully because the
+same cancellation-handling line is reported in both snapshots. These are two
+benchmark mismatches, not two independent code defects. The remaining rows
+exited successfully. The first yq-error attempt was incomplete because its
+offline Go package load failed; after fetching the pinned repository objects
+and warming the isolated module/build caches, a fresh run completed as above.
+
+This deliberately small, selected corpus now includes one JavaScript fix,
+but still has no Kotlin or TSX historical cases and covers only a few rule
+families. Multiple findings from one fix and repeated snapshots are not
+independent examples. These results are not a population-wide accuracy
+estimate, and absence of reported coverage gaps does not prove completeness.
+The typed cases require the trusted compiler, probe, dependencies, and snapshot
+setup documented in [the benchmark README](README.md).
+
+## Earlier run
+
 This is a small, selected baseline, not an estimate of population-wide rule
 accuracy. The manifests link the original revisions, licenses, and label
 rationales. A case compares two snapshots; a reported false positive in both
