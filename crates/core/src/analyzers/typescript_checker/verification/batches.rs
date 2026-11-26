@@ -21,12 +21,16 @@ pub(super) fn verify(
         let request = TypeScriptRequest { typescript_module: options.compiler, config: options.config, calls: &batch.calls[range.clone()] };
         let Some(result) = check(options.node, &request, remaining) else { return Err("typescript_checker_incomplete") };
         if result.status != "ok" { return Err(limitation_reason(result.reason.as_deref())); }
-        for ((unit, start), result) in batch.positions[range].iter().copied().zip(result.calls.unwrap_or_default()) {
-            if result.status == "promise_like" { verified.entry(unit).or_default().insert(start); }
-            if matches!(result.status.as_str(), "promise_like" | "not_promise") { classified.entry(unit).or_default().insert(start); }
-        }
+        record_classifications(&batch.positions[range], result, verified, classified);
     }
     if skipped { Err("typescript_checker_incomplete") } else { Ok(()) }
+}
+
+fn record_classifications(positions: &[(usize, usize)], result: TypeScriptResult, verified: &mut Positions, classified: &mut Positions) {
+    for ((unit, start), result) in positions.iter().copied().zip(result.calls.unwrap_or_default()) {
+        if result.status == "promise_like" { verified.entry(unit).or_default().insert(start); }
+        if matches!(result.status.as_str(), "promise_like" | "not_promise") { classified.entry(unit).or_default().insert(start); }
+    }
 }
 
 fn limitation_reason(reason: Option<&str>) -> &'static str {

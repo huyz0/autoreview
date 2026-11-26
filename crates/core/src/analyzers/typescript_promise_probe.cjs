@@ -16,7 +16,7 @@ function run(request) {
       if (pkg.name === 'typescript' && Number.parseInt(pkg.version, 10) >= 7) {
         return { status: 'incomplete', reason: 'compiler_api_unsupported' };
       }
-    } catch (_) { /* Preserve the original load failure. */ }
+    } catch (_) { throw error; }
     throw error;
   }
   if (!ts || typeof ts.readConfigFile !== 'function' || typeof ts.parseJsonConfigFileContent !== 'function' ||

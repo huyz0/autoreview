@@ -58,16 +58,26 @@ fn verified_detail(reason: &str) -> Option<&'static str> {
 }
 
 fn typed_detail(reason: &str) -> Option<&'static str> {
+    checker_detail(reason).or_else(|| promise_detail(reason))
+}
+
+fn checker_detail(reason: &str) -> Option<&'static str> {
     Some(match reason {
-            "typed_promise_source_unavailable" => "Typed promise source verification is not configured; this rule was skipped.",
-            "factory_binding_inventory_incomplete" => "The module's bindings could not be inventoried completely; typed promise analysis may be incomplete.",
-            "factory_module_graph_incomplete" => "The module graph does not match the parsed sources; typed promise analysis was skipped.",
-            "promise_type_unresolved" => "The promise type could not be verified at this call; typed promise analysis may be incomplete.",
             "typescript_checker_incomplete" => "The configured TypeScript checker failed or could not complete; typed promise analysis may be incomplete.",
             "typescript_compiler_api_unsupported" => "The configured TypeScript compiler does not provide the API required by this checker; typed promise analysis was skipped.",
             "typescript_project_type_errors" => "The TypeScript project has type errors; typed promise analysis was skipped.",
             "typescript_config_invalid" => "The TypeScript configuration is invalid; typed promise analysis was skipped.",
             "typescript_config_unreadable" => "The TypeScript configuration could not be read; typed promise analysis was skipped.",
+            _ => return None,
+    })
+}
+
+fn promise_detail(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+            "typed_promise_source_unavailable" => "Typed promise source verification is not configured; this rule was skipped.",
+            "factory_binding_inventory_incomplete" => "The module's bindings could not be inventoried completely; typed promise analysis may be incomplete.",
+            "factory_module_graph_incomplete" => "The module graph does not match the parsed sources; typed promise analysis was skipped.",
+            "promise_type_unresolved" => "The promise type could not be verified at this call; typed promise analysis may be incomplete.",
             "factory_call_unmodeled" => "An imported call uses optional-call or spread syntax that typed promise analysis cannot model; this call was skipped.",
             "factory_flow_unmodeled" => "An enclosing function contains unsupported control flow and an imported call; typed promise analysis may be incomplete.",
             _ => return None,
