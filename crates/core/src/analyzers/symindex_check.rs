@@ -398,6 +398,45 @@ type Customer struct { Balance, Fee, Tax int }
     }
 
     #[test]
+    fn reports_one_and_two_helper_hops_from_a_separate_receiver_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "billing/invoice.go", "package billing\ntype Invoice struct { Offset int }\ntype Customer struct { Balance, Fee, Tax int }\n");
+        write_file(dir.path(), "billing/invoice_methods.go", r#"
+package billing
+func (i *Invoice) Base() int { return i.Offset }
+func (i *Invoice) OneHop(c *Customer) int {
+    return total(c) + i.Offset + i.Base()
+}
+func (i *Invoice) TwoHops(c *Customer) int {
+    alias := c
+    return relay(alias) + i.Offset
+}
+func (i *Invoice) Balanced(c *Customer) int {
+    return relay(c) + i.Offset + i.Offset
+}
+"#);
+        write_file(dir.path(), "billing/relay.go", "package billing\nfunc relay(c *Customer) int { return total(c) }\n");
+        write_file(dir.path(), "billing/total.go", "package billing\nfunc total(c *Customer) int { return c.Balance + c.Fee + c.Tax }\n");
+        write_file(dir.path(), "other/invoice.go", "package billing\ntype Invoice struct{}\n");
+
+        let findings = run_symindex_check(dir.path(), &["billing/invoice_methods.go".to_string()]);
+        let envy: Vec<_> = findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some("feature-envy")).collect();
+        assert_eq!(envy.len(), 2, "got: {findings:#?}");
+        for (finding, method, helpers) in [
+            (envy[0], "Invoice.OneHop", &["billing/total.go"][..]),
+            (envy[1], "Invoice.TwoHops", &["billing/relay.go", "billing/total.go"][..]),
+        ] {
+            assert_eq!(finding.location.path, "billing/invoice_methods.go");
+            assert_eq!(finding.location.snippet, method);
+            assert!(finding.message.contains("versus 1 access(es) to its own fields"));
+            let related = finding.related_locations.as_ref().unwrap();
+            assert_eq!(related[0].path, "billing/invoice.go");
+            let paths: HashSet<_> = related[1..].iter().map(|location| location.path.as_str()).collect();
+            assert_eq!(paths, helpers.iter().copied().collect());
+        }
+    }
+
+    #[test]
     fn reports_go_feature_envy_two_cross_file_hops_away() {
         let dir = tempfile::tempdir().unwrap();
         write_billing_invoice(dir.path(), r#"
