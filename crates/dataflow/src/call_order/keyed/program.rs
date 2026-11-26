@@ -4,10 +4,12 @@ use tree_sitter::Node;
 
 use crate::cfg::{CallSite, CallTarget, Cfg, IdentityOperand, Stmt};
 mod signature;
+mod associated;
+use associated::Associated;
 pub use signature::has_attributes as has_rust_attributes;
 mod exports;
 pub use exports::{resolve_declaration_import, DeclarationResolution, KeyedDeclaration};
-use signature::{candidate, export, local_rust_associated_owner, parameters, Export};
+use signature::{candidate, export, parameters, Export};
 
 use super::{CallOrderSpec, Plan, Values};
 
@@ -50,8 +52,7 @@ pub struct KeyedImport {
 pub(in crate::call_order) struct Program<'spec, 'src, 'graph> {
     pub frames: Vec<Frame<'spec, 'src, 'graph>>,
     targets: BTreeMap<(Scope, String, usize), Option<usize>>,
-    associated: BTreeMap<(usize, String, String, usize), Option<usize>>,
-    local_types: BTreeSet<(usize, String)>,
+    associated: Associated,
     units: Vec<Unit<'src, 'graph>>,
     paths: BTreeMap<&'src str, usize>,
     unresolved: RefCell<BTreeSet<(usize, usize, &'static str)>>,
@@ -86,19 +87,13 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         let mut program = Self {
             frames: Vec::new(),
             targets: BTreeMap::new(),
-            associated: BTreeMap::new(),
-            local_types: BTreeSet::new(),
+            associated: Associated::default(),
             paths: BTreeMap::new(),
             unresolved: RefCell::new(BTreeSet::new()),
             units: Vec::new(),
         };
         for (unit, input) in inputs.iter().enumerate() {
-            if let Some(function) = input.functions.first() {
-                let root = std::iter::successors(Some(function.node), |node| node.parent()).last().unwrap();
-                if root.kind() == "source_file" {
-                    self::signature::record_local_types(root, input.source, unit, &mut program.local_types);
-                }
-            }
+            program.associated.index_types(unit, input);
             program.paths.insert(input.path, unit);
             program.units.push(Unit {
                 path: input.path,
@@ -131,10 +126,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
                 .entry((scope, name.clone(), params.len()))
                 .and_modify(|target| *target = None)
                 .or_insert(Some(self.frames.len()));
-            if let Some(owner) = local_rust_associated_owner(node, source) {
-                self.associated.entry((unit, owner, name.clone(), params.len()))
-                    .and_modify(|target| *target = None).or_insert(Some(self.frames.len()));
-            }
+            self.associated.register(unit, node, source, &name, params.len(), self.frames.len());
             Some(export(node, source, name))
         });
         self.units[unit].frames.push(self.frames.len());
@@ -173,43 +165,11 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
                 .result_components.get(start).map_or(1, |shape| shape.count),
             _ => site.arguments.len(),
         };
-        if let Some((owner, method)) = name.split_once("::") {
-            if !method.contains(':') {
-                let owner = if owner == "Self" {
-                    match frame.export.as_ref().and_then(|export| export.owner.as_deref()) {
-                        Some(owner) => owner,
-                        None => { self.unresolved.borrow_mut().insert((from, site.start, "unresolved_helper_target")); return None; }
-                    }
-                } else { owner };
-                if let Some(target) = self.associated.get(&(frame.unit, owner.to_owned(), method.to_owned(), arity)) {
-                    if target.is_none() { self.unresolved.borrow_mut().insert((from, site.start, "unresolved_helper_target")); }
-                    return *target;
-                }
-                if self.local_types.contains(&(frame.unit, owner.to_owned())) {
-                    self.unresolved.borrow_mut().insert((from, site.start, "unresolved_helper_target"));
-                    return None;
-                }
-            }
+        if let Some(target) = self.associated.lookup(frame.unit, frame.export.as_ref(), name, arity) {
+            if target.is_none() { self.unresolved.borrow_mut().insert((from, site.start, "unresolved_helper_target")); }
+            return target;
         }
-        if site.local {
-            if let Some(local) = self
-                .targets
-                .get(&(frame.scope, name.into(), arity))
-                .or_else(|| {
-                    self.targets
-                        .get(&(Scope::File(frame.unit), name.into(), arity))
-                })
-            {
-                return *local;
-            }
-        } else if root == name {
-            return None;
-        }
-        let resolution = self.resolve_import(frame.unit, name, arity, &mut exports::ResolutionContext::default());
-        if let Some(reason) = resolution.limitation() {
-            self.unresolved.borrow_mut().insert((from, site.start, reason));
-        }
-        resolution.unique()
+        self.resolve_named(from, name, root, site, arity)
     }
 
     pub(super) fn roots(&self) -> Vec<usize> {
