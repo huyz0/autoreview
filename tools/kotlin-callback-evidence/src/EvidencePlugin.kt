@@ -61,16 +61,17 @@ private class EvidenceExtension : IrGenerationExtension {
         val records = mutableListOf<Record>()
         require(moduleFragment.files.size <= MAX_FILES) { "too many source files" }
         var totalSourceBytes = 0
+        val digest = MessageDigest.getInstance("SHA-256")
         for (file in moduleFragment.files) {
             val path = Path.of(file.fileEntry.name).toAbsolutePath().normalize()
             val bytes = Files.newInputStream(path).use { it.readNBytes(MAX_SOURCE_BYTES + 1) }
             require(bytes.size <= MAX_SOURCE_BYTES) { "source exceeds evidence limit" }
             totalSourceBytes += bytes.size
             require(totalSourceBytes <= MAX_TOTAL_SOURCE_BYTES) { "total source exceeds evidence limit" }
-            val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+            val hash = digest.digest(bytes).joinToString("") { "%02x".format(it) }
             file.acceptChildrenVoid(object : IrVisitorVoid() {
                 override fun visitElement(element: IrElement) {
-                    if (element is IrCall) collect(element, path.toString(), hash, records)
+                    if (element is IrCall) collect(call = element, path = path.toString(), hash = hash, records = records)
                     element.acceptChildrenVoid(this)
                 }
             })
@@ -98,8 +99,11 @@ private fun collect(call: IrCall, path: String, hash: String, records: MutableLi
         val samType = conversion.typeOperand.classFqName?.asString() ?: continue
         if (lambda.startOffset < 0 || lambda.endOffset < lambda.startOffset) continue
         check(records.size < MAX_RECORDS) { "too many callback evidence records" }
-        records.add(Record(path, hash, call.startOffset, call.endOffset, lambda.startOffset,
-            lambda.endOffset, callee, index, samType, owner.modality.name))
+        records.add(Record(
+            path = path, sha256 = hash, callStartUtf16 = call.startOffset, callEndUtf16 = call.endOffset,
+            lambdaStartUtf16 = lambda.startOffset, lambdaEndUtf16 = lambda.endOffset,
+            callee = callee, parameter = index, samType = samType, modality = owner.modality.name,
+        ))
     }
 }
 
