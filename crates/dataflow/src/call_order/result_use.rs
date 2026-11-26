@@ -26,6 +26,7 @@ mod sources;
 pub use sources::{discover_factory_sources, FactorySourceDiscovery};
 
 mod checks;
+mod opaque;
 pub(super) use checks::{check_units, check_units_with_components};
 #[cfg(test)]
 use checks::check_units_with_sources;
@@ -52,6 +53,8 @@ struct HelperSummary {
 struct HelperOutcome {
     parameters: Vec<bool>,
     origins: Vec<(Origin, bool)>,
+    opaque_parameters: Vec<bool>,
+    opaque_origins: Vec<Origin>,
 }
 
 impl Analysis {
@@ -95,12 +98,18 @@ impl Analysis {
                 .and_modify(|(_, previous)| *previous |= used)
                 .or_insert_with(|| (origin.clone(), used));
         });
+        let mut opaque_origins = BTreeMap::new();
+        let opaque_live = self.opaque_record(&seed, &mut |_, origin| {
+            opaque_origins.insert((origin.path.clone(), origin.start, origin.component, origin.calls.clone()), origin.clone());
+        });
         HelperOutcome {
             parameters: parameters
                 .iter()
                 .map(|parameter| parameter.is_none_or(|place| live.contains(&place)))
                 .collect(),
             origins: origins.into_values().collect(),
+            opaque_parameters: parameters.iter().map(|parameter| parameter.is_none_or(|place| opaque_live.contains(&place))).collect(),
+            opaque_origins: opaque_origins.into_values().collect(),
         }
     }
 }
@@ -240,6 +249,8 @@ fn transfer(
             Effect::Read(binding) => {
                 live.insert(*binding);
             }
+            Effect::OpaqueRead(_) => {}
+            Effect::OpaqueOnly(_) => {}
             Effect::Write(writes) => {
                 transfer_writes(writes, live, observe.as_deref_mut());
             }
@@ -447,14 +458,18 @@ func f(x string) { switch x { case "p\n", "q": return; default: return } }"#, tr
     #[test]
     fn helper_effect_propagates_only_the_arguments_required_by_the_caller() {
         let output = Place::CallResult(50);
-        let effects = [Effect::ApplyHelper(HelperCall {
+        let effects = [Effect::ApplyHelper(Box::new(HelperCall {
             arguments: vec![Some(Place::Local(1)), Some(Place::Local(2))],
             demand: Demand::Slot(output),
             when_discarded: vec![true, false],
             when_observed: vec![true, true],
             origins_discarded: vec![],
             origins_observed: vec![],
-        })];
+            opaque_discarded: vec![false, false],
+            opaque_observed: vec![false, false],
+            opaque_origins_discarded: vec![],
+            opaque_origins_observed: vec![],
+        }))];
         for observed in [false, true] {
             let mut live = Live::new();
             if observed {

@@ -23,9 +23,11 @@ pub(in crate::call_order::result_use) struct Write {
 
 pub(in crate::call_order::result_use) enum Effect {
     Read(Place),
+    OpaqueRead(Place),
+    OpaqueOnly(Vec<Effect>),
     Write(Vec<Write>),
     Invoke(usize, Demand),
-    ApplyHelper(HelperCall),
+    ApplyHelper(Box<HelperCall>),
 }
 
 pub(in crate::call_order::result_use) struct HelperCall {
@@ -35,6 +37,10 @@ pub(in crate::call_order::result_use) struct HelperCall {
     pub(in crate::call_order::result_use) when_observed: Vec<bool>,
     pub(in crate::call_order::result_use) origins_discarded: Vec<(Origin, bool)>,
     pub(in crate::call_order::result_use) origins_observed: Vec<(Origin, bool)>,
+    pub(in crate::call_order::result_use) opaque_discarded: Vec<bool>,
+    pub(in crate::call_order::result_use) opaque_observed: Vec<bool>,
+    pub(in crate::call_order::result_use) opaque_origins_discarded: Vec<Origin>,
+    pub(in crate::call_order::result_use) opaque_origins_observed: Vec<Origin>,
 }
 
 #[derive(Clone, Copy)]

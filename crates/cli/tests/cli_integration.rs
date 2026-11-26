@@ -426,6 +426,27 @@ fn static_review_report(repo: &autoreview_test_support::TestRepo, base: &str, ta
 }
 
 #[test]
+fn unresolved_assigned_result_crosses_helpers_in_review_and_replay() {
+    let helper = "export function send(value) { unknown(value); }\n";
+    let before = "import { rename } from 'node:fs/promises';\nimport { send } from './helper';\nexport function run(a, b) { const pending = rename(a, b); send(pending); }\n";
+    let after = "import { rename } from 'node:fs/promises';\nexport async function run(a, b) { await rename(a, b); }\n";
+    let repo = init_repo(&[("main.js", before), ("helper.js", helper)]);
+    let old = current_commit(repo.path());
+    repo.commit(&[("main.js", after)], "observe rename promise");
+    let fixed = current_commit(repo.path());
+    let suite = serde_json::json!({"cases":[{"name":"unknown helper receiver","rule":{"tool":"autoreview-dataflow","id":"javascript-node-fs-discarded-promise"},"before":{"commit":old,"path":"main.js","lines":[]},"after":{"commit":fixed,"path":"main.js","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let report = failed_replay_report(repo.path());
+    assert_eq!(report["coverage"][0]["incomplete"], 1, "{report}");
+    assert!(report["failures"][0]["error"].as_str().unwrap().contains("unresolved helper"), "{report}");
+    repo.commit(&[("main.js", before)], "pass promise through helper");
+    let review = static_review_report(&repo, &fixed, None);
+    assert!(review["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "unresolved_result_receiver" && issue["rule"] == "javascript-node-fs-discarded-promise"
+            && issue["path"] == "main.js" && issue["line"] == 3), "{review}");
+}
+
+#[test]
 fn unresolved_result_receivers_reach_review_and_block_replay_scoring() {
     let before = "import { rename } from 'node:fs/promises';\nexport function run(a, b) { unknown(rename(a, b)); }\n";
     let after = "import { rename } from 'node:fs/promises';\nexport async function run(a, b) { await rename(a, b); }\n";

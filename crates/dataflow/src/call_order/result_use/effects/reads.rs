@@ -85,14 +85,25 @@ impl Lower<'_, '_, '_> {
                     })
                     .collect()
             };
-            effects.push(Effect::ApplyHelper(HelperCall {
+            let opaque_origins = |values: &[super::Origin]| {
+                values.iter().cloned().map(|mut origin| {
+                    let call = (self.plan.syntax.unit, node.start_byte());
+                    if !origin.calls.contains(&call) { origin.calls.push(call); origin.calls.sort_unstable(); }
+                    origin
+                }).collect()
+            };
+            effects.push(Effect::ApplyHelper(Box::new(HelperCall {
                 arguments,
                 demand,
                 when_discarded: summary.when_discarded.parameters.clone(),
                 when_observed: summary.when_observed.parameters.clone(),
                 origins_discarded: origins(&summary.when_discarded.origins),
                 origins_observed: origins(&summary.when_observed.origins),
-            }));
+                opaque_discarded: summary.when_discarded.opaque_parameters.clone(),
+                opaque_observed: summary.when_observed.opaque_parameters.clone(),
+                opaque_origins_discarded: opaque_origins(&summary.when_discarded.opaque_origins),
+                opaque_origins_observed: opaque_origins(&summary.when_observed.opaque_origins),
+            })));
             return;
         }
         if let Some(closure) = self.closures.literal(node) {
@@ -104,6 +115,7 @@ impl Lower<'_, '_, '_> {
             effects.push(Effect::Write(snapshots));
             return;
         }
+        self.opaque_arguments(node, effects);
         if let Some(place) = self.places.place(node, false).filter(|place| matches!(place, Place::Field(..))) {
             effects.push(Effect::Read(self.remap(place)));
             return;
@@ -114,6 +126,23 @@ impl Lower<'_, '_, '_> {
         }
         let parts: Vec<_> = site::children(node).collect();
         todo.extend(parts.into_iter().rev().map(|child| Visit::Syntax(child, Demand::Observed)));
+    }
+
+    fn opaque_arguments(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
+        if !matches!(node.kind(), "call_expression" | "method_invocation" | "new_expression") || self.origin(node).is_some() { return; }
+        let Some(arguments) = site::arguments(node) else { return; };
+        for argument in site::children(arguments).filter_map(site::argument) {
+            let argument = transparent(argument);
+            if let Some(place) = self.place(argument, false) {
+                effects.push(Effect::OpaqueRead(place));
+            } else if self.helper_call(argument).is_some() {
+                let temporary = Place::CallResult(argument.start_byte());
+                let mut nested = Vec::new();
+                self.reads_with(argument, &mut nested, Demand::Slot(temporary));
+                effects.push(Effect::OpaqueOnly(nested));
+                effects.push(Effect::OpaqueRead(temporary));
+            }
+        }
     }
 
     fn read_names(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
