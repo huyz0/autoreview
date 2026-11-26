@@ -87,6 +87,7 @@ func isContextParameter(param *types.Var) bool {
 
 func contextReturnsOnly(body *ast.BlockStmt, param *types.Var, info *types.Info, summaries map[callee]*errorOrigin) bool {
 	valid, sawError := true, false
+	bindings := forwardedBindings(body, param, info, summaries)
 	var stack []ast.Node
 	ast.Inspect(body, func(node ast.Node) bool {
 		if node == nil {
@@ -104,9 +105,12 @@ func contextReturnsOnly(body *ast.BlockStmt, param *types.Var, info *types.Info,
 		case *ast.Ident:
 			if info.Uses[item] == param {
 				selector, ok := parent.(*ast.SelectorExpr)
-				if (!ok || selector.X != item || (selector.Sel.Name != "Err" && selector.Sel.Name != "Done")) && !isForwardedContext(item, stack, param, info, summaries) {
+				if (!ok || selector.X != item || (selector.Sel.Name != "Err" && selector.Sel.Name != "Done")) && !isForwardedContext(item, stack, param, info, summaries) && !isBindingContext(item, stack, param, info, summaries, bindings) {
 					valid = false
 				}
+			}
+			if variable, ok := info.Uses[item].(*types.Var); ok && bindings[variable] != nil && !isSafeErrorUse(item, parent, info) {
+				valid = false
 			}
 		case *ast.ReturnStmt:
 			if len(item.Results) != 1 {
@@ -116,7 +120,7 @@ func contextReturnsOnly(body *ast.BlockStmt, param *types.Var, info *types.Info,
 			if isPredeclaredNil(item.Results[0], info) {
 				break
 			}
-			if isContextError(item.Results[0], param, info) || isForwardedError(item.Results[0], param, info, summaries) {
+			if isContextError(item.Results[0], param, info) || isForwardedError(item.Results[0], param, info, summaries) || isBoundError(item.Results[0], info, bindings) {
 				sawError = true
 			} else {
 				valid = false

@@ -111,3 +111,21 @@ func analyzeOrigins(t *testing.T, src string, snippets []string) response {
 	}
 	return got
 }
+
+func TestContextErrorOriginsThroughCheckedBindings(t *testing.T) {
+	src := `package p
+import ("context"; "errors")
+func leaf(ctx context.Context) error { return ctx.Err() }
+func plain(ctx context.Context) error { err := leaf(ctx); if err != nil { return err }; return nil }
+func inIf(ctx context.Context) error { if err := leaf(ctx); err != nil { return err }; return nil }
+func overwrite(ctx context.Context) error { err := leaf(ctx); err = errors.New("other"); return err }
+func escaped(ctx context.Context) error { err := leaf(ctx); consume(&err); return err }
+func consume(*error) {}
+func changed(ctx context.Context) error { err := leaf(ctx); ctx = context.Background(); return err }
+func shadowed(ctx context.Context, flag bool) error { err := leaf(ctx); if flag { err := errors.New("other"); return err }; return err }
+func run(ctx context.Context) { plain(ctx); inIf(ctx); overwrite(ctx); escaped(ctx); changed(ctx); shadowed(ctx, true) }
+`
+	snippets := []string{"plain(ctx);", "inIf(ctx);", "overwrite(ctx);", "escaped(ctx);", "changed(ctx);", "shadowed(ctx, true)"}
+	got := analyzeOrigins(t, src, snippets)
+	t.Run("checked bindings", func(t *testing.T) { assertErrorOrigins(t, got, snippets, []int{0, 0, -1, -1, -1, -1}) })
+}
