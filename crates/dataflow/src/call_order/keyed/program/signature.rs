@@ -1,5 +1,6 @@
 use crate::lower::site::{children, identifier};
 use tree_sitter::Node;
+use std::collections::BTreeSet;
 
 pub(super) struct Export {
     pub(super) name: String,
@@ -110,6 +111,23 @@ fn rust_associated_owner(node: Node<'_>, source: &[u8]) -> Option<String> {
         || children(implementation).any(|child| child.kind() == "where_clause") { return None; }
     let ty = implementation.child_by_field_name("type").filter(|ty| ty.kind() == "type_identifier")?;
     Some(ty.utf8_text(source).ok()?.to_owned())
+}
+
+pub(super) fn local_rust_associated_owner(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let owner = rust_associated_owner(node, source)?;
+    let root = node.parent()?.parent()?.parent()?;
+    let matching: Vec<_> = children(root).filter(|item| item.child_by_field_name("name")
+        .and_then(|name| name.utf8_text(source).ok()) == Some(owner.as_str())).collect();
+    matches!(matching.as_slice(), [item] if matches!(item.kind(), "struct_item" | "enum_item")
+        && !has_attributes(*item) && item.child_by_field_name("type_parameters").is_none()).then_some(owner)
+}
+
+pub(super) fn record_local_types(root: Node<'_>, source: &[u8], unit: usize, types: &mut BTreeSet<(usize, String)>) {
+    for item in children(root).filter(|item| matches!(item.kind(), "struct_item" | "enum_item" | "trait_item" | "type_item")) {
+        if let Some(name) = item.child_by_field_name("name").and_then(|name| name.utf8_text(source).ok()) {
+            types.insert((unit, name.to_owned()));
+        }
+    }
 }
 
 /// Whether outer Rust attributes immediately precede an item.

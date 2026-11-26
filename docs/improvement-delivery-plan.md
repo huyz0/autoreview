@@ -40,6 +40,10 @@ dispatch can be identified without guessing. Direct imports and aliases of a
 non-generic local struct or enum can now resolve unconditional, non-generic
 inherent associated functions with `pub` or `pub(crate)` visibility. The
 current coverage warning remains conservative even for these supported calls.
+Same-file calls to supported private or public inherent functions also trace
+results through `Self::` forwarding; review and replay have regression tests.
+Shadowed type names, local imports and unresolved same-file associated calls
+are reported as incomplete rather than assigned a guessed target.
 Trait dispatch, generic types and implementations, conditional compilation,
 re-exported types and ambiguous declarations need further work.
 

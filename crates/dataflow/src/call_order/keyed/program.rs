@@ -4,6 +4,8 @@ use tree_sitter::Node;
 
 use crate::cfg::{CallSite, CallTarget, Cfg, IdentityOperand, Stmt};
 mod signature;
+mod associated;
+use associated::Associated;
 pub use signature::has_attributes as has_rust_attributes;
 mod exports;
 pub use exports::{resolve_declaration_import, DeclarationResolution, KeyedDeclaration};
@@ -50,6 +52,7 @@ pub struct KeyedImport {
 pub(in crate::call_order) struct Program<'spec, 'src, 'graph> {
     pub frames: Vec<Frame<'spec, 'src, 'graph>>,
     targets: BTreeMap<(Scope, String, usize), Option<usize>>,
+    associated: Associated,
     units: Vec<Unit<'src, 'graph>>,
     paths: BTreeMap<&'src str, usize>,
     unresolved: RefCell<BTreeSet<(usize, usize, &'static str)>>,
@@ -84,11 +87,13 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         let mut program = Self {
             frames: Vec::new(),
             targets: BTreeMap::new(),
+            associated: Associated::default(),
             paths: BTreeMap::new(),
             unresolved: RefCell::new(BTreeSet::new()),
             units: Vec::new(),
         };
         for (unit, input) in inputs.iter().enumerate() {
+            program.associated.index_types(unit, input);
             program.paths.insert(input.path, unit);
             program.units.push(Unit {
                 path: input.path,
@@ -121,6 +126,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
                 .entry((scope, name.clone(), params.len()))
                 .and_modify(|target| *target = None)
                 .or_insert(Some(self.frames.len()));
+            self.associated.register(unit, (node, source), &name, params.len(), self.frames.len());
             Some(export(node, source, name))
         });
         self.units[unit].frames.push(self.frames.len());
@@ -146,7 +152,12 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
     pub(in crate::call_order) fn target(&self, from: usize, name: &str, site: &CallSite) -> Option<usize> {
         let frame = &self.frames[from];
         let root = name.split(['.', ':']).next()?;
-        if frame.plan.as_ref()?.syntax.taken_name(root) || frame.plan.as_ref()?.syntax.shadows_type(root) {
+        let syntax = &frame.plan.as_ref()?.syntax;
+        if name.contains("::") && (syntax.shadows_type(root) || syntax.has_local_type_imports()) {
+            self.unresolved.borrow_mut().insert((from, site.start, "unresolved_helper_target"));
+            return None;
+        }
+        if syntax.taken_name(root) || syntax.shadows_type(root) {
             return None;
         }
         let arity = match site.arguments.as_slice() {
@@ -154,25 +165,11 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
                 .result_components.get(start).map_or(1, |shape| shape.count),
             _ => site.arguments.len(),
         };
-        if site.local {
-            if let Some(local) = self
-                .targets
-                .get(&(frame.scope, name.into(), arity))
-                .or_else(|| {
-                    self.targets
-                        .get(&(Scope::File(frame.unit), name.into(), arity))
-                })
-            {
-                return *local;
-            }
-        } else if root == name {
-            return None;
+        if let Some(target) = self.associated.lookup(frame.unit, frame.export.as_ref(), name, arity) {
+            if target.is_none() { self.unresolved.borrow_mut().insert((from, site.start, "unresolved_helper_target")); }
+            return target;
         }
-        let resolution = self.resolve_import(frame.unit, name, arity, &mut exports::ResolutionContext::default());
-        if let Some(reason) = resolution.limitation() {
-            self.unresolved.borrow_mut().insert((from, site.start, reason));
-        }
-        resolution.unique()
+        self.resolve_named(from, name, root, site, arity)
     }
 
     pub(super) fn roots(&self) -> Vec<usize> {
