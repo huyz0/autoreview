@@ -33,38 +33,6 @@ fn config_path(root: &Path, configured: Option<&std::ffi::OsStr>) -> Option<Path
     canonical_config.starts_with(&canonical_root).then_some(candidate)
 }
 
-#[cfg(test)]
-mod config_tests {
-    use super::config_path;
-    use std::ffi::OsStr;
-
-    #[test]
-    fn relative_config_is_selected_within_each_root() {
-        let first = tempfile::tempdir().unwrap();
-        let second = tempfile::tempdir().unwrap();
-        for root in [first.path(), second.path()] {
-            std::fs::create_dir(root.join("web")).unwrap();
-            std::fs::write(root.join("web/tsconfig.json"), "{}").unwrap();
-            assert_eq!(config_path(root, Some(OsStr::new("web/tsconfig.json"))), Some(root.join("web/tsconfig.json")));
-            assert!(config_path(root, Some(OsStr::new("../outside.json"))).is_none());
-            assert!(config_path(root, Some(OsStr::new("web/missing.json"))).is_none());
-            assert_eq!(config_path(root, None), Some(root.join("tsconfig.json")));
-        }
-        let absolute = first.path().join("web/tsconfig.json");
-        assert_eq!(config_path(second.path(), Some(absolute.as_os_str())), Some(absolute));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn relative_config_cannot_follow_symlinks_outside_root() {
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        std::fs::write(outside.path().join("tsconfig.json"), "{}").unwrap();
-        std::os::unix::fs::symlink(outside.path(), root.path().join("outside")).unwrap();
-        assert!(config_path(root.path(), Some(OsStr::new("outside/tsconfig.json"))).is_none());
-    }
-}
-
 pub(super) fn check_typed_rule(
     spec: &autoreview_dataflow::call_order::CallOrderSpec,
     units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, root: &Path, checker: Option<&TrustedTypeScript>,
@@ -98,3 +66,34 @@ fn discover_calls(modules: &[TypeModule<'_>]) -> FactorySourceDiscovery {
     FactorySourceDiscovery { candidates, limitations }
 }
 
+#[cfg(test)]
+mod config_tests {
+    use super::config_path;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn relative_config_is_selected_within_each_root() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for root in [first.path(), second.path()] {
+            std::fs::create_dir(root.join("web")).unwrap();
+            std::fs::write(root.join("web/tsconfig.json"), "{}").unwrap();
+            assert_eq!(config_path(root, Some(OsStr::new("web/tsconfig.json"))), Some(root.join("web/tsconfig.json")));
+            assert!(config_path(root, Some(OsStr::new("../outside.json"))).is_none());
+            assert!(config_path(root, Some(OsStr::new("web/missing.json"))).is_none());
+            assert_eq!(config_path(root, None), Some(root.join("tsconfig.json")));
+        }
+        let absolute = first.path().join("web/tsconfig.json");
+        assert_eq!(config_path(second.path(), Some(absolute.as_os_str())), Some(absolute));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_config_cannot_follow_symlinks_outside_root() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("tsconfig.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("outside")).unwrap();
+        assert!(config_path(root.path(), Some(OsStr::new("outside/tsconfig.json"))).is_none());
+    }
+}
