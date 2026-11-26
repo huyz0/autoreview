@@ -491,6 +491,12 @@ mod budget_tests {
         let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
         assert_eq!(findings.len(), 1, "{findings:#?} {coverage:?}");
         assert_eq!(findings[0].location.range.start_line, 4);
+
+        std::fs::write(dir.path().join("view.tsx"), "function first(): Promise<void> { return second(); }\nfunction second(): Promise<void> { return first(); }\nexport function run() { first(); }\n").unwrap();
+        std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true,"jsx":"preserve"},"files":["view.tsx"]}"#).unwrap();
+        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
+        assert_eq!(findings.len(), 1, "{findings:#?} {coverage:?}");
+        assert_eq!(findings[0].location.range.start_line, 3);
     }
 
     #[test]
