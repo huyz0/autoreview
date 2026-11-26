@@ -1,5 +1,20 @@
 # Windows historical replay baseline
 
+## Additional Kotlin and TSX cases
+
+On Windows using the debug CLI from main `eac1f2ce5b59b07da0dad6b09741d239d9dd9d16`
+and ast-grep 0.51.3, the following additional historical cases completed:
+
+| Manifest | Completed / attempted | TP | FP | FN |
+| --- | ---: | ---: | ---: | ---: |
+| `redicloud-coroutines.yaml` | 1 / 1 | 2 | 2 | 0 |
+| `sentry-async-executor.yaml` | 1 / 1 | 2 | 0 | 0 |
+
+RediCloud's two false positives are the same registered callback in the two
+revisions; replay exits unsuccessfully. The two Sentry positives share one fix
+pair. Neither case establishes general language or rule accuracy. See the
+[benchmark README](README.md) for labels and reproduction instructions.
+
 ## Current run: main 9db6cce
 
 On Windows, the debug CLI built from main commit
@@ -34,8 +49,8 @@ exited successfully. The first yq-error attempt was incomplete because its
 offline Go package load failed; after fetching the pinned repository objects
 and warming the isolated module/build caches, a fresh run completed as above.
 
-This deliberately small, selected corpus now includes one JavaScript fix,
-but still has no Kotlin or TSX historical cases and covers only a few rule
+The corpus at this revision includes one JavaScript fix,
+but has no Kotlin or TSX historical cases and covers only a few rule
 families. Multiple findings from one fix and repeated snapshots are not
 independent examples. These results are not a population-wide accuracy
 estimate, and absence of reported coverage gaps does not prove completeness.

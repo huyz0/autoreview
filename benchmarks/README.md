@@ -161,6 +161,40 @@ Coverage reporting is not exhaustive: unsupported expressions and unresolved
 imports can still escape the current diagnostics. A clean replay is evidence
 for this case, not a guarantee of complete analysis in general.
 
+`redicloud-coroutines.yaml` records an EUPL-1.2 Kotlin fix that removes two
+blocking calls from suspend functions. Replay detects both labeled calls. It
+also flags an authenticator callback in both revisions, so the replay exits
+unsuccessfully with two false positives. The callback is registered for later
+invocation, rather than executed at the registration site. These two reports
+refer to the same callback in different snapshots. Inline lambdas such as
+`map` can execute immediately, so excluding all nested lambdas would miss real
+blocking calls. This case does not measure general Kotlin rule accuracy.
+
+`sentry-async-executor.yaml` records two async Promise executors in a TSX file
+from Sentry, licensed at the pinned revision under FSL-1.1-Apache-2.0. Replay
+detects both before the fix and no findings afterward. The two findings are
+from one fix pair, not independent evidence of general accuracy. The manifest
+references upstream revisions and does not redistribute their source.
+
+To reproduce either case, initialize a separate Git repository, fetch the fix
+and its parent, and run replay with ast-grep installed:
+
+```sh
+git init redicloud && cd redicloud
+git fetch --depth 2 https://github.com/RediCloud/cloud-v2.git 77c38cb88f1632978cb7fae22cd2093ad166908a
+autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/redicloud-coroutines.yaml
+```
+
+```sh
+git init sentry && cd sentry
+git fetch --depth 2 https://github.com/getsentry/sentry.git 40041a2c736a0a07085aeeb649ea60b0ca3ccfbc
+autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/sentry-async-executor.yaml
+```
+
+The snapshot checkout requires source objects for both revisions. A partial
+clone may not provide them through the temporary checkout's object alternates;
+fetch the required objects before replaying.
+
 `uwas-rename.yaml` records an independent Go error-handling fix in UWAS,
 dual licensed under AGPL-3.0-or-later or a commercial license. Session
 persistence discarded an `os.Rename` error; the fix logs it. An earlier
