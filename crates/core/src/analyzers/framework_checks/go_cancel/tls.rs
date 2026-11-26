@@ -1,8 +1,10 @@
 use autoreview_schema::AgentFinding;
 use tree_sitter::Node;
 
-use super::super::{children, descendants, location, text, Rule};
-use super::package::{local_names, package_alias, File};
+use super::{
+    super::{children, descendants, location, text, Rule},
+    package::{local_names, package_alias, File},
+};
 
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     id: "go-tls-verification-disabled-by-assignment",
@@ -137,9 +139,13 @@ fn declares_name(node: Node<'_>, name: &str, source: &str) -> bool {
 }
 
 fn is_tls_binding(binding: Node<'_>, alias: &str, source: &str) -> bool {
-    if let Some(ty) = binding.child_by_field_name("type") {
-        return is_tls_type(ty, alias, source);
-    }
+    binding
+        .child_by_field_name("type")
+        .or_else(|| literal_binding_type(binding))
+        .is_some_and(|ty| is_tls_type(ty, alias, source))
+}
+
+fn literal_binding_type(binding: Node<'_>) -> Option<Node<'_>> {
     let value = match binding.kind() {
         "short_var_declaration"
             if binding
@@ -159,25 +165,17 @@ fn is_tls_binding(binding: Node<'_>, alias: &str, source: &str) -> bool {
         }
         _ => None,
     };
-    let Some(mut value) = value.and_then(single_expression) else {
-        return false;
-    };
-    if value.kind() == "unary_expression" {
-        if value
-            .child_by_field_name("operator")
-            .is_none_or(|operator| operator.kind() != "&")
-        {
-            return false;
+    let value = value.and_then(single_expression)?;
+    let literal = match value.kind() {
+        "unary_expression" if value.child_by_field_name("operator")?.kind() == "&" => {
+            value.child_by_field_name("operand")?
         }
-        let Some(operand) = value.child_by_field_name("operand") else {
-            return false;
-        };
-        value = operand;
-    }
-    value.kind() == "composite_literal"
-        && value
-            .child_by_field_name("type")
-            .is_some_and(|ty| is_tls_type(ty, alias, source))
+        "composite_literal" => value,
+        _ => return None,
+    };
+    (literal.kind() == "composite_literal")
+        .then(|| literal.child_by_field_name("type"))
+        .flatten()
 }
 
 fn is_tls_type(mut ty: Node<'_>, alias: &str, source: &str) -> bool {

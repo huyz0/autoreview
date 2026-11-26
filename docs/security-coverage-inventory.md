@@ -93,8 +93,8 @@ unescaped single- and double-quoted string values. Numeric coercion, aliases,
 explicit imports of the Node process module, computed or escaped values, compound
 assignments, environment files, deployment configuration, and shell commands
 remain outside its scope. Local binding detection covers common parameters,
-declarations, and imports. Loop-header bindings and TypeScript-specific
-declarations can remain unresolved. The check does not infer whether a
+declarations, loop bindings, and imports. TypeScript-specific declarations
+can remain unresolved. The check does not infer whether a
 particular connection overrides the process default or whether a browser
 supplies a different global `process`.
 

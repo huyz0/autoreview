@@ -48,10 +48,18 @@ pub(super) fn binding_nodes(node: Node<'_>) -> Vec<Node<'_>> {
         "variable_declarator" | "function_declaration" | "class_declaration" => node.child_by_field_name("name"),
         "required_parameter" | "optional_parameter" => node.child_by_field_name("pattern"),
         "catch_clause" | "arrow_function" => node.child_by_field_name("parameter"),
+        "for_in_statement" if loop_binding_kind(node).is_some() => node.child_by_field_name("left"),
         "formal_parameters" => Some(node),
         _ => None,
     };
     binding.into_iter().flat_map(pattern_bindings).collect()
+}
+
+fn loop_binding_kind(node: Node<'_>) -> Option<&str> {
+    let mut cursor = node.walk();
+    let token = node.children_by_field_name("kind", &mut cursor)
+        .find(|token| matches!(token.kind(), "const" | "let" | "var" | "using"))?;
+    Some(token.kind())
 }
 
 fn pattern_bindings(pattern: Node<'_>) -> Vec<Node<'_>> {

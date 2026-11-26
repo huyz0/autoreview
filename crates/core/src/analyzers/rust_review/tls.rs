@@ -12,14 +12,14 @@ const CERTIFICATES: RustReviewRule = RustReviewRule {
     category: "security",
     severity: Severity::Medium,
     semantic: false,
-    title: "TLS builder accepts invalid certificates",
+    title: "Certificate chain verification disabled on TLS client",
     message: "The final builder settings allow invalid TLS certificates. Keep certificate verification enabled and add a trusted root for private services.",
     reference: "https://cwe.mitre.org/data/definitions/295.html",
     cwe: Some("CWE-295"),
 };
 const HOSTNAMES: RustReviewRule = RustReviewRule {
     id: "rust-tls-invalid-hostnames",
-    title: "TLS builder accepts invalid hostnames",
+    title: "TLS client allows a mismatched peer hostname",
     message: "The final builder settings allow a certificate issued for a different hostname. Keep hostname verification enabled and use a certificate issued for the connection hostname.",
     reference: "https://cwe.mitre.org/data/definitions/297.html",
     cwe: Some("CWE-297"),
@@ -43,32 +43,44 @@ pub(super) fn check<'t>(review: &mut Review<'t, '_>, build: Node<'t>) {
     let Some((builder, setters)) = builder_setters(&review.source, receiver, build) else {
         return;
     };
+    let Some([certificates, hostnames]) = final_settings(&review.source, builder, setters) else {
+        return;
+    };
+    for (rule, flag) in [(&CERTIFICATES, certificates), (&HOSTNAMES, hostnames)] {
+        if let Some(setting) = flag {
+            review.report_related(rule, setting, &[method]);
+        }
+    }
+}
+
+fn final_settings<'t>(
+    source: &Source<'t, '_>,
+    builder: Builder,
+    setters: Vec<(Node<'t>, Node<'t>)>,
+) -> Option<[Option<Node<'t>>; 2]> {
     let mut certificates = None;
     let mut hostnames = None;
     // Calls are in reverse execution order. An unknown value in the last
     // setter also masks a known value set earlier.
     for (call, method) in setters {
-        let slot = match (builder, review.source.text(method)) {
+        let slot = match (builder, source.text(method)) {
             (_, "danger_accept_invalid_certs")
             | (Builder::Reqwest, "tls_danger_accept_invalid_certs") => &mut certificates,
             (_, "danger_accept_invalid_hostnames")
             | (Builder::Reqwest, "tls_danger_accept_invalid_hostnames") => &mut hostnames,
             (builder, name) if preserves_tls_flags(builder, name) => continue,
-            _ => return,
+            _ => return None,
         };
-        slot.get_or_insert_with(|| {
-            let mut args = arguments(call);
-            let is_true = args.next().is_some_and(|arg| {
-                arg.kind() == "boolean_literal" && review.source.text(arg) == "true"
-            }) && args.next().is_none();
-            is_true.then_some(method)
-        });
+        slot.get_or_insert_with(|| true_argument(source, call).then_some(method));
     }
-    for (rule, flag) in [(&CERTIFICATES, certificates), (&HOSTNAMES, hostnames)] {
-        if let Some(Some(setting)) = flag {
-            review.report_related(rule, setting, &[method]);
-        }
-    }
+    Some([certificates.flatten(), hostnames.flatten()])
+}
+
+fn true_argument(source: &Source<'_, '_>, call: Node<'_>) -> bool {
+    let mut args = arguments(call);
+    args.next()
+        .is_some_and(|arg| arg.kind() == "boolean_literal" && source.text(arg) == "true")
+        && args.next().is_none()
 }
 
 fn builder_setters<'t>(
@@ -101,36 +113,42 @@ fn builder_setters<'t>(
     if mentions_before(source, statement, name, stem.start_byte()) {
         return None;
     }
-    for intervening in std::iter::successors(statement.prev_named_sibling(), |part| {
+    let prior_uses = std::iter::successors(statement.prev_named_sibling(), |part| {
         part.prev_named_sibling()
     })
     .take_while(|part| *part != declaration)
-    {
-        if !mentions_before(source, intervening, name, intervening.end_byte()) {
-            continue;
-        }
-        if builder != Builder::NativeTls || attrs_may_skip(intervening) {
+    .filter(|part| mentions_before(source, *part, name, part.end_byte()));
+    for use_site in prior_uses {
+        if builder != Builder::NativeTls {
             return None;
         }
-        let call = intervening
-            .named_child(0)
-            .filter(|_| intervening.kind() == "expression_statement")?;
-        let mut direct_setters = Vec::new();
-        let target = peel(call, &mut direct_setters);
-        if target.kind() != "identifier"
-            || source.text(target).trim_start_matches("r#") != name
-            || direct_setters.is_empty()
-            || direct_setters
-                .iter()
-                .flat_map(|(call, _)| arguments(*call))
-                .any(|arg| mentions_before(source, arg, name, arg.end_byte()))
-        {
-            return None;
-        }
-        setters.extend(direct_setters);
+        setters.extend(standalone_native_setters(source, use_site, name)?);
     }
     setters.extend(initializer_setters);
     Some((builder, setters))
+}
+
+fn standalone_native_setters<'t>(
+    source: &Source<'t, '_>,
+    statement: Node<'t>,
+    name: &str,
+) -> Option<Vec<(Node<'t>, Node<'t>)>> {
+    if statement.kind() != "expression_statement" || attrs_may_skip(statement) {
+        return None;
+    }
+    let mut setters = Vec::new();
+    let target = peel(statement.named_child(0)?, &mut setters);
+    if target.kind() != "identifier"
+        || source.text(target).trim_start_matches("r#") != name
+        || setters.is_empty()
+        || setters
+            .iter()
+            .flat_map(|(call, _)| arguments(*call))
+            .any(|arg| mentions_before(source, arg, name, arg.end_byte()))
+    {
+        return None;
+    }
+    Some(setters)
 }
 
 fn peel<'t>(mut receiver: Node<'t>, setters: &mut Vec<(Node<'t>, Node<'t>)>) -> Node<'t> {

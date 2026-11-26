@@ -9,7 +9,7 @@ pub(in crate::analyzers::framework_checks) const JAVASCRIPT_RULE: Rule = Rule {
     id: "javascript-tls-verification-disabled",
     category: "security",
     subcategories: &["transport.tls"],
-    title: "Node.js TLS client disables certificate verification",
+    title: "Node.js client accepts an unverified TLS peer",
     message: "This Node.js client disables certificate verification. Keep verification enabled and configure a trusted CA for private services.",
     reference: "https://nodejs.org/api/tls.html#tlsconnectoptions-callback",
 };

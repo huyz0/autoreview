@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{binding_nodes, is_function};
+use super::{binding_nodes, is_function, loop_binding_kind};
 use crate::analyzers::framework_checks::{descendants, text, Node};
 
 pub(in crate::analyzers::framework_checks) struct BindingScopes<'t, 's> {
@@ -10,11 +10,11 @@ pub(in crate::analyzers::framework_checks) struct BindingScopes<'t, 's> {
 impl<'t, 's> BindingScopes<'t, 's> {
     pub fn new(root: Node<'t>, source: &'s str) -> Self {
         let mut scopes: HashMap<_, Vec<_>> = HashMap::new();
-        for binding in descendants(root).flat_map(binding_nodes) {
-            scopes
-                .entry(text(binding, source))
-                .or_default()
-                .push(binding_scope(binding));
+        for declaration in descendants(root) {
+            for binding in binding_nodes(declaration) {
+                scopes.entry(text(binding, source)).or_default()
+                    .push(binding_scope(binding, declaration));
+            }
         }
         Self { scopes }
     }
@@ -32,7 +32,15 @@ impl<'t, 's> BindingScopes<'t, 's> {
     }
 }
 
-fn binding_scope(binding: Node<'_>) -> Node<'_> {
+fn binding_scope<'t>(binding: Node<'t>, declaration: Node<'t>) -> Node<'t> {
+    if declaration.kind() == "for_in_statement" {
+        if loop_binding_kind(declaration) == Some("var") {
+            return std::iter::successors(declaration.parent(), |node| node.parent())
+                .find(|scope| is_function(*scope) || scope.kind() == "program")
+                .unwrap_or(declaration);
+        }
+        return declaration;
+    }
     let Some(parent) = binding.parent() else {
         return binding;
     };

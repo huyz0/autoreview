@@ -72,6 +72,11 @@ web.createServer({ rejectUnauthorized: false });
 new TypeOnly({ rejectUnauthorized: false });
 dial(443, 'service.test', { rejectUnauthorized: false });
 dial(443, { rejectUnauthorized: false, ['rejectUnauthorized']: true });
+for (const web of clients) { web.request({ rejectUnauthorized: false }); }
+function useLocalClient() {
+    for (var web of clients) { use(web); }
+    web.request({ rejectUnauthorized: false });
+}
 "#;
     let tsx = "import https from 'https';\nconst view = <main />;\nnew https.Agent({ rejectUnauthorized: false });";
     let found = scan(&[("client.js", js), ("client.ts", ts), ("view.tsx", tsx)], &["client.js", "client.ts", "view.tsx"]);
