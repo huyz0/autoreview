@@ -188,46 +188,33 @@ fn unresolved_receivers_track_bindings_across_languages() {
     assert_unresolved_receiver_cases(&cases);
 }
 
-#[test]
-fn unresolved_receivers_report_results_wrapped_in_web_arrays() {
+fn assert_web_receiver_lines(source: &str, reason: &str, expected: &[u32]) {
     for (ext, rule) in [("js", "javascript-node-fs-discarded-promise"), ("ts", "typescript-node-fs-discarded-promise"), ("tsx", "typescript-node-fs-discarded-promise")] {
         let path = format!("main.{ext}");
-        let source = "import { rename } from 'node:fs/promises';\nfunction consume(values) {}\nfunction array(a, b) { unknown([rename(a, b)]); }\nfunction spread(a, b) { unknown(...[rename(a, b)]); }\nfunction local(a, b) { consume([rename(a, b)]); }\nasync function observed(a, b) { unknown([await rename(a, b)]); }\nfunction noReceiver(a, b) { return [rename(a, b)]; }\n";
         let root = write_single_file(&path, source);
         let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), std::slice::from_ref(&path), &[]);
         let lines: std::collections::BTreeSet<_> = result.coverage.iter().filter(|issue|
-            issue.reason == "wrapped_result_receiver" && issue.rule.as_deref() == Some(rule))
-            .filter_map(|issue| issue.line).collect();
-        assert_eq!(lines, std::collections::BTreeSet::from([3, 4, 5]), "{ext}: {:?}", result.coverage);
+            issue.reason == reason && issue.rule.as_deref() == Some(rule)).filter_map(|issue| issue.line).collect();
+        assert_eq!(lines, expected.iter().copied().collect(), "{ext}: {:?}", result.coverage);
     }
+}
+
+#[test]
+fn unresolved_receivers_report_results_wrapped_in_web_arrays() {
+    let source = "import { rename } from 'node:fs/promises';\nfunction consume(values) {}\nfunction array(a, b) { unknown([rename(a, b)]); }\nfunction spread(a, b) { unknown(...[rename(a, b)]); }\nfunction local(a, b) { consume([rename(a, b)]); }\nasync function observed(a, b) { unknown([await rename(a, b)]); }\nfunction noReceiver(a, b) { return [rename(a, b)]; }\n";
+    assert_web_receiver_lines(source, "wrapped_result_receiver", &[3, 4, 5]);
 }
 
 #[test]
 fn unresolved_receivers_track_assigned_results_in_web_arrays() {
-    for (ext, rule) in [("js", "javascript-node-fs-discarded-promise"), ("ts", "typescript-node-fs-discarded-promise"), ("tsx", "typescript-node-fs-discarded-promise")] {
-        let path = format!("main.{ext}");
-        let source = "import { rename } from 'node:fs/promises';\nfunction local(values) {}\nfunction direct(a, b) { const p = rename(a, b); unknown([p]); }\nfunction alias(a, b) { const p = rename(a, b); const q = p; unknown(...[q]); }\nfunction resolved(a, b) { const p = rename(a, b); local([p]); }\nfunction overwritten(a, b) { let p = rename(a, b); p = null; unknown([p]); }\nasync function observed(a, b) { const p = rename(a, b); unknown([await p]); }\nfunction branch(a, b, flag) { const p = rename(a, b); if (flag) unknown([p]); }\n";
-        let root = write_single_file(&path, source);
-        let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), std::slice::from_ref(&path), &[]);
-        let lines: std::collections::BTreeSet<_> = result.coverage.iter().filter(|issue|
-            issue.reason == "unresolved_result_receiver" && issue.rule.as_deref() == Some(rule))
-            .filter_map(|issue| issue.line).collect();
-        assert_eq!(lines, std::collections::BTreeSet::from([3, 4, 5, 8]), "{ext}: {:?}", result.coverage);
-    }
+    let source = "import { rename } from 'node:fs/promises';\nfunction local(values) {}\nfunction direct(a, b) { const p = rename(a, b); unknown([p]); }\nfunction alias(a, b) { const p = rename(a, b); const q = p; unknown(...[q]); }\nfunction resolved(a, b) { const p = rename(a, b); local([p]); }\nfunction overwritten(a, b) { let p = rename(a, b); p = null; unknown([p]); }\nasync function observed(a, b) { const p = rename(a, b); unknown([await p]); }\nfunction branch(a, b, flag) { const p = rename(a, b); if (flag) unknown([p]); }\n";
+    assert_web_receiver_lines(source, "unresolved_result_receiver", &[3, 4, 5, 8]);
 }
 
 #[test]
 fn unresolved_receivers_track_results_in_stored_arrays() {
-    for (ext, rule) in [("js", "javascript-node-fs-discarded-promise"), ("ts", "typescript-node-fs-discarded-promise"), ("tsx", "typescript-node-fs-discarded-promise")] {
-        let path = format!("main.{ext}");
-        let source = "import { rename } from 'node:fs/promises';\nfunction direct(a, b) { const values = [rename(a, b)]; unknown(values); }\nfunction assigned(a, b) { const p = rename(a, b); const values = [p]; unknown(values); }\nfunction alias(a, b) { const p = rename(a, b); const values = [p]; const q = values; unknown(q); }\nfunction replaced(a, b) { const p = rename(a, b); let values = [p]; values = []; unknown(values); }\nfunction valueReplaced(a, b) { let p = rename(a, b); const values = [p]; p = null; unknown(values); }\nasync function observed(a, b) { const p = rename(a, b); const values = [await p]; unknown(values); }\nfunction branch(a, b, flag) { const p = rename(a, b); const values = [p]; if (flag) unknown(values); }\nfunction mixed(a, b) { const p = rename(a, b); const values = [p, 1, null]; unknown(values); }\n";
-        let root = write_single_file(&path, source);
-        let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), std::slice::from_ref(&path), &[]);
-        let lines: std::collections::BTreeSet<_> = result.coverage.iter().filter(|issue|
-            issue.reason == "unresolved_result_receiver" && issue.rule.as_deref() == Some(rule))
-            .filter_map(|issue| issue.line).collect();
-        assert_eq!(lines, std::collections::BTreeSet::from([2, 3, 4, 6, 8, 9]), "{ext}: {:?}", result.coverage);
-    }
+    let source = "import { rename } from 'node:fs/promises';\nfunction direct(a, b) { const values = [rename(a, b)]; unknown(values); }\nfunction assigned(a, b) { const p = rename(a, b); const values = [p]; unknown(values); }\nfunction alias(a, b) { const p = rename(a, b); const values = [p]; const q = values; unknown(q); }\nfunction replaced(a, b) { const p = rename(a, b); let values = [p]; values = []; unknown(values); }\nfunction valueReplaced(a, b) { let p = rename(a, b); const values = [p]; p = null; unknown(values); }\nasync function observed(a, b) { const p = rename(a, b); const values = [await p]; unknown(values); }\nfunction branch(a, b, flag) { const p = rename(a, b); const values = [p]; if (flag) unknown(values); }\nfunction mixed(a, b) { const p = rename(a, b); const values = [p, 1, null]; unknown(values); }\n";
+    assert_web_receiver_lines(source, "unresolved_result_receiver", &[2, 3, 4, 6, 8, 9]);
 }
 
 #[test]
