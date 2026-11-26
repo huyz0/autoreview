@@ -24,6 +24,11 @@ Kotlin, JavaScript, TypeScript, TSX, and Rust can
 specialize that guard and report a definite unused result or establish that the
 helper observes it. Go retains the warning because its predeclared boolean
 names can be shadowed and that binding is not yet verified for this check.
+For bounded acyclic callers with supported effects, the same helper guard can
+also be correlated with a stable caller branch or alias. This can report a
+discarded result on a proven path; unknown effects and unstable guards remain
+incomplete. Some safe locally assigned results may still receive a warning
+from the separate partial-observation analysis.
 Stable boolean alias chains are followed for up to 64 bindings. Writes or
 mutable borrows anywhere in the chain prevent specialization, even when they
 occur after an alias is copied. Longer chains and path-dependent assignments

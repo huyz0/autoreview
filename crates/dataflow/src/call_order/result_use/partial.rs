@@ -7,7 +7,7 @@ mod guards;
 mod helper_coverage;
 mod parameters;
 
-pub(super) use helper_coverage::has_partial_helper;
+pub(super) use helper_coverage::helper_paths;
 pub(super) use parameters::{unique_parameter_guard, unobserved_parameters, ParameterQuery};
 
 use super::{Body, Demand, Effect, Origin, Place, Plan, Value, Write};

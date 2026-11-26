@@ -50,21 +50,27 @@ impl<'src> Bindings<'src> {
         }
     }
 
-    pub(super) fn stable_boolean<'a>(&'a self, mut name: &'a str, mut at: usize) -> Option<bool> {
+    pub(super) fn stable_identity<'a>(&'a self, mut name: &'a str, mut at: usize) -> Option<IdentityOperand> {
         let mut seen = HashSet::new();
         while seen.len() < 64 && seen.insert(name) {
             (self.can_read(name) && !self.all_writes.contains(name)).then_some(())?;
             let binding = self.declarations.get(name)?.as_ref()?;
             (binding.visible_at <= at).then_some(())?;
-            let alias = binding.alias.as_ref()?;
+            let Some(alias) = binding.alias.as_ref() else { return Some(IdentityOperand::Binding(name.to_owned())); };
             alias.borrowed_root.is_none().then_some(())?;
             match &alias.operand {
-                IdentityOperand::Boolean(value) => return Some(*value),
                 IdentityOperand::Binding(origin) => { name = origin; at = alias.captured_at; }
-                _ => return None,
+                value => return Some(value.clone()),
             }
         }
         None
+    }
+
+    pub(super) fn stable_boolean(&self, name: &str, at: usize) -> Option<bool> {
+        match self.stable_identity(name, at)? {
+            IdentityOperand::Boolean(value) => Some(value),
+            _ => None,
+        }
     }
 
     pub(super) fn can_read(&self, name: &str) -> bool {

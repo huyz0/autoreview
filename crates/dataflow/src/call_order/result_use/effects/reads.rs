@@ -103,6 +103,10 @@ impl Lower<'_, '_, '_> {
         // Go permits shadowing its predeclared boolean names, including where
         // the syntax tree gives them literal-shaped nodes.
         let shadowed = language == Some(crate::call_order::ContractLanguage::Go);
+        let guard = (!shadowed).then(|| summary.when_observed.conditional_parameters.as_ref()
+            .and_then(|conditional| arguments.get(conditional.guard_index).copied())
+            .map(transparent).filter(|argument| argument.kind() == "identifier")
+            .and_then(|argument| argument.utf8_text(self.source).ok().and_then(|name| self.plan.syntax.stable_identity(name, argument.start_byte())))).flatten();
         let (discarded, observed) = if shadowed {
             ((summary.when_discarded.parameters.clone(), summary.when_discarded.unobserved_parameters.clone()),
              (summary.when_observed.parameters.clone(), summary.when_observed.unobserved_parameters.clone()))
@@ -165,6 +169,9 @@ impl Lower<'_, '_, '_> {
             when_observed: observed.0,
             unobserved_discarded: discarded.1,
             unobserved_observed: observed.1,
+            guard,
+            conditional_discarded: summary.when_discarded.conditional_parameters.clone(),
+            conditional_observed: summary.when_observed.conditional_parameters.clone(),
             origins_discarded: origins(&summary.when_discarded.origins),
             origins_observed: origins(&summary.when_observed.origins),
             opaque_discarded: summary.when_discarded.opaque_parameters.clone(),
