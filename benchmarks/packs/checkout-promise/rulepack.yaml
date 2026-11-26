@@ -1,0 +1,3 @@
+id: checkout-promise-benchmark
+version: "1"
+description: Experimental rule for the actions/checkout historical observation.

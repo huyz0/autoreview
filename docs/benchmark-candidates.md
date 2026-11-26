@@ -71,14 +71,11 @@ restores the older compiler's catch-variable behavior without disabling
 declaration checks. The opt-in regression below checks the labeled files'
 SHA-256 hashes and requires the unresolved-type warnings to remain visible.
 
-For a reproducible local observation, from a temporary parent directory:
+For a reproducible source-level observation, first follow the clone, checkout,
+and dependency installation steps for this case in [the benchmark README](../benchmarks/README.md).
+Then, from the `checkout` directory:
 
 ```sh
-git clone https://github.com/actions/checkout.git checkout
-cd checkout
-git checkout --detach 5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f
-npm ci --ignore-scripts --no-audit --no-fund
-npm install --prefix "$PWD/../ts-5.6.3" --no-save --ignore-scripts --no-audit --no-fund typescript@5.6.3
 mkdir -p .autoreview-replay-tmp/checkout-before .autoreview-replay-tmp/checkout-after
 git archive c952173edf28a2bd22e1a4926590c1ac39630461 | tar -x -C .autoreview-replay-tmp/checkout-before
 git archive 5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f | tar -x -C .autoreview-replay-tmp/checkout-after
@@ -90,8 +87,10 @@ AUTOREVIEW_TEST_TYPESCRIPT="$PWD/../ts-5.6.3/node_modules/typescript" \
   cargo test --manifest-path /absolute/path/to/autoreview/Cargo.toml -p autoreview-core --lib checkout_historical_general_promise_observation
 ```
 
-To turn these into scored cases, resolve or accurately scope the remaining
-coverage limitations, exercise the rule through the normal replay entry
-point, and check all findings in each entire file. Keep synchronous and
-intentionally observed calls as negatives, and retain compiler and snapshot
-verification, bounded execution, and coverage reporting.
+The normal `rules replay` entry point can also run these cases using the
+benchmark pack and compatibility adapter documented in `benchmarks/README.md`.
+It currently reports both cases as incomplete and exits nonzero; it does not
+score either case. To score them, resolve or accurately scope the remaining
+coverage limitations and check all findings in each entire file. Keep
+synchronous and intentionally observed calls as negatives, and retain compiler
+and snapshot verification, bounded execution, and coverage reporting.

@@ -37,8 +37,8 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
     const names = ['promise()', 'sync()', 'anything()', 'mixed()', 'thenable()', 'identity(value)', 'factory()()'];
     const hash = text => createHash('sha256').update(text, 'utf8').digest('hex');
     let calls = names.map(name => ({ path: file, start: Buffer.byteLength(source.slice(0, source.lastIndexOf(name))), source_sha256: hash(source) }));
-    function invoke() {
-      const child = spawnSync(process.execPath, [probe], { input: JSON.stringify({ typescriptModule: compiler, config, calls }), encoding: 'utf8' });
+    function invoke(typescriptModule = compiler, env = {}) {
+      const child = spawnSync(process.execPath, [probe], { input: JSON.stringify({ typescriptModule, config, calls }), encoding: 'utf8', env: { ...process.env, ...env } });
       assert.equal(child.status, 0, child.stderr);
       return JSON.parse(child.stdout);
     }
@@ -60,6 +60,16 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
     assert.equal(invoke().calls[0].status, 'source_changed');
     fs.appendFileSync(file, '\nconst broken: number = "wrong";\n');
     assert.deepEqual(invoke(), { status: 'incomplete', reason: 'project_type_errors' });
+
+    const compatibility = 'declare function task(): Promise<void>; try { throw new Error(); } catch (error) { error.message; } task();';
+    fs.writeFileSync(file, compatibility);
+    calls = [{ path: file, start: Buffer.byteLength(compatibility.slice(0, compatibility.lastIndexOf('task()'))), source_sha256: hash(compatibility) }];
+    assert.deepEqual(invoke(), { status: 'incomplete', reason: 'project_type_errors' });
+    const adapter = path.resolve(__dirname, '../../../benchmarks/typescript-legacy-catch.cjs');
+    const env = { AUTOREVIEW_BENCHMARK_TYPESCRIPT_MODULE: compiler };
+    assert.equal(invoke(adapter, env).calls[0].status, 'promise_like');
+    fs.appendFileSync(file, '\nconst broken: number = "wrong";\n');
+    assert.deepEqual(invoke(adapter, env), { status: 'incomplete', reason: 'project_type_errors' });
   } finally {
     const target = path.resolve(directory);
     const root = path.resolve(os.tmpdir()) + path.sep;
