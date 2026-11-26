@@ -26,7 +26,7 @@ pub mod tier4;
 
 use std::path::{Path, PathBuf};
 
-pub use model::{AccessRef, CallChain, ForeignAccessRef, MethodDecl, NamedSlot, SymbolIndex, TypeDecl};
+pub use model::{AccessRef, CallChain, ForeignAccessRef, HelperAccess, MethodDecl, NamedSlot, SymbolIndex, TypeDecl};
 pub use queries::{find_data_clumps, find_feature_envy, find_message_chains, find_refused_bequest, ChainFinding, ClumpMember, ClumpScope, DataClumpFinding, FeatureEnvyFinding, RefusedBequestFinding};
 pub use tier4::{confirm_feature_envy, run_tier4_go, Tier4Access, Tier4Verdict};
 
@@ -77,6 +77,7 @@ pub fn build_index(repo_root: &Path) -> SymbolIndex {
     walk_source_files(repo_root, &mut files);
 
     let mut types = Vec::new();
+    let mut go_helpers = extract::go::GoHelperEnvy::default();
     for file in &files {
         let Ok(metadata) = std::fs::metadata(file) else { continue };
         if metadata.len() > MAX_FILE_BYTES {
@@ -87,9 +88,15 @@ pub fn build_index(repo_root: &Path) -> SymbolIndex {
         // mapping layer in autoreview-core) compare it against
         // git-diff-relative changed-file paths.
         let rel_file = file.strip_prefix(repo_root).unwrap_or(file);
-        types.extend(extract::extract_file(rel_file, &content));
+        let Some((extension, tree)) = extract::parse_file(rel_file, &content) else { continue };
+        let first_type = types.len();
+        types.extend(extract::extract_parsed_file(rel_file, &content, extension, &tree));
+        if extension == "go" {
+            go_helpers.add_file(tree.root_node(), content.as_bytes(), rel_file, &types[first_type..], first_type);
+        }
     }
 
+    go_helpers.attach(&mut types);
     SymbolIndex { types }
 }
 

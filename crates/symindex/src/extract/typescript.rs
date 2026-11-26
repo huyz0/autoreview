@@ -177,6 +177,7 @@ fn extract_method(node: Node, source: &[u8], file: &Path, owner_type: &str, fiel
         return_type_text,
         own_field_accesses,
         foreign_accesses,
+        helper_accesses: Vec::new(),
         chains,
         is_trivial_body: trivial_body,
     })

@@ -124,6 +124,10 @@ fn type_matches(qualified: &str, unqualified: &str) -> bool {
 /// several lines and the heuristic's own line anchor is the method decl's
 /// start line, not any one access site.
 pub fn confirm_feature_envy(records: &[Tier4Access], finding: &FeatureEnvyFinding) -> Tier4Verdict {
+    if !finding.helper_evidence.is_empty() {
+        // Tier 4 records direct method accesses. It has no call-site evidence for helpers.
+        return Tier4Verdict::NoData;
+    }
     let for_method: Vec<&Tier4Access> =
         records.iter().filter(|r| r.method == finding.method && type_matches(&r.receiver_type, &finding.owner_type)).collect();
 
@@ -154,6 +158,7 @@ mod tests {
             envied_type: envied_type.to_string(),
             envied_access_count: 3,
             own_access_count: 0,
+            helper_evidence: Vec::new(),
         }
     }
 

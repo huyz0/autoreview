@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
-use crate::model::{MethodDecl, NamedSlot, SymbolIndex, TypeDecl};
+use crate::model::{HelperAccess, MethodDecl, NamedSlot, SymbolIndex, TypeDecl};
 
 /// One message-chain finding: a call chain at or above the reporting
 /// threshold, anchored at the method it was found in.
@@ -55,6 +55,7 @@ pub struct FeatureEnvyFinding {
     pub envied_type: String,
     pub envied_access_count: usize,
     pub own_access_count: usize,
+    pub helper_evidence: Vec<HelperAccess>,
 }
 
 /// Feature Envy: a method envies a foreign type when accesses to it (via a
@@ -64,11 +65,12 @@ pub struct FeatureEnvyFinding {
 /// parameter's declared type text (not by parameter name — two
 /// differently-named params of the same type both count toward that
 /// type's envy), so a method juggling several unrelated foreign types is
-/// judged per type, not by a single combined count.
+/// judged per type, not by a single combined count. Go can also contribute
+/// evidence from a resolved helper that works on the forwarded parameter.
 pub fn find_feature_envy(index: &SymbolIndex, min_foreign_accesses: usize, margin: i64) -> Vec<FeatureEnvyFinding> {
     let mut findings = Vec::new();
     for m in index.methods() {
-        if m.foreign_accesses.is_empty() {
+        if m.foreign_accesses.is_empty() && m.helper_accesses.is_empty() {
             continue;
         }
         let own_count = m.own_field_accesses.len();
@@ -79,8 +81,31 @@ pub fn find_feature_envy(index: &SymbolIndex, min_foreign_accesses: usize, margi
             *by_type.entry(receiver_type.clone()).or_insert(0) += 1;
         }
 
+        let mut helper_by_type: BTreeMap<&str, Vec<&HelperAccess>> = BTreeMap::new();
+        for access in &m.helper_accesses {
+            helper_by_type.entry(&access.receiver_type).or_default().push(access);
+        }
+        let meets_threshold = |count| count >= min_foreign_accesses && count as i64 - own_count as i64 >= margin;
+        for (receiver_type, helper_accesses) in helper_by_type {
+            let direct_count = by_type.remove(receiver_type).unwrap_or(0)
+                + by_type.remove(&format!("*{receiver_type}")).unwrap_or(0);
+            let count = direct_count + helper_accesses.iter().map(|access| access.count).sum::<usize>();
+            if meets_threshold(count) {
+                findings.push(FeatureEnvyFinding {
+                    file: m.file.clone(),
+                    line: m.start_line,
+                    owner_type: m.owner_type.clone(),
+                    method: m.name.clone(),
+                    envied_type: receiver_type.to_owned(),
+                    envied_access_count: count,
+                    own_access_count: own_count,
+                    helper_evidence: helper_accesses.into_iter().cloned().collect(),
+                });
+            }
+        }
+
         for (envied_type, envied_access_count) in by_type {
-            if envied_access_count >= min_foreign_accesses && envied_access_count as i64 - own_count as i64 >= margin {
+            if meets_threshold(envied_access_count) {
                 findings.push(FeatureEnvyFinding {
                     file: m.file.clone(),
                     line: m.start_line,
@@ -89,6 +114,7 @@ pub fn find_feature_envy(index: &SymbolIndex, min_foreign_accesses: usize, margi
                     envied_type,
                     envied_access_count,
                     own_access_count: own_count,
+                    helper_evidence: Vec::new(),
                 });
             }
         }
@@ -242,6 +268,7 @@ mod tests {
             return_type_text: None,
             own_field_accesses: vec![],
             foreign_accesses: vec![],
+            helper_accesses: Vec::new(),
             chains: vec![CallChain {
                 root_text: "owner".to_string(),
                 depth,
@@ -302,6 +329,7 @@ mod tests {
             return_type_text: None,
             own_field_accesses,
             foreign_accesses,
+            helper_accesses: Vec::new(),
             chains: vec![],
             is_trivial_body: false,
         }
@@ -363,6 +391,7 @@ mod tests {
             return_type_text: None,
             own_field_accesses: vec![],
             foreign_accesses: vec![],
+            helper_accesses: Vec::new(),
             chains: vec![],
             is_trivial_body: false,
         }
@@ -451,6 +480,7 @@ mod tests {
             return_type_text: None,
             own_field_accesses: vec![],
             foreign_accesses: vec![],
+            helper_accesses: Vec::new(),
             chains: vec![],
             is_trivial_body: true,
         }
