@@ -26,14 +26,15 @@ type callSite struct {
 	Start int    `json:"start"`
 }
 type request struct {
-	Files           []sourceFile      `json:"files,omitempty"`
-	Calls           []callSite        `json:"calls"`
-	PackageDir      string            `json:"packageDir,omitempty"`
-	GoBinary        string            `json:"goBinary,omitempty"`
-	ExpectedSources map[string]string `json:"expectedSources,omitempty"`
-	PackageSources  map[string]string `json:"packageSources,omitempty"`
-	ModuleMode      string            `json:"moduleMode,omitempty"`
-	IncludeCallees  bool              `json:"includeCallees,omitempty"`
+	Files               []sourceFile      `json:"files,omitempty"`
+	Calls               []callSite        `json:"calls"`
+	PackageDir          string            `json:"packageDir,omitempty"`
+	GoBinary            string            `json:"goBinary,omitempty"`
+	ExpectedSources     map[string]string `json:"expectedSources,omitempty"`
+	PackageSources      map[string]string `json:"packageSources,omitempty"`
+	ModuleMode          string            `json:"moduleMode,omitempty"`
+	IncludeCallees      bool              `json:"includeCallees,omitempty"`
+	IncludeErrorOrigins bool              `json:"includeErrorOrigins,omitempty"`
 }
 type callee struct {
 	Package  string `json:"package"`
@@ -41,12 +42,13 @@ type callee struct {
 	Receiver string `json:"receiver,omitempty"`
 }
 type callResult struct {
-	Path         string  `json:"path"`
-	Start        int     `json:"start"`
-	Status       string  `json:"status"`
-	ResultCount  int     `json:"resultCount,omitempty"`
-	ErrorIndexes []int   `json:"errorIndexes,omitempty"`
-	Callee       *callee `json:"callee,omitempty"`
+	Path         string       `json:"path"`
+	Start        int          `json:"start"`
+	Status       string       `json:"status"`
+	ResultCount  int          `json:"resultCount,omitempty"`
+	ErrorIndexes []int        `json:"errorIndexes,omitempty"`
+	Callee       *callee      `json:"callee,omitempty"`
+	ErrorOrigin  *errorOrigin `json:"errorOrigin,omitempty"`
 }
 type response struct {
 	Version int          `json:"version"`
@@ -67,14 +69,16 @@ func analyze(req request) response {
 		return incomplete(reason)
 	}
 	info := &types.Info{Types: make(map[ast.Expr]types.TypeAndValue)}
-	if req.IncludeCallees {
+	if req.IncludeCallees || req.IncludeErrorOrigins {
 		info.Uses = make(map[*ast.Ident]types.Object)
 		info.Selections = make(map[*ast.SelectorExpr]*types.Selection)
+		info.Defs = make(map[*ast.Ident]types.Object)
 	}
 	if _, err := config.Check(loaded.path, fset, files, info); err != nil {
 		return incomplete("type_errors")
 	}
 	indexes := indexCalls(fset, byPath)
+	origins := indexErrorOrigins(files, info, req.IncludeErrorOrigins)
 	result := response{Version: 2, Status: "ok", Calls: make([]callResult, 0, len(req.Calls))}
 	for _, call := range req.Calls {
 		node := indexes[call.Path][call.Start]
@@ -82,6 +86,11 @@ func analyze(req request) response {
 		item := callResult{Path: call.Path, Start: call.Start, Status: status, ResultCount: count, ErrorIndexes: indexes}
 		if req.IncludeCallees {
 			item.Callee = resolvedCallee(node, info)
+		}
+		if req.IncludeErrorOrigins {
+			if target := resolvedCallee(node, info); target != nil {
+				item.ErrorOrigin = origins[*target]
+			}
 		}
 		result.Calls = append(result.Calls, item)
 	}
@@ -128,6 +137,13 @@ func resolveFunctionExpr(expr ast.Expr, info *types.Info) *callee {
 	if !ok || function.Pkg() == nil {
 		return nil
 	}
+	return functionIdentity(function)
+}
+
+func functionIdentity(function *types.Func) *callee {
+	if function == nil || function.Pkg() == nil {
+		return nil
+	}
 	result := &callee{Package: function.Pkg().Path(), Name: function.Name()}
 	if signature, ok := function.Type().(*types.Signature); ok && signature.Recv() != nil {
 		receiver := signature.Recv().Type()
@@ -158,7 +174,7 @@ func preparePackage(fset *token.FileSet, req request) (loadedPackage, string) {
 	}
 	loaded, reason := loadPackage(fset, req.PackageDir, req.GoBinary, req.ModuleMode)
 	if reason == "" && (!matchesExpectedSources(loaded.files, req.Calls, req.ExpectedSources, false) ||
-		req.IncludeCallees && !matchesPackageSources(loaded.files, req.PackageSources, req.ExpectedSources)) {
+		(req.IncludeCallees || req.IncludeErrorOrigins) && !matchesPackageSources(loaded.files, req.PackageSources, req.ExpectedSources)) {
 		return loadedPackage{}, "source_mismatch"
 	}
 	return loaded, reason

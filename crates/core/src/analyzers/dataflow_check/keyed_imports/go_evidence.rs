@@ -42,6 +42,8 @@ struct Request<'a> {
     calls: Vec<Call>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     include_callees: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    include_error_origins: bool,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -70,17 +72,26 @@ struct CallResult {
     error_indexes: Vec<usize>,
     #[serde(default)]
     callee: Option<Callee>,
+    #[serde(default)]
+    error_origin: Option<ErrorOrigin>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
 struct Callee { package: String, name: String, #[serde(default, skip_serializing_if = "String::is_empty")] receiver: String }
 
-pub(super) type CalleeEvidence = BTreeMap<(String, usize), serde_json::Value>;
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ErrorOrigin { kind: String, context_parameter: usize }
+
+#[derive(Default)]
+pub(super) struct CallEvidence { callee: Option<serde_json::Value>, error_origin: Option<serde_json::Value> }
+pub(super) type CalleeEvidence = BTreeMap<(String, usize), CallEvidence>;
 
 pub(super) fn finding(path: &str, source: Option<&str>, rule: &super::CallOrderRuleDef, hit: &autoreview_dataflow::call_order::CallOrderHit, callees: &CalleeEvidence) -> super::AgentFinding {
     let mut finding = super::super::dsl::call_order_finding(path, source, rule, hit);
-    if let Some(callee) = hit.source_start.and_then(|start| callees.get(&(path.to_owned(), start))) {
-        finding.meta.get_or_insert_with(Default::default).insert("goTypeCheckedCallee".into(), callee.clone());
+    if let Some(evidence) = hit.source_start.and_then(|start| callees.get(&(path.to_owned(), start))) {
+        if let Some(callee) = &evidence.callee { finding.meta.get_or_insert_with(Default::default).insert("goTypeCheckedCallee".into(), callee.clone()); }
+        if let Some(origin) = &evidence.error_origin { finding.meta.get_or_insert_with(Default::default).insert("goErrorOrigin".into(), origin.clone()); }
     }
     finding
 }
@@ -102,7 +113,12 @@ impl Verified {
         let (index, start) = position;
         if let Some(callee) = &result.callee {
             if valid_callee(callee) {
-                if let Ok(value) = serde_json::to_value(callee) { self.callees.insert((unit.path.to_owned(), start), value); }
+                if let Ok(value) = serde_json::to_value(callee) { self.callees.entry((unit.path.to_owned(), start)).or_default().callee = Some(value); }
+            }
+        }
+        if let Some(origin) = &result.error_origin {
+            if origin.kind == "context_error_or_nil" && origin.context_parameter < 1024 {
+                if let Ok(value) = serde_json::to_value(origin) { self.callees.entry((unit.path.to_owned(), start)).or_default().error_origin = Some(value); }
             }
         }
         match result.status.as_str() {
@@ -122,16 +138,16 @@ pub(super) fn check_go_rule(
     spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, root: &Path,
 ) -> (KeyedCheckResult, CalleeEvidence) {
     let Some(checker) = TrustedGo::from_environment() else { return (check_keyed_units_with_coverage(spec, units), BTreeMap::new()); };
-    let options = ProbeOptions { root, checker: &checker, include_callees: std::env::var_os("AUTOREVIEW_GO_CALLEE_EVIDENCE").is_some_and(|value| value == "1") };
+    let options = ProbeOptions { root, checker: &checker, include_callees: std::env::var_os("AUTOREVIEW_GO_CALLEE_EVIDENCE").is_some_and(|value| value == "1"), include_error_origins: std::env::var_os("AUTOREVIEW_GO_ERROR_ORIGIN_EVIDENCE").is_some_and(|value| value == "1") };
     check_with_probe_and_callees(spec, units, sources, options)
 }
 
-struct ProbeOptions<'a> { root: &'a Path, checker: &'a TrustedGo, include_callees: bool }
+struct ProbeOptions<'a> { root: &'a Path, checker: &'a TrustedGo, include_callees: bool, include_error_origins: bool }
 
 fn check_with_probe_and_callees(
     spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, options: ProbeOptions<'_>,
 ) -> (KeyedCheckResult, CalleeEvidence) {
-    let ProbeOptions { root, checker, include_callees } = options;
+    let ProbeOptions { root, checker, include_callees, include_error_origins } = options;
     let mut verified = Verified { discovery: FactorySourceDiscovery { candidates: BTreeMap::new(), limitations: Vec::new() }, components: BTreeMap::new(), callees: BTreeMap::new() };
     let groups = collect_groups(units, sources, root, &mut verified.discovery.limitations);
     for (index, (dir, group)) in groups.into_iter().filter(|(_, group)| !group.calls.is_empty()).enumerate() {
@@ -139,9 +155,14 @@ fn check_with_probe_and_callees(
             verified.discovery.limitations.push(limitation(None));
             continue;
         }
-        let package_sources = include_callees.then(|| package_source_hashes(&dir)).flatten();
-        let mut request = Request { package_dir: &dir, go_binary: &checker.go, expected_sources: group.expected, package_sources, module_mode: checker.module_mode.as_deref(), calls: group.calls, include_callees };
+        let package_sources = (include_callees || include_error_origins).then(|| package_source_hashes(&dir)).flatten();
+        let mut request = Request { package_dir: &dir, go_binary: &checker.go, expected_sources: group.expected, package_sources, module_mode: checker.module_mode.as_deref(), calls: group.calls, include_callees, include_error_origins };
         let results = verify(&checker.probe, &request).or_else(|| {
+            if !request.include_error_origins { return None; }
+            request.include_error_origins = false;
+            if !request.include_callees { request.package_sources = None; }
+            verify(&checker.probe, &request)
+        }).or_else(|| {
             if !request.include_callees { return None; }
             request.include_callees = false;
             request.package_sources = None;
@@ -150,6 +171,7 @@ fn check_with_probe_and_callees(
         match results {
             Some(results) => for ((unit, start), mut result) in group.indices.into_iter().zip(results) {
                 if !request.include_callees { result.callee = None; }
+                if !request.include_error_origins { result.error_origin = None; }
                 verified.record(&units[unit], &sources[units[unit].path], (unit, start), result);
             },
             None => verified.discovery.limitations.push(limitation(None)),
@@ -300,7 +322,7 @@ mod tests {
 
     #[test]
     fn rejects_inconsistent_multi_result_evidence() {
-        let item = |count, indexes| CallResult { path: "main.go".into(), start: 1, status: "multi_error".into(), result_count: count, error_indexes: indexes, callee: None };
+        let item = |count, indexes| CallResult { path: "main.go".into(), start: 1, status: "multi_error".into(), result_count: count, error_indexes: indexes, callee: None, error_origin: None };
         assert!(valid_call_result(&item(3, vec![1, 2])));
         assert!(!valid_call_result(&item(1, vec![0])));
         assert!(!valid_call_result(&item(2, vec![])));
@@ -325,12 +347,12 @@ mod tests {
         let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
         let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
         let source = "package sample\nfunc first() error { return nil }\nfunc second() error { return nil }\nfunc use(f func() error) { first(); second(); f() }\nfunc duplicate() { first(); first() }\n";
-        let (result, callees) = analyze_source_with_evidence(source, &checker, true);
+        let (result, callees) = analyze_source_with_origins(source, &checker, true, &[], true);
         assert_eq!(result.hits.len(), 4);
         for (name, expected) in [("first()", "first"), ("second()", "second")] {
             let start = source.find("func use").unwrap() + source[source.find("func use").unwrap()..].find(name).unwrap();
             let hit = result.hits.iter().find(|hit| hit.source_start == Some(start)).unwrap();
-            let callee = &callees[&(hit.path.clone().unwrap(), start)];
+            let callee = callees[&(hit.path.clone().unwrap(), start)].callee.as_ref().unwrap();
             assert_eq!(callee["package"], "example.test/probe");
             assert_eq!(callee["name"], expected);
         }
@@ -348,7 +370,7 @@ mod tests {
         let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_LEGACY_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
         let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
         let source = "package sample\nfunc operation() error { return nil }\nfunc use() { operation() }\n";
-        let (result, callees) = analyze_source_with_evidence(source, &checker, true);
+        let (result, callees) = analyze_source_with_origins(source, &checker, true, &[], true);
         assert_eq!(result.hits.len(), 1);
         assert!(result.limitations.is_empty());
         assert!(callees.is_empty());
@@ -373,7 +395,7 @@ mod tests {
         let (result, callees) = analyze_source_with_files(source, &checker, true, &extra);
         let start = source.rfind("operation()").unwrap();
         assert_eq!(result.hits.len(), 1);
-        assert_eq!(callees[&("main.go".to_owned(), start)]["name"], "operation");
+        assert_eq!(callees[&("main.go".to_owned(), start)].callee.as_ref().unwrap()["name"], "operation");
     }
 
     #[test]
@@ -389,8 +411,24 @@ mod tests {
         let (result, callees) = analyze_source_with_files(source, &checker, true, &files);
         assert_eq!(result.hits.len(), 1);
         assert!(result.limitations.is_empty());
-        let call = &callees[&("main.go".into(), source.find("dep.Operation()").unwrap())];
+        let call = callees[&("main.go".into(), source.find("dep.Operation()").unwrap())].callee.as_ref().unwrap();
         assert_eq!(call["package"], "example.invalid/offline-dep");
+    }
+
+    #[test]
+    fn context_error_evidence_reaches_result_finding() {
+        let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
+        let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
+        let source = "package sample\nimport \"context\"\nfunc operation(ctx context.Context) error { return ctx.Err() }\nfunc use(ctx context.Context) { operation(ctx) }\n";
+        let (result, evidence) = analyze_source_with_origins(source, &checker, false, &[], true);
+        assert_eq!(result.hits.len(), 1);
+        let hit = &result.hits[0];
+        let rules = crate::analyzers::call_order_rules::load_call_order_rules(&[]);
+        let rule = rules.iter().find(|rule| rule.id == "go-project-error-result-unobserved").unwrap();
+        let finding = super::finding("main.go", Some(source), rule, hit, &evidence);
+        let origin = &finding.meta.unwrap()["goErrorOrigin"];
+        assert_eq!(origin["kind"], "context_error_or_nil");
+        assert_eq!(origin["contextParameter"], 0);
     }
 
     fn analyze_source(source: &str, checker: &TrustedGo) -> KeyedCheckResult {
@@ -402,6 +440,10 @@ mod tests {
     }
 
     fn analyze_source_with_files(source: &str, checker: &TrustedGo, include_callees: bool, extra: &[(&str, &str)]) -> (KeyedCheckResult, CalleeEvidence) {
+        analyze_source_with_origins(source, checker, include_callees, extra, false)
+    }
+
+    fn analyze_source_with_origins(source: &str, checker: &TrustedGo, include_callees: bool, extra: &[(&str, &str)], include_error_origins: bool) -> (KeyedCheckResult, CalleeEvidence) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("go.mod"), "module example.test/probe\n\ngo 1.22\n").unwrap();
         std::fs::write(dir.path().join("main.go"), source).unwrap();
@@ -421,6 +463,6 @@ mod tests {
         let units = [KeyedUnit { path: "main.go", source: source.as_bytes(), functions: &functions, imports: &[], exports: &[], entry: true }];
         let rules = crate::analyzers::call_order_rules::load_call_order_rules(&[]);
         let rule = rules.iter().find(|rule| rule.id == "go-project-error-result-unobserved").unwrap();
-        check_with_probe_and_callees(&rule.spec, &units, &sources, ProbeOptions { root: dir.path(), checker, include_callees })
+        check_with_probe_and_callees(&rule.spec, &units, &sources, ProbeOptions { root: dir.path(), checker, include_callees, include_error_origins })
     }
 }

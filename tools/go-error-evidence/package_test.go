@@ -46,6 +46,11 @@ func TestPackageModeUsesBuildFilesAndLocalDependencies(t *testing.T) {
 	req.ExpectedSources["main.go"] = hex.EncodeToString(sum[:])
 	write("other.go", "package sample\nfunc helper() {}\n")
 	assertSourceMismatch(t, req, "callee evidence requires hashes for all selected files")
+	req.IncludeCallees = false
+	req.IncludeErrorOrigins = true
+	assertSourceMismatch(t, req, "error-origin evidence requires hashes for all selected files")
+	req.IncludeErrorOrigins = false
+	req.IncludeCallees = true
 	otherSum := sha256.Sum256([]byte("package sample\nfunc helper() {}\n"))
 	req.ExpectedSources["other.go"] = hex.EncodeToString(otherSum[:])
 	if got := analyze(req); got.Status != "ok" {

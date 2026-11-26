@@ -72,6 +72,21 @@ suppress findings or establish a callee's error behavior.
 Autoreview hashes at most 512 Go files totaling 8 MiB in a package directory;
 unreadable files, symlinks, or exceeded limits cause a fallback.
 
+The probe also accepts an experimental `includeErrorOrigins` request flag.
+For a statically resolved function whose body is in the loaded package, it may
+report `context_error_or_nil` and the zero-based context parameter index,
+excluding any method receiver. This
+means the supported explicit return expressions are the parameter's `Err()`
+or predeclared `nil`; it does not prove that the context implementation is
+well behaved, that callers check the error, or that suppressing it is correct.
+Named returns, deferred or nested functions, reassigned or escaping context
+parameters, other returned expressions, and unavailable source produce no
+summary. Package-mode requests require complete selected-file hashes as for
+callee evidence. Set `AUTOREVIEW_GO_ERROR_ORIGIN_EVIDENCE=1` to attach available
+summaries as `goErrorOrigin` metadata on experimental result-use findings.
+This does not change finding decisions. Unsupported or older probes fall back
+to the existing analysis without that metadata.
+
 The caller must analyze an immutable package snapshot: other package files and
 cached dependency exports can change during or after loading. Source-file mode
 still relies on the caller to provide the complete build-selected package.
