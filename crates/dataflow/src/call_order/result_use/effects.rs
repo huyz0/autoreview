@@ -98,6 +98,7 @@ impl Lower<'_, '_, '_> {
                 if reached {
                     for range in &node.evaluations {
                         let Some(syntax) = evaluation(function, range) else { continue; };
+                        if site::identifier(syntax) && site::discarded_conditional_arm(syntax) { continue; }
                         if let Some((span, kind)) = &range.assignment {
                             if let Some((owner, target, reassign)) = syntax_at(function, span, *kind)
                                 .and_then(|owner| assignment_parts(owner, self.source).map(|(target, _, reassign)| (owner, target, reassign))) {
@@ -117,7 +118,6 @@ impl Lower<'_, '_, '_> {
     }
 
     fn statement(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
-        if site::identifier(node) && site::discarded_conditional_arm(node) { return; }
         let value = if let Some(closure) = self.inside {
             closure_result(node, closure)
         } else if self.returns_to_caller {
