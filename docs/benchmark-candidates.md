@@ -17,14 +17,12 @@ contribute to accuracy scores. They are not counted as detected findings.
   constructing a typed array from the promise produced zero elements; awaiting
   that promise first produced a 20-byte digest.
 
-This is a candidate for promise-as-synchronous-value analysis, not an
-ignored-result finding: the promise is passed to a constructor, so a general
-result-use rule can regard it as used. A useful rule needs reliable evidence
-for both the promise-producing API and the receiving operation, including
-shadowing and aliases, and must distinguish promise-aware consumers. The
-before and after files have not been replayed against such a rule and are not
-scored. Any future label must inspect the entire file, check the actual fix
-and parent, and record incomplete analysis separately.
+This is a promise-as-synchronous-value problem, not an ignored-result finding:
+the promise is passed to a constructor, so a general result-use rule can
+regard it as used. The narrowly scoped Web Crypto rule now detects this pair;
+see `benchmarks/silphscope-digest.yaml` for the full-file replay. It is not a
+general promise type mismatch analysis and does not track arbitrary aliases,
+helpers, reassignments, or dynamically replaced globals.
 
 ## Project-defined Go error returns
 

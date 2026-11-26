@@ -7,6 +7,21 @@ These cases reference public repositories and pinned commits; they do not
 copy the source files into Autoreview. Check each project's license before
 adding cases. Labels cover an entire file, not only the changed lines.
 
+`silphscope-digest.yaml` records an MIT-licensed JavaScript fix where a Web
+Crypto digest promise was passed to `Uint8Array` before being awaited. The
+framework check recognizes direct calls and a single-use local `const`, with
+conservative shadowing checks; it does not model general promise misuse or
+runtime replacement of globals. A local replay found the constructor before
+the fix and no finding after it, with no reported incomplete analysis. This
+one fix pair does not establish general accuracy. To reproduce:
+
+```sh
+git init silphscope
+cd silphscope
+git fetch --depth 2 https://github.com/chickenpoo351/SilphScope.git 0079a6f5d13e081dc5a26f683047895e6d1b7465
+autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/silphscope-digest.yaml
+```
+
 For cross-file findings, each `before` or `after` label may specify an
 optional `entry` path. Autoreview analyzes that file and its supported
 dependencies, while `path` and `lines` identify the file containing the
