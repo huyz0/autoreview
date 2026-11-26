@@ -5,11 +5,11 @@ use super::{Bindings, EdgeKind, Lower, Node, NodeId};
 pub(super) fn supports(node: Node<'_>) -> bool {
     if node.kind() != "match_expression" || node.has_error()
         || !node.parent().is_some_and(non_tail_statement)
-        || !node.child_by_field_name("value").is_some_and(|value| matches!(value.kind(), "identifier" | "integer_literal" | "boolean_literal" | "char_literal" | "string_literal")) { return false; }
+        || !node.child_by_field_name("value").is_some_and(simple_value) { return false; }
     let Some(body) = node.child_by_field_name("body") else { return false };
     let arms: Vec<_> = body.named_children(&mut body.walk()).filter(|item| item.kind() != "line_comment" && item.kind() != "block_comment").collect();
     let Some((last, rest)) = arms.split_last() else { return false };
-    rest.iter().all(|arm| literal_arm(*arm)) && wildcard_arm(*last)
+    rest.iter().all(|arm| unbound_arm(*arm)) && wildcard_arm(*last)
 }
 
 fn non_tail_statement(parent: Node<'_>) -> bool {
@@ -51,9 +51,22 @@ fn simple_call(node: Node<'_>) -> bool {
     callee && node.child_by_field_name("arguments").is_some_and(|args| args.named_children(&mut args.walk()).all(simple_value))
 }
 
-fn literal_arm(arm: Node<'_>) -> bool {
+fn unbound_arm(arm: Node<'_>) -> bool {
     pattern(arm).is_some_and(|pattern| pattern.named_child_count() == 1
-        && pattern.named_child(0).is_some_and(|part| matches!(part.kind(), "integer_literal" | "boolean_literal" | "char_literal" | "string_literal")))
+        && pattern.named_child(0).is_some_and(|part| matches!(part.kind(), "integer_literal" | "boolean_literal" | "char_literal" | "string_literal" | "scoped_identifier")
+            || wildcard_tuple(part)))
+}
+
+fn wildcard_tuple(node: Node<'_>) -> bool {
+    let Some(ty) = node.child_by_field_name("type") else { return false };
+    if node.kind() != "tuple_struct_pattern" || !matches!(ty.kind(), "identifier" | "scoped_identifier") { return false; }
+    let mut wildcard = false;
+    for child in node.children(&mut node.walk()) {
+        if child == ty || matches!(child.kind(), "(" | ")" | ",") { continue; }
+        if child.kind() != "_" { return false; }
+        wildcard = true;
+    }
+    wildcard
 }
 
 fn wildcard_arm(arm: Node<'_>) -> bool {

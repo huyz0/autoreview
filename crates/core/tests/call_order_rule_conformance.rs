@@ -731,10 +731,21 @@ fn rust_literal_match_tracks_results_across_arms() {
 
 #[test]
 fn rust_unmodeled_matches_remain_incomplete() {
-    for body in ["match x { 0 if check() => {}, _ => {} };", "match x { value => {} };", "match x { 0 => {} };", "match check() { _ => {} };", "match x { _ => { let y = risky() + 1; } };", "match x { _ => {} }"] {
+    for body in ["match x { 0 if check() => {}, _ => {} };", "match x { value => {} };", "match x { Some(value) => {}, _ => {} };", "match x { 0 => {} };", "match check(risky() + 1) { _ => {} };", "match x { _ => { let y = risky() + 1; } };", "match x { _ => {} }"] {
         let root = write_single_file("lib.rs", &format!("fn run(x: u8) {{ {body} }}\n"));
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("lib.rs")), "{body}: {:?}", result.coverage);
+    }
+}
+
+#[test]
+fn rust_unbound_enum_match_tracks_results() {
+    for (pattern, ty) in [("Some(_)", "Option<u8>"), ("Option::Some(_)", "Option<u8>"), ("Mode::Fast", "Mode")] {
+        let source = format!("use std::fs::remove_file; enum Mode {{ Fast, Other }}\nfn run(path: &str, value: {ty}) {{\n    match value {{ {pattern} => {{ remove_file(path); }}, _ => {{}} }};\n}}\n");
+        let root = write_single_file("lib.rs", &source);
+        assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 3)]);
+        let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+        assert!(!result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{pattern}: {:?}", result.coverage);
     }
 }
 
@@ -745,7 +756,7 @@ fn rust_literal_match_checks_cleanup_on_each_arm() {
     let repo = tempfile::tempdir().unwrap();
     let pack = tempfile::tempdir().unwrap();
     std::fs::write(pack.path().join("rust.yml"), "id: rust-match-cleanup\nkind: call-sequence\nlanguage: Rust\ncategory: correctness\nseverity: warning\nmessage: Finish before leaving\nafter: [{call: begin}]\nunless: [{call: finish}]\ncheckBeforeReturn: true\n").unwrap();
-    let source = "fn partial(flag: u8) {\n begin();\n match flag { 0 => { finish(); }, _ => {} };\n}\nfn closed(flag: u8) {\n begin();\n match flag { 0 => { finish(); }, _ => { finish(); } };\n}\n";
+    let source = "fn partial() {\n match begin() { Some(_) => { finish(); }, _ => {} };\n}\nfn closed() {\n match begin() { Some(_) => { finish(); }, _ => { finish(); } };\n}\n";
     std::fs::write(repo.path().join("lib.rs"), source).unwrap();
     let result = run_dataflow_check_with_coverage(repo.path(), repo.path(), &["lib.rs".into()], &[ResolvedRulePack {
         id: "match-cleanup".into(), local_path: pack.path().to_owned(), trust: RulePackTrust::Full,
@@ -753,7 +764,7 @@ fn rust_literal_match_checks_cleanup_on_each_arm() {
     let lines: Vec<_> = result.findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some("rust-match-cleanup"))
         .map(|finding| finding.location.range.start_line).collect();
     assert_eq!(lines.len(), 1, "{lines:?}: {:#?}", result.findings);
-    assert!(lines[0] <= 4, "{lines:?}");
+    assert!(lines[0] <= 3, "{lines:?}");
     assert!(!result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", result.coverage);
 }
 
