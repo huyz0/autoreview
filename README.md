@@ -56,6 +56,9 @@ deep tier.
   call identities in finding metadata; this does not change rule decisions.
   The probe requires hashes for every selected package file for this evidence,
   and falls back to result-type analysis if that evidence is unavailable.
+  `AUTOREVIEW_GO_ERROR_ORIGIN_EVIDENCE=1` optionally adds conservative
+  same-package context-error summaries to finding metadata; these summaries
+  do not establish that discarding an error is safe.
 - **Framework checks** flag Go context cancellation missed on a branch or
   through a same-package helper, Java Spring transaction self-invocation,
   and Hibernate reads that initialize a mapped lazy collection for each
