@@ -125,6 +125,12 @@ pub(crate) fn discarded_conditional_expression(node: Node<'_>) -> bool {
     value.parent().is_some_and(|owner| owner.kind() == "expression_statement")
 }
 
+pub(crate) fn returned_conditional_expression(node: Node<'_>) -> bool {
+    let mut value = node;
+    while let Some(wrapper) = value.parent().filter(|parent| conditional_wrapper(parent.kind())) { value = wrapper; }
+    value.parent().is_some_and(|owner| owner.kind() == "return_statement")
+}
+
 fn conditional_wrapper(kind: &str) -> bool {
     matches!(kind, "parenthesized_expression" | "as_expression" | "satisfies_expression" | "non_null_expression")
 }

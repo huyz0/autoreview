@@ -92,12 +92,13 @@ impl Lower<'_, '_, '_> {
             .map(|(node, &reached)| {
                 let mut effects = Vec::new();
                 if reached {
-                    for syntax in node
-                        .evaluations
-                        .iter()
-                        .filter_map(|range| evaluation(function, range))
-                    {
-                        self.statement(syntax, &mut effects);
+                    for range in &node.evaluations {
+                        let Some(syntax) = evaluation(function, range) else { continue; };
+                        if range.returned && (self.returns_to_caller || self.inside.is_some()) {
+                            self.returned(syntax, &mut effects);
+                        } else {
+                            self.statement(syntax, &mut effects);
+                        }
                     }
                 }
                 effects
@@ -121,11 +122,7 @@ impl Lower<'_, '_, '_> {
             None
         };
         if let Some(value) = value {
-            let value = self.value(value, effects);
-            effects.push(Effect::Write(vec![Write {
-                target: Some(Place::Return),
-                value,
-            }]));
+            self.returned(value, effects);
             return;
         }
         match node.kind() {
@@ -152,6 +149,11 @@ impl Lower<'_, '_, '_> {
                 None => self.expression(node, effects),
             },
         }
+    }
+
+    fn returned(&self, value: Node<'_>, effects: &mut Vec<Effect>) {
+        let value = self.value(value, effects);
+        effects.push(Effect::Write(vec![Write { target: Some(Place::Return), value }]));
     }
 
     fn assignment(
