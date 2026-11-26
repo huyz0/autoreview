@@ -3,6 +3,7 @@ mod fetch;
 mod go_cancel;
 mod java;
 mod jest;
+mod node_tls;
 pub(super) mod outbox;
 mod prisma;
 mod rabbitmq;
@@ -37,6 +38,7 @@ fn rules() -> impl Iterator<Item = &'static Rule> {
         &java::PAGINATION_RULE,
         &java::NULLABILITY_REGRESSION_RULE,
         &jest::RULE,
+        &node_tls::RULE,
         &react::INTERVAL_RULE,
         &prisma::RULE,
         &rabbitmq::RULE,
@@ -82,6 +84,7 @@ pub fn run_framework_checks(root: &Path, changed: &[String]) -> Vec<AgentFinding
         web_findings.extend(prisma::inspect(path, source, file));
         web_findings.extend(rabbitmq::inspect(path, source, file));
         web_findings.extend(jest::inspect(root, path, source, file));
+        web_findings.extend(node_tls::inspect(path, source, file));
         web_findings.extend(fetch::inspect(path, source, file));
         web_findings
     }));
