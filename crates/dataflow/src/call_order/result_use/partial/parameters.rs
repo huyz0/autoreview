@@ -44,13 +44,50 @@ pub(in crate::call_order::result_use) fn unobserved_parameters(
     parameters
         .iter()
         .map(|parameter| {
-            if !supported {
-                return None;
-            }
             let parameter = parameter.filter(|place| matches!(place, Place::Local(_)))?;
+            if !supported {
+                return observed_before_branch(body, cfg, syntax, parameter, return_used)
+                    .then_some(false);
+            }
             unobserved(body, cfg, plan, &edges, (parameter, return_used))
         })
         .collect()
+}
+
+fn observed_before_branch(
+    body: &Body,
+    cfg: &Cfg<Stmt>,
+    syntax: (Node<'_>, &[u8]),
+    parameter: Place,
+    return_used: bool,
+) -> bool {
+    let mut state = State {
+        active: true,
+        ..State::default()
+    };
+    state.aliases.insert(parameter);
+    let mut seen = BTreeSet::new();
+    let mut node = body.flow.entry;
+    while seen.insert(node) {
+        if hidden_at(cfg, node, syntax)
+            || !body.effects[node]
+                .iter()
+                .all(|effect| supported_effect_with_return(effect, true))
+        {
+            return false;
+        }
+        if observes(&body.effects[node], &mut state, return_used) {
+            return true;
+        }
+        if state.aliases.is_empty() {
+            return false;
+        }
+        let [next] = body.flow.successors[node].as_slice() else {
+            return false;
+        };
+        node = *next;
+    }
+    false
 }
 
 fn unobserved(
