@@ -388,13 +388,19 @@ func costs(customer *Customer) int { return customer.Balance + customer.Fee }
         assert!(unrelated.iter().all(|finding| finding.source.rule_id.as_deref() != Some("feature-envy")));
     }
 
-    #[test]
-    fn reports_go_feature_envy_two_cross_file_hops_away() {
-        let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "invoice.go", r#"
+    fn write_billing_invoice(dir: &Path, methods: &str) {
+        let types = "
 package billing
 type Invoice struct{}
 type Customer struct { Balance, Fee, Tax int }
+";
+        write_file(dir, "invoice.go", &format!("{types}{methods}"));
+    }
+
+    #[test]
+    fn reports_go_feature_envy_two_cross_file_hops_away() {
+        let dir = tempfile::tempdir().unwrap();
+        write_billing_invoice(dir.path(), r#"
 func (Invoice) Total(customer *Customer) int {
     alias := customer
     return forward(0, alias) + relay(alias)
@@ -434,10 +440,7 @@ func totals(customer *Customer, fee int) int {
     #[test]
     fn skips_two_hop_ambiguity_and_ordinary_forwarding() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "invoice.go", r#"
-package billing
-type Invoice struct{}
-type Customer struct { Balance, Fee, Tax int }
+        write_billing_invoice(dir.path(), r#"
 func (c *Customer) Total() int { return c.Balance + c.Fee + c.Tax }
 func (Invoice) Ambiguous(c *Customer) int { return uncertain(c) }
 func (Invoice) Shadowed(f func(*Customer) int, c *Customer) int { return shadowed(c, f) }
@@ -476,10 +479,7 @@ func load() *Customer { return nil }
     #[test]
     fn skips_go_helper_forwarding_and_ambiguous_bindings() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "invoice.go", r#"
-package billing
-type Invoice struct{}
-type Customer struct { Balance, Fee, Tax int }
+        write_billing_invoice(dir.path(), r#"
 func (c *Customer) Total() int { return c.Balance + c.Fee + c.Tax }
 func (i Invoice) Forward(customer *Customer) int {
     return forward(customer) + forward(customer) + forward(customer)
