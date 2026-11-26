@@ -45,7 +45,7 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
     const types = path.join(directory, 'node_modules', '@types', 'local');
     fs.mkdirSync(types, { recursive: true });
     fs.writeFileSync(path.join(types, 'index.d.ts'), 'declare const LOCAL_GLOBAL: number;');
-    fs.writeFileSync(config, JSON.stringify({ compilerOptions: { target: 'ES2022', strict: true }, files: ['sample.ts'] }));
+    fs.writeFileSync(config, JSON.stringify({ compilerOptions: { target: 'ES2020', strict: true }, files: ['sample.ts'] }));
     const source = [
       'declare function promise(): Promise<void>;',
       'declare function sync(): string;',
@@ -78,6 +78,36 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
     calls = [...awaiting.matchAll(/\b(?:unknownValue|knownPromise)\(\)/g)].slice(2)
       .map(match => ({ path: file, start: Buffer.byteLength(awaiting.slice(0, match.index)), source_sha256: hash(awaiting) }));
     assert.deepEqual(invoke().calls.map(call => call.status), ['observed', 'not_proven', 'promise_like', 'not_proven']);
+    const returns = [
+      'declare function unknownValue(): any;',
+      'async function direct() { return ((unknownValue())); }',
+      'const arrow = async () => (unknownValue());',
+      'class Example { async method() { return unknownValue(); } }',
+      'async function guarded() { try { return unknownValue(); } finally { return 1; } }',
+      'async function loop() { for (const value of [1]) { return unknownValue(); } return 1; }',
+      'function syncReturn() { return unknownValue(); }',
+      'async function outer() { function inner() { return unknownValue(); } return inner(); }',
+      'async function* generator() { return unknownValue(); }',
+      'async function property() { return unknownValue().value; }',
+    ].join('\n');
+    fs.writeFileSync(file, returns);
+    calls = [...returns.matchAll(/\bunknownValue\(\)/g)].slice(1)
+      .map(match => ({ path: file, start: Buffer.byteLength(returns.slice(0, match.index)), source_sha256: hash(returns) }));
+    assert.deepEqual(invoke().calls.map(call => call.status), ['observed', 'observed', 'observed', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven']);
+    if (require(compiler).NodeFlags.Using) {
+      const resources = [
+        'declare function unknownValue(): any;',
+        'declare const resource: { [Symbol.dispose](): void };',
+        'async function work() { using item = resource; return unknownValue(); }',
+        'async function outer() { function inner() { using item = resource; } return unknownValue(); }',
+      ].join('\n');
+      fs.writeFileSync(config, JSON.stringify({ compilerOptions: { target: 'ES2020', lib: ['ES2020', 'ESNext.Disposable'], strict: true }, files: ['sample.ts'] }));
+      fs.writeFileSync(file, resources);
+      calls = [...resources.matchAll(/\bunknownValue\(\)/g)].slice(1)
+        .map(match => ({ path: file, start: Buffer.byteLength(resources.slice(0, match.index)), source_sha256: hash(resources) }));
+      assert.deepEqual(invoke().calls.map(call => call.status), ['not_proven', 'observed']);
+      fs.writeFileSync(config, JSON.stringify({ compilerOptions: { target: 'ES2020', strict: true }, files: ['sample.ts'] }));
+    }
     fs.writeFileSync(file, source);
     calls = names.map(name => ({ path: file, start: Buffer.byteLength(source.slice(0, source.lastIndexOf(name))), source_sha256: hash(source) }));
     calls = [calls[1], calls[0], calls[1], { ...calls[0], source_sha256: 'wrong' }, { ...calls[0], path: path.join(directory, 'missing.ts') }];

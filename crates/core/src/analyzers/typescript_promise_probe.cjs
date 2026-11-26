@@ -22,7 +22,9 @@ function run(request) {
   if (!ts || typeof ts.readConfigFile !== 'function' || typeof ts.parseJsonConfigFileContent !== 'function' ||
       typeof ts.createProgram !== 'function' || typeof ts.getPreEmitDiagnostics !== 'function' ||
       typeof ts.isCallExpression !== 'function' || typeof ts.isAwaitExpression !== 'function' ||
-      typeof ts.isParenthesizedExpression !== 'function' || typeof ts.forEachChild !== 'function') {
+      typeof ts.isParenthesizedExpression !== 'function' || typeof ts.isFunctionLike !== 'function' ||
+      typeof ts.isReturnStatement !== 'function' || typeof ts.isArrowFunction !== 'function' ||
+      typeof ts.isBlock !== 'function' || typeof ts.isVariableDeclarationList !== 'function' || typeof ts.forEachChild !== 'function') {
     return { status: 'incomplete', reason: 'compiler_api_unsupported' };
   }
   const config = ts.readConfigFile(request.config, ts.sys.readFile);
@@ -55,6 +57,34 @@ function run(request) {
     let value = node;
     while (value.parent && ts.isParenthesizedExpression(value.parent) && value.parent.expression === value) value = value.parent;
     return !!value.parent && ts.isAwaitExpression(value.parent) && value.parent.expression === value;
+  }
+  // Only a direct function-body return without using declarations is safe:
+  // finally blocks, iterator cleanup and resource disposal can replace it.
+  function returnedFromAsync(node) {
+    let value = node;
+    while (value.parent && ts.isParenthesizedExpression(value.parent) && value.parent.expression === value) value = value.parent;
+    let current = value.parent;
+    if (current && ts.isArrowFunction(current) && current.body === value) return asyncFunction(current);
+    if (!current || !ts.isReturnStatement(current) || current.expression !== value) return false;
+    const body = current.parent;
+    const fn = body && body.parent;
+    return !!fn && ts.isBlock(body) && ts.isFunctionLike(fn) && fn.body === body && asyncFunction(fn) && !hasUsing(body);
+  }
+  function asyncFunction(node) {
+    return !node.asteriskToken && !!node.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword);
+  }
+  const usingCache = new WeakMap();
+  function hasUsing(body) {
+    if (usingCache.has(body)) return usingCache.get(body);
+    let found = false;
+    function visit(node) {
+      if (found || (node !== body && ts.isFunctionLike(node))) return;
+      if (ts.isVariableDeclarationList(node) && (node.flags & (ts.NodeFlags.Using || 0))) found = true;
+      else ts.forEachChild(node, visit);
+    }
+    visit(body);
+    usingCache.set(body, found);
+    return found;
   }
   const files = new Map();
   function indexCalls(file) {
@@ -90,7 +120,7 @@ function run(request) {
     const selected = cached.calls.get(call.start);
     if (!selected) return { ...call, status: 'unavailable' };
     const type = checker.getTypeAtLocation(selected);
-    return { ...call, status: promiseLike(type) ? 'promise_like' : definitelyNotPromise(type) ? 'not_promise' : directlyAwaited(selected) ? 'observed' : 'not_proven' };
+    return { ...call, status: promiseLike(type) ? 'promise_like' : definitelyNotPromise(type) ? 'not_promise' : directlyAwaited(selected) || returnedFromAsync(selected) ? 'observed' : 'not_proven' };
   });
   return { status: 'ok', calls };
 }
