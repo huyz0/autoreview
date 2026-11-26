@@ -54,11 +54,12 @@ class EvidenceTest(unittest.TestCase):
         result = self.compile("sample", source)
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads((self.root / "sample.json").read_text(encoding="utf-8"))
-        self.assertEqual((report["version"], report["compiler"]), (1, "2.2.20"))
+        self.assertEqual((report["version"], report["compiler"]), (2, "2.2.20"))
         self.assertEqual(len(report["records"]), 1, report)
         record = report["records"][0]
         self.assertEqual(record["sha256"], hashlib.sha256(source.encode()).hexdigest())
         self.assertEqual((record["callee"], record["parameter"], record["samType"]), ("vendor.Server.setAuthenticator", 0, "vendor.Auth"))
+        self.assertEqual(record["parameterTypes"], ["vendor.Auth"])
         self.assertEqual(utf16_slice(source, record["lambdaStartUtf16"], record["lambdaEndUtf16"]), "{ value -> value.isNotEmpty() }")
         self.assertIn("authenticator =", utf16_slice(source, record["callStartUtf16"], record["callEndUtf16"]))
 
@@ -82,6 +83,21 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads((self.root / "parameter.json").read_text(encoding="utf-8"))
         self.assertEqual([(record["callee"], record["parameter"], record["samType"]) for record in report["records"]], [("demo.register", 1, "vendor.Auth")])
+        self.assertEqual(report["records"][0]["parameterTypes"], ["kotlin.Int", "vendor.Auth"])
+
+    def test_overloaded_calls_have_distinct_parameter_types(self) -> None:
+        source = "package demo\nimport vendor.Auth\nfun register(n: Int, callback: Auth) {}\nfun register(n: String, callback: Auth) {}\nfun install() { register(1, Auth { true }); register(\"a\", Auth { true }) }\n"
+        result = self.compile("overloads", source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        records = json.loads((self.root / "overloads.json").read_text(encoding="utf-8"))["records"]
+        self.assertEqual([record["parameterTypes"] for record in records], [["kotlin.Int", "vendor.Auth"], ["kotlin.String", "vendor.Auth"]])
+
+    def test_generic_parameter_is_unknown(self) -> None:
+        source = "package demo\nimport vendor.Auth\nfun <T> register(n: T, callback: Auth) {}\nfun install() { register(1, Auth { true }) }\n"
+        result = self.compile("generic", source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        records = json.loads((self.root / "generic.json").read_text(encoding="utf-8"))["records"]
+        self.assertEqual(records[0]["parameterTypes"], [None, "vendor.Auth"])
 
     def test_existing_output_is_not_overwritten(self) -> None:
         output = self.root / "existing.json"

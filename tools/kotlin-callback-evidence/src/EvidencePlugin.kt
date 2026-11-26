@@ -20,6 +20,7 @@ import org.jetbrains.kotlin.ir.expressions.IrTypeOperator
 import org.jetbrains.kotlin.ir.expressions.IrTypeOperatorCall
 import org.jetbrains.kotlin.ir.symbols.UnsafeDuringIrConstructionAPI
 import org.jetbrains.kotlin.ir.types.classFqName
+import org.jetbrains.kotlin.ir.types.IrSimpleType
 import org.jetbrains.kotlin.ir.util.fqNameWhenAvailable
 import org.jetbrains.kotlin.ir.visitors.IrVisitorVoid
 import org.jetbrains.kotlin.ir.visitors.acceptChildrenVoid
@@ -50,6 +51,7 @@ private data class Record(
     val parameter: Int,
     val samType: String,
     val modality: String,
+    val parameterTypes: List<String?>,
 )
 
 @OptIn(UnsafeDuringIrConstructionAPI::class)
@@ -103,12 +105,16 @@ private fun collect(call: IrCall, path: String, hash: String, records: MutableLi
             path = path, sha256 = hash, callStartUtf16 = call.startOffset, callEndUtf16 = call.endOffset,
             lambdaStartUtf16 = lambda.startOffset, lambdaEndUtf16 = lambda.endOffset,
             callee = callee, parameter = index, samType = samType, modality = owner.modality.name,
+            parameterTypes = owner.parameters.filter { it.kind == IrParameterKind.Regular }.map {
+                val type = it.type as? IrSimpleType
+                if (type == null || type.arguments.isNotEmpty()) null else type.classFqName?.asString()
+            },
         ))
     }
 }
 
 private fun encode(records: List<Record>): String = buildString {
-    append("{\"version\":1,\"compiler\":\"2.2.20\",\"records\":[")
+    append("{\"version\":2,\"compiler\":\"2.2.20\",\"records\":[")
     records.forEachIndexed { index, record ->
         if (index != 0) append(',')
         append("{\"path\":").append(quote(record.path))
@@ -120,7 +126,13 @@ private fun encode(records: List<Record>): String = buildString {
         append(",\"callee\":").append(quote(record.callee))
         append(",\"parameter\":").append(record.parameter)
         append(",\"samType\":").append(quote(record.samType))
-        append(",\"modality\":").append(quote(record.modality)).append('}')
+        append(",\"modality\":").append(quote(record.modality))
+        append(",\"parameterTypes\":[")
+        record.parameterTypes.forEachIndexed { typeIndex, type ->
+            if (typeIndex != 0) append(',')
+            append(type?.let(::quote) ?: "null")
+        }
+        append("]}")
     }
     append("]}")
 }
