@@ -426,6 +426,37 @@ fn caller_and_helper_guards_are_correlated() {
 }
 
 #[test]
+fn locally_assigned_results_follow_correlated_helper_guards() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b, flag) { if (flag) { const value = rename(a, b); return consume(value, flag); } }\n";
+        let root = write_single_file(path, source);
+        let result = conditional_test_result(&root, path);
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        let bad = source.replace("if (flag) { const value", "if (!flag) { const value");
+        std::fs::write(root.path().join(path), bad).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let mixed = source.replace("if (flag) { const value = rename(a, b); return consume(value, flag); }", "const value = rename(a, b); if (flag) return consume(value, flag);");
+        std::fs::write(root.path().join(path), mixed).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)) || result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let another = source.replace("run(a, b, flag)", "run(a, b, flag, other)").replace("return consume(value, flag); } }", "return consume(value, flag); } const remaining = rename(a, b); return consume(remaining, other); }");
+        std::fs::write(root.path().join(path), another).unwrap();
+        assert_partial_helper_coverage(&root, path, rule);
+    }
+}
+
+#[test]
+fn helper_path_budget_does_not_claim_complete_analysis() {
+    let mut source = String::from("import { rename } from 'node:fs/promises';\nfunction consume(value) { return value; }\nexport function run(a, b, flags) {\n");
+    for index in 0..14 { source.push_str(&format!(" const f{index} = flags[{index}]; if (f{index}) {{ a = a; }}\n")); }
+    source.push_str(" return consume(rename(a, b));\n}\n");
+    let root = write_single_file("main.js", &source);
+    assert_partial_helper_coverage(&root, "main.js", "javascript-node-fs-discarded-promise");
+}
+
+#[test]
 fn caller_helper_guard_correlation_across_jvm_and_rust() {
     let cases = [
         ("Main.java", "java-discarded-objects-comparison", "import java.util.Objects;\nclass Main { static boolean consume(boolean value, boolean flag) { if (flag) return value; return false; }\nboolean run(Object a, Object b, boolean flag) { if (flag) return consume(Objects.equals(a,b), flag); return false; } }\n"),
@@ -435,6 +466,16 @@ fn caller_helper_guard_correlation_across_jvm_and_rust() {
     for (path, rule, source) in cases {
         let root = write_single_file(path, source);
         assert_correlated_helper_pair(&root, path, rule, source);
+        let assigned = match path {
+            "Main.java" => source.replace("if (flag) return consume(Objects.equals(a,b), flag);", "if (flag) { boolean value = Objects.equals(a,b); return consume(value, flag); }"),
+            "Main.kt" => source.replace("if (flag) return consume(runCatching { 1 }, flag);", "if (flag) { val value = runCatching { 1 }; return consume(value, flag); }"),
+            "lib.rs" => source.replace("if flag { return consume(remove_file(path), flag); }", "if flag { let value = remove_file(path); return consume(value, flag); }"),
+            _ => unreachable!(),
+        };
+        std::fs::write(root.path().join(path), assigned).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
     }
 }
 
