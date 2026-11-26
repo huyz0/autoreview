@@ -311,6 +311,28 @@ pub fn supports_match(node: Node<'_>) -> bool {
     match_flow::supports(node)
 }
 
+/// Simple arm-local bindings in a supported Rust match pattern.
+pub fn match_arm_bindings(arm: Node<'_>) -> Vec<Node<'_>> {
+    match_flow::arm_bindings(arm)
+}
+
+/// Lines where a supported match projects one or more arm-local values.
+pub fn match_binding_lines(function: Node<'_>) -> Vec<u32> {
+    let mut pending = function.child_by_field_name("body").into_iter().collect::<Vec<_>>();
+    let mut lines = Vec::new();
+    while let Some(node) = pending.pop() {
+        if matches!(node.kind(), "function_item" | "closure_expression" | "async_block" | "macro_invocation") { continue; }
+        if supports_match(node) && node.child_by_field_name("body").is_some_and(|body|
+            body.named_children(&mut body.walk()).any(|arm| !match_arm_bindings(arm).is_empty())) {
+            lines.push(node.start_position().row as u32 + 1);
+        }
+        pending.extend(node.named_children(&mut node.walk()));
+    }
+    lines.sort_unstable();
+    lines.dedup();
+    lines
+}
+
 fn statement_position(node: Node<'_>) -> bool {
     node.parent().is_some_and(|parent| {
         matches!(

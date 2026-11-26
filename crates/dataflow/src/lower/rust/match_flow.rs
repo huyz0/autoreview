@@ -1,7 +1,7 @@
 use super::{Bindings, EdgeKind, Lower, Node, NodeId};
+use crate::cfg::{BindingWrite, IdentityOperand, Stmt};
 
-// A final wildcard guarantees an arm. Excluding bindings and guards keeps
-// arm-local names and guard side effects from being silently discarded.
+// A final wildcard guarantees an arm. Guard evaluation remains unsupported.
 pub(super) fn supports(node: Node<'_>) -> bool {
     if node.kind() != "match_expression" || node.has_error()
         || !node.parent().is_some_and(non_tail_statement)
@@ -9,7 +9,7 @@ pub(super) fn supports(node: Node<'_>) -> bool {
     let Some(body) = node.child_by_field_name("body") else { return false };
     let arms: Vec<_> = body.named_children(&mut body.walk()).filter(|item| item.kind() != "line_comment" && item.kind() != "block_comment").collect();
     let Some((last, rest)) = arms.split_last() else { return false };
-    rest.iter().all(|arm| unbound_arm(*arm)) && wildcard_arm(*last)
+    rest.iter().all(|arm| supported_arm(*arm)) && wildcard_arm(*last)
 }
 
 fn non_tail_statement(parent: Node<'_>) -> bool {
@@ -51,22 +51,30 @@ fn simple_call(node: Node<'_>) -> bool {
     callee && node.child_by_field_name("arguments").is_some_and(|args| args.named_children(&mut args.walk()).all(simple_value))
 }
 
-fn unbound_arm(arm: Node<'_>) -> bool {
+fn supported_arm(arm: Node<'_>) -> bool {
     pattern(arm).is_some_and(|pattern| pattern.named_child_count() == 1
         && pattern.named_child(0).is_some_and(|part| matches!(part.kind(), "integer_literal" | "boolean_literal" | "char_literal" | "string_literal" | "scoped_identifier")
-            || wildcard_tuple(part)))
+            || tuple_bindings(part).is_some()))
 }
 
-fn wildcard_tuple(node: Node<'_>) -> bool {
-    let Some(ty) = node.child_by_field_name("type") else { return false };
-    if node.kind() != "tuple_struct_pattern" || !matches!(ty.kind(), "identifier" | "scoped_identifier") { return false; }
-    let mut wildcard = false;
+fn tuple_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
+    let ty = node.child_by_field_name("type")?;
+    if node.kind() != "tuple_struct_pattern" || !matches!(ty.kind(), "identifier" | "scoped_identifier") { return None; }
+    let mut bindings = Vec::new();
+    let mut has_element = false;
     for child in node.children(&mut node.walk()) {
         if child == ty || matches!(child.kind(), "(" | ")" | ",") { continue; }
-        if child.kind() != "_" { return false; }
-        wildcard = true;
+        match child.kind() {
+            "_" => has_element = true,
+            "identifier" => { has_element = true; bindings.push(child); }
+            _ => return None,
+        }
     }
-    wildcard
+    has_element.then_some(bindings)
+}
+
+pub(super) fn arm_bindings(arm: Node<'_>) -> Vec<Node<'_>> {
+    pattern(arm).and_then(|pattern| pattern.named_child(0)).and_then(tuple_bindings).unwrap_or_default()
 }
 
 fn wildcard_arm(arm: Node<'_>) -> bool {
@@ -82,7 +90,16 @@ impl Lower<'_> {
             let value = arm.child_by_field_name("value")?;
             let start = self.cfg.push_node(super::line(value));
             self.edge(evaluated, start, EdgeKind::Fallthrough);
-            if let Some(end) = self.statement(value, start, &mut names.clone()) { ends.push(end); }
+            let mut arm_names = names.clone();
+            for binding in arm_bindings(arm) {
+                let name = self.text(binding).to_owned();
+                arm_names.insert(name.clone(), self.fresh(&name));
+                if self.cfg.keyed_flow.is_some() {
+                    self.cfg.emit(start, Stmt::Rebind(BindingWrite { name: name.clone(), start: binding.start_byte(),
+                        value: Some(IdentityOperand::Fresh { name, start: binding.start_byte(), age: 0, unit: 0 }) }), super::line(binding));
+                }
+            }
+            if let Some(end) = self.statement(value, start, &mut arm_names) { ends.push(end); }
         }
         if ends.is_empty() { return None; }
         let join = self.cfg.push_node(super::line(node));

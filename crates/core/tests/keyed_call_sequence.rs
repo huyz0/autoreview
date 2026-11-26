@@ -78,6 +78,28 @@ const RECEIVER: &str = "{receiver: true, keyArgument: 0}";
 const ARGUMENT: &str = "{collectionArgument: 0, keyArgument: 2}";
 
 #[test]
+fn rust_match_bindings_do_not_borrow_outer_key_identity() {
+    let same = "fn pending(root: &mut Registry, value: Option<&str>) {\n match value { Some(key) => { root.register(key); root.remove(key); }, _ => {} };\n}\n";
+    assert!(findings("Rust", "lib.rs", same, RECEIVER, true).is_empty());
+    let wrong = same.replace("root.remove(key)", "root.remove(\"other\")");
+    assert_eq!(findings("Rust", "lib.rs", &wrong, RECEIVER, true).len(), 1);
+}
+
+#[test]
+fn rust_shadowed_match_key_never_appears_fully_verified() {
+    let source = "fn pending(root: &mut Registry, key: &str, value: Option<&str>) {\n root.register(key);\n match value { Some(key) => { root.remove(key); }, _ => {} };\n}\n";
+    let repo = tempfile::tempdir().unwrap();
+    let pack = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("lib.rs"), source).unwrap();
+    std::fs::write(pack.path().join("pending.yml"), "id: pending-entry\nkind: call-sequence\nlanguage: Rust\ncategory: correctness\nseverity: warning\nmessage: Clean up\nafter: [{call: register}]\nunless: [{call: remove}]\ncheckBeforeReturn: true\nidentity: {receiver: true, keyArgument: 0}\n").unwrap();
+    let result = autoreview_core::run_dataflow_check_with_coverage(repo.path(), repo.path(), &["lib.rs".into()], &[ResolvedRulePack {
+        id: "entries".into(), local_path: pack.path().into(), trust: RulePackTrust::Full,
+    }]);
+    assert!(result.coverage.iter().any(|issue| issue.reason == "rust_match_binding_projection"
+        && issue.rule.as_deref() == Some("pending-entry") && issue.line == Some(3)), "{:?}", result.coverage);
+}
+
+#[test]
 fn cleanup_preserves_other_collections_keys_and_paths() {
     let source = r#"function pending(active, spare, partial) {
     active.register("first");
