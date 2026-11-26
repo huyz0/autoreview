@@ -53,16 +53,30 @@ function run(request) {
       ts.TypeFlags.ESSymbolLike;
     return !!(type.flags & primitive) && !checker.getPropertyOfType(type, 'then');
   }
-  function directlyAwaited(node) {
+  // Follow only expression positions whose evaluated value becomes the value
+  // of the containing expression. Conditions and left operands are inputs,
+  // not necessarily the value adopted by await or an async return.
+  function adoptedExpression(node) {
     let value = node;
-    while (value.parent && ts.isParenthesizedExpression(value.parent) && value.parent.expression === value) value = value.parent;
+    while (value.parent) {
+      const parent = value.parent;
+      if (ts.isParenthesizedExpression(parent) && parent.expression === value ||
+          parent.kind === ts.SyntaxKind.ConditionalExpression && (parent.whenTrue === value || parent.whenFalse === value) ||
+          parent.kind === ts.SyntaxKind.BinaryExpression && parent.right === value &&
+            [ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken].includes(parent.operatorToken.kind)) {
+        value = parent;
+      } else break;
+    }
+    return value;
+  }
+  function directlyAwaited(node) {
+    const value = adoptedExpression(node);
     return !!value.parent && ts.isAwaitExpression(value.parent) && value.parent.expression === value;
   }
   // Only traverse ordinary blocks, ifs and switch cases: finally blocks,
   // iterator cleanup and resource disposal can replace a pending return.
   function returnedFromAsync(node) {
-    let value = node;
-    while (value.parent && ts.isParenthesizedExpression(value.parent) && value.parent.expression === value) value = value.parent;
+    const value = adoptedExpression(node);
     let current = value.parent;
     if (current && ts.isArrowFunction(current) && current.body === value) return asyncFunction(current);
     if (!current || !ts.isReturnStatement(current) || current.expression !== value) return false;
