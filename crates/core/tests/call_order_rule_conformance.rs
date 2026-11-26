@@ -183,12 +183,16 @@ fn unsupported_contract_handle_storage_reports_incomplete_analysis() {
     assert!(!check().coverage.iter().any(|issue| issue.reason == "unmodeled_contract_handle"));
 }
 
+fn conditional_test_result(root: &tempfile::TempDir, path: &str) -> autoreview_core::DataflowReviewResult {
+    autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &[path.into()], &[])
+}
+
 #[test]
 fn conditional_return_results_flow_through_helpers() {
     for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
         let source = "import { rename } from 'node:fs/promises';\nfunction make(a, b, flag) {\n return flag ? rename(a, b) : null;\n}\nexport function run(a, b, flag) { make(a, b, flag); }\n";
         let root = write_single_file(path, source);
-        let check = || autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &[path.into()], &[]);
+        let check = || conditional_test_result(&root, path);
         let result = check();
         let hits: Vec<_> = result.findings.iter().filter(|hit| hit.source.rule_id.as_deref() == Some(rule)).collect();
         assert_eq!(hits.len(), 1, "{path}: {hits:#?} {:?}", result.coverage);
@@ -219,7 +223,7 @@ fn discarded_results_in_conditional_statements_are_tracked() {
     for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
         let source = "import { rename } from 'node:fs/promises';\nexport function run(a, b, flag) {\n flag ? rename(a, b) : null;\n}\n";
         let root = write_single_file(path, source);
-        let check = || autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &[path.into()], &[]);
+        let check = || conditional_test_result(&root, path);
         let result = check();
         let hits: Vec<_> = result.findings.iter().filter(|hit| hit.source.rule_id.as_deref() == Some(rule)).collect();
         assert_eq!(hits.len(), 1, "{path}: {hits:#?} {:?}", result.coverage);

@@ -19,12 +19,13 @@ pub(super) fn lower(cfg: &mut Cfg<Stmt>, node: Node<'_>, source: &[u8], current:
     for (arm, edge, impossible) in [(yes, EdgeKind::True, literal == "false"), (no, EdgeKind::False, literal == "true")] {
         let start = cfg.push_node(line(arm));
         if !impossible { cfg.edges.push((current, start, edge)); }
-        lower_arm(cfg, arm, source, start, join, returning.then_some(node.start_byte()));
+        lower_arm(cfg, arm, source, (start, join), returning.then_some(node.start_byte()));
     }
     Some(join)
 }
 
-fn lower_arm(cfg: &mut Cfg<Stmt>, arm: Node<'_>, source: &[u8], start: NodeId, join: NodeId, return_start: Option<usize>) {
+fn lower_arm(cfg: &mut Cfg<Stmt>, arm: Node<'_>, source: &[u8], nodes: (NodeId, NodeId), return_start: Option<usize>) {
+    let (start, join) = nodes;
     let mut end = nested_arguments(cfg, arm, source, start);
     if cfg.keyed_exceptions {
         if let Some(call) = throwing_call(arm, source) { end = cfg.fork_exception(end, call, line(arm)); }
