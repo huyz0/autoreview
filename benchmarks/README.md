@@ -90,6 +90,26 @@ git fetch --depth 2 https://github.com/golang/tools.git c6f2f8edba4a9d5be665bb15
 autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/go-tools.yaml
 ```
 
+`syzkaller-swallowed-error.yaml` records an Apache-2.0 Go fix where a failed
+service-configuration call was checked but the branch returned `nil`. Replay
+finds line 188 before the fix and no findings in the fixed file. This is one
+historical fix pair, not an estimate of general rule accuracy. The rule is a
+syntactic heuristic: it does not prove the checked value's type or whether
+suppressing the error is intentional. It only matches an immediately returning
+branch inside an explicitly `error`-returning function or method, and excludes
+branches with additional handling. Reproduce with:
+
+```sh
+git init syzkaller
+cd syzkaller
+git fetch --depth 2 https://github.com/google/syzkaller.git 9e5c2a555caa9213219160895411f922d6c0358b
+autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/syzkaller-swallowed-error.yaml
+```
+
+The same pattern was observed in the pre-fix source of Cilium commit
+`fb7b8f905fc3e00fa17aa510b0e2d9262c469053`; the fixed file has no match for
+this rule. That source-level observation has not been scored by replay.
+
 Coverage reporting is not exhaustive: unsupported expressions and unresolved
 imports can still escape the current diagnostics. A clean replay is evidence
 for this case, not a guarantee of complete analysis in general.

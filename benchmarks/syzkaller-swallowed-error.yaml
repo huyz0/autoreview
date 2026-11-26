@@ -1,0 +1,16 @@
+cases:
+  - name: syzkaller suppresses a service configuration error
+    rule: {tool: ast-grep, id: go-checked-error-returned-nil}
+    evidence:
+      kind: historical
+      source: https://github.com/google/syzkaller/commit/9e5c2a555caa9213219160895411f922d6c0358b
+      license: Apache-2.0
+      rationale: The error branch returned nil; the fix returns the service configuration error.
+    before:
+      commit: 01ff072a602c88b4dacfd533bb78d0649b4cf739
+      path: pkg/mgrconfig/load.go
+      lines: [188]
+    after:
+      commit: 9e5c2a555caa9213219160895411f922d6c0358b
+      path: pkg/mgrconfig/load.go
+      lines: []

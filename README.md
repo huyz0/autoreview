@@ -16,7 +16,9 @@ deep tier.
 
 - **ast-grep pattern rules** for Go, Java, Kotlin, TypeScript, JavaScript,
   and Rust. Rust rules cover resource lifetimes, panic and unsafe preconditions,
-  blocking behavior, credentials, and TLS.
+  blocking behavior, credentials, and TLS. A Go heuristic also flags an
+  immediate `return nil` after checking a failed call in an `error`-returning
+  function; review whether suppressing the error is intentional.
 - **Scoped Rust review** resolves explicit imports and local bindings to catch
   discarded assertions in supported parameterized and asynchronous tests, Mockall expectation problems, and
   SQLx, Diesel, and rusqlite query issues without a build.
