@@ -22,6 +22,27 @@ concurrency:
 # Clippy (below) already catches the things that actually matter.
 
 jobs:
+  kotlin-callback-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install pinned Kotlin compiler
+        run: |
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/kotlin.zip" https://github.com/JetBrains/kotlin/releases/download/v2.2.20/kotlin-compiler-2.2.20.zip
+          echo '81f0264c9073b5cbbdb3ff8418cf2c5dac076879fc156fa1a6462f5a5acc4420  '"$RUNNER_TEMP/kotlin.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/kotlin.zip" -d "$RUNNER_TEMP/kotlin"
+      - name: Test compiler evidence prototype
+        run: |
+          export AUTOREVIEW_TEST_KOTLINC="$RUNNER_TEMP/kotlin/kotlinc/bin/kotlinc"
+          export AUTOREVIEW_TEST_KOTLIN_COMPILER_JAR="$RUNNER_TEMP/kotlin/kotlinc/lib/kotlin-compiler.jar"
+          export AUTOREVIEW_TEST_JAVAC="$(command -v javac)"
+          python3 tools/kotlin-callback-evidence/test_evidence.py
+
   test:
     runs-on: ubuntu-latest
     # A hung subprocess (golangci-lint/ast-grep) shouldn't consume a CI
