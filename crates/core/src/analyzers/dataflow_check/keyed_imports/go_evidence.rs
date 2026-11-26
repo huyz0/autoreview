@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -10,6 +11,8 @@ use super::Source;
 
 const PACKAGE_LIMIT: usize = 8;
 const CALL_LIMIT: usize = 2048;
+const PACKAGE_SOURCE_LIMIT: u64 = 8 * 1024 * 1024;
+const PACKAGE_FILE_LIMIT: usize = 512;
 
 pub(super) struct TrustedGo {
     probe: PathBuf,
@@ -30,6 +33,8 @@ struct Request<'a> {
     package_dir: &'a Path,
     go_binary: &'a Path,
     expected_sources: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    package_sources: Option<BTreeMap<String, String>>,
     calls: Vec<Call>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     include_callees: bool,
@@ -130,10 +135,12 @@ fn check_with_probe_and_callees(
             verified.discovery.limitations.push(limitation(None));
             continue;
         }
-        let mut request = Request { package_dir: &dir, go_binary: &checker.go, expected_sources: group.expected, calls: group.calls, include_callees };
+        let package_sources = include_callees.then(|| package_source_hashes(&dir)).flatten();
+        let mut request = Request { package_dir: &dir, go_binary: &checker.go, expected_sources: group.expected, package_sources, calls: group.calls, include_callees };
         let results = verify(&checker.probe, &request).or_else(|| {
             if !request.include_callees { return None; }
             request.include_callees = false;
+            request.package_sources = None;
             verify(&checker.probe, &request)
         });
         match results {
@@ -145,6 +152,26 @@ fn check_with_probe_and_callees(
         }
     }
     (check_keyed_units_with_verified_components(spec, units, verified.discovery, &verified.components), verified.callees)
+}
+
+fn package_source_hashes(dir: &Path) -> Option<BTreeMap<String, String>> {
+    let mut hashes = BTreeMap::new();
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(dir).ok()? {
+        let entry = entry.ok()?;
+        let name = entry.file_name().into_string().ok()?;
+        if !name.ends_with(".go") { continue; }
+        let metadata = entry.file_type().ok()?;
+        if !metadata.is_file() || hashes.len() >= PACKAGE_FILE_LIMIT { return None; }
+        let size = entry.metadata().ok()?.len();
+        total = total.checked_add(size)?;
+        if total > PACKAGE_SOURCE_LIMIT { return None; }
+        let mut bytes = Vec::new();
+        std::fs::File::open(entry.path()).ok()?.take(size.saturating_add(1)).read_to_end(&mut bytes).ok()?;
+        if bytes.len() as u64 != size { return None; }
+        hashes.insert(name, format!("{:x}", Sha256::digest(bytes)));
+    }
+    Some(hashes)
 }
 
 fn valid_callee(callee: &Callee) -> bool {
@@ -323,14 +350,31 @@ mod tests {
         assert!(callees.is_empty());
     }
 
+    #[test]
+    fn callee_evidence_covers_selected_files_not_loaded_as_helpers() {
+        let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
+        let checker = TrustedGo { probe: probe.into(), go: go.into() };
+        let source = "package sample\nfunc operation() error { return nil }\nfunc use() { operation() }\n";
+        let extra = [("other.go", "package sample\nvar setting = 1\n"), ("other_test.go", "package sample\nthis is not parsed\n")];
+        let (result, callees) = analyze_source_with_files(source, &checker, true, &extra);
+        let start = source.rfind("operation()").unwrap();
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(callees[&("main.go".to_owned(), start)]["name"], "operation");
+    }
+
     fn analyze_source(source: &str, checker: &TrustedGo) -> KeyedCheckResult {
         analyze_source_with_evidence(source, checker, false).0
     }
 
     fn analyze_source_with_evidence(source: &str, checker: &TrustedGo, include_callees: bool) -> (KeyedCheckResult, CalleeEvidence) {
+        analyze_source_with_files(source, checker, include_callees, &[])
+    }
+
+    fn analyze_source_with_files(source: &str, checker: &TrustedGo, include_callees: bool, extra: &[(&str, &str)]) -> (KeyedCheckResult, CalleeEvidence) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("go.mod"), "module example.test/probe\n\ngo 1.22\n").unwrap();
         std::fs::write(dir.path().join("main.go"), source).unwrap();
+        for (name, contents) in extra { std::fs::write(dir.path().join(name), contents).unwrap(); }
         let tree = autoreview_langsupport::parser_for(Language::Go).unwrap().parse(source, None).unwrap();
         let parsed = Rc::new((source.to_owned(), tree));
         let sources = BTreeMap::from([("main.go".to_owned(), Source { language: Language::Go, parsed, imports: vec![], exports: vec![] })]);
