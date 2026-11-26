@@ -15,6 +15,12 @@ It does not claim that every unsupported construct has been catalogued.
 | A keyed cleanup argument contains an unsupported nested expression | Direct nested calls such as `root.remove(choose(key))` are followed, but conditional and other complex argument expressions may still be unmodeled. | Track the returned identity through the expression or report that this path was not modeled. |
 | External static tool is unavailable or fails | Review reports include structured analyzer-scoped issues for unavailable ast-grep and golangci-lint and for execution errors from ast-grep, golangci-lint, and Clippy. Clippy findings remain available even when another target fails. Cargo audit errors identify the affected lockfile. Existing text warnings remain. | Other tools and partial failures still need structured coverage; do not imply that other analyzers failed. |
 
+Rust lowering supports non-tail statement matches with an identifier or literal
+scrutinee, literal arms, and a final wildcard. Arms must use supported simple
+statements and calls, without guards or pattern bindings. The analyzer explores
+each arm conservatively. Tail matches, complex scrutinees or arm expressions,
+guards, and binding patterns remain coverage limitations.
+
 Report scopes should distinguish an entire file, a function or root, a rule,
 and an imported dependency. Findings from unaffected scopes remain useful.
 Deduplicate repeated limitations across callers while retaining enough location

@@ -2,6 +2,7 @@
 //! Names are syntactic. Macros and independently executed closures are opaque.
 
 mod values;
+mod match_flow;
 
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -108,6 +109,7 @@ impl Lower<'_> {
     fn flow_expression(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
         match expr.kind() {
             "if_expression" => self.branch(expr, at, names),
+            "match_expression" => self.match_expression(expr, at, names),
             "while_expression" | "for_expression" | "loop_expression" => {
                 self.loop_body(expr, at, names)
             }
@@ -283,7 +285,7 @@ impl Lower<'_> {
 fn supported(node: Node<'_>) -> bool {
     match node.kind() {
         "function_item" | "closure_expression" | "async_block" | "macro_invocation" => return true,
-        "match_expression" | "let_chain" | "let_condition" | "label" | "unsafe_block" => {
+        "let_chain" | "let_condition" | "label" | "unsafe_block" => {
             return false
         }
         "for_expression" | "let_declaration" if !simple_binding(node) => return false,
@@ -300,7 +302,13 @@ fn supported(node: Node<'_>) -> bool {
         }
         _ => {}
     }
-    node.named_children(&mut node.walk()).all(supported)
+    (node.kind() != "match_expression" || supports_match(node))
+        && node.named_children(&mut node.walk()).all(supported)
+}
+
+/// Whether this match can be represented without pattern binding or guards.
+pub fn supports_match(node: Node<'_>) -> bool {
+    match_flow::supports(node)
 }
 
 fn statement_position(node: Node<'_>) -> bool {
