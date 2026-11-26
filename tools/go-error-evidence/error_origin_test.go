@@ -23,15 +23,7 @@ func run(ctx context.Context) { safe(ctx, true); direct(ctx); other(ctx); reassi
 `
 	snippets := []string{"safe(ctx, true)", "direct(ctx)", "other(ctx)", "reassigned(ctx, ctx)", "escaped(ctx)", "named(ctx)", "deferred(ctx)", "wrapped(ctx)", "shadowNil(ctx)"}
 	got := analyzeOrigins(t, src, snippets)
-	for i, call := range got.Calls {
-		if i < 2 {
-			if call.ErrorOrigin == nil || call.ErrorOrigin.Kind != "context_error_or_nil" || call.ErrorOrigin.ContextParameter != 0 {
-				t.Errorf("%s: %+v", snippets[i], call)
-			}
-		} else if call.ErrorOrigin != nil {
-			t.Errorf("unproven %s: %+v", snippets[i], call)
-		}
-	}
+	assertErrorOrigins(t, got, snippets, []int{0, 0, -1, -1, -1, -1, -1, -1, -1})
 }
 
 func TestContextErrorSummaryPassLimitLeavesLongChainsUnknown(t *testing.T) {
@@ -87,17 +79,20 @@ func run(ctx context.Context, w worker, f func(context.Context) error) { outer(c
 `
 	snippets := []string{"outer(ctx);", "w.method(ctx);", "expression(w, ctx);", "unrelated(ctx);", "otherContext(ctx, ctx);", "dynamic(ctx, f);", "cyclic(ctx) }"}
 	got := analyzeOrigins(t, src, snippets)
+	assertErrorOrigins(t, got, snippets, []int{0, 0, 1, -1, 1, -1, -1})
+}
+
+func assertErrorOrigins(t *testing.T, got response, snippets []string, expected []int) {
+	t.Helper()
 	for i, call := range got.Calls {
-		if i < 3 || i == 4 {
-			want := 0
-			if i == 2 || i == 4 {
-				want = 1
+		if expected[i] < 0 {
+			if call.ErrorOrigin != nil {
+				t.Errorf("unproven %s: %+v", snippets[i], call)
 			}
-			if call.ErrorOrigin == nil || call.ErrorOrigin.ContextParameter != want {
-				t.Errorf("%s: %+v", snippets[i], call)
-			}
-		} else if call.ErrorOrigin != nil {
-			t.Errorf("unproven %s: %+v", snippets[i], call)
+			continue
+		}
+		if call.ErrorOrigin == nil || call.ErrorOrigin.Kind != "context_error_or_nil" || call.ErrorOrigin.ContextParameter != expected[i] {
+			t.Errorf("%s: %+v", snippets[i], call)
 		}
 	}
 }
