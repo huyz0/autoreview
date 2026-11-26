@@ -137,7 +137,7 @@ fn replay_excludes_ambiguous_helpers_even_without_a_known_result_source() {
     assert_eq!(report["coverage"][0]["incomplete"], 1);
 }
 
-fn assert_conditional_replay(bad: &str, fixed: &str, line: u32) {
+fn assert_conditional_replay(bad: &str, fixed: &str, line: u32, test_unmodeled: bool) {
     let repo = init_repo(&[("main.js", bad)]);
     let before = current_commit(repo.path());
     repo.commit(&[("main.js", fixed)], "observe conditional promise");
@@ -148,6 +148,7 @@ fn assert_conditional_replay(bad: &str, fixed: &str, line: u32) {
     let report: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
     assert_eq!(report["rules"][0]["truePositives"], 1, "{report}");
     assert_eq!(report["coverage"][0]["completed"], 1, "{report}");
+    if !test_unmodeled { return; }
     repo.commit(&[("main.js", &bad.replace("flag ?", "check(flag) ?"))], "use unmodeled condition");
     suite["cases"][0]["before"]["commit"] = current_commit(repo.path()).into();
     suite["cases"][0]["before"]["lines"] = serde_json::json!([]);
@@ -158,21 +159,27 @@ fn assert_conditional_replay(bad: &str, fixed: &str, line: u32) {
 #[test]
 fn replay_tracks_conditional_assignment_results() {
     let bad = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = flag ? rename(a, b) : null;\n}\n";
-    assert_conditional_replay(bad, &bad.replace("\n}\n", "\n await pending;\n}\n"), 3);
+    assert_conditional_replay(bad, &bad.replace("\n}\n", "\n await pending;\n}\n"), 3, true);
 }
 
 #[test]
 fn replay_tracks_returned_conditional_helper_results() {
     let bad = "import { rename } from 'node:fs/promises';\nfunction make(a, b, flag) { return flag ? rename(a, b) : null; }\nexport function run(a, b, flag) { make(a, b, flag); }\n";
     let fixed = bad.replace("export function run(a, b, flag) { make(a, b, flag); }", "export async function run(a, b, flag) { await make(a, b, flag); }");
-    assert_conditional_replay(bad, &fixed, 2);
+    assert_conditional_replay(bad, &fixed, 2, true);
 }
 
 #[test]
 fn replay_detects_conditional_discarded_promise() {
     let bad = "import { rename } from 'node:fs/promises';\nexport function run(a, b, flag) {\n flag ? rename(a, b) : null;\n}\n";
     let clean = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n if (flag) { await rename(a, b); }\n}\n";
-    assert_conditional_replay(bad, clean, 3);
+    assert_conditional_replay(bad, clean, 3, true);
+}
+
+#[test]
+fn replay_detects_discarded_conditional_binding() {
+    let bad = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = rename(a, b);\n flag ? pending : null;\n}\n";
+    assert_conditional_replay(bad, &bad.replace("\n}\n", "\n await pending;\n}\n"), 3, false);
 }
 
 #[test]

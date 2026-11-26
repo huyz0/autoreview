@@ -98,6 +98,7 @@ impl Lower<'_, '_, '_> {
                 if reached {
                     for range in &node.evaluations {
                         let Some(syntax) = evaluation(function, range) else { continue; };
+                        if site::identifier(syntax) && site::discarded_conditional_arm(syntax) { continue; }
                         if let Some((span, kind)) = &range.assignment {
                             if let Some((owner, target, reassign)) = syntax_at(function, span, *kind)
                                 .and_then(|owner| assignment_parts(owner, self.source).map(|(target, _, reassign)| (owner, target, reassign))) {

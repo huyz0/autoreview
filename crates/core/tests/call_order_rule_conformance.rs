@@ -197,6 +197,33 @@ fn conditional_finding_fixture(path: &str, rule: &str, source: &str) -> tempfile
 }
 
 #[test]
+fn discarded_conditional_bindings_do_not_consume_results() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = rename(a, b);\n flag ? pending : null;\n}\n";
+        let root = conditional_finding_fixture(path, rule, source);
+        let check = || conditional_test_result(&root, path);
+        let observed = source.replace("\n}\n", "\n await pending;\n}\n");
+        std::fs::write(root.path().join(path), observed).unwrap();
+        let result = check();
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        let helper = "import { rename } from 'node:fs/promises';\nfunction ignore(value, flag) { flag ? value : null; }\nexport function run(a, b, flag) { const pending = rename(a, b); ignore(pending, flag); }\n";
+        std::fs::write(root.path().join(path), helper).unwrap();
+        let result = check();
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let branch = source.replace("\n}\n", "\n if (flag) await pending; else await pending;\n}\n");
+        std::fs::write(root.path().join(path), branch).unwrap();
+        let result = check();
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let imported = "import { rename } from 'node:fs/promises';\nimport { ignore } from './helper';\nexport function run(a, b, flag) { const pending = rename(a, b); ignore(pending, flag); }\n";
+        std::fs::write(root.path().join(path), imported).unwrap();
+        let extension = path.rsplit('.').next().unwrap();
+        std::fs::write(root.path().join(format!("helper.{extension}")), "export function ignore(value, flag) { flag ? value : null; }\n").unwrap();
+        let result = check();
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+    }
+}
+
+#[test]
 fn conditional_assignments_track_result_use() {
     for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
         let source = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = flag ? rename(a, b) : null;\n}\n";
