@@ -483,10 +483,7 @@ mod tests {
         let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
         let source = "package sample\nimport \"context\"\nfunc wrapper(ctx context.Context) error { err := operation(ctx); if err != nil { return err }; return nil }\nfunc operation(ctx context.Context) error { return ctx.Err() }\nfunc use(ctx context.Context) { wrapper(ctx) }\n";
         let (result, evidence) = analyze_source_with_origins(source, &checker, false, &[], true);
-        let hit = result.hits.iter().find(|hit| hit.trigger_call == "wrapper").unwrap();
-        let origin = evidence[&(hit.path.clone().unwrap(), hit.source_start.unwrap())].error_origin.as_ref().unwrap();
-        assert_eq!(origin["kind"], "context_error_or_nil");
-        assert_eq!(origin["contextParameter"], 0);
+        assert_wrapper_origin(&result, &evidence);
     }
 
     #[test]
@@ -494,10 +491,8 @@ mod tests {
         let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
         let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
         let (result, evidence) = analyze_dependency_fixture(&checker);
-        let hit = result.hits.iter().find(|hit| hit.trigger_call == "wrapper").unwrap();
         assert!(result.limitations.is_empty());
-        let origin = evidence[&(hit.path.clone().unwrap(), hit.source_start.unwrap())].error_origin.as_ref().unwrap();
-        assert_eq!(origin["kind"], "context_error_or_nil");
+        assert_wrapper_origin(&result, &evidence);
     }
 
     #[test]
@@ -522,6 +517,13 @@ mod tests {
         let source = "package sample\nimport (\"context\"; \"example.test/probe/dep\")\nfunc wrapper(ctx context.Context) error { return dep.Leaf(ctx) }\nfunc use(ctx context.Context) { wrapper(ctx) }\n";
         let files = [("dep/dep.go", "package dep\nimport \"context\"\nfunc Leaf(ctx context.Context) error { return ctx.Err() }\n")];
         analyze_source_with_config(source, checker, &files, (false, true, Some(r#"{"example.test/probe/dep":"dep"}"#)))
+    }
+
+    fn assert_wrapper_origin(result: &KeyedCheckResult, evidence: &CalleeEvidence) {
+        let hit = result.hits.iter().find(|hit| hit.trigger_call == "wrapper").unwrap();
+        let origin = evidence[&(hit.path.clone().unwrap(), hit.source_start.unwrap())].error_origin.as_ref().unwrap();
+        assert_eq!(origin["kind"], "context_error_or_nil");
+        assert_eq!(origin["contextParameter"], 0);
     }
 
     fn analyze_source(source: &str, checker: &TrustedGo) -> KeyedCheckResult {
