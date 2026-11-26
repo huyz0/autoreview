@@ -15,13 +15,7 @@ func stableIntegerParameter(body *ast.BlockStmt, param *types.Var, info *types.I
 		return false
 	}
 	stable := true
-	var stack []ast.Node
-	ast.Inspect(body, func(node ast.Node) bool {
-		if node == nil {
-			stack = stack[:len(stack)-1]
-			return true
-		}
-		stack = append(stack, node)
+	inspectWithStack(body, nil, func(node ast.Node, stack []ast.Node) {
 		if _, ok := node.(*ast.FuncLit); ok {
 			stable = false
 		}
@@ -29,7 +23,6 @@ func stableIntegerParameter(body *ast.BlockStmt, param *types.Var, info *types.I
 		if ok && info.Uses[ident] == param && parameterMayChange(stack) {
 			stable = false
 		}
-		return true
 	})
 	return stable
 }
@@ -40,25 +33,23 @@ func parameterMayChange(stack []ast.Node) bool {
 	}
 	ident := stack[len(stack)-1]
 	for i := len(stack) - 2; i >= 0; i-- {
+		changed := false
 		switch node := stack[i].(type) {
 		case *ast.ParenExpr:
 			ident = node
+			continue
 		case *ast.UnaryExpr:
-			return node.Op == token.AND && node.X == ident
+			changed = node.Op == token.AND && node.X == ident
 		case *ast.IncDecStmt:
-			return node.X == ident
+			changed = node.X == ident
 		case *ast.AssignStmt:
 			for _, lhs := range node.Lhs {
-				if lhs == ident {
-					return true
-				}
+				changed = changed || lhs == ident
 			}
-			return false
 		case *ast.RangeStmt:
-			return node.Key == ident || node.Value == ident
-		default:
-			return false
+			changed = node.Key == ident || node.Value == ident
 		}
+		return changed
 	}
 	return false
 }
@@ -70,13 +61,7 @@ func integerGuard(expr ast.Expr, param *types.Var, argument constant.Value, info
 		return false, false
 	}
 	condition, ok := expr.(*ast.BinaryExpr)
-	if !ok {
-		return false, false
-	}
-	if !isIntegerParameter(condition.X, param, info) && !isIntegerParameter(condition.Y, param, info) {
-		return false, false
-	}
-	if condition.Op != token.EQL && condition.Op != token.NEQ && condition.Op != token.LSS && condition.Op != token.LEQ && condition.Op != token.GTR && condition.Op != token.GEQ {
+	if !ok || !comparisonOperator(condition.Op) || (!isIntegerParameter(condition.X, param, info) && !isIntegerParameter(condition.Y, param, info)) {
 		return false, false
 	}
 	left, leftOK := integerOperand(condition.X, param, argument, info)
@@ -85,6 +70,10 @@ func integerGuard(expr ast.Expr, param *types.Var, argument constant.Value, info
 		return false, false
 	}
 	return constant.Compare(left, condition.Op, right), true
+}
+
+func comparisonOperator(op token.Token) bool {
+	return op == token.EQL || op == token.NEQ || op == token.LSS || op == token.LEQ || op == token.GTR || op == token.GEQ
 }
 
 func isIntegerParameter(expr ast.Expr, param *types.Var, info *types.Info) bool {
@@ -132,14 +121,14 @@ func specializeCall(call *ast.CallExpr, info *types.Info, summaries map[callee]*
 	if !ok {
 		return nil
 	}
-	signature, ok := local.function.Type().(*types.Signature)
-	if !ok || signature.Results().Len() != 1 {
+	signature := singleUnnamedError(local.function)
+	if signature == nil {
 		return nil
 	}
-	output := signature.Results().At(0)
-	if output.Name() != "" || !types.Identical(output.Type(), types.Universe.Lookup("error").Type()) {
-		return nil
-	}
+	return specializeArguments(call, local.decl.Body, signature, info, summaries)
+}
+
+func specializeArguments(call *ast.CallExpr, body *ast.BlockStmt, signature *types.Signature, info *types.Info, summaries map[callee]*errorOrigin) *errorOrigin {
 	offset := callReceiverOffset(call, info)
 	for i := 0; i < signature.Params().Len(); i++ {
 		if i+offset >= len(call.Args) {
@@ -147,10 +136,10 @@ func specializeCall(call *ast.CallExpr, info *types.Info, summaries map[callee]*
 		}
 		argument := info.Types[call.Args[i+offset]].Value
 		param := signature.Params().At(i)
-		if argument == nil || argument.Kind() != constant.Int || !stableIntegerParameter(local.decl.Body, param, info) {
+		if argument == nil || argument.Kind() != constant.Int || !stableIntegerParameter(body, param, info) {
 			continue
 		}
-		if origin := specializeContext(local.decl.Body, signature, param, argument, info, summaries); origin != nil {
+		if origin := specializeContext(body, signature, param, argument, info, summaries); origin != nil {
 			origin.Specialized = &integerEvidence{Parameter: i, Value: argument.ExactString()}
 			return origin
 		}
@@ -163,36 +152,28 @@ func specializeContext(body *ast.BlockStmt, signature *types.Signature, integer 
 	matched := false
 	ast.Inspect(body, func(node ast.Node) bool {
 		branch, ok := node.(*ast.IfStmt)
-		if !ok {
-			return true
-		}
-		value, known := integerGuard(branch.Cond, integer, argument, info)
-		if !known {
-			return true
-		}
-		matched = true
-		if value {
-			if branch.Else != nil {
-				unreachable[branch.Else] = true
-			}
-		} else {
-			unreachable[branch.Body] = true
+		if ok {
+			matched = markIntegerBranch(branch, integer, argument, info, unreachable) || matched
 		}
 		return true
 	})
 	if !matched {
 		return nil
 	}
-	var found *errorOrigin
-	for i := 0; i < signature.Params().Len(); i++ {
-		param := signature.Params().At(i)
-		if !isContextParameter(param) || !contextReturnsWithReachability(body, param, info, summaries, unreachable) {
-			continue
-		}
-		if found != nil {
-			return nil
-		}
-		found = &errorOrigin{Kind: "context_error_or_nil", ContextParameter: i}
+	return contextOrigin(body, signature, info, summaries, unreachable)
+}
+
+func markIntegerBranch(branch *ast.IfStmt, integer *types.Var, argument constant.Value, info *types.Info, unreachable map[ast.Node]bool) bool {
+	value, known := integerGuard(branch.Cond, integer, argument, info)
+	if !known {
+		return false
 	}
-	return found
+	if value {
+		if branch.Else != nil {
+			unreachable[branch.Else] = true
+		}
+	} else {
+		unreachable[branch.Body] = true
+	}
+	return true
 }

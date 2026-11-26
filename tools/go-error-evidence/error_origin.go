@@ -68,6 +68,14 @@ func originDeclaration(item ast.Decl, info *types.Info) (*ast.FuncDecl, *types.F
 }
 
 func summarizeContextReturns(decl *ast.FuncDecl, function *types.Func, info *types.Info, summaries map[callee]*errorOrigin) *errorOrigin {
+	signature := singleUnnamedError(function)
+	if signature == nil {
+		return nil
+	}
+	return contextOrigin(decl.Body, signature, info, summaries, unreachableErrorBranches(decl.Body, info))
+}
+
+func singleUnnamedError(function *types.Func) *types.Signature {
 	signature, ok := function.Type().(*types.Signature)
 	if !ok || signature.Results().Len() != 1 {
 		return nil
@@ -76,10 +84,14 @@ func summarizeContextReturns(decl *ast.FuncDecl, function *types.Func, info *typ
 	if result.Name() != "" || !types.Identical(result.Type(), types.Universe.Lookup("error").Type()) {
 		return nil
 	}
+	return signature
+}
+
+func contextOrigin(body *ast.BlockStmt, signature *types.Signature, info *types.Info, summaries map[callee]*errorOrigin, unreachable map[ast.Node]bool) *errorOrigin {
 	var found *errorOrigin
 	for i := 0; i < signature.Params().Len(); i++ {
 		param := signature.Params().At(i)
-		if !isContextParameter(param) || !contextReturnsOnly(decl.Body, param, info, summaries) {
+		if !isContextParameter(param) || !contextReturnsWithReachability(body, param, info, summaries, unreachable) {
 			continue
 		}
 		if found != nil {
@@ -95,28 +107,30 @@ func isContextParameter(param *types.Var) bool {
 	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "context" && named.Obj().Name() == "Context"
 }
 
-func contextReturnsOnly(body *ast.BlockStmt, param *types.Var, info *types.Info, summaries map[callee]*errorOrigin) bool {
-	unreachable := unreachableErrorBranches(body, info)
-	return contextReturnsWithReachability(body, param, info, summaries, unreachable)
+func inspectWithStack(root ast.Node, skip map[ast.Node]bool, visit func(ast.Node, []ast.Node)) {
+	var stack []ast.Node
+	ast.Inspect(root, func(node ast.Node) bool {
+		if node == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		if skip[node] {
+			return false
+		}
+		stack = append(stack, node)
+		visit(node, stack)
+		return true
+	})
 }
 
 func contextReturnsWithReachability(body *ast.BlockStmt, param *types.Var, info *types.Info, summaries map[callee]*errorOrigin, unreachable map[ast.Node]bool) bool {
 	valid, sawError := true, false
 	bindings := forwardedBindings(body, param, info, summaries, unreachable)
-	var stack []ast.Node
-	ast.Inspect(body, func(node ast.Node) bool {
-		if node == nil {
-			stack = stack[:len(stack)-1]
-			return true
-		}
-		if unreachable[node] {
-			return false
-		}
+	inspectWithStack(body, unreachable, func(node ast.Node, stack []ast.Node) {
 		var parent ast.Node
-		if len(stack) > 0 {
-			parent = stack[len(stack)-1]
+		if len(stack) > 1 {
+			parent = stack[len(stack)-2]
 		}
-		stack = append(stack, node)
 		switch item := node.(type) {
 		case *ast.FuncLit, *ast.DeferStmt:
 			valid = false
@@ -144,7 +158,6 @@ func contextReturnsWithReachability(body *ast.BlockStmt, param *types.Var, info 
 				valid = false
 			}
 		}
-		return true
 	})
 	return valid && sawError
 }
