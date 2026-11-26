@@ -62,9 +62,16 @@ fn verified_detail(reason: &str) -> Option<&'static str> {
 }
 
 fn go_detail(reason: &str) -> Option<&'static str> {
-    Some(match reason {
+    go_probe_detail(reason).or_else(|| Some(match reason {
             "typed_go_error_source_unavailable" => "Go error type verification is not configured; this rule was skipped.",
             "go_multi_result_unmodeled" => "A multi-result Go call with an error occurs in an unsupported context; result-use analysis skipped this call.",
+            "go_dependency_evidence_incomplete" => "Requested Go dependency error-origin evidence could not be verified; summaries are incomplete.",
+            _ => return None,
+    }))
+}
+
+fn go_probe_detail(reason: &str) -> Option<&'static str> {
+    Some(match reason {
             "go_error_checker_incomplete" => "Go error type verification could not complete for this package; result-use analysis may be incomplete.",
             "go_error_package_limit" => "The Go error checker package limit was reached; remaining packages were not verified.",
             "go_error_call_limit" => "The Go error checker call-site limit was exceeded; this package was not verified.",
@@ -72,7 +79,6 @@ fn go_detail(reason: &str) -> Option<&'static str> {
             "go_error_typecheck_incomplete" => "The Go error checker could not parse or type-check the selected sources; result-use analysis may be incomplete.",
             "go_error_source_mismatch" => "The Go error checker sources did not match the reviewed snapshot; result-use analysis was skipped.",
             "go_error_probe_invalid_request" => "The Go error checker rejected the package configuration or request; result-use analysis was skipped.",
-            "go_dependency_evidence_incomplete" => "Requested Go dependency error-origin evidence could not be verified; summaries are incomplete.",
             _ => return None,
     })
 }
