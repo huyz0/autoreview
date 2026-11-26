@@ -93,18 +93,10 @@ fn uncertain_path(
     let mut visited = BTreeSet::new();
     let mut found = Evidence::None;
     while let Some((node, mut state, mut evidence)) = pending.pop() {
-        if !visited.insert((node, state.clone(), evidence)) {
-            continue;
-        }
-        if visited.len() > PATH_LIMIT {
-            return if found == Evidence::None {
-                found
-            } else {
-                Evidence::Unknown
-            };
-        }
-        if throws(cfg, node) {
-            continue;
+        match visit(&mut visited, cfg, node, &state, evidence) {
+            None => return found,
+            Some(false) => continue,
+            Some(true) => {}
         }
         let conditional = hidden_at(cfg, node, syntax);
         if process(
@@ -134,6 +126,22 @@ fn uncertain_path(
         );
     }
     Evidence::None
+}
+
+fn visit(
+    visited: &mut BTreeSet<(NodeId, State, Evidence)>,
+    cfg: &Cfg<Stmt>,
+    node: NodeId,
+    state: &State,
+    evidence: Evidence,
+) -> Option<bool> {
+    if !visited.insert((node, state.clone(), evidence)) {
+        return Some(false);
+    }
+    if visited.len() > PATH_LIMIT {
+        return None;
+    }
+    Some(!throws(cfg, node))
 }
 
 fn extend_paths(

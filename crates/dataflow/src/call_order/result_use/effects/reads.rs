@@ -118,33 +118,7 @@ impl Lower<'_, '_, '_> {
             (specialize(&summary.when_discarded, &arguments, self.source, kotlin, &self.plan.syntax),
              specialize(&summary.when_observed, &arguments, self.source, kotlin, &self.plan.syntax))
         };
-        let multi = (arguments.len() == 1).then(|| transparent(arguments[0]))
-            .and_then(|call| self.plan.result_components.get(&call.start_byte()).map(|shape| (call, shape)));
-        let arguments = if let Some((call, shape)) = multi {
-            let Some(origin) = self.origin(call) else { return true; };
-            self.reads(call, effects);
-            (0..shape.count).map(|index| {
-                let place = Place::CallComponent(call.start_byte(), index);
-                let value = if shape.indices.contains(&index) {
-                    let mut component = origin.clone();
-                    component.component = Some(index);
-                    Value::Source(component)
-                } else { Value::Other };
-                effects.push(Effect::Write(vec![Write { target: Some(place), value }]));
-                Some(place)
-            }).collect()
-        } else { arguments
-            .into_iter()
-            .map(|argument| {
-                if let Some(place) = self.place(argument, false) {
-                    return Some(place);
-                }
-                let temporary = Place::CallResult(argument.start_byte());
-                let value = self.value(argument, effects);
-                effects.push(Effect::Write(vec![Write { target: Some(temporary), value }]));
-                Some(temporary)
-            })
-            .collect() };
+        let Some(arguments) = self.lower_helper_arguments(arguments, effects) else { return true; };
         let origins = |values: &[(super::Origin, bool)]| {
             values
                 .iter()
@@ -184,6 +158,37 @@ impl Lower<'_, '_, '_> {
             opaque_origins_observed: opaque_origins(&summary.when_observed.opaque_origins),
         })));
         true
+    }
+
+    fn lower_helper_arguments(&self, arguments: Vec<Node<'_>>, effects: &mut Vec<Effect>) -> Option<Vec<Option<Place>>> {
+        let multi = (arguments.len() == 1).then(|| transparent(arguments[0]))
+            .and_then(|call| self.plan.result_components.get(&call.start_byte()).map(|shape| (call, shape)));
+        let arguments = if let Some((call, shape)) = multi {
+            let origin = self.origin(call)?;
+            self.reads(call, effects);
+            (0..shape.count).map(|index| {
+                let place = Place::CallComponent(call.start_byte(), index);
+                let value = if shape.indices.contains(&index) {
+                    let mut component = origin.clone();
+                    component.component = Some(index);
+                    Value::Source(component)
+                } else { Value::Other };
+                effects.push(Effect::Write(vec![Write { target: Some(place), value }]));
+                Some(place)
+            }).collect()
+        } else { arguments
+            .into_iter()
+            .map(|argument| {
+                if let Some(place) = self.place(argument, false) {
+                    return Some(place);
+                }
+                let temporary = Place::CallResult(argument.start_byte());
+                let value = self.value(argument, effects);
+                effects.push(Effect::Write(vec![Write { target: Some(temporary), value }]));
+                Some(temporary)
+            })
+            .collect() };
+        Some(arguments)
     }
 
     fn opaque_arguments(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
