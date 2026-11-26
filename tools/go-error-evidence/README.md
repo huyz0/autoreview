@@ -76,8 +76,11 @@ The probe also accepts an experimental `includeErrorOrigins` request flag.
 For a statically resolved function whose body is in the loaded package, it may
 report `context_error_or_nil` and the zero-based context parameter index,
 excluding any method receiver. This
-means the supported explicit return expressions are the parameter's `Err()`
-or predeclared `nil`; it does not prove that the context implementation is
+means the supported explicit return expressions are the parameter's `Err()`,
+predeclared `nil`, or a direct call to a same-package helper with an already
+established summary and the same context parameter. Helper summaries use at
+most 16 passes; unresolved or recursive-only flows stay unknown. It does not
+prove that the context implementation is
 well behaved, that callers check the error, or that suppressing it is correct.
 Named returns, deferred or nested functions, reassigned or escaping context
 parameters, other returned expressions, and unavailable source produce no
