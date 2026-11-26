@@ -473,6 +473,21 @@ mod budget_tests {
         assert_eq!(findings.len(), 1, "{findings:#?} {coverage:?}");
         assert_eq!(findings[0].location.range.start_line, 2, "{findings:#?}");
 
+        std::fs::write(dir.path().join("view.tsx"), "declare function one(): Promise<void>;\ndeclare function two(): Promise<void>;\nfunction choose(flag: boolean) {\n  if (flag) { return one(); } else { return two(); }\n}\nexport function run(flag: boolean) { choose(flag); }\n").unwrap();
+        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
+        assert_eq!(findings.len(), 2, "{findings:#?} {coverage:?}");
+        assert!(findings.iter().all(|finding| finding.location.range.start_line == 4), "{findings:#?}");
+
+        std::fs::write(dir.path().join("view.tsx"), "declare function one(): Promise<void>;\ndeclare function two(): Promise<void>;\nfunction choose(flag: boolean) {\n  if (flag) { return one(); } else { return two(); }\n}\nexport async function run(flag: boolean) { choose(flag); await choose(flag); }\n").unwrap();
+        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
+        assert_eq!(findings.len(), 2, "{findings:#?} {coverage:?}");
+        assert!(findings.iter().all(|finding| finding.location.range.start_line == 4), "{findings:#?}");
+
+        std::fs::write(dir.path().join("view.tsx"), "declare function one(): Promise<void>;\ndeclare const ready: Promise<void>;\nfunction choose(flag: boolean) {\n  if (flag) { return one(); } else { return ready; }\n}\nexport function run(flag: boolean) { choose(flag); }\n").unwrap();
+        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
+        assert_eq!(findings.len(), 1, "{findings:#?} {coverage:?}");
+        assert_eq!(findings[0].location.range.start_line, 6);
+
         std::fs::write(dir.path().join("view.tsx"), "async function created(): Promise<void> {}\nexport function run() { created(); }\n").unwrap();
         let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
         assert_eq!(findings.len(), 1, "{findings:#?} {coverage:?}");
