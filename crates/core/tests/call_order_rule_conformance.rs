@@ -218,6 +218,26 @@ fn unresolved_receivers_track_results_in_stored_arrays() {
 }
 
 #[test]
+fn mixed_array_elements_preserve_result_and_helper_flow() {
+    let source = "import { rename } from 'node:fs/promises';\nfunction make(a, b) { return rename(a, b); }\nfunction mixed(a, b) { const p = rename(a, b); const values = [p, build()]; unknown(values); }\nfunction helper(a, b) { const values = [make(a, b), build()]; unknown(values); }\nasync function used(a, b) { const p = rename(a, b); const values = [p, await p]; unknown(values); }\nfunction sideEffect(a, b) { const p = rename(a, b); const values = [send(p), 1]; return values; }\n";
+    assert_web_receiver_lines(source, "unresolved_result_receiver", &[2, 3, 6]);
+    let clean = "import { rename } from 'node:fs/promises';\nfunction make(a, b) { return rename(a, b); }\nfunction run(a, b) { return [make(a, b), build()]; }\n";
+    let root = write_single_file("main.js", clean);
+    assert_helper_locations(root.path(), "main.js", "javascript-node-fs-discarded-promise", &[]);
+}
+
+#[test]
+fn mixed_array_tracks_imported_result_helpers() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("helper.js"), "import { rename } from 'node:fs/promises';\nexport function make(a, b) { return rename(a, b); }\n").unwrap();
+    std::fs::write(root.path().join("main.js"), "import { make } from './helper';\nfunction run(a, b) { const values = [make(a, b), build()]; unknown(values); }\n").unwrap();
+    let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &["main.js".into()], &[]);
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unresolved_result_receiver"
+        && issue.rule.as_deref() == Some("javascript-node-fs-discarded-promise")
+        && issue.path.as_deref() == Some("helper.js") && issue.line == Some(2)), "{:?}", result.coverage);
+}
+
+#[test]
 fn stored_array_result_uncertainty_crosses_helper_files() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("helper.js"), "import { rename } from 'node:fs/promises';\nexport function make(a, b) { return [rename(a, b)]; }\nexport function send(values) { unknown(values); }\n").unwrap();
