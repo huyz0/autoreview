@@ -51,7 +51,9 @@ types and implementations still need further work. Straight-line calls in
 top-level synchronous functions now rely on per-call resolution: unknown
 methods and arities report incomplete coverage, while verified calls can be
 scored by replay. Calls in closures and more complex syntax retain the
-conservative Rust import coverage warning.
+conservative Rust import coverage warning. A function skipped by Rust control
+flow lowering now also reports a rule-scoped limitation, including when a
+separately written associated call appears syntactically simple.
 
 Results reaching an unresolved receiver now produce a coverage limitation
 instead of implying the receiver was verified. Supported flows include direct

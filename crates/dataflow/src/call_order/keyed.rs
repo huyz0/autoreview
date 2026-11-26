@@ -73,7 +73,7 @@ fn check_with_budget(spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], budg
     }
     let program = Program::new(spec, units);
     if !program.has_registration() {
-        return KeyedCheckResult { hits: Vec::new(), limitations: Vec::new() };
+        return KeyedCheckResult { hits: Vec::new(), limitations: program.resolution_limitations() };
     }
     let mut hits = Vec::new();
     let mut limitations = Vec::new();

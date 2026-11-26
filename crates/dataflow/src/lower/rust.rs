@@ -44,6 +44,11 @@ fn lower_function_with(cfg: Cfg<Stmt>, source: &[u8], function: Node<'_>) -> Cfg
     lower.cfg
 }
 
+/// Whether this function's body can be lowered without skipping it entirely.
+pub fn supports_function(function: Node<'_>) -> bool {
+    function.child_by_field_name("body").is_some_and(supported)
+}
+
 type Bindings = HashMap<String, String>;
 
 struct Lower<'src> {
