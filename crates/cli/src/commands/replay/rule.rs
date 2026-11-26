@@ -64,6 +64,21 @@ impl Tool {
     }
 }
 
+pub(super) fn validated_source(snapshot: &Path, name: &str, commit: &str, tool: Tool) -> anyhow::Result<String> {
+    let path = Path::new(name);
+    let file = snapshot.join(path);
+    ensure!(file.symlink_metadata().is_ok_and(|meta| meta.is_file())
+        && file.canonicalize()?.starts_with(snapshot.canonicalize()?),
+        "'{}' must be a regular source file in {commit}", name);
+    let source = std::fs::read_to_string(file)?;
+    if tool != Tool::AutoreviewDuplication {
+        ensure!(autoreview_core::parses_cleanly(path, &source) == Some(true),
+            "'{}' must parse successfully in {commit}", name);
+    }
+    Ok(source)
+}
+
+
 fn affects_rules(issue: &autoreview_schema::AnalysisCoverageIssue, rules: &BTreeSet<String>, packs: &[autoreview_core::ResolvedRulePack]) -> bool {
     if let Some(rule) = &issue.rule {
         return rules.contains(rule);

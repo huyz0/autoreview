@@ -447,6 +447,123 @@ fn unresolved_assigned_result_crosses_helpers_in_review_and_replay() {
 }
 
 #[test]
+fn imported_helper_arguments_reach_review_and_replay_across_languages() {
+    let fixtures = [
+        ("go-os-rename-discarded-error", "worker.go", "package main\nimport (\"os\"; \"example.com/project/helper\")\nfunc run(a, b string) { helper.Ignore(os.Rename(a, b)) }\n", "package main\nimport (\"os\"; \"example.com/project/helper\")\nfunc run(a, b string) error { return helper.Forward(os.Rename(a, b)) }\n", 3),
+        ("java-discarded-objects-comparison", "app/Worker.java", "package app;\nimport java.util.Objects;\nimport support.Checks;\nclass Worker { void run(Object a, Object b) { Checks.discard(Objects.equals(a, b)); } }\n", "package app;\nimport java.util.Objects;\nimport support.Checks;\nclass Worker { boolean run(Object a, Object b) { return Checks.forward(Objects.equals(a, b)); } }\n", 4),
+        ("kotlin-discarded-run-catching-result", "app/Worker.kt", "package app\nimport kotlin.runCatching\nimport support.discard\nfun run(value: String) { discard(runCatching { value.toInt() }) }\n", "package app\nimport kotlin.runCatching\nimport support.forward\nfun run(value: String): Result<Int> { return forward(runCatching { value.toInt() }) }\n", 4),
+        ("rust-discarded-remove-file-result", "src/worker.rs", "use crate::support::discard;\nuse std::fs::remove_file;\nfn run(path: &str) { discard(remove_file(path)); }\n", "use crate::support::forward;\nuse std::fs::remove_file;\nfn run(path: &str) -> std::io::Result<()> { forward(remove_file(path)) }\n", 3),
+        ("javascript-node-fs-discarded-promise", "web/js/worker.js", "import { rename } from 'node:fs/promises';\nimport { discard } from './helper';\nexport function run(a, b) { discard(rename(a, b)); }\n", "import { rename } from 'node:fs/promises';\nimport { forward } from './helper';\nexport function run(a, b) { return forward(rename(a, b)); }\n", 3),
+        ("typescript-node-fs-discarded-promise", "web/ts/worker.ts", "import { rename } from 'node:fs/promises';\nimport { discard } from './helper';\nexport function run(a, b) { discard(rename(a, b)); }\n", "import { rename } from 'node:fs/promises';\nimport { forward } from './helper';\nexport function run(a, b) { return forward(rename(a, b)); }\n", 3),
+        ("typescript-node-fs-discarded-promise", "web/tsx/Worker.tsx", "import { rename } from 'node:fs/promises';\nimport { discard } from './helper';\nexport function run(a, b) { discard(rename(a, b)); }\n", "import { rename } from 'node:fs/promises';\nimport { forward } from './helper';\nexport function run(a, b) { return forward(rename(a, b)); }\n", 3),
+    ];
+    let extras = [
+        ("go.mod", "module example.com/project\n\ngo 1.22\n"),
+        ("helper/helper.go", "package helper\nfunc Ignore(err error) {}\nfunc Forward(err error) error { return err }\n"),
+        ("support/Checks.java", "package support;\npublic class Checks { public static void discard(boolean value) {} public static boolean forward(boolean value) { return value; } }\n"),
+        ("support/Checks.kt", "package support\nfun discard(value: Result<Int>) {}\nfun forward(value: Result<Int>): Result<Int> = value\n"),
+        ("src/lib.rs", "mod support; mod worker;\n"),
+        ("src/support.rs", "pub(crate) fn discard(value: std::io::Result<()>) {}\npub(crate) fn forward(value: std::io::Result<()>) -> std::io::Result<()> { value }\n"),
+        ("web/js/helper.js", "export function discard(value) {}\nexport function forward(value) { return value; }\n"),
+        ("web/ts/helper.ts", "export function discard(value) {}\nexport function forward(value) { return value; }\n"),
+        ("web/tsx/helper.tsx", "export function discard(value) {}\nexport function forward(value) { return value; }\n"),
+    ];
+    let files: Vec<_> = extras.into_iter().chain(fixtures.iter().map(|(_, path, bad, _, _)| (*path, *bad))).collect();
+    let repo = init_repo(&files);
+    let before = current_commit(repo.path());
+    repo.commit(&fixtures.map(|(_, path, _, fixed, _)| (path, fixed)), "Use results through imported helpers");
+    let after = current_commit(repo.path());
+    let cases = fixtures.map(|(id, path, _, _, line)| contract_replay_case(id, path, &[line], &before, &after));
+    assert_contract_replay(repo.path(), &cases);
+    repo.commit(&fixtures.map(|(_, path, bad, _, _)| (path, bad)), "Discard results through imported helpers");
+    let review = static_review_report(&repo, &after, None);
+    for (rule, path, _, _, line) in fixtures {
+        assert!(review["findings"].as_array().unwrap().iter().any(|finding|
+            finding["source"]["ruleId"] == rule && finding["location"]["path"] == path
+                && finding["location"]["range"]["startLine"] == line), "{rule}, {path}: {review}");
+    }
+}
+
+#[test]
+fn replay_scores_a_source_in_an_imported_helper_from_its_caller() {
+    let helper = "import { rename } from 'node:fs/promises';\nexport function move(a, b) { return rename(a, b); }\n";
+    let bad = "import { move } from './helper';\nexport function run(a, b) { move(a, b); }\n";
+    let fixed = "import { move } from './helper';\nexport function run(a, b) { return move(a, b); }\n";
+    let repo = init_repo(&[("worker.js", bad), ("helper.js", helper)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("worker.js", fixed)], "Forward helper result");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name": "helper result", "rule": {"tool": "autoreview-dataflow", "id": "javascript-node-fs-discarded-promise"},
+        "before": {"commit": before, "entry": "worker.js", "path": "helper.js", "lines": [2]},
+        "after": {"commit": after, "entry": "worker.js", "path": "helper.js", "lines": []}}]});
+    std::fs::write(repo.path().join("contracts.yaml"), suite.to_string()).unwrap();
+    let replay = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["rules", "replay", "--suite", "contracts.yaml"]).assert().success();
+    let replay: serde_json::Value = serde_json::from_slice(&replay.get_output().stdout).unwrap();
+    assert_eq!(replay["cases"][0]["before"]["entry"], "worker.js");
+    repo.commit(&[("worker.js", bad)], "Discard helper result");
+    let review = static_review_report(&repo, &after, None);
+    assert!(review["findings"].as_array().unwrap().iter().any(|finding|
+        finding["source"]["ruleId"] == "javascript-node-fs-discarded-promise"
+            && finding["location"]["path"] == "helper.js" && finding["location"]["range"]["startLine"] == 2
+            && finding["relatedLocations"].as_array().is_some_and(|related| related.iter().any(|location|
+                location["path"] == "worker.js" && location["range"]["startLine"] == 2))), "{review}");
+}
+
+#[test]
+fn replay_rejects_invalid_cross_file_entry_paths() {
+    let source = "export function run() {}\n";
+    let repo = init_repo(&[("source.js", source), ("broken.js", "export function (\n")]);
+    let commit = current_commit(repo.path());
+    for entry in ["../outside.js", "missing.js", "broken.js"] {
+        let suite = serde_json::json!({"cases": [{"name": entry, "rule": {"tool": "autoreview-dataflow", "id": "javascript-node-fs-discarded-promise"},
+            "before": {"commit": commit, "entry": entry, "path": "source.js", "lines": []},
+            "after": {"commit": commit, "entry": entry, "path": "source.js", "lines": []}}]});
+        std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+        let report = failed_replay_report(repo.path());
+        assert_eq!(report["failures"][0]["kind"], "error", "{entry}: {report}");
+        assert_eq!(report["coverage"][0]["completed"], 0, "{entry}: {report}");
+    }
+}
+
+#[test]
+fn imported_helper_returns_replay_across_languages() {
+    let web_helper = "import { rename } from 'node:fs/promises';\nexport function move(a, b) { return rename(a, b); }\n";
+    let web_bad = "import { move } from './helper';\nexport function run(a, b) { move(a, b); }\n";
+    let web_fixed = "import { move } from './helper';\nexport function run(a, b) { return move(a, b); }\n";
+    let cases = [
+        ("go-os-rename-discarded-error", "worker.go", "package main\nimport \"example.com/project/helper\"\nfunc run(a, b string) { helper.Move(a, b) }\n", "package main\nimport \"example.com/project/helper\"\nfunc run(a, b string) error { return helper.Move(a, b) }\n", "helper/helper.go", "package helper\nimport \"os\"\nfunc Move(a, b string) error { return os.Rename(a, b) }\n", 3),
+        ("java-discarded-objects-comparison", "app/Worker.java", "package app;\nimport support.Checks;\nclass Worker { void run(Object a, Object b) { Checks.compare(a, b); } }\n", "package app;\nimport support.Checks;\nclass Worker { boolean run(Object a, Object b) { return Checks.compare(a, b); } }\n", "support/Checks.java", "package support;\nimport java.util.Objects;\npublic class Checks { public static boolean compare(Object a, Object b) { return Objects.equals(a, b); } }\n", 3),
+        ("kotlin-discarded-run-catching-result", "app/Worker.kt", "package app\nimport support.parse\nfun run(text: String) { parse(text) }\n", "package app\nimport support.parse\nfun run(text: String): Result<Int> { return parse(text) }\n", "support/Checks.kt", "package support\nimport kotlin.runCatching\nfun parse(text: String): Result<Int> = runCatching { text.toInt() }\n", 3),
+        ("rust-discarded-remove-file-result", "src/worker.rs", "use crate::support::remove;\nfn run(path: &str) { remove(path); }\n", "use crate::support::remove;\nfn run(path: &str) -> std::io::Result<()> { remove(path) }\n", "src/support.rs", "use std::fs::remove_file;\npub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n", 2),
+        ("javascript-node-fs-discarded-promise", "web/js/worker.js", web_bad, web_fixed, "web/js/helper.js", web_helper, 2),
+        ("typescript-node-fs-discarded-promise", "web/ts/worker.ts", web_bad, web_fixed, "web/ts/helper.ts", web_helper, 2),
+        ("typescript-node-fs-discarded-promise", "web/tsx/Worker.tsx", web_bad, web_fixed, "web/tsx/helper.tsx", web_helper, 2),
+    ];
+    let files: Vec<_> = [("go.mod", "module example.com/project\n\ngo 1.22\n"), ("src/lib.rs", "mod support; mod worker;\n")]
+        .into_iter().chain(cases.iter().flat_map(|(_, caller, bad, _, helper, source, _)| [(*caller, *bad), (*helper, *source)])).collect();
+    let repo = init_repo(&files);
+    let before = current_commit(repo.path());
+    repo.commit(&cases.map(|(_, caller, _, fixed, _, _, _)| (caller, fixed)), "Observe returned helper results");
+    let after = current_commit(repo.path());
+    let replay_cases: Vec<_> = cases.iter().map(|(rule, caller, _, _, helper, _, line)| serde_json::json!({
+        "name": caller, "rule": {"tool": "autoreview-dataflow", "id": rule},
+        "before": {"commit": before, "entry": caller, "path": helper, "lines": [line]},
+        "after": {"commit": after, "entry": caller, "path": helper, "lines": []}
+    })).collect();
+    assert_contract_replay(repo.path(), &replay_cases);
+    repo.commit(&cases.map(|(_, caller, bad, _, _, _, _)| (caller, bad)), "Discard returned helper results");
+    let review = static_review_report(&repo, &after, None);
+    for (rule, caller, _, _, helper, _, line) in cases {
+        assert!(review["findings"].as_array().unwrap().iter().any(|finding|
+            finding["source"]["ruleId"] == rule && finding["location"]["path"] == helper
+                && finding["location"]["range"]["startLine"] == line
+                && finding["relatedLocations"].as_array().is_some_and(|related| related.iter().any(|item| item["path"] == caller))),
+            "{rule}, {caller}: {review}");
+    }
+}
+
+#[test]
 fn unresolved_result_receivers_reach_review_and_block_replay_scoring() {
     let before = "import { rename } from 'node:fs/promises';\nexport function run(a, b) { unknown(rename(a, b)); }\n";
     let after = "import { rename } from 'node:fs/promises';\nexport async function run(a, b) { await rename(a, b); }\n";

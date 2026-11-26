@@ -26,9 +26,10 @@ The conformance tests exercise imported helper arguments and returned values
 for Go, Java, Kotlin, Rust, JavaScript, TypeScript and TSX. Web re-exports and
 several Rust module and re-export forms have additional cases. These are
 specific fixtures, not proof of all combinations in the acceptance criteria.
-The CLI suite separately exercises cross-file findings in review, and local
-result contracts across languages in replay. It does not yet establish full
-cross-file helper-flow parity through both entry points for every language.
+The CLI suite exercises direct imported-helper arguments and returned sources
+through both review and replay in all seven supported language grammars. Replay
+labels can name a caller as `entry` while scoring the source file via `path`.
+These cases do not establish parity for every helper shape or combination.
 
 An ambiguous web re-export is now reported even when no known result source
 is registered. CLI regressions check that review exposes the structured

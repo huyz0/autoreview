@@ -4,6 +4,14 @@ These cases reference public repositories and pinned commits; they do not
 copy the source files into Autoreview. Check each project's license before
 adding cases. Labels cover an entire file, not only the changed lines.
 
+For cross-file findings, each `before` or `after` label may specify an
+optional `entry` path. Autoreview analyzes that file and its supported
+dependencies, while `path` and `lines` identify the file containing the
+expected findings. Both paths refer to regular repository files in the named
+snapshot. If `entry` is omitted, it defaults to `path`. Findings in other
+files are not scored by that label; use separate cases when those files also
+need labels. An incomplete analysis still excludes the case from scoring.
+
 The Apache-2.0 Iceberg case records a Testify assertion comparing a range
 value with the same slice element. The `go-testify-range-element-self-comparison`
 framework check now finds the labeled line before the fix and no findings in the
