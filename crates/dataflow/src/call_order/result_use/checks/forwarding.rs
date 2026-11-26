@@ -17,13 +17,9 @@ pub(super) fn forwarded_calls(
         let Some(plan) = &frame.plan else { continue };
         for (start, target) in program.resolved_calls(index, frame.graph, plan) {
             if !contains(sources, frame.unit, start) { continue; }
-            let callee = &program.frames[target];
-            if callee.plan.is_none() { continue; }
-            let Some(function) = functions.get(target) else { continue };
-            let Some(inner) = forwarded_return(function.node, units[callee.unit].source) else { continue };
-            let lowered = callee.graph.nodes.iter().flat_map(|node| &node.evaluations)
-                .any(|evaluation| evaluation.span.start <= inner && inner < evaluation.span.end);
-            if lowered && contains(sources, callee.unit, inner) { edges.insert((frame.unit, start), (callee.unit, inner)); }
+            if let Some(inner) = forwarded_target(program, units, &functions, sources, target) {
+                edges.insert((frame.unit, start), inner);
+            }
         }
     }
     let mut forwarded = BTreeMap::<usize, BTreeSet<usize>>::new();
@@ -32,6 +28,19 @@ pub(super) fn forwarded_calls(
         if reaches_terminal(start, &edges, &mut cache) { forwarded.entry(start.0).or_default().insert(start.1); }
     }
     forwarded
+}
+
+fn forwarded_target(
+    program: &Program<'_, '_, '_>, units: &[KeyedUnit<'_, '_, '_>],
+    functions: &[&crate::call_order::KeyedFunction<'_, '_>], sources: &BTreeMap<usize, BTreeSet<usize>>, target: usize,
+) -> Option<Position> {
+    let callee = &program.frames[target];
+    callee.plan.as_ref()?;
+    let function = functions.get(target)?;
+    let inner = forwarded_return(function.node, units[callee.unit].source)?;
+    let lowered = callee.graph.nodes.iter().flat_map(|node| &node.evaluations)
+        .any(|evaluation| evaluation.span.start <= inner && inner < evaluation.span.end);
+    (lowered && contains(sources, callee.unit, inner)).then_some((callee.unit, inner))
 }
 
 fn contains(sources: &BTreeMap<usize, BTreeSet<usize>>, unit: usize, start: usize) -> bool {
@@ -53,9 +62,8 @@ fn reaches_terminal(start: Position, edges: &BTreeMap<Position, Position>, cache
 
 fn forwarded_return(function: tree_sitter::Node<'_>, source: &[u8]) -> Option<usize> {
     let body = function.child_by_field_name("body")?;
-    if body.kind() != "statement_block" { return None; }
     let signature = source.get(function.start_byte()..body.start_byte())?;
-    if signature.split(|byte| !byte.is_ascii_alphanumeric()).any(|word| word == b"async") { return None; }
+    if body.kind() != "statement_block" || signature.split(|byte| !byte.is_ascii_alphanumeric()).any(|word| word == b"async") { return None; }
     let statements: Vec<_> = body.named_children(&mut body.walk()).filter(|node| node.kind() != "comment").collect();
     let [statement] = statements.as_slice() else { return None };
     if statement.kind() != "return_statement" { return None; }
@@ -64,15 +72,10 @@ fn forwarded_return(function: tree_sitter::Node<'_>, source: &[u8]) -> Option<us
     (value.kind() == "call_expression" && crate::lower::site::name(*value, source).is_some()).then_some(value.start_byte())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn forwarding_rejects_cycles_and_preserves_terminal_chains() {
-        let edges = BTreeMap::from([((0, 1), (1, 2)), ((1, 2), (2, 3)), ((3, 4), (4, 5)), ((4, 5), (3, 4))]);
-        let mut cache = BTreeMap::new();
-        assert!(reaches_terminal((0, 1), &edges, &mut cache));
-        assert!(!reaches_terminal((3, 4), &edges, &mut cache));
-    }
+#[test]
+fn forwarding_rejects_cycles_and_preserves_terminal_chains() {
+    let edges = BTreeMap::from([((0, 1), (1, 2)), ((1, 2), (2, 3)), ((3, 4), (4, 5)), ((4, 5), (3, 4))]);
+    let mut cache = BTreeMap::new();
+    assert!(reaches_terminal((0, 1), &edges, &mut cache));
+    assert!(!reaches_terminal((3, 4), &edges, &mut cache));
 }
