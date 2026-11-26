@@ -136,6 +136,33 @@ fn replay_evaluates_a_registered_custom_call_sequence_rule() {
 }
 
 #[test]
+fn replay_keeps_typed_benchmark_incomplete_with_compatibility_adapter() {
+    let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
+    let source = "declare function task(): Promise<void>;\ndeclare function mystery(): unknown;\nexport function run() { try { throw new Error(); } catch (error) { error.message; } task(); mystery(); }\n";
+    let config = r#"{"compilerOptions":{"target":"ES2022","strict":true},"files":["main.ts"]}"#;
+    let repo = init_repo(&[("main.ts", source), ("tsconfig.json", config)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("main.ts", &format!("{source}// fixed snapshot\n"))], "second revision");
+    let after = current_commit(repo.path());
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let pack = root.join("benchmarks/packs/checkout-promise");
+    let adapter = root.join("benchmarks/typescript-legacy-catch.cjs");
+    std::fs::create_dir_all(repo.path().join(".autoreview")).unwrap();
+    let path = serde_json::to_string(&pack.to_string_lossy()).unwrap();
+    std::fs::write(repo.path().join(".autoreview/rulepacks.yaml"), format!("packs:\n  - id: checkout-promise-benchmark\n    source: {{ kind: local, path: {path} }}\n")).unwrap();
+    let suite = serde_json::json!({"cases":[{"name":"typed","rule":{"tool":"autoreview-dataflow","id":"benchmark-typescript-unobserved-promise"},"before":{"commit":before,"path":"main.ts","lines":[]},"after":{"commit":after,"path":"main.ts","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .env("AUTOREVIEW_TYPESCRIPT_MODULE", adapter).env("AUTOREVIEW_BENCHMARK_TYPESCRIPT_MODULE", compiler)
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
+    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(report["coverage"][0]["incomplete"], 1);
+    assert_eq!(report["failures"][0]["kind"], "incomplete-analysis");
+    assert!(report["failures"][0]["error"].as_str().unwrap().contains("promise type could not be verified"));
+    assert!(report["rules"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn commit_replay_measures_rule_precision_and_gates_only_qualified_changed_lines() {
     if !ast_grep_available() {
         return;

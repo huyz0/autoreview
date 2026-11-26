@@ -80,6 +80,35 @@ Coverage reporting is not exhaustive: unsupported expressions and unresolved
 imports can still escape the current diagnostics. A clean replay is evidence
 for this case, not a guarantee of complete analysis in general.
 
+`checkout-promise.yaml` exercises the experimental general promise source on
+the MIT-licensed actions/checkout fix documented in `docs/benchmark-candidates.md`.
+The normal replay currently exits nonzero and marks both cases incomplete due
+to unresolved call types; they are not included in accuracy scores. To reproduce
+from a fresh clone, set `AUTOREVIEW_ROOT` to the absolute path of this Autoreview
+checkout and run:
+
+```sh
+git clone https://github.com/actions/checkout.git checkout
+cd checkout
+git checkout --detach 5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f
+npm ci --ignore-scripts --no-audit --no-fund
+npm install --prefix "$PWD/../ts-5.6.3" --no-save --ignore-scripts --no-audit --no-fund typescript@5.6.3
+mkdir -p .autoreview .autoreview-replay-tmp
+printf 'packs:\n  - id: checkout-promise-benchmark\n    source:\n      kind: local\n      path: "%s/benchmarks/packs/checkout-promise"\n' "$AUTOREVIEW_ROOT" > .autoreview/rulepacks.yaml
+TMPDIR="$PWD/.autoreview-replay-tmp" \
+AUTOREVIEW_BENCHMARK_TYPESCRIPT_MODULE="$PWD/../ts-5.6.3/node_modules/typescript" \
+AUTOREVIEW_TYPESCRIPT_MODULE="$AUTOREVIEW_ROOT/benchmarks/typescript-legacy-catch.cjs" \
+  autoreview rules replay --suite "$AUTOREVIEW_ROOT/benchmarks/checkout-promise.yaml"
+```
+
+The benchmark-only adapter sets `useUnknownInCatchVariables` to `false`, the
+older project's catch-variable behavior, while leaving other project options
+and declaration diagnostics enabled. It executes the explicitly configured
+compiler package, so both paths must point to trusted code. Replay snapshots
+are placed under the clone so their imports resolve the installed dependencies.
+Do not reuse that dependency setup for different revisions without checking the
+manifests and configuration.
+
 `sftp-promise.yaml` labels two discarded promises in one TypeScript file and
 the fixed file. On the typed-promise branch, a replay found both before-fix
 lines and no findings after the fix, with no reported replay failures. This is

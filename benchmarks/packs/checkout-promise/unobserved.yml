@@ -1,0 +1,9 @@
+id: benchmark-typescript-unobserved-promise
+language: TypeScript
+category: correctness
+severity: warning
+kind: call-sequence
+message: Observe, await, or return this promise.
+contract:
+  mode: must-use
+  source: typed-promise

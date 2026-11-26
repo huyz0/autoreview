@@ -90,8 +90,10 @@ AUTOREVIEW_TEST_TYPESCRIPT="$PWD/../ts-5.6.3/node_modules/typescript" \
   cargo test --manifest-path /absolute/path/to/autoreview/Cargo.toml -p autoreview-core --lib checkout_historical_general_promise_observation
 ```
 
-To turn these into scored cases, resolve or accurately scope the remaining
-coverage limitations, exercise the rule through the normal replay entry
-point, and check all findings in each entire file. Keep synchronous and
-intentionally observed calls as negatives, and retain compiler and snapshot
-verification, bounded execution, and coverage reporting.
+The normal `rules replay` entry point can also run these cases using the
+benchmark pack and compatibility adapter documented in `benchmarks/README.md`.
+It currently reports both cases as incomplete and exits nonzero; it does not
+score either case. To score them, resolve or accurately scope the remaining
+coverage limitations and check all findings in each entire file. Keep
+synchronous and intentionally observed calls as negatives, and retain compiler
+and snapshot verification, bounded execution, and coverage reporting.
