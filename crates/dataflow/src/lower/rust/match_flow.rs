@@ -77,6 +77,22 @@ pub(super) fn arm_bindings(arm: Node<'_>) -> Vec<Node<'_>> {
     pattern(arm).and_then(|pattern| pattern.named_child(0)).and_then(tuple_bindings).unwrap_or_default()
 }
 
+pub(super) fn binding_lines(function: Node<'_>) -> Vec<u32> {
+    let mut pending = function.child_by_field_name("body").into_iter().collect::<Vec<_>>();
+    let mut lines = Vec::new();
+    while let Some(node) = pending.pop() {
+        if matches!(node.kind(), "function_item" | "closure_expression" | "async_block" | "macro_invocation") { continue; }
+        if supports(node) && node.child_by_field_name("body").is_some_and(|body|
+            body.named_children(&mut body.walk()).any(|arm| !arm_bindings(arm).is_empty())) {
+            lines.push(node.start_position().row as u32 + 1);
+        }
+        pending.extend(node.named_children(&mut node.walk()));
+    }
+    lines.sort_unstable();
+    lines.dedup();
+    lines
+}
+
 fn wildcard_arm(arm: Node<'_>) -> bool {
     pattern(arm).is_some_and(|pattern| pattern.child_count() == 1 && pattern.child(0).is_some_and(|part| part.kind() == "_"))
 }
