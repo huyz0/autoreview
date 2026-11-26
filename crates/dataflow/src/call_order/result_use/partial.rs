@@ -69,6 +69,10 @@ pub(super) fn unused(
 }
 
 fn local_origins(body: &Body) -> Vec<(NodeId, Origin)> {
+    source_origins(body, |place| matches!(place, Place::Local(_)))
+}
+
+fn source_origins(body: &Body, include: fn(Place) -> bool) -> Vec<(NodeId, Origin)> {
     body.effects
         .iter()
         .enumerate()
@@ -78,7 +82,7 @@ fn local_origins(body: &Body) -> Vec<(NodeId, Origin)> {
                 .filter_map(move |effect| match effect {
                     Effect::Write(writes) => Some(writes.iter().filter_map(move |write| {
                         match (write.target, &write.value) {
-                            (Some(Place::Local(_)), Value::Source(origin)) => {
+                            (Some(place), Value::Source(origin)) if include(place) => {
                                 Some((node, origin.clone()))
                             }
                             _ => None,

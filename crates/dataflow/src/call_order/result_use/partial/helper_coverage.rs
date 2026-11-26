@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use super::{
-    branch, hidden_at, local_origins, observed, outgoing, supported_edges, throws, Body, Cfg,
-    Demand, EdgeKind, Effect, Node, Origin, Plan, State, Stmt, PATH_LIMIT,
+    branch, hidden_at, observed, outgoing, source_origins, supported_edges, throws, Body, Cfg,
+    Demand, EdgeKind, Effect, Node, Origin, Place, Plan, State, Stmt, PATH_LIMIT,
 };
 use crate::cfg::NodeId;
 
@@ -15,7 +15,14 @@ pub(in crate::call_order::result_use) fn has_partial_helper(
     unused: &[(NodeId, Origin)],
 ) -> bool {
     let edges = outgoing(body, cfg);
-    local_origins(body).into_iter().any(|(node, origin)| {
+    source_origins(body, |place| {
+        matches!(
+            place,
+            Place::Local(_) | Place::CallResult(_) | Place::CallComponent(_, _)
+        )
+    })
+    .into_iter()
+    .any(|(node, origin)| {
         !unused.iter().any(|(_, other)| *other == origin)
             && uncertain_path((body, cfg, plan, syntax), &edges, node, &origin)
     })
