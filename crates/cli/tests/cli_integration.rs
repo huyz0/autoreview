@@ -138,6 +138,19 @@ fn replay_excludes_ambiguous_helpers_even_without_a_known_result_source() {
 }
 
 #[test]
+fn replay_excludes_unmodeled_contract_cleanup() {
+    let bad = "import java.util.concurrent.CompletableFuture;\nclass Main {\n Object run(Runnable work, boolean flag) {\n  var task = CompletableFuture.runAsync(work);\n  return flag ? task.join() : null;\n }\n}\n";
+    let clean = "import java.util.concurrent.CompletableFuture;\nclass Main { void run(Runnable work) { var task = CompletableFuture.runAsync(work); task.join(); } }\n";
+    let repo = init_repo(&[("Main.java", bad)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("Main.java", clean)], "observe task");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"conditional cleanup", "rule":{"tool":"autoreview-dataflow","id":"java-completable-future-unobserved"}, "before":{"commit":before,"path":"Main.java","lines":[]}, "after":{"commit":after,"path":"Main.java","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    assert_incomplete_replay(&failed_replay_report(repo.path()), "unmodeled_cleanup_call", "Main.java", 5);
+}
+
+#[test]
 fn replay_excludes_unmodeled_contract_handle_storage() {
     let bad = "package main\nimport (\"compress/gzip\"; \"io\")\nfunc run(out io.Writer, holder *Holder) {\n holder.writer = gzip.NewWriter(out)\n}\n";
     let clean = "package main\nimport (\"compress/gzip\"; \"io\")\nfunc run(out io.Writer) { w := gzip.NewWriter(out); w.Close() }\n";

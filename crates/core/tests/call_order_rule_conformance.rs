@@ -184,6 +184,24 @@ fn unsupported_contract_handle_storage_reports_incomplete_analysis() {
 }
 
 #[test]
+fn unlowered_contract_cleanup_reports_incomplete_analysis() {
+    let source = "import java.util.concurrent.CompletableFuture;\nclass Main {\n Object run(Runnable work, boolean flag) {\n  var task = CompletableFuture.runAsync(work);\n  return flag ? task.join() : null;\n }\n}\n";
+    let root = write_single_file("Main.java", source);
+    let check = || autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &["Main.java".into()], &[]);
+    let result = check();
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_cleanup_call"
+        && issue.rule.as_deref() == Some("java-completable-future-unobserved") && issue.path.as_deref() == Some("Main.java") && issue.line == Some(5)), "{:?}", result.coverage);
+    std::fs::write(root.path().join("Main.java"), "import java.util.concurrent.CompletableFuture;\nclass Main { void run(Runnable work) { var task = CompletableFuture.runAsync(work); task.join(); } }\n").unwrap();
+    assert!(!check().coverage.iter().any(|issue| issue.reason == "unmodeled_cleanup_call"));
+    std::fs::write(root.path().join("Main.java"), "import java.util.concurrent.CompletableFuture;\nclass Main {\n Object finish(CompletableFuture<Void> task, boolean flag) { return flag ? task.join() : null; }\n void run(Runnable work, boolean flag) { var task = CompletableFuture.runAsync(work); finish(task, flag); }\n}\n").unwrap();
+    let result = check();
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_cleanup_call"
+        && issue.rule.as_deref() == Some("java-completable-future-unobserved") && issue.line == Some(3)), "{:?}", result.coverage);
+    std::fs::write(root.path().join("Main.java"), "class Main { Object finish(Other task, boolean flag) { return flag ? task.join() : null; } }\n").unwrap();
+    assert!(!check().coverage.iter().any(|issue| issue.reason == "unmodeled_cleanup_call"));
+}
+
+#[test]
 fn unsupported_java_future_storage_reports_incomplete_analysis() {
     let source = "import java.util.concurrent.CompletableFuture;\nclass Main {\n Object pending;\n void run() { pending = CompletableFuture.runAsync(() -> {}); }\n}\n";
     let root = write_single_file("Main.java", source);
