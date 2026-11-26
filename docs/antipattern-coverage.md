@@ -8,6 +8,8 @@ See [collection performance and retention](collection-coverage.md) for
 allocation, collection lifetime, and mutation checks by language.
 See [loop and recursion rules](loop-and-recursion-coverage.md) for control
 flow, repeated work, and stack depth.
+See [callback execution evidence](callback-execution-plan.md) for the planned
+handling of immediate, deferred, and unresolved callback execution.
 
 ## Code design and complexity
 
