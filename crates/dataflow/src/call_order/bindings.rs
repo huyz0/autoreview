@@ -94,12 +94,14 @@ impl<'src> Bindings<'src> {
     }
 
     fn record_declarations(&mut self, node: Node<'_>, source: &'src [u8], track_results: bool) {
-        let targets = if declares_iteration(node) {
+        let targets = if node.kind() == "match_arm" && node.parent().and_then(|body| body.parent()).is_some_and(crate::lower::rust::supports_match) {
+            crate::lower::rust::match_arm_bindings(node)
+        } else if declares_iteration(node) {
             crate::lower::keyed_flow::loops::iterator_bindings(node)
         } else {
             declaration(node)
         };
-        let single_target = targets.len() == 1 || declares_iteration(node)
+        let single_target = targets.len() == 1 || declares_iteration(node) || node.kind() == "match_arm"
             || matches!(
                 node.kind(),
                 "parameter_declaration" | "variadic_parameter_declaration"

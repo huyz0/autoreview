@@ -65,6 +65,7 @@ pub(in crate::call_order) struct Frame<'spec, 'src, 'graph> {
     pub plan: Option<Plan<'spec, 'src>>,
     scope: Scope,
     unsupported_rust_line: Option<u32>,
+    rust_match_bindings: Vec<u32>,
     pub(in crate::call_order) params: Vec<String>,
 }
 
@@ -138,6 +139,9 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             scope,
             unsupported_rust_line: (node.kind() == "function_item" && !crate::lower::rust::supports_function(node))
                 .then_some(node.start_position().row as u32 + 1),
+            rust_match_bindings: if node.kind() == "function_item" && crate::lower::rust::supports_function(node) {
+                crate::lower::rust::match_binding_lines(node)
+            } else { Vec::new() },
             params: params.unwrap_or_default(),
             export,
         });
@@ -204,7 +208,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
     }
 
     pub(in crate::call_order) fn resolution_limitations(&self) -> Vec<super::KeyedLimitation> {
-        if self.unresolved.borrow().is_empty() && self.frames.iter().all(|frame| frame.unsupported_rust_line.is_none()) {
+        if self.unresolved.borrow().is_empty() && self.frames.iter().all(|frame| frame.unsupported_rust_line.is_none() && frame.rust_match_bindings.is_empty()) {
             return Vec::new();
         }
         let mut pending: Vec<_> = self.units.iter().filter(|unit| unit.entry)
@@ -220,6 +224,9 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         let mut limitations: Vec<_> = reachable.iter().filter_map(|&frame| self.frames[frame].unsupported_rust_line.map(|line| super::KeyedLimitation {
             reason: "unsupported_rust_control_flow", path: self.path(self.frames[frame].unit), line: Some(line),
         })).collect();
+        limitations.extend(reachable.iter().flat_map(|&frame| self.frames[frame].rust_match_bindings.iter().map(move |&line| super::KeyedLimitation {
+            reason: "rust_match_binding_projection", path: self.path(self.frames[frame].unit), line: Some(line),
+        })));
         limitations.extend(self.unresolved.borrow().iter().filter_map(|&(frame, start, reason)| {
             if !reachable.contains(&frame) { return None; }
             let unit = &self.units[self.frames[frame].unit];

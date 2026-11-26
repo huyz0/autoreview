@@ -791,6 +791,30 @@ fn rust_literal_match_result_reaches_review_and_replay() {
 }
 
 #[test]
+fn rust_match_binding_projection_keeps_replay_incomplete() {
+    let prefix = "use std::fs::remove_file;\nfn run(value: Option<&str>) -> std::io::Result<()> {\n";
+    let before = format!("{prefix}    match value {{ Some(path) => {{ remove_file(path); }}, _ => {{}} }};\n    Ok(())\n}}\n");
+    let after = format!("{prefix}    match value {{ Some(path) => {{ return remove_file(path); }}, _ => {{}} }};\n    Ok(())\n}}\n");
+    let repo = init_repo(&[("lib.rs", &before)]);
+    let old = current_commit(repo.path());
+    repo.commit(&[("lib.rs", &after)], "observe match-bound result");
+    let fixed = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"Rust match binding", "rule":{"tool":"autoreview-dataflow", "id":"rust-discarded-remove-file-result"},
+        "before":{"commit":old, "path":"lib.rs", "lines":[3]}, "after":{"commit":fixed, "path":"lib.rs", "lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let replay = failed_replay_report(repo.path());
+    assert_eq!(replay["coverage"][0]["incomplete"], 1, "{replay}");
+    assert!(replay["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "rust_match_binding_projection" && issue["path"] == "lib.rs" && issue["line"] == 3), "{replay}");
+    repo.commit(&[("lib.rs", &before)], "discard match-bound result");
+    let review = static_review_report(&repo, &fixed, None);
+    assert!(review["findings"].as_array().unwrap().iter().any(|finding| finding["source"]["ruleId"] == "rust-discarded-remove-file-result"
+        && finding["location"]["path"] == "lib.rs" && finding["location"]["range"]["startLine"] == 3), "{review}");
+    assert!(review["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "rust_match_binding_projection" && issue["path"] == "lib.rs" && issue["line"] == 3), "{review}");
+}
+
+#[test]
 fn rust_module_alias_results_reach_the_review_report() {
     let root = "mod support; mod worker;\n";
     let support = "use std::fs::remove_file;\npub(crate) fn discard(value: std::io::Result<()>) {}\npub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n";

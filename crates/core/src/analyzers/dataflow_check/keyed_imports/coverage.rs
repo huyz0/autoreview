@@ -41,6 +41,7 @@ fn limitation_detail(reason: &str) -> &'static str {
             "path_budget" => "The path-state budget was exhausted; this rule skipped the affected root.",
             "helper_summary_limit" => "Helper summaries did not converge within the analysis budget; cross-file result tracking was skipped.",
             "unsupported_rust_control_flow" => "Rust control flow in this function could not be lowered; call-sequence analysis was skipped.",
+            "rust_match_binding_projection" => "Rust match pattern names are tracked as distinct local identities; their relationship to the matched value and whether they denote constants are not resolved.",
             "unresolved_helper_target" => "The helper target is ambiguous or depends on unavailable exports; cross-file call-sequence analysis may be incomplete.",
             "unresolved_result_receiver" => "A result reached an unresolved helper or an unmodeled helper argument; whether it is used could not be determined.",
             "wrapped_result_receiver" => "A result was passed in an array or spread argument; the receiver's use of that result could not be determined.",

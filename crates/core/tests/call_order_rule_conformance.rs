@@ -731,11 +731,30 @@ fn rust_literal_match_tracks_results_across_arms() {
 
 #[test]
 fn rust_unmodeled_matches_remain_incomplete() {
-    for body in ["match x { 0 if check() => {}, _ => {} };", "match x { value => {} };", "match x { Some(value) => {}, _ => {} };", "match x { 0 => {} };", "match check(risky() + 1) { _ => {} };", "match x { _ => { let y = risky() + 1; } };", "match x { _ => {} }"] {
+    for body in ["match x { 0 if check() => {}, _ => {} };", "match x { value => {} };", "match x { Some(ref value) => {}, _ => {} };", "match x { 0 => {} };", "match check(risky() + 1) { _ => {} };", "match x { _ => { let y = risky() + 1; } };", "match x { _ => {} }"] {
         let root = write_single_file("lib.rs", &format!("fn run(x: u8) {{ {body} }}\n"));
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("lib.rs")), "{body}: {:?}", result.coverage);
     }
+}
+
+#[test]
+fn rust_match_bindings_preserve_arm_scope_and_report_projection_limit() {
+    let source = "use std::fs::remove_file;\nfn run(path: &str, item: Option<&str>) {\n    let result = remove_file(path);\n    match item { Some(result) => { inspect(result); }, _ => {} };\n}\n";
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 3)]);
+    let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    assert!(result.coverage.iter().any(|issue| issue.reason == "rust_match_binding_projection" && issue.path.as_deref() == Some("lib.rs") && issue.line == Some(4) && issue.rule.as_deref() == Some("rust-discarded-remove-file-result")), "{:?}", result.coverage);
+    assert!(!result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", result.coverage);
+    let after = "use std::fs::remove_file;\nfn run(path: &str, item: Option<&str>) -> std::io::Result<()> {\n    let result = remove_file(path);\n    match item { Some(result) => { inspect(result); }, _ => {} };\n    result\n}\n";
+    std::fs::write(root.path().join("lib.rs"), after).unwrap();
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[]);
+    let inside = "use std::fs::remove_file;\nfn run(item: Option<&str>) {\n    match item { Some(path) => { remove_file(path); }, _ => {} };\n}\n";
+    std::fs::write(root.path().join("lib.rs"), inside).unwrap();
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 3)]);
+    let siblings = "use std::fs::remove_file;\nenum Choice<'a> { Left(&'a str), Right(&'a str), Other }\nfn run(value: Choice<'_>) {\n    match value {\n        Choice::Left(path) => { remove_file(path); },\n        Choice::Right(path) => { remove_file(path); },\n        _ => {}\n    };\n}\n";
+    std::fs::write(root.path().join("lib.rs"), siblings).unwrap();
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 5), ("lib.rs", 6)]);
 }
 
 #[test]

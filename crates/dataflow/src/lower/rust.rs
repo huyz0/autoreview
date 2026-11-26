@@ -311,6 +311,16 @@ pub fn supports_match(node: Node<'_>) -> bool {
     match_flow::supports(node)
 }
 
+/// Simple arm-local bindings in a supported Rust match pattern.
+pub fn match_arm_bindings(arm: Node<'_>) -> Vec<Node<'_>> {
+    match_flow::arm_bindings(arm)
+}
+
+/// Lines where a supported match projects one or more arm-local values.
+pub fn match_binding_lines(function: Node<'_>) -> Vec<u32> {
+    match_flow::binding_lines(function)
+}
+
 fn statement_position(node: Node<'_>) -> bool {
     node.parent().is_some_and(|parent| {
         matches!(

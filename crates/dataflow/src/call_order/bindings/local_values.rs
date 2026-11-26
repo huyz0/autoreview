@@ -59,6 +59,7 @@ impl<'src> LocalValues<'src> {
 }
 
 fn visible_after(declaration: Node<'_>, target: Node<'_>) -> usize {
+    if declaration.kind() == "match_arm" { return target.end_byte(); }
     if declares_iteration(declaration) {
         return declaration
             .child_by_field_name("right")
@@ -73,6 +74,7 @@ fn visible_after(declaration: Node<'_>, target: Node<'_>) -> usize {
 }
 
 fn scope(node: Node<'_>, web_var: bool) -> Option<Range<usize>> {
+    if node.kind() == "match_arm" { return Some(node.byte_range()); }
     if declares_iteration(node) && node.kind() != "range_clause" {
         return Some(node.byte_range());
     }

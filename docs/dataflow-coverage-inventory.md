@@ -17,11 +17,14 @@ It does not claim that every unsupported construct has been catalogued.
 
 Rust lowering supports non-tail statement matches with a simple scrutinee,
 including supported direct calls, and a final wildcard. Arms can use literals,
-qualified unit variants, and tuple variants containing only wildcards, such as
-`Some(_)`. Arm bodies must use supported simple statements and calls, without
-guards or pattern bindings. The analyzer explores each arm conservatively. Tail
-matches, complex scrutinees or arm expressions, guards, and binding patterns
-remain coverage limitations.
+qualified unit variants, and simple tuple variants such as `Some(_)` or
+`Some(value)`. Arm-local names receive distinct identities, but the analyzer
+does not connect them to the matched value or resolve whether an identifier
+pattern denotes a constant: those cases report `rust_match_binding_projection`
+and replay remains incomplete. Arm bodies must
+use supported simple statements and calls, without guards. The analyzer
+explores each arm conservatively. Tail matches, complex scrutinees or arm
+expressions, guards, and more complex binding patterns remain limitations.
 
 Report scopes should distinguish an entire file, a function or root, a rule,
 and an imported dependency. Findings from unaffected scopes remain useful.
