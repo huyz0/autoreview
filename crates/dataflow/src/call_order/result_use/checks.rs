@@ -34,6 +34,7 @@ pub(in crate::call_order) fn check_units_with_components(
     }
     let mut limitations = unmodeled_sources(&program, units, sources, components);
     if !program.has_registration() {
+        limitations.extend(program.resolution_limitations());
         return (Vec::new(), false, limitations);
     }
     let (summaries, summary_limit) = summaries::build(&program, units);

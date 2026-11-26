@@ -247,6 +247,26 @@ fn ignored_results_follow_helpers_through_web_reexports() {
 }
 
 #[test]
+fn unresolved_helper_is_reported_without_a_registered_source() {
+    for (ext, rule) in [("js", "javascript-node-fs-discarded-promise"), ("ts", "typescript-node-fs-discarded-promise"), ("tsx", "typescript-node-fs-discarded-promise")] {
+        let root = tempfile::tempdir().unwrap();
+        let entry = format!("main.{ext}");
+        for (name, body) in [("a", "return a;"), ("b", "return b;")] {
+            std::fs::write(root.path().join(format!("{name}.{ext}")), format!("export function move(a, b) {{ {body} }}\n")).unwrap();
+        }
+        let index = root.path().join(format!("index.{ext}"));
+        std::fs::write(&index, "export * from './a'; export * from './b';\n").unwrap();
+        std::fs::write(root.path().join(&entry), "import { move } from './index';\nfunction run(a, b) { move(a, b); }\n").unwrap();
+        let check = || autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), std::slice::from_ref(&entry), &[]);
+        let result = check();
+        assert!(result.coverage.iter().any(|issue| issue.reason == "unresolved_helper_target" && issue.rule.as_deref() == Some(rule) && issue.path.as_deref() == Some(&entry) && issue.line == Some(2)), "{ext}: {:?}", result.coverage);
+        std::fs::write(&index, "export * from './a';\n").unwrap();
+        let resolved = check();
+        assert!(!resolved.coverage.iter().any(|issue| issue.reason == "unresolved_helper_target" && issue.rule.as_deref() == Some(rule)), "{ext}: {:?}", resolved.coverage);
+    }
+}
+
+#[test]
 fn ignored_results_follow_exported_arrow_helpers() {
     for (extension, rule) in [("js", "javascript-node-fs-discarded-promise"), ("ts", "typescript-node-fs-discarded-promise"), ("tsx", "typescript-node-fs-discarded-promise")] {
         let root = tempfile::tempdir().unwrap();
