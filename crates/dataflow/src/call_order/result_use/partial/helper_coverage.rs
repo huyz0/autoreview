@@ -28,18 +28,7 @@ pub(in crate::call_order::result_use) fn helper_paths(
 ) -> HelperPaths {
     let (unused, has_closures) = options;
     let edges = outgoing(body, cfg);
-    let precise = !has_closures
-        && !cyclic(body)
-        && edges
-            .iter()
-            .enumerate()
-            .all(|(node, out)| supported_edges(cfg, plan, node, out, 2))
-        && body.effects.iter().flatten().all(precise_effect)
-        && !cfg
-            .nodes
-            .iter()
-            .enumerate()
-            .any(|(node, _)| body.flow.reachable[node] && hidden_at(cfg, node, syntax));
+    let precise = !has_closures && precisely_modeled((body, cfg, plan, syntax), &edges);
     let mut hits = Vec::new();
     let mut observed = Vec::new();
     let mut incomplete = false;
@@ -64,6 +53,24 @@ pub(in crate::call_order::result_use) fn helper_paths(
         observed,
         incomplete,
     }
+}
+
+fn precisely_modeled(
+    context: (&Body, &Cfg<Stmt>, &Plan<'_, '_>, (Node<'_>, &[u8])),
+    edges: &[Vec<(NodeId, EdgeKind)>],
+) -> bool {
+    let (body, cfg, plan, syntax) = context;
+    !cyclic(body)
+        && edges
+            .iter()
+            .enumerate()
+            .all(|(node, out)| supported_edges(cfg, plan, node, out, 2))
+        && body.effects.iter().flatten().all(precise_effect)
+        && !cfg
+            .nodes
+            .iter()
+            .enumerate()
+            .any(|(node, _)| body.flow.reachable[node] && hidden_at(cfg, node, syntax))
 }
 
 fn precise_effect(effect: &Effect) -> bool {
