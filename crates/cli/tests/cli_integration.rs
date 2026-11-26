@@ -768,9 +768,10 @@ fn skipped_rust_function_blocks_replay_and_reaches_review() {
 
 #[test]
 fn rust_literal_match_result_reaches_review_and_replay() {
-    let prefix = "use std::fs::remove_file;\nfn run(path: &str, flag: u8) -> std::io::Result<()> {\n";
-    let before = format!("{prefix}    match flag {{ 0 => {{ remove_file(path); }}, _ => {{}} }};\n    Ok(())\n}}\n");
-    let after = format!("{prefix}    match flag {{ 0 => {{ return remove_file(path); }}, _ => {{}} }};\n    Ok(())\n}}\n");
+    let prefix = "use std::fs::remove_file;\nfn run(path: &str, flag: Option<u8>) -> std::io::Result<()> {\n";
+    let suffix = "    Ok(())\n}\nfn normalize(value: Option<u8>) -> Option<u8> { value }\n";
+    let before = format!("{prefix}    match normalize(flag) {{ Some(_) => {{ remove_file(path); }}, _ => {{}} }};\n{suffix}");
+    let after = format!("{prefix}    match normalize(flag) {{ Some(_) => {{ return remove_file(path); }}, _ => {{}} }};\n{suffix}");
     let repo = init_repo(&[("lib.rs", &before)]);
     let old = current_commit(repo.path());
     repo.commit(&[("lib.rs", &after)], "observe result inside match");
