@@ -20,6 +20,25 @@ forwarded and ignored parameters, ignored helper returns, mixed callers,
 recursion, shadowed imports, exceptions, and prior local and closure cases.
 Findings must identify the original acquisition and avoid duplication.
 
+### Helper-flow audit checkpoint
+
+The conformance tests exercise imported helper arguments and returned values
+for Go, Java, Kotlin, Rust, JavaScript, TypeScript and TSX. Web re-exports and
+several Rust module and re-export forms have additional cases. These are
+specific fixtures, not proof of all combinations in the acceptance criteria.
+The CLI suite separately exercises cross-file findings in review, and local
+result contracts across languages in replay. It does not yet establish full
+cross-file helper-flow parity through both entry points for every language.
+
+An ambiguous web re-export is now reported even when no known result source
+is registered. CLI regressions check that review exposes the structured
+limitation and replay excludes the incomplete case from scoring. Rust calls
+such as `Type::method()` through an imported type remain a separate gap:
+the helper resolver does not generally model associated functions. Its
+unresolved-import warnings must remain until supported declarations and
+dispatch can be identified without guessing. Trait implementations, aliases,
+conditional compilation and ambiguous declarations require explicit tests.
+
 ## 2. Measure rule accuracy
 
 Extend the existing labelled Git replay workflow with documented, reproducible

@@ -24,6 +24,12 @@ fn current_commit(repo: &std::path::Path) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
+fn failed_replay_report(repo: &std::path::Path) -> serde_json::Value {
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo)
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
+    serde_json::from_slice(&result.get_output().stdout).unwrap()
+}
+
 #[test]
 fn replay_reports_analysis_failures_without_losing_successful_cases() {
     let bad = "package main\nimport \"os\"\nfunc move(a, b string) { os.Rename(a, b) }\n";
@@ -45,9 +51,7 @@ fn replay_reports_analysis_failures_without_losing_successful_cases() {
          "after": {"commit": after, "path": "main.js", "lines": []}}
     ]});
     std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
-    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
-        .args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
-    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    let report = failed_replay_report(repo.path());
     assert_eq!(report["rules"][0]["truePositives"], 1);
     assert_eq!(report["languages"][0]["language"], "Go");
     assert_eq!(report["cases"][0]["evidence"]["kind"], "synthetic");
@@ -68,6 +72,36 @@ fn replay_reports_analysis_failures_without_losing_successful_cases() {
     assert_eq!(report["coverage"][1]["incomplete"], 1);
     assert_eq!(report["coverage"][1]["failed"], 0);
     assert_eq!(report["cases"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn replay_excludes_ambiguous_helpers_even_without_a_known_result_source() {
+    let entry = "import { move } from './index';\nexport function run(a, b) { move(a, b); }\n";
+    let repo = init_repo(&[
+        ("main.js", entry),
+        ("a.js", "export function move(a, b) { return a; }\n"),
+        ("b.js", "export function move(a, b) { return b; }\n"),
+        ("index.js", "export * from './a';\n"),
+    ]);
+    let clean = current_commit(repo.path());
+    repo.commit(&[("main.js", &format!("{entry}// unchanged behavior\n"))], "second clean revision");
+    let clean_after = current_commit(repo.path());
+    repo.commit(&[("index.js", "export * from './a'; export * from './b';\n")], "introduce ambiguous export");
+    let ambiguous = current_commit(repo.path());
+    let rule = serde_json::json!({"tool":"autoreview-dataflow", "id":"javascript-node-fs-discarded-promise"});
+    let suite = serde_json::json!({"cases": [
+        {"name":"resolved", "rule":rule, "before":{"commit":clean,"path":"main.js","lines":[]}, "after":{"commit":clean_after,"path":"main.js","lines":[]}},
+        {"name":"ambiguous", "rule":rule, "before":{"commit":ambiguous,"path":"main.js","lines":[]}, "after":{"commit":clean_after,"path":"main.js","lines":[]}}
+    ]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let report = failed_replay_report(repo.path());
+    assert_eq!(report["cases"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(report["cases"][0]["name"], "resolved");
+    assert_eq!(report["failures"][0]["name"], "ambiguous");
+    assert_eq!(report["failures"][0]["kind"], "incomplete-analysis");
+    assert_eq!(report["coverage"][0]["attempted"], 2);
+    assert_eq!(report["coverage"][0]["completed"], 1);
+    assert_eq!(report["coverage"][0]["incomplete"], 1);
 }
 
 #[test]
@@ -337,6 +371,22 @@ fn static_review_report(repo: &autoreview_test_support::TestRepo, base: &str, ta
     let run = command.assert().success();
     let path = report_path_from_stdout(&String::from_utf8_lossy(&run.get_output().stdout));
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+#[test]
+fn review_reports_ambiguous_helpers_without_known_result_sources() {
+    let repo = init_repo(&[
+        ("main.js", "import { move } from './index';\nexport function run(a, b) { return a; }\n"),
+        ("a.js", "export function move(a, b) { return a; }\n"),
+        ("b.js", "export function move(a, b) { return b; }\n"),
+        ("index.js", "export * from './a'; export * from './b';\n"),
+    ]);
+    let base = current_commit(repo.path());
+    repo.commit(&[("main.js", "import { move } from './index';\nexport function run(a, b) { move(a, b); }\n")], "call ambiguous helper");
+    let report = static_review_report(&repo, &base, None);
+    assert!(report["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "unresolved_helper_target" && issue["rule"] == "javascript-node-fs-discarded-promise"
+            && issue["path"] == "main.js" && issue["line"] == 2), "{report}");
 }
 
 fn assert_rust_helper_review(repo: &autoreview_test_support::TestRepo, base: &str, incomplete_reason: &str) {
