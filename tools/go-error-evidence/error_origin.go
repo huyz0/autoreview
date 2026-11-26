@@ -8,8 +8,14 @@ import (
 // This is evidence about explicit returned values, not about whether the
 // caller should suppress them. Missing evidence always means unknown.
 type errorOrigin struct {
-	Kind             string `json:"kind"`
-	ContextParameter int    `json:"contextParameter"`
+	Kind             string           `json:"kind"`
+	ContextParameter int              `json:"contextParameter"`
+	Specialized      *integerEvidence `json:"specialized,omitempty"`
+}
+
+type integerEvidence struct {
+	Parameter int    `json:"parameter"`
+	Value     string `json:"value"`
 }
 
 const errorOriginPassLimit = 16
@@ -90,8 +96,12 @@ func isContextParameter(param *types.Var) bool {
 }
 
 func contextReturnsOnly(body *ast.BlockStmt, param *types.Var, info *types.Info, summaries map[callee]*errorOrigin) bool {
-	valid, sawError := true, false
 	unreachable := unreachableErrorBranches(body, info)
+	return contextReturnsWithReachability(body, param, info, summaries, unreachable)
+}
+
+func contextReturnsWithReachability(body *ast.BlockStmt, param *types.Var, info *types.Info, summaries map[callee]*errorOrigin, unreachable map[ast.Node]bool) bool {
+	valid, sawError := true, false
 	bindings := forwardedBindings(body, param, info, summaries, unreachable)
 	var stack []ast.Node
 	ast.Inspect(body, func(node ast.Node) bool {
@@ -206,11 +216,28 @@ func forwardedParameter(call *ast.CallExpr, info *types.Info, summaries map[call
 	if origin == nil || origin.Kind != "context_error_or_nil" {
 		return 0, false
 	}
-	index := origin.ContextParameter
-	if selector, ok := call.Fun.(*ast.SelectorExpr); ok {
-		if selection := info.Selections[selector]; selection != nil && selection.Kind() == types.MethodExpr {
-			index++
+	index := origin.ContextParameter + callReceiverOffset(call, info)
+	return index, index >= 0 && index < len(call.Args)
+}
+
+func callReceiverOffset(call *ast.CallExpr, info *types.Info) int {
+	fun := call.Fun
+	for {
+		switch item := fun.(type) {
+		case *ast.ParenExpr:
+			fun = item.X
+		case *ast.IndexExpr:
+			fun = item.X
+		case *ast.IndexListExpr:
+			fun = item.X
+		default:
+			selector, ok := fun.(*ast.SelectorExpr)
+			if ok {
+				if selection := info.Selections[selector]; selection != nil && selection.Kind() == types.MethodExpr {
+					return 1
+				}
+			}
+			return 0
 		}
 	}
-	return index, index >= 0 && index < len(call.Args)
 }

@@ -82,7 +82,7 @@ established summary and the same context parameter. A fresh, single-result
 error binding can also be returned after nil comparisons when it is never
 reassigned or otherwise used. Branches that Go's type checker proves are
 unreachable because of a compile-time constant condition are excluded; their
-initializer statements are still analyzed. Receiver fields and runtime
+initializer statements are still analyzed. Receiver fields and nonconstant
 arguments are not treated as constants. Helper summaries use at
 most 16 passes; unresolved or recursive-only flows stay unknown. It does not
 prove that the context implementation is
@@ -94,6 +94,14 @@ callee evidence. Set `AUTOREVIEW_GO_ERROR_ORIGIN_EVIDENCE=1` to attach available
 summaries as `goErrorOrigin` metadata on experimental result-use findings.
 This does not change finding decisions. Unsupported or older probes fall back
 to the existing analysis without that metadata.
+
+For a direct call to a function in the loaded package, the probe can also
+specialize comparisons against a type-checked integer constant argument when
+the corresponding parameter is never modified or addressed and the body has
+no function literals. Such call-specific metadata records the parameter index
+and value under `specialized`; it is not an unconditional function summary.
+At most 256 calls per request are considered for specialization. Receiver
+fields, nonconstant arguments, and imported function bodies are not specialized.
 
 To include explicitly selected repository dependencies, set
 `AUTOREVIEW_GO_ERROR_ORIGIN_DEPENDENCIES` to a JSON object mapping canonical Go

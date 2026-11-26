@@ -78,10 +78,11 @@ func analyze(req request) response {
 	}
 	indexes := indexCalls(fset, byPath)
 	indexErrorOriginsInto(files, info, req.IncludeErrorOrigins, origins)
+	analysis := callAnalysis{info: info, origins: origins, functions: localFunctions(files, info, req.IncludeErrorOrigins), request: req, remaining: 256}
 	result := response{Version: 2, Status: "ok", Calls: make([]callResult, 0, len(req.Calls))}
 	for _, call := range req.Calls {
 		node := indexes[call.Path][call.Start]
-		result.Calls = append(result.Calls, makeCallResult(call, node, info, origins, req))
+		result.Calls = append(result.Calls, analysis.result(call, node))
 	}
 	return result
 }
@@ -104,15 +105,28 @@ func typecheckTarget(fset *token.FileSet, loaded loadedPackage, req request) ([]
 	return files, byPath, info, ""
 }
 
-func makeCallResult(call callSite, node *ast.CallExpr, info *types.Info, origins map[callee]*errorOrigin, req request) callResult {
-	status, count, indexes := callStatus(node, info)
+type callAnalysis struct {
+	info      *types.Info
+	origins   map[callee]*errorOrigin
+	functions map[callee]localFunction
+	request   request
+	remaining int
+}
+
+func (a *callAnalysis) result(call callSite, node *ast.CallExpr) callResult {
+	status, count, indexes := callStatus(node, a.info)
 	item := callResult{Path: call.Path, Start: call.Start, Status: status, ResultCount: count, ErrorIndexes: indexes}
-	if req.IncludeCallees {
-		item.Callee = resolvedCallee(node, info)
+	if a.request.IncludeCallees {
+		item.Callee = resolvedCallee(node, a.info)
 	}
-	if req.IncludeErrorOrigins {
-		if target := resolvedCallee(node, info); target != nil {
-			item.ErrorOrigin = origins[*target]
+	if a.request.IncludeErrorOrigins {
+		if target := resolvedCallee(node, a.info); target != nil {
+			item.ErrorOrigin = a.origins[*target]
+			_, local := a.functions[*target]
+			if item.ErrorOrigin == nil && local && a.remaining > 0 {
+				a.remaining--
+				item.ErrorOrigin = specializeCall(node, a.info, a.origins, a.functions)
+			}
 		}
 	}
 	return item
