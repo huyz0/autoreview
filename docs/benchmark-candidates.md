@@ -62,11 +62,36 @@ establish general precision or recall.
   replay needs a justified, reproducible compatible compiler configuration;
   it must not silently bypass those errors.
 
-To turn these into scored cases, the general rule needs to prove the return
-type of ordinary imported functions and class methods, track the particular
-returned promise through the existing result-use engine, and report missing
-type evidence rather than infer from a method name. Verify both fixed files
-and unrelated synchronous or intentionally observed calls as negatives;
-preserve compiler and source-snapshot checks, bounded execution, and coverage
-reporting. Add the pinned files as separate replay cases only when that rule
-exists, and check all findings in each entire file before accepting its labels.
+The general `typed-promise` source has since been exercised on both revisions.
+It finds all three labeled calls before the fix and none in either fixed file,
+but reports unresolved call types in both revisions. This is an incomplete
+observation, not a scored replay or an accuracy estimate. TypeScript 5.6.3
+type-checks these snapshots with `useUnknownInCatchVariables: false`; that
+restores the older compiler's catch-variable behavior without disabling
+declaration checks. The opt-in regression below checks the labeled files'
+SHA-256 hashes and requires the unresolved-type warnings to remain visible.
+
+For a reproducible local observation, from a temporary parent directory:
+
+```sh
+git clone https://github.com/actions/checkout.git checkout
+cd checkout
+git checkout --detach 5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f
+npm ci --ignore-scripts --no-audit --no-fund
+npm install --prefix "$PWD/../ts-5.6.3" --no-save --ignore-scripts --no-audit --no-fund typescript@5.6.3
+mkdir -p .autoreview-replay-tmp/checkout-before .autoreview-replay-tmp/checkout-after
+git archive c952173edf28a2bd22e1a4926590c1ac39630461 | tar -x -C .autoreview-replay-tmp/checkout-before
+git archive 5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f | tar -x -C .autoreview-replay-tmp/checkout-after
+for snapshot in checkout-before checkout-after; do
+  printf '%s\n' '{"extends":"./tsconfig.json","compilerOptions":{"useUnknownInCatchVariables":false}}' > ".autoreview-replay-tmp/$snapshot/tsconfig-autoreview.json"
+done
+AUTOREVIEW_CHECKOUT_SNAPSHOTS="$PWD/.autoreview-replay-tmp" \
+AUTOREVIEW_TEST_TYPESCRIPT="$PWD/../ts-5.6.3/node_modules/typescript" \
+  cargo test --manifest-path /absolute/path/to/autoreview/Cargo.toml -p autoreview-core --lib checkout_historical_general_promise_observation
+```
+
+To turn these into scored cases, resolve or accurately scope the remaining
+coverage limitations, exercise the rule through the normal replay entry
+point, and check all findings in each entire file. Keep synchronous and
+intentionally observed calls as negatives, and retain compiler and snapshot
+verification, bounded execution, and coverage reporting.
