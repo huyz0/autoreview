@@ -506,6 +506,33 @@ mod tests {
     }
 
     #[test]
+    fn specialized_dependency_evidence_reaches_result_finding() {
+        let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
+        let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
+        let source = "package sample\nimport (\"context\"; \"example.test/probe/dep\")\nfunc use(ctx context.Context) {\n dep.Guarded(ctx, 1)\n dep.Guarded(ctx, 2)\n}\n";
+        let files = [("dep/dep.go", "package dep\nimport (\"context\"; \"errors\")\nfunc Guarded(ctx context.Context, n int) error { if n > 1 { return errors.New(\"other\") }; return ctx.Err() }\n")];
+        let (result, evidence) = analyze_source_with_config(source, &checker, &files, (false, true, Some(r#"{"example.test/probe/dep":"dep"}"#)));
+        assert!(result.limitations.is_empty());
+        assert_eq!(result.hits.len(), 2);
+        let rules = crate::analyzers::call_order_rules::load_call_order_rules(&[]);
+        let rule = rules.iter().find(|rule| rule.id == "go-project-error-result-unobserved").unwrap();
+        for (index, expression) in ["dep.Guarded(ctx, 1)", "dep.Guarded(ctx, 2)"].iter().enumerate() {
+            let start = source.find(expression).unwrap();
+            let hit = result.hits.iter().find(|hit| hit.source_start == Some(start)).unwrap();
+            let finding = super::finding("main.go", Some(source), rule, hit, &evidence);
+            let origin = finding.meta.as_ref().and_then(|meta| meta.get("goErrorOrigin"));
+            if index == 0 {
+                let origin = origin.unwrap();
+                assert_eq!(origin["contextParameter"], 0);
+                assert_eq!(origin["specialized"]["parameter"], 1);
+                assert_eq!(origin["specialized"]["value"], "1");
+            } else {
+                assert!(origin.is_none());
+            }
+        }
+    }
+
+    #[test]
     fn older_probe_reports_unavailable_dependency_evidence_and_keeps_findings() {
         let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_LEGACY_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
         let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };

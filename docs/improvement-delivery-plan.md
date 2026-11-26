@@ -136,6 +136,11 @@ constructor. A method named `Wait` is not evidence that errors are limited to
 cancellation. The static rule must continue warning unless the receiver,
 configuration, and possible error paths are established.
 
+The optional probe can specialize a direct call using an integer constant in
+an explicitly verified dependency as well as in the target package. This is
+call-specific metadata only; it does not track a receiver's constructor or
+mutable fields and does not resolve the Cilium false positive.
+
 The experimental Go probe can optionally identify a statically bound callee;
 the Go result-use rule can attach it to finding metadata without changing
 the finding decision. Before using it to suppress
