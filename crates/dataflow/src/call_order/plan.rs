@@ -39,13 +39,20 @@ impl<'a, 'src> Plan<'a, 'src> {
     pub(super) fn declined_cleanup(
         spec: &CallOrderSpec, cfg: &Cfg<Stmt>, function: Node<'_>, source: &[u8], unit: usize,
     ) -> Option<(u32, bool)> {
-        if spec.contract.is_some() || spec.unless.is_empty() { return None; }
+        if spec.contract.as_ref().is_some_and(|contract| contract.mode != ContractMode::MustComplete) || spec.unless.is_empty() { return None; }
         let mut sources = Sources::default();
         sources.collect(cfg)?;
         let syntax = Syntax::scan(function, source, &sources.writes, unit, false)?;
         let start = syntax.unmodeled_cleanup(&spec.unless, &sources.calls)?;
         let line = source.get(..start)?.iter().filter(|byte| **byte == b'\n').count() as u32 + 1;
-        Some((line, syntax.has_registration(&spec.after)))
+        let registered = match &spec.contract {
+            Some(contract) => {
+                let api = ApiMatcher::new(contract, function, source);
+                syntax.any_call(|name| api.matches(name, |root| syntax.shadows_api(root)))
+            }
+            None => syntax.has_registration(&spec.after),
+        };
+        Some((line, registered))
     }
 
     pub(super) fn new(
