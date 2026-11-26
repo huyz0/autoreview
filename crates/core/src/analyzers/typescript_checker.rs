@@ -154,6 +154,30 @@ mod tests {
     }
 
     #[test]
+    fn verifies_large_candidate_sets_in_bounded_batches() {
+        let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let name = format!("{}.ts", "long_name_".repeat(9));
+        let file = dir.path().join(&name);
+        let config = dir.path().join("tsconfig.json");
+        let source = format!("declare function pending(): Promise<void>;\n{}", "pending();\n".repeat(2000));
+        std::fs::write(&file, &source).unwrap();
+        std::fs::write(&config, serde_json::json!({"compilerOptions":{"target":"ES2022","strict":true},"files":[name]}).to_string()).unwrap();
+        let offsets: BTreeSet<_> = source.match_indices("pending();").map(|(start, _)| start).collect();
+        let calls: Vec<_> = offsets.iter().map(|&start| TypeScriptCall { path: file.to_string_lossy().into_owned(), start, source_sha256: format!("{:x}", Sha256::digest(source.as_bytes())) }).collect();
+        let config_path = config.to_str().unwrap();
+        let request = TypeScriptRequest { typescript_module: &compiler, config: config_path, calls: &calls };
+        assert!(serde_json::to_vec(&request).unwrap().len() > MAX_BYTES);
+        let units = [KeyedUnit { path: &name, source: source.as_bytes(), functions: &[], imports: &[], exports: &[], entry: true }];
+        let limitations = offsets.iter().map(|&start| KeyedLimitation { reason: "promise_type_unresolved", path: Some(name.clone()), line: Some(source[..start].bytes().filter(|byte| *byte == b'\n').count() as u32 + 1) }).collect();
+        let discovery = FactorySourceDiscovery { candidates: BTreeMap::from([(0, offsets)]), limitations };
+        let options = CheckerConfig { node: "node", compiler: &compiler, config: config_path, root: dir.path(), timeout: Duration::from_secs(60) };
+        let verified = verify_candidates(&options, &units, discovery);
+        assert_eq!(verified.candidates[&0].len(), 2000);
+        assert!(verified.limitations.is_empty(), "{:?}", verified.limitations.iter().map(|item| item.reason).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn verified_candidates_keep_unresolved_locations_and_reject_changed_sources() {
         let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
         let dir = tempfile::tempdir().unwrap();

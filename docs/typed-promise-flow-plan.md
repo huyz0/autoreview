@@ -123,6 +123,13 @@ compiler configuration the typed contract is reported as skipped. This is an
 experimental interface; compiler distribution, descendant-process containment,
 and broader review and replay coverage still require work.
 
+Candidate requests are split into bounded batches to stay within the probe's
+input and output limits. All batches share one deadline. If a batch fails,
+completed batches keep their verified results and unverified candidates retain
+coverage limitations; an individually oversized request is skipped and also
+reported as incomplete. Each batch starts a compiler process, so large reviews
+may still exceed the deadline and need further performance work.
+
 Optional calls and calls with spread arguments are not modeled by the typed
 factory rule. When the imported binding resolves to factory annotation evidence,
 these call sites are reported as incomplete instead of being counted as clean.

@@ -4,6 +4,7 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use autoreview_dataflow::call_order::{FactorySourceDiscovery, KeyedLimitation, KeyedUnit};
 use super::{check, TypeScriptCall, TypeScriptRequest};
+mod batches;
 
 /// Keep only checker-confirmed candidates. Unverified positions retain their
 /// coverage limitations. This does not select or trust a compiler for users.
@@ -30,19 +31,8 @@ pub fn verify_candidates(
         limitations.push(checker_limitation());
         return FactorySourceDiscovery { candidates: verified, limitations };
     };
-    if !batch.calls.is_empty() {
-        let request = TypeScriptRequest { typescript_module: options.compiler, config: options.config, calls: &batch.calls };
-        match check(options.node, &request, options.timeout) {
-            Some(result) if result.status == "ok" => {
-                for ((unit, start), result) in batch.positions.iter().copied().zip(result.calls.unwrap_or_default()) {
-                    if result.status == "promise_like" { verified.entry(unit).or_default().insert(start); }
-                    if matches!(result.status.as_str(), "promise_like" | "not_promise") {
-                        classified.entry(unit).or_default().insert(start);
-                    }
-                }
-            }
-            _ => limitations.push(checker_limitation()),
-        }
+    if !batch.calls.is_empty() && !batches::verify(options, &batch, &mut verified, &mut classified, check) {
+        limitations.push(checker_limitation());
     }
     retain_unresolved(&mut limitations, units, &discovery.candidates, &classified);
     FactorySourceDiscovery { candidates: verified, limitations }
