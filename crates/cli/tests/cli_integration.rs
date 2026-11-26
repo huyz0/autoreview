@@ -30,6 +30,30 @@ fn failed_replay_report(repo: &std::path::Path) -> serde_json::Value {
     serde_json::from_slice(&result.get_output().stdout).unwrap()
 }
 
+#[cfg(windows)]
+#[test]
+fn replay_checks_out_unrelated_long_paths_on_windows() {
+    let repo = init_repo(&[("main.go", "package main\nfunc main() {}\n")]);
+    let before = current_commit(repo.path());
+    let blob = StdCommand::new("git").args(["hash-object", "-w", "main.go"]).current_dir(repo.path()).output().unwrap();
+    assert!(blob.status.success());
+    let hash = std::str::from_utf8(&blob.stdout).unwrap().trim();
+    let long_path = format!("{}/file.txt", vec!["a".repeat(50); 6].join("/"));
+    let added = StdCommand::new("git").args(["update-index", "--add", "--cacheinfo", "100644", hash, &long_path]).current_dir(repo.path()).output().unwrap();
+    assert!(added.status.success(), "{}", String::from_utf8_lossy(&added.stderr));
+    let commit = StdCommand::new("git").args(["commit", "-m", "add long path"]).current_dir(repo.path()).output().unwrap();
+    assert!(commit.status.success(), "{}", String::from_utf8_lossy(&commit.stderr));
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name": "long snapshot path", "rule": {"tool": "autoreview-dataflow", "id": "go-os-rename-discarded-error"},
+        "before": {"commit": before, "path": "main.go", "lines": []}, "after": {"commit": after, "path": "main.go", "lines": []}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .env("GIT_CONFIG_COUNT", "1").env("GIT_CONFIG_KEY_0", "core.longpaths").env("GIT_CONFIG_VALUE_0", "false")
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().success();
+    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(report["coverage"][0]["completed"], 1, "{report}");
+}
+
 #[test]
 fn replay_reports_analysis_failures_without_losing_successful_cases() {
     let bad = "package main\nimport \"os\"\nfunc move(a, b string) { os.Rename(a, b) }\n";

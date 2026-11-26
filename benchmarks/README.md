@@ -1,5 +1,8 @@
 # Historical replay cases
 
+See [the Windows baseline](windows-baseline.md) for a measured selection of
+these cases, including replay failures and the known Cilium false positive.
+
 These cases reference public repositories and pinned commits; they do not
 copy the source files into Autoreview. Check each project's license before
 adding cases. Labels cover an entire file, not only the changed lines.
