@@ -131,6 +131,16 @@ pub(crate) fn returned_conditional_expression(node: Node<'_>) -> bool {
     value.parent().is_some_and(|owner| owner.kind() == "return_statement")
 }
 
+pub(crate) fn assigned_conditional_expression(node: Node<'_>) -> bool {
+    let mut value = node;
+    while let Some(wrapper) = value.parent().filter(|parent| conditional_wrapper(parent.kind())) { value = wrapper; }
+    value.parent().is_some_and(|owner| match owner.kind() {
+        "variable_declarator" => owner.child_by_field_name("value") == Some(value),
+        "assignment_expression" | "augmented_assignment_expression" => owner.child_by_field_name("right") == Some(value),
+        _ => false,
+    })
+}
+
 fn conditional_wrapper(kind: &str) -> bool {
     matches!(kind, "parenthesized_expression" | "as_expression" | "satisfies_expression" | "non_null_expression")
 }

@@ -62,12 +62,16 @@ pub(super) fn lower<'src>(
 }
 
 fn evaluation<'tree>(function: Node<'tree>, evaluation: &Evaluation) -> Option<Node<'tree>> {
+    syntax_at(function, &evaluation.span, evaluation.syntax_kind)
+}
+
+fn syntax_at<'tree>(function: Node<'tree>, span: &std::ops::Range<usize>, syntax_kind: u16) -> Option<Node<'tree>> {
     let inner =
-        function.named_descendant_for_byte_range(evaluation.span.start, evaluation.span.end)?;
+        function.named_descendant_for_byte_range(span.start, span.end)?;
     // A wrapper and its only child can have identical spans.
     std::iter::successors(Some(inner), Node::parent)
-        .take_while(|node| *node != function && node.byte_range() == evaluation.span)
-        .find(|node| node.kind_id() == evaluation.syntax_kind)
+        .take_while(|node| *node != function && node.byte_range() == *span)
+        .find(|node| node.kind_id() == syntax_kind)
 }
 
 struct Lower<'plan, 'src, 'tree> {
@@ -94,7 +98,12 @@ impl Lower<'_, '_, '_> {
                 if reached {
                     for range in &node.evaluations {
                         let Some(syntax) = evaluation(function, range) else { continue; };
-                        if range.returned && (self.returns_to_caller || self.inside.is_some()) {
+                        if let Some((span, kind)) = &range.assignment {
+                            if let Some((owner, target, reassign)) = syntax_at(function, span, *kind)
+                                .and_then(|owner| assignment_parts(owner, self.source).map(|(target, _, reassign)| (owner, target, reassign))) {
+                                self.assignment(owner, target, Some(syntax), reassign, &mut effects);
+                            }
+                        } else if range.returned && (self.returns_to_caller || self.inside.is_some()) {
                             self.returned(syntax, &mut effects);
                         } else {
                             self.statement(syntax, &mut effects);

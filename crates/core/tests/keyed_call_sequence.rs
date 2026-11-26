@@ -78,6 +78,24 @@ const RECEIVER: &str = "{receiver: true, keyArgument: 0}";
 const ARGUMENT: &str = "{collectionArgument: 0, keyArgument: 2}";
 
 #[test]
+fn conditional_assignment_preserves_collection_identity_per_branch() {
+    let source = "function pending(root, other, key, flag) {\n const chosen = flag ? root : other;\n chosen.register(key);\n root.remove(key);\n}\n";
+    for (language, path) in [("JavaScript", "main.js"), ("TypeScript", "main.ts"), ("TypeScript", "main.tsx")] {
+        assert_eq!(findings(language, path, source, RECEIVER, true).len(), 1, "{path}");
+        let clean = source.replace("root.remove(key)", "chosen.remove(key)");
+        assert!(findings(language, path, &clean, RECEIVER, true).is_empty(), "{path}");
+        let constant = source.replace("flag ?", "true ?");
+        assert!(findings(language, path, &constant, RECEIVER, true).is_empty(), "{path}");
+        let reassigned = source.replace("const chosen = flag ? root : other;", "let chosen = root; chosen = flag ? root : other;");
+        assert_eq!(findings(language, path, &reassigned, RECEIVER, true).len(), 1, "{path}");
+        let keyed = "function pending(root, key, other, flag) {\n const chosen = flag ? key : other;\n root.register(chosen);\n root.remove(key);\n}\n";
+        assert_eq!(findings(language, path, keyed, RECEIVER, true).len(), 1, "{path}");
+        let same_key = keyed.replace("root.remove(key)", "root.remove(chosen)");
+        assert!(findings(language, path, &same_key, RECEIVER, true).is_empty(), "{path}");
+    }
+}
+
+#[test]
 fn conditional_returns_track_cleanup_on_each_branch() {
     let source = "function pending(root, key, flag) {\n root.register(key);\n return flag ? root.remove(key) : null;\n}\n";
     for (language, path) in [("JavaScript", "main.js"), ("TypeScript", "main.ts"), ("TypeScript", "main.tsx")] {

@@ -14,6 +14,7 @@ pub(crate) struct Evaluation {
     pub(crate) span: std::ops::Range<usize>,
     pub(crate) syntax_kind: u16,
     pub(crate) returned: bool,
+    pub(crate) assignment: Option<(std::ops::Range<usize>, u16)>,
 }
 
 #[derive(Debug, Clone)]

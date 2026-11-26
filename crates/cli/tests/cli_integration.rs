@@ -137,35 +137,12 @@ fn replay_excludes_ambiguous_helpers_even_without_a_known_result_source() {
     assert_eq!(report["coverage"][0]["incomplete"], 1);
 }
 
-#[test]
-fn replay_tracks_returned_conditional_helper_results() {
-    let bad = "import { rename } from 'node:fs/promises';\nfunction make(a, b, flag) { return flag ? rename(a, b) : null; }\nexport function run(a, b, flag) { make(a, b, flag); }\n";
-    let fixed = bad.replace("export function run(a, b, flag) { make(a, b, flag); }", "export async function run(a, b, flag) { await make(a, b, flag); }");
+fn assert_conditional_replay(bad: &str, fixed: &str, line: u32) {
     let repo = init_repo(&[("main.js", bad)]);
     let before = current_commit(repo.path());
-    repo.commit(&[("main.js", &fixed)], "observe returned promise");
+    repo.commit(&[("main.js", fixed)], "observe conditional promise");
     let after = current_commit(repo.path());
-    let mut suite = serde_json::json!({"cases": [{"name":"conditional helper", "rule":{"tool":"autoreview-dataflow","id":"javascript-node-fs-discarded-promise"}, "before":{"commit":before,"path":"main.js","lines":[2]}, "after":{"commit":after,"path":"main.js","lines":[]}}]});
-    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
-    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["rules", "replay", "--suite", "suite.json"]).assert().success();
-    let report: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
-    assert_eq!(report["rules"][0]["truePositives"], 1, "{report}");
-    repo.commit(&[("main.js", &bad.replace("flag ?", "check(flag) ?"))], "use unmodeled condition");
-    suite["cases"][0]["before"]["commit"] = current_commit(repo.path()).into();
-    suite["cases"][0]["before"]["lines"] = serde_json::json!([]);
-    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
-    assert_incomplete_replay(&failed_replay_report(repo.path()), "unmodeled_conditional_result", "main.js", 2);
-}
-
-#[test]
-fn replay_detects_conditional_discarded_promise() {
-    let bad = "import { rename } from 'node:fs/promises';\nexport function run(a, b, flag) {\n flag ? rename(a, b) : null;\n}\n";
-    let clean = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n if (flag) { await rename(a, b); }\n}\n";
-    let repo = init_repo(&[("main.js", bad)]);
-    let before = current_commit(repo.path());
-    repo.commit(&[("main.js", clean)], "observe conditional promise");
-    let after = current_commit(repo.path());
-    let mut suite = serde_json::json!({"cases": [{"name":"conditional promise", "rule":{"tool":"autoreview-dataflow","id":"javascript-node-fs-discarded-promise"}, "before":{"commit":before,"path":"main.js","lines":[3]}, "after":{"commit":after,"path":"main.js","lines":[]}}]});
+    let mut suite = serde_json::json!({"cases": [{"name":"conditional promise", "rule":{"tool":"autoreview-dataflow","id":"javascript-node-fs-discarded-promise"}, "before":{"commit":before,"path":"main.js","lines":[line]}, "after":{"commit":after,"path":"main.js","lines":[]}}]});
     std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
     let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["rules", "replay", "--suite", "suite.json"]).assert().success();
     let report: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
@@ -175,7 +152,27 @@ fn replay_detects_conditional_discarded_promise() {
     suite["cases"][0]["before"]["commit"] = current_commit(repo.path()).into();
     suite["cases"][0]["before"]["lines"] = serde_json::json!([]);
     std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
-    assert_incomplete_replay(&failed_replay_report(repo.path()), "unmodeled_conditional_result", "main.js", 3);
+    assert_incomplete_replay(&failed_replay_report(repo.path()), "unmodeled_conditional_result", "main.js", line);
+}
+
+#[test]
+fn replay_tracks_conditional_assignment_results() {
+    let bad = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = flag ? rename(a, b) : null;\n}\n";
+    assert_conditional_replay(bad, &bad.replace("\n}\n", "\n await pending;\n}\n"), 3);
+}
+
+#[test]
+fn replay_tracks_returned_conditional_helper_results() {
+    let bad = "import { rename } from 'node:fs/promises';\nfunction make(a, b, flag) { return flag ? rename(a, b) : null; }\nexport function run(a, b, flag) { make(a, b, flag); }\n";
+    let fixed = bad.replace("export function run(a, b, flag) { make(a, b, flag); }", "export async function run(a, b, flag) { await make(a, b, flag); }");
+    assert_conditional_replay(bad, &fixed, 2);
+}
+
+#[test]
+fn replay_detects_conditional_discarded_promise() {
+    let bad = "import { rename } from 'node:fs/promises';\nexport function run(a, b, flag) {\n flag ? rename(a, b) : null;\n}\n";
+    let clean = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n if (flag) { await rename(a, b); }\n}\n";
+    assert_conditional_replay(bad, clean, 3);
 }
 
 #[test]

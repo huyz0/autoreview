@@ -41,7 +41,7 @@ fn conditional_arm(node: Node<'_>) -> Option<Node<'_>> {
     if !matches!(node.kind(), "call_expression" | "method_invocation" | "new_expression") { return None; }
     let conditional = std::iter::successors(node.parent(), |parent| parent.parent())
         .take_while(|parent| !matches!(parent.kind(), "function_declaration" | "function_expression" | "arrow_function" | "method_definition"))
-        .find(|parent| parent.kind() == "ternary_expression" && (site::discarded_conditional_expression(*parent) || site::returned_conditional_expression(*parent)))?;
+        .find(|parent| parent.kind() == "ternary_expression" && (site::discarded_conditional_expression(*parent) || site::returned_conditional_expression(*parent) || site::assigned_conditional_expression(*parent)))?;
     ["consequence", "alternative"].into_iter().filter_map(|field| conditional.child_by_field_name(field))
         .find(|arm| arm.start_byte() <= node.start_byte() && node.end_byte() <= arm.end_byte())
 }

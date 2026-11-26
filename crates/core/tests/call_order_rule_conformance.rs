@@ -197,6 +197,34 @@ fn conditional_finding_fixture(path: &str, rule: &str, source: &str) -> tempfile
 }
 
 #[test]
+fn conditional_assignments_track_result_use() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = flag ? rename(a, b) : null;\n}\n";
+        let root = conditional_finding_fixture(path, rule, source);
+        let check = || conditional_test_result(&root, path);
+        std::fs::write(root.path().join(path), source.replace("\n}\n", "\n await pending;\n}\n")).unwrap();
+        let result = check();
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        let overwritten = source.replace("\n}\n", "\n pending = null;\n await pending;\n}\n").replace("const pending", "let pending");
+        std::fs::write(root.path().join(path), overwritten).unwrap();
+        let result = check();
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        std::fs::write(root.path().join(path), source.replace("flag ?", "check(flag) ?")).unwrap();
+        let result = check();
+        assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_conditional_result" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        std::fs::write(root.path().join(path), source.replace(": null;", ": null, other = 0;")).unwrap();
+        let result = check();
+        assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_conditional_result" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        let helper = "import { rename } from 'node:fs/promises';\nexport function make(a, b, flag) {\n const pending = flag ? rename(a, b) : null;\n return pending;\n}\n";
+        std::fs::write(root.path().join(path), "import { make } from './helper';\nexport function run(a, b, flag) { make(a, b, flag); }\n").unwrap();
+        let extension = path.rsplit('.').next().unwrap();
+        std::fs::write(root.path().join(format!("helper.{extension}")), helper).unwrap();
+        let result = check();
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule) && hit.location.range.start_line == 3), "{path}: {:?} {:?}", result.findings, result.coverage);
+    }
+}
+
+#[test]
 fn conditional_return_results_flow_through_helpers() {
     for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
         let source = "import { rename } from 'node:fs/promises';\nfunction make(a, b, flag) {\n return flag ? rename(a, b) : null;\n}\nexport function run(a, b, flag) { make(a, b, flag); }\n";
