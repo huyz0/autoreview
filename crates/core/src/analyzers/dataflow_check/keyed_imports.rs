@@ -404,14 +404,14 @@ mod budget_tests {
     }
 
     fn assert_async_return_unknown_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
-        let source = "declare function uncertain(): any;\nexport async function direct() { return uncertain(); }\nexport async function branch(flag: boolean) { if (flag) return uncertain(); return 1; }\nexport async function choose(n: number) { switch (n) { case 1: return uncertain(); default: return 1; } }\nexport async function guarded() { try { return uncertain(); } finally { return 1; } }\nexport async function loop() { for (const x of [1]) return uncertain(); return 1; }\n";
+        let source = "declare function uncertain(): any;\nexport async function direct() { return uncertain(); }\nexport async function branch(flag: boolean) { if (flag) return uncertain(); return 1; }\nexport async function choose(n: number) { switch (n) { case 1: return uncertain(); default: return 1; } }\nexport async function guarded() { try { return uncertain(); } finally { return 1; } }\nexport async function loop() { for (const x of [1]) return uncertain(); return 1; }\nexport async function expression(flag: boolean) { return flag ? uncertain() : 1; }\nexport async function condition() { return uncertain() ? 1 : 2; }\n";
         for path in ["returned.ts", "returned.tsx"] {
             std::fs::write(dir.join(path), source).unwrap();
             let paths = [path.to_owned()];
             let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
             assert!(findings.is_empty(), "{findings:#?}");
-            for line in [2, 3, 4] { assert!(!coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(line)), "{coverage:?}"); }
-            for line in [5, 6] { assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(line)), "{coverage:?}"); }
+            for line in [2, 3, 4, 7] { assert!(!coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(line)), "{coverage:?}"); }
+            for line in [5, 6, 8] { assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(line)), "{coverage:?}"); }
             std::fs::remove_file(dir.join(path)).unwrap();
         }
     }

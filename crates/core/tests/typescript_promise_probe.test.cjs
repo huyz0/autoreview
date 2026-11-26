@@ -97,6 +97,22 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
     calls = [...returns.matchAll(/\bunknownValue\(\)/g)].slice(1)
       .map(match => ({ path: file, start: Buffer.byteLength(returns.slice(0, match.index)), source_sha256: hash(returns) }));
     assert.deepEqual(invoke().calls.map(call => call.status), ['observed', 'observed', 'observed', 'observed', 'observed', 'observed', 'observed', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven']);
+    const expressions = [
+      'declare function unknownValue(): any;',
+      'async function branch(flag: boolean) { return flag ? unknownValue() : unknownValue(); }',
+      'async function awaited(flag: boolean) { await (flag ? unknownValue() : unknownValue()); }',
+      'async function logical(flag: boolean) { return flag && unknownValue() || unknownValue(); }',
+      'async function nullish(flag: boolean) { return flag ?? unknownValue(); }',
+      'async function condition() { return unknownValue() ? 1 : 2; }',
+      'async function left() { return unknownValue() || 1; }',
+      'async function guarded(flag: boolean) { try { return flag ? unknownValue() : 1; } finally { return 1; } }',
+      'function sync(flag: boolean) { return flag ? unknownValue() : 1; }',
+      'async function property(flag: boolean) { return (flag ? unknownValue() : 1).value; }',
+    ].join('\n');
+    fs.writeFileSync(file, expressions);
+    calls = [...expressions.matchAll(/\bunknownValue\(\)/g)].slice(1)
+      .map(match => ({ path: file, start: Buffer.byteLength(expressions.slice(0, match.index)), source_sha256: hash(expressions) }));
+    assert.deepEqual(invoke().calls.map(call => call.status), ['observed', 'observed', 'observed', 'observed', 'not_proven', 'observed', 'observed', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven']);
     if (require(compiler).NodeFlags.Using) {
       const resources = [
         'declare function unknownValue(): any;',

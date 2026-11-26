@@ -148,9 +148,11 @@ An experimental custom call-sequence rule may also set `source: typed-promise`
 on a TypeScript or TSX `must-use` contract. It sends call sites to the trusted
 compiler and tracks only confirmed promise-like returns. Known primitive
 non-promises are excluded; unknown types remain coverage limitations unless
-the call itself is directly awaited or returned from a supported async
-function, including through parentheses and ordinary blocks, `if` branches,
-or `switch` cases. Async generators, returns inside loops or `try` statements,
+the call's value is awaited or returned from a supported async function,
+including through parentheses, conditional arms, right operands of `&&`,
+`||`, and `??`, and ordinary blocks, `if` branches, or `switch` cases. Calls
+used as conditions or left operands are not assumed observed. Async generators,
+returns inside loops or `try` statements,
 and functions with `using` declarations remain unclassified because cleanup
 can replace a return before its value is adopted.
 This
