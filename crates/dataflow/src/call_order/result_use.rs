@@ -54,9 +54,17 @@ struct HelperSummary {
 struct HelperOutcome {
     parameters: Vec<bool>,
     unobserved_parameters: Vec<Option<bool>>,
+    conditional_parameters: Option<ConditionalParameters>,
     origins: Vec<(Origin, bool)>,
     opaque_parameters: Vec<bool>,
     opaque_origins: Vec<Origin>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ConditionalParameters {
+    guard_index: usize,
+    when_false: Vec<Option<bool>>,
+    when_true: Vec<Option<bool>>,
 }
 
 impl Analysis {
@@ -110,6 +118,7 @@ impl Analysis {
                 .map(|parameter| parameter.is_none_or(|place| live.contains(&place)))
                 .collect(),
             unobserved_parameters: vec![None; parameters.len()],
+            conditional_parameters: None,
             origins: origins.into_values().collect(),
             opaque_parameters: parameters.iter().map(|parameter| parameter.is_none_or(|place| opaque_live.contains(&place))).collect(),
             opaque_origins: opaque_origins.into_values().collect(),

@@ -17,7 +17,12 @@ The same warning can identify a locally tracked result or a direct result
 passed as an argument to a resolved
 helper that may leave its parameter unobserved, unless subsequent caller paths
 prove the result is used. Helper guard values are not yet mapped to caller
-arguments, so this is an incomplete-analysis warning, not a proven defect.
+arguments in general, so this is an incomplete-analysis warning, not a proven defect.
+When a supported helper has one stable parameter guard and the caller passes a
+literal boolean, Java, Kotlin, JavaScript, TypeScript, TSX, and Rust can
+specialize that guard and report a definite unused result or establish that the
+helper observes it. Go retains the warning because its predeclared boolean
+names can be shadowed and that binding is not yet verified for this check.
 This check does not cover every storage shape, helper chain, or expression.
 Merely intersecting liveness sets would produce false positives for correlated guards.
 Discarded conditional arms that reference a tracked binding are modeled when

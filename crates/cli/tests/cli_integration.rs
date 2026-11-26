@@ -170,6 +170,12 @@ fn replay_tracks_returned_conditional_helper_results() {
 }
 
 #[test]
+fn replay_tracks_boolean_helper_guard() {
+    let bad = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b) { return consume(rename(a, b), false); }\n";
+    assert_conditional_replay(bad, &bad.replace(", false)", ", true)"), 3, false);
+}
+
+#[test]
 fn replay_detects_conditional_discarded_promise() {
     let bad = "import { rename } from 'node:fs/promises';\nexport function run(a, b, flag) {\n flag ? rename(a, b) : null;\n}\n";
     let clean = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n if (flag) { await rename(a, b); }\n}\n";

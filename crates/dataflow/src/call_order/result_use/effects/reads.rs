@@ -11,6 +11,26 @@ enum Visit<'tree> {
     Invoke(usize, Demand),
 }
 
+fn specialize(outcome: &super::super::HelperOutcome, arguments: &[Node<'_>], source: &[u8], kotlin: bool) -> (Vec<bool>, Vec<Option<bool>>) {
+    let mut used = outcome.parameters.clone();
+    let mut unobserved = outcome.unobserved_parameters.clone();
+    let Some(conditional) = &outcome.conditional_parameters else { return (used, unobserved); };
+    let Some(argument) = arguments.get(conditional.guard_index).copied().map(transparent) else { return (used, unobserved); };
+    let kind = if (kotlin && argument.kind() == "identifier") || argument.kind() == "boolean_literal" { argument.utf8_text(source).unwrap_or("") } else { argument.kind() };
+    let values = match kind {
+        "true" => &conditional.when_true,
+        "false" => &conditional.when_false,
+        _ => return (used, unobserved),
+    };
+    for (index, value) in values.iter().enumerate() {
+        if let Some(can_skip) = value {
+            used[index] = !can_skip;
+            unobserved[index] = Some(*can_skip);
+        }
+    }
+    (used, unobserved)
+}
+
 impl Lower<'_, '_, '_> {
     pub(super) fn helper_call<'tree>(&self, node: Node<'tree>) -> Option<(Vec<Node<'tree>>, &super::HelperSummary)> {
         let summary = self.helpers.get(&node.start_byte())?;
@@ -69,6 +89,18 @@ impl Lower<'_, '_, '_> {
 
     fn add_helper_effect(&self, node: Node<'_>, demand: Demand, effects: &mut Vec<Effect>) -> bool {
         let Some((arguments, summary)) = self.helper_call(node) else { return false; };
+        let language = self.plan.spec.contract.as_ref().map(|contract| contract.language);
+        let kotlin = language == Some(crate::call_order::ContractLanguage::Kotlin);
+        // Go permits shadowing its predeclared boolean names, including where
+        // the syntax tree gives them literal-shaped nodes.
+        let shadowed = language == Some(crate::call_order::ContractLanguage::Go);
+        let (discarded, observed) = if shadowed {
+            ((summary.when_discarded.parameters.clone(), summary.when_discarded.unobserved_parameters.clone()),
+             (summary.when_observed.parameters.clone(), summary.when_observed.unobserved_parameters.clone()))
+        } else {
+            (specialize(&summary.when_discarded, &arguments, self.source, kotlin),
+             specialize(&summary.when_observed, &arguments, self.source, kotlin))
+        };
         let multi = (arguments.len() == 1).then(|| transparent(arguments[0]))
             .and_then(|call| self.plan.result_components.get(&call.start_byte()).map(|shape| (call, shape)));
         let arguments = if let Some((call, shape)) = multi {
@@ -120,10 +152,10 @@ impl Lower<'_, '_, '_> {
         effects.push(Effect::ApplyHelper(Box::new(HelperCall {
             arguments,
             demand,
-            when_discarded: summary.when_discarded.parameters.clone(),
-            when_observed: summary.when_observed.parameters.clone(),
-            unobserved_discarded: summary.when_discarded.unobserved_parameters.clone(),
-            unobserved_observed: summary.when_observed.unobserved_parameters.clone(),
+            when_discarded: discarded.0,
+            when_observed: observed.0,
+            unobserved_discarded: discarded.1,
+            unobserved_observed: observed.1,
             origins_discarded: origins(&summary.when_discarded.origins),
             origins_observed: origins(&summary.when_observed.origins),
             opaque_discarded: summary.when_discarded.opaque_parameters.clone(),

@@ -102,6 +102,7 @@ fn empty_summary(parameters: usize) -> HelperSummary {
     let empty = HelperOutcome {
         parameters: vec![false; parameters],
         unobserved_parameters: vec![None; parameters],
+        conditional_parameters: None,
         origins: Vec::new(),
         opaque_parameters: vec![false; parameters],
         opaque_origins: Vec::new(),
@@ -136,10 +137,24 @@ fn summarize(
     let analysis = effects::lower(plan, function, unit.source, true, calls);
     let mut summary = analysis.helper_summary(&parameters);
     let syntax = (function.node, unit.source);
+    let guard = (plan.spec.contract.as_ref().is_some_and(|contract| contract.language != crate::call_order::ContractLanguage::Go))
+        .then(|| super::partial::unique_parameter_guard(function.graph, plan, params)).flatten();
     for (used, outcome) in [(false, &mut summary.when_discarded), (true, &mut summary.when_observed)] {
         outcome.unobserved_parameters = super::partial::unobserved_parameters(
-            &analysis.owner, function.graph, plan, syntax, (&parameters, used, !analysis.closures.is_empty()),
+            &analysis.owner, function.graph, plan, syntax, super::partial::ParameterQuery {
+                parameters: &parameters, return_used: used, has_closures: !analysis.closures.is_empty(), assumed_guard: None,
+            },
         );
+        if let Some((guard_index, identity)) = &guard {
+            let specialized = |truth| super::partial::unobserved_parameters(
+                &analysis.owner, function.graph, plan, syntax,
+                super::partial::ParameterQuery { parameters: &parameters, return_used: used,
+                    has_closures: !analysis.closures.is_empty(), assumed_guard: Some((identity.clone(), truth)) },
+            );
+            outcome.conditional_parameters = Some(super::ConditionalParameters {
+                guard_index: *guard_index, when_false: specialized(false), when_true: specialized(true),
+            });
+        }
     }
     summary
 }
@@ -200,6 +215,10 @@ mod tests {
                 assert!(!exhausted);
                 assert_eq!(summaries[&0].when_observed.unobserved_parameters[0], Some(expected));
                 assert_eq!(summaries[&0].when_discarded.unobserved_parameters[0], Some(true));
+                let conditional = summaries[&0].when_observed.conditional_parameters.as_ref().unwrap();
+                assert_eq!(conditional.guard_index, 1);
+                assert_eq!(conditional.when_true[0], Some(false));
+                assert_eq!(conditional.when_false[0], Some(expected));
             });
         }
     }
