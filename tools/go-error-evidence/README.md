@@ -49,7 +49,10 @@ the target was not established; interface dispatch and function-valued
 variables are deliberately unresolved. This identifies a declaration,
 not the errors it can return or a guarantee about unverified dependencies.
 In package mode, a request for callee evidence must supply matching hashes for
-every build-selected source file in the target package. It still does not
+every build-selected source file in the target package. The optional
+`packageSources` map can include additional unselected `.go` files; the
+separate `expectedSources` map still requires every analyzed source to be
+build-selected and match. It still does not
 verify the contents of dependency exports or prevent subsequent changes.
 With `AUTOREVIEW_GO_CALLEE_EVIDENCE=1`, Autoreview requests this evidence for
 the experimental Go result-use rule and attaches available identities to
@@ -58,6 +61,8 @@ offset and omits ambiguous merged findings. If the probe is older or the
 package hashes are incomplete, Autoreview retries without callee evidence;
 the existing result-use analysis remains available. This evidence does not
 suppress findings or establish a callee's error behavior.
+Autoreview hashes at most 512 Go files totaling 8 MiB in a package directory;
+unreadable files, symlinks, or exceeded limits cause a fallback.
 
 The caller must analyze an immutable package snapshot: other package files and
 cached dependency exports can change during or after loading. Source-file mode

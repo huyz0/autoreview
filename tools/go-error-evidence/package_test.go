@@ -53,6 +53,16 @@ func TestPackageModeUsesBuildFilesAndLocalDependencies(t *testing.T) {
 	if got := analyze(req); got.Status != "ok" {
 		t.Fatalf("complete package hashes: %+v", got)
 	}
+	delete(req.ExpectedSources, "other.go")
+	req.PackageSources = map[string]string{"main.go": hex.EncodeToString(sum[:]), "other.go": hex.EncodeToString(otherSum[:]), "ignored.go": "not-selected"}
+	if got := analyze(req); got.Status != "ok" {
+		t.Fatalf("selected files can be verified among extra candidates: %+v", got)
+	}
+	delete(req.PackageSources, "other.go")
+	if got := analyze(req); got.Status != "incomplete" || got.Reason != "source_mismatch" {
+		t.Fatalf("missing selected candidate: %+v", got)
+	}
+	req.PackageSources = nil
 	req.ExpectedSources["other.go"] = strings.Repeat("0", 64)
 	if got := analyze(req); got.Status != "incomplete" || got.Reason != "source_mismatch" {
 		t.Fatalf("changed helper source: %+v", got)

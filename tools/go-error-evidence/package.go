@@ -196,3 +196,19 @@ func matchesExpectedSources(files []sourceFile, calls []callSite, expected map[s
 	}
 	return true
 }
+
+// Package candidates may include files excluded by build constraints, but each
+// selected file must have a matching digest. The separate expected-source map
+// still checks every file that the analyzer actually loaded.
+func matchesPackageSources(files []sourceFile, candidates, expected map[string]string) bool {
+	if candidates == nil {
+		return matchesExpectedSources(files, nil, expected, true)
+	}
+	for _, file := range files {
+		hash := sha256.Sum256([]byte(file.Source))
+		if candidates[file.Path] != hex.EncodeToString(hash[:]) {
+			return false
+		}
+	}
+	return true
+}
