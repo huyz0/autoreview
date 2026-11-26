@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use autoreview_dataflow::call_order::has_rust_attributes as has_attributes;
 
 mod parent;
 use parent::private_parent_namespace;
@@ -252,12 +253,6 @@ fn declared_module(resolver: &Resolver<'_>, current: &Path, name: &str) -> Optio
         && node.child_by_field_name("name").and_then(|part| text(part, &parsed.0)) == Some(name)).collect();
     let [module] = modules.as_slice() else { return None };
     (!has_attributes(*module)).then(|| rust_module(resolver, &module_dir(current)?.join(name))).flatten()
-}
-
-fn has_attributes(node: Node<'_>) -> bool {
-    std::iter::successors(node.prev_named_sibling(), |node| node.prev_named_sibling())
-        .take_while(|node| matches!(node.kind(), "attribute_item" | "line_comment" | "block_comment"))
-        .any(|node| node.kind() == "attribute_item")
 }
 
 fn rust_paths(usage: &str) -> Vec<String> {

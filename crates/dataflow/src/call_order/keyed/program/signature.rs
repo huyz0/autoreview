@@ -16,6 +16,18 @@ pub(super) fn export(node: Node<'_>, source: &[u8], name: String) -> Export {
         .and_then(|parent| parent.child_by_field_name("name"))
         .and_then(|name| name.utf8_text(source).ok())
         .map(str::to_owned));
+    let visible = is_visible(node, source, &name, owner.is_some());
+    let default = parent.is_some_and(|parent| {
+        parent.kind() == "export_statement"
+            && parent
+                .children(&mut parent.walk())
+                .any(|node| node.kind() == "default")
+    });
+    Export { name, owner, visible, default }
+}
+
+fn is_visible(node: Node<'_>, source: &[u8], name: &str, associated: bool) -> bool {
+    let parent = node.parent();
     let signature = node
         .child_by_field_name("name")
         .and_then(|name| source.get(node.start_byte()..name.start_byte()))
@@ -25,9 +37,9 @@ pub(super) fn export(node: Node<'_>, source: &[u8], name: String) -> Export {
             .split(|byte| !byte.is_ascii_alphanumeric())
             .any(|word| word == expected)
     };
-    let visible = match node.kind() {
+    match node.kind() {
         "method_declaration" => has(b"static") && !has(b"private"),
-        "function_item" if owner.is_some() => children(node).find(|child| child.kind() == "visibility_modifier")
+        "function_item" if associated => children(node).find(|child| child.kind() == "visibility_modifier")
             .and_then(|visibility| visibility.utf8_text(source).ok()).is_some_and(|visibility| matches!(visibility, "pub" | "pub(crate)")),
         "function_item" => has(b"pub"),
         "arrow_function" | "function_expression" => web_value_visible(parent),
@@ -39,18 +51,6 @@ pub(super) fn export(node: Node<'_>, source: &[u8], name: String) -> Export {
             name.chars().next().is_some_and(char::is_uppercase)
         }
         _ => parent.is_some_and(|parent| parent.kind() != "program") && !has(b"private"),
-    };
-    let default = parent.is_some_and(|parent| {
-        parent.kind() == "export_statement"
-            && parent
-                .children(&mut parent.walk())
-                .any(|node| node.kind() == "default")
-    });
-    Export {
-        name,
-        owner,
-        visible,
-        default,
     }
 }
 
@@ -107,7 +107,8 @@ fn rust_associated_owner(node: Node<'_>, source: &[u8]) -> Option<String> {
     Some(ty.utf8_text(source).ok()?.to_owned())
 }
 
-fn has_attributes(node: Node<'_>) -> bool {
+/// Whether outer Rust attributes immediately precede an item.
+pub fn has_attributes(node: Node<'_>) -> bool {
     std::iter::successors(node.prev_named_sibling(), |node| node.prev_named_sibling())
         .take_while(|node| matches!(node.kind(), "attribute_item" | "line_comment" | "block_comment"))
         .any(|node| node.kind() == "attribute_item")

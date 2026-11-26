@@ -4,6 +4,7 @@ use tree_sitter::Node;
 
 use crate::cfg::{CallSite, CallTarget, Cfg, IdentityOperand, Stmt};
 mod signature;
+pub use signature::has_attributes as has_rust_attributes;
 mod exports;
 pub use exports::{resolve_declaration_import, DeclarationResolution, KeyedDeclaration};
 use signature::{candidate, export, parameters, Export};

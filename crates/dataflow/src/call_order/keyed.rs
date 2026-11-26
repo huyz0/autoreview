@@ -15,7 +15,7 @@ mod helpers;
 pub(super) mod program;
 mod state;
 use program::Program;
-pub use program::{resolve_declaration_import, DeclarationResolution, KeyedDeclaration, KeyedExport, KeyedFunction, KeyedImport, KeyedUnit};
+pub use program::{has_rust_attributes, resolve_declaration_import, DeclarationResolution, KeyedDeclaration, KeyedExport, KeyedFunction, KeyedImport, KeyedUnit};
 use state::{Deferred, Registration, State};
 
 const PATH_BUDGET: usize = 16_384;
