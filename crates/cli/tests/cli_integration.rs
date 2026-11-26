@@ -170,6 +170,50 @@ fn replay_evaluates_a_registered_custom_call_sequence_rule() {
 }
 
 #[test]
+fn nested_typescript_config_follows_replay_snapshots() {
+    let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
+    let before = "declare function pending(): Promise<void>;\nexport function run() { pending(); }\n";
+    let after = "declare function pending(): Promise<void>;\nexport async function run() { await pending(); }\n";
+    let repo = init_repo(&[("web/main.ts", before), ("web/tsconfig.json", r#"{"compilerOptions":{"target":"ES2022","strict":true},"files":["main.ts"]}"#)]);
+    let old = current_commit(repo.path());
+    repo.commit(&[("web/main.ts", after)], "observe promise");
+    let fixed = current_commit(repo.path());
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let pack = root.join("benchmarks/packs/checkout-promise");
+    std::fs::create_dir_all(repo.path().join(".autoreview")).unwrap();
+    let path = serde_json::to_string(&pack.to_string_lossy()).unwrap();
+    std::fs::write(repo.path().join(".autoreview/rulepacks.yaml"), format!("packs:\n  - id: checkout-promise-benchmark\n    source: {{ kind: local, path: {path} }}\n")).unwrap();
+    let suite = serde_json::json!({"cases":[{"name":"nested config","rule":{"tool":"autoreview-dataflow","id":"benchmark-typescript-unobserved-promise"},"before":{"commit":old,"path":"web/main.ts","lines":[2]},"after":{"commit":fixed,"path":"web/main.ts","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .env("AUTOREVIEW_TYPESCRIPT_MODULE", &compiler).env("AUTOREVIEW_TYPESCRIPT_CONFIG", "web/tsconfig.json")
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().success();
+    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(report["rules"][0]["truePositives"], 1, "{report}");
+    assert_eq!(report["coverage"][0]["completed"], 1, "{report}");
+    assert_eq!(report["coverage"][0]["incomplete"], 0, "{report}");
+    repo.commit(&[("web/tsconfig.json", r#"{"compilerOptions":{"target":"ES2022"},"files":[]}"#)], "remove source from config");
+    let changed_config = current_commit(repo.path());
+    let mut changed_suite = suite;
+    changed_suite["cases"][0]["after"]["commit"] = changed_config.into();
+    std::fs::write(repo.path().join("suite.json"), changed_suite.to_string()).unwrap();
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .env("AUTOREVIEW_TYPESCRIPT_MODULE", &compiler).env("AUTOREVIEW_TYPESCRIPT_CONFIG", "web/tsconfig.json")
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
+    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(report["coverage"][0]["completed"], 0, "{report}");
+    assert_eq!(report["coverage"][0]["incomplete"], 1, "{report}");
+    repo.commit(&[("web/main.ts", before), ("web/tsconfig.json", r#"{"compilerOptions":{"target":"ES2022","strict":true},"files":["main.ts"]}"#)], "discard promise again");
+    let run = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .env("AUTOREVIEW_TYPESCRIPT_MODULE", &compiler).env("AUTOREVIEW_TYPESCRIPT_CONFIG", "web/tsconfig.json")
+        .args(["diff", "--base", &fixed, "--head", "HEAD", "--static-only"]).assert().success();
+    let path = report_path_from_stdout(&String::from_utf8_lossy(&run.get_output().stdout));
+    let review: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert!(review["findings"].as_array().unwrap().iter().any(|finding|
+        finding["source"]["ruleId"] == "benchmark-typescript-unobserved-promise" && finding["location"]["path"] == "web/main.ts"), "{review}");
+}
+
+#[test]
 fn replay_keeps_typed_benchmark_incomplete_with_compatibility_adapter() {
     let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
     let source = "declare function task(): Promise<void>;\ndeclare function mystery(): unknown;\nexport function run() { try { throw new Error(); } catch (error) { error.message; } task(); mystery(); }\n";

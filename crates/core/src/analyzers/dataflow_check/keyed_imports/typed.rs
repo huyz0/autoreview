@@ -14,10 +14,23 @@ impl TrustedTypeScript {
     pub(super) fn from_environment(root: &Path) -> Option<Self> {
         let compiler = std::env::var("AUTOREVIEW_TYPESCRIPT_MODULE").ok()?;
         if !Path::new(&compiler).is_absolute() { return None; }
-        let config = std::env::var("AUTOREVIEW_TYPESCRIPT_CONFIG").ok().map(PathBuf::from).unwrap_or_else(|| root.join("tsconfig.json"));
+        let config = config_path(root, std::env::var_os("AUTOREVIEW_TYPESCRIPT_CONFIG").as_deref())?;
         if !config.is_absolute() { return None; }
         Some(Self { node: std::env::var("AUTOREVIEW_NODE_BINARY").unwrap_or_else(|_| "node".into()), compiler, config: config.to_str()?.to_owned() })
     }
+}
+
+fn config_path(root: &Path, configured: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let Some(configured) = configured else { return Some(root.join("tsconfig.json")); };
+    let path = Path::new(configured);
+    if path.is_absolute() { return Some(path.to_path_buf()); }
+    if !path.components().all(|part| matches!(part, std::path::Component::Normal(_) | std::path::Component::CurDir)) {
+        return None;
+    }
+    let candidate = root.join(path);
+    let canonical_root = root.canonicalize().ok()?;
+    let canonical_config = candidate.canonicalize().ok()?;
+    canonical_config.starts_with(&canonical_root).then_some(candidate)
 }
 
 pub(super) fn check_typed_rule(
@@ -53,3 +66,34 @@ fn discover_calls(modules: &[TypeModule<'_>]) -> FactorySourceDiscovery {
     FactorySourceDiscovery { candidates, limitations }
 }
 
+#[cfg(test)]
+mod config_tests {
+    use super::config_path;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn relative_config_is_selected_within_each_root() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for root in [first.path(), second.path()] {
+            std::fs::create_dir(root.join("web")).unwrap();
+            std::fs::write(root.join("web/tsconfig.json"), "{}").unwrap();
+            assert_eq!(config_path(root, Some(OsStr::new("web/tsconfig.json"))), Some(root.join("web/tsconfig.json")));
+            assert!(config_path(root, Some(OsStr::new("../outside.json"))).is_none());
+            assert!(config_path(root, Some(OsStr::new("web/missing.json"))).is_none());
+            assert_eq!(config_path(root, None), Some(root.join("tsconfig.json")));
+        }
+        let absolute = first.path().join("web/tsconfig.json");
+        assert_eq!(config_path(second.path(), Some(absolute.as_os_str())), Some(absolute));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_config_cannot_follow_symlinks_outside_root() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("tsconfig.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("outside")).unwrap();
+        assert!(config_path(root.path(), Some(OsStr::new("outside/tsconfig.json"))).is_none());
+    }
+}

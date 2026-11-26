@@ -119,7 +119,9 @@ Replay reported all three cases incomplete because other call types could
 not be classified; that experiment is not scored. The project pins
 TypeScript 7, whose package does not expose the compiler API expected by the
 current probe. This API-specific replay does not establish general support for
-that compiler or project-wide promise analysis.
+that compiler or project-wide promise analysis. A compatible compiler can use
+`AUTOREVIEW_TYPESCRIPT_CONFIG=frontend/tsconfig.app.json` to select each
+snapshot's nested configuration without a configuration adapter.
 
 `checkout-promise.yaml` exercises the experimental general promise source on
 the MIT-licensed actions/checkout fix documented in `docs/benchmark-candidates.md`.
