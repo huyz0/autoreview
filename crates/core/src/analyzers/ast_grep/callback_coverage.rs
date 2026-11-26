@@ -48,10 +48,21 @@ fn callback_context(tree: Option<&Tree>, finding: &AgentFinding) -> Option<bool>
     let node = tree?.root_node().descendant_for_point_range(position, position)?;
     for ancestor in std::iter::successors(Some(node), |node| node.parent()) {
         match ancestor.kind() {
-            "lambda_literal" => return Some(true),
+            "lambda_literal" if !immediately_invoked(ancestor) => return Some(true),
             "function_declaration" | "anonymous_function" => return Some(false),
             _ => {}
         }
     }
     None
+}
+
+fn immediately_invoked(lambda: tree_sitter::Node<'_>) -> bool {
+    let mut expression = lambda;
+    while let Some(parent) = expression.parent().filter(|node| node.kind() == "parenthesized_expression") {
+        expression = parent;
+    }
+    expression.parent().is_some_and(|call| {
+        call.kind() == "call_expression" && call.named_child(0) == Some(expression)
+            && call.named_child(1).is_some_and(|arguments| arguments.kind() == "value_arguments")
+    })
 }

@@ -39,6 +39,11 @@ shadowing must be tested before an identity is trusted.
 
 ## Delivery sequence
 
+The Kotlin pattern coverage check recognizes directly invoked lambda literals
+such as `({ ... })()`. It still reports an unresolved outer lambda, even when
+an inner lambda is directly invoked. Alias calls, `.invoke()` forms, inline
+library methods, and functional-interface conversions remain unresolved.
+
 1. Add an execution-context result to the shared analysis model, including
    source and callback locations, evidence identity, and an explicit unknown
    reason. Define path and analysis budgets and propagate exhaustion as

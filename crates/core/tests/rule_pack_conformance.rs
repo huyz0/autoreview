@@ -236,6 +236,24 @@ fn kotlin_callback_findings_report_unresolved_execution() {
 }
 
 #[test]
+fn kotlin_direct_lambda_invocation_preserves_outer_uncertainty() {
+    if !ast_grep_available() { return; }
+    let checks = KOTLIN_COROUTINE_CHECKS;
+    let source = format!("suspend fun run() {{\n ({{ {checks} }})()\n ((({{ {checks} }})))()\n register {{ ({{ {checks} }})() }}\n val action = {{ {checks} }}\n action()\n ({{ {checks} }}).invoke()\n}}\n");
+    let repo = kotlin_test_repo(&source);
+    let result = autoreview_core::run_ast_grep_with_coverage(repo.path(), &["example.kt".into()], &[]).unwrap();
+    for &rule in KOTLIN_COROUTINE_RULES {
+        let findings: Vec<_> = result.findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some(rule)).collect();
+        let lines: Vec<_> = findings.iter().map(|finding| finding.location.range.start_line).collect();
+        assert_eq!(lines, [2, 3, 4, 5, 7], "{rule}");
+        assert!(findings[..2].iter().all(|finding| finding.confidence == 1.0), "{rule}");
+        assert!(findings[2..].iter().all(|finding| finding.confidence < 1.0), "{rule}");
+        let incomplete: Vec<_> = result.coverage.iter().filter(|issue| issue.rule.as_deref() == Some(rule)).map(|issue| issue.line.unwrap()).collect();
+        assert_eq!(incomplete, [4, 5, 7], "{rule}");
+    }
+}
+
+#[test]
 fn typescript_pattern_catalog_has_tsx_parity() {
     if !ast_grep_available() {
         return;

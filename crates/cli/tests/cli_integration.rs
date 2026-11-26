@@ -542,6 +542,30 @@ fn unresolved_kotlin_callback_reaches_review_and_blocks_replay() {
 }
 
 #[test]
+fn directly_invoked_kotlin_lambda_replays_without_hiding_outer_uncertainty() {
+    if !ast_grep_available() { return; }
+    let direct = "suspend fun run() {\n ({ runBlocking { work() } })()\n}\n";
+    let clean = "suspend fun run() {\n work()\n}\n";
+    let repo = init_repo(&[("Main.kt", direct)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("Main.kt", clean)], "remove blocking");
+    let after = current_commit(repo.path());
+    let mut suite = serde_json::json!({"cases": [{"name":"direct lambda", "rule":{"tool":"ast-grep","id":"kotlin-runblocking-in-suspend-function"}, "before":{"commit":before,"path":"Main.kt","lines":[2]}, "after":{"commit":after,"path":"Main.kt","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().success();
+    let report: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(report["rules"][0]["truePositives"], 1, "{report}");
+    repo.commit(&[("Main.kt", "suspend fun run() {\n register { ({ runBlocking { work() } })() }\n}\n")], "nest callback");
+    suite["cases"][0]["before"]["commit"] = current_commit(repo.path()).into();
+    repo.commit(&[("Main.kt", clean)], "remove nested callback");
+    suite["cases"][0]["after"]["commit"] = current_commit(repo.path()).into();
+    suite["cases"][0]["before"]["lines"] = serde_json::json!([]);
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    assert_incomplete_replay(&failed_replay_report(repo.path()), "callback_execution_unresolved", "Main.kt", 2);
+}
+
+#[test]
 fn diff_reports_dataflow_syntax_limitations_without_warning_on_clean_files() {
     let repo = init_repo(&[("main.go", "package main\nfunc main() {}\n")]);
     let base = current_commit(repo.path());
