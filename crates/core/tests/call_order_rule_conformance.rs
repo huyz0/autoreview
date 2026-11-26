@@ -306,18 +306,23 @@ fn partial_helper_observation_reports_incomplete_analysis() {
     }
 }
 
+fn assert_boolean_helper_guard(path: &str, rule: &str, source: &str) -> tempfile::TempDir {
+    let root = write_single_file(path, source);
+    let result = conditional_test_result(&root, path);
+    assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+    assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+    std::fs::write(root.path().join(path), source.replace(", true)", ", false)")).unwrap();
+    let result = conditional_test_result(&root, path);
+    assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+    assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+    root
+}
+
 #[test]
 fn helper_conditional_returns_respect_constant_arguments() {
     for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
         let source = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b) { return consume(rename(a, b), true); }\n";
-        let root = write_single_file(path, source);
-        let result = conditional_test_result(&root, path);
-        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
-        assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
-        std::fs::write(root.path().join(path), source.replace(", true)", ", false)")).unwrap();
-        let result = conditional_test_result(&root, path);
-        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
-        assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        let root = assert_boolean_helper_guard(path, rule, source);
         let later = source.replace("export function run(a, b) { return consume(rename(a, b), true); }", "export async function run(a, b) { const value = rename(a, b); consume(value, false); await value; }");
         std::fs::write(root.path().join(path), later).unwrap();
         let result = conditional_test_result(&root, path);
@@ -332,7 +337,7 @@ fn helper_conditional_returns_respect_constant_arguments() {
         std::fs::write(root.path().join(path), unknown).unwrap();
         let result = conditional_test_result(&root, path);
         assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
-        assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        assert_partial_helper_coverage(&root, path, rule);
     }
 }
 
@@ -344,13 +349,7 @@ fn helper_constant_guards_are_resolved_across_languages() {
         ("lib.rs", "rust-discarded-remove-file-result", "use std::fs::remove_file;\nfn consume(value: std::io::Result<()>, flag: bool) -> std::io::Result<()> { if flag { return value; } Ok(()) }\nfn run(path: &str) -> std::io::Result<()> { consume(remove_file(path), true) }\n"),
     ];
     for (path, rule, source) in cases {
-        let root = write_single_file(path, source);
-        let result = conditional_test_result(&root, path);
-        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
-        assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
-        std::fs::write(root.path().join(path), source.replace(", true)", ", false)")).unwrap();
-        let result = conditional_test_result(&root, path);
-        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        assert_boolean_helper_guard(path, rule, source);
     }
 }
 
