@@ -401,6 +401,29 @@ fn assert_rust_helper_review(repo: &autoreview_test_support::TestRepo, base: &st
 }
 
 #[test]
+fn rust_local_associated_result_replays_and_reaches_review() {
+    let prefix = "use std::fs::remove_file;\nstruct Files;\nimpl Files {\n    fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n}\n";
+    let before = format!("{prefix}fn run(path: &str) {{ Files::remove(path); }}\n");
+    let after = format!("{prefix}fn run(path: &str) -> std::io::Result<()> {{ Files::remove(path) }}\n");
+    let repo = init_repo(&[("lib.rs", &before)]);
+    let old = current_commit(repo.path());
+    repo.commit(&[("lib.rs", &after)], "use associated result");
+    let fixed = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"local associated helper", "rule":{"tool":"autoreview-dataflow","id":"rust-discarded-remove-file-result"},
+        "before":{"commit":old,"path":"lib.rs","lines":[4]}, "after":{"commit":fixed,"path":"lib.rs","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let replay = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["rules", "replay", "--suite", "suite.json"]).assert().success();
+    let report: serde_json::Value = serde_json::from_slice(&replay.get_output().stdout).unwrap();
+    assert_eq!(report["rules"][0]["truePositives"], 1, "{report}");
+    assert_eq!(report["rules"][0]["falsePositives"], 0, "{report}");
+    repo.commit(&[("lib.rs", &before)], "discard associated result");
+    let review = static_review_report(&repo, &fixed, None);
+    assert!(review["findings"].as_array().unwrap().iter().any(|finding|
+        finding["source"]["ruleId"] == "rust-discarded-remove-file-result"
+            && finding["location"]["path"] == "lib.rs" && finding["location"]["range"]["startLine"] == 4), "{review}");
+}
+
+#[test]
 fn rust_imported_associated_helper_reaches_review_report() {
     let support = "use std::fs::remove_file;\npub(crate) struct Files;\nimpl Files {\n    pub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n}\n";
     let before = "use crate::support::Files as Store;\nfn run(path: &str) -> std::io::Result<()> { Store::remove(path) }\n";

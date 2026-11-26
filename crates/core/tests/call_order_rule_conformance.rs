@@ -434,6 +434,28 @@ pub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }
 "#;
 
 #[test]
+fn rust_local_associated_helpers_preserve_result_usage() {
+    let source = "use std::fs::remove_file;\nstruct Files;\nimpl Files {\n    fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n    fn discard(value: std::io::Result<()>) {}\n    fn forward(value: std::io::Result<()>) -> std::io::Result<()> { value }\n    fn bridge(path: &str) -> std::io::Result<()> { Self::remove(path) }\n}\nfn ignored(path: &str) { Files::bridge(path); }\nfn observed(path: &str) -> std::io::Result<()> { Files::bridge(path) }\nfn ignored_arg(path: &str) { Files::discard(remove_file(path)); }\nfn observed_arg(path: &str) -> std::io::Result<()> { Files::forward(remove_file(path)) }\n";
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 4), ("lib.rs", 11)]);
+    let head = source.split("fn ignored(path:").next().unwrap();
+    for body in [
+        "trait Other { fn remove(path: &str); }\nfn run<Files: Other>(path: &str) { Files::remove(path); }\n",
+        "fn run(path: &str) { struct Files; impl Files { fn remove(_: &str) {} } Files::remove(path); }\n",
+        "mod other { pub struct Files; impl Files { pub fn remove(_: &str) {} } }\nfn run(path: &str) { use other::Files; Files::remove(path); }\n",
+    ] {
+        std::fs::write(root.path().join("lib.rs"), format!("{head}{body}")).unwrap();
+        assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[]);
+        let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+        assert!(result.coverage.iter().any(|issue| issue.reason == "unresolved_helper_target" && issue.path.as_deref() == Some("lib.rs")), "{body}: {:?}", result.coverage);
+    }
+    let guarded = source.replace("impl Files {", "#[cfg(feature = \"files\")]\nimpl Files {");
+    std::fs::write(root.path().join("lib.rs"), guarded).unwrap();
+    let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unresolved_helper_target" && issue.path.as_deref() == Some("lib.rs")), "{:?}", result.coverage);
+}
+
+#[test]
 fn rust_imported_associated_helpers_preserve_result_usage() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("src")).unwrap();
