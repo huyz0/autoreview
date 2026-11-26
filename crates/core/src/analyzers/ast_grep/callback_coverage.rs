@@ -88,7 +88,11 @@ fn explicit_invoke(expression: Node<'_>, source: &str) -> bool {
 fn immediate_local(expression: Node<'_>, source: &str) -> bool {
     let Some(declaration) = expression.parent().filter(|node| node.kind() == "property_declaration") else { return false };
     if !declaration.parent().is_some_and(|parent| matches!(parent.kind(), "block" | "lambda_literal")) { return false; }
-    let Some(mut name) = simple_val(declaration, expression, source) else { return false };
+    let Some(name) = simple_val(declaration, expression, source) else { return false };
+    follow_local(declaration, name, source)
+}
+
+fn follow_local<'a>(declaration: Node<'_>, mut name: &'a str, source: &'a str) -> bool {
     let mut next = declaration.next_named_sibling();
     for _ in 0..32 {
         let Some(statement) = next else { return false };
