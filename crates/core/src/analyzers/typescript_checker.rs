@@ -87,7 +87,7 @@ fn valid_response(result: &TypeScriptResult, request: &TypeScriptRequest<'_>) ->
         "ok" if result.reason.is_none() && result.calls.as_ref().is_some_and(|calls| {
             calls.len() == request.calls.len() && calls.iter().zip(request.calls).all(|(actual, expected)| {
                 actual.path == expected.path && actual.start == expected.start && actual.source_sha256 == expected.source_sha256
-                    && matches!(actual.status.as_str(), "promise_like" | "not_promise" | "not_proven" | "unavailable" | "source_changed")
+                    && matches!(actual.status.as_str(), "promise_like" | "not_promise" | "observed" | "not_proven" | "unavailable" | "source_changed")
             })
         }) => true,
         _ => false,

@@ -174,8 +174,8 @@ fn replay_evaluates_a_registered_custom_call_sequence_rule() {
 #[test]
 fn nested_typescript_config_follows_replay_snapshots() {
     let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
-    let before = "declare function pending(): Promise<void>;\nexport function run() { pending(); }\n";
-    let after = "declare function pending(): Promise<void>;\nexport async function run() { await pending(); }\n";
+    let before = "declare function pending(): Promise<void>; declare function mystery(): unknown;\nexport async function run() { await mystery(); pending(); }\n";
+    let after = "declare function pending(): Promise<void>; declare function mystery(): unknown;\nexport async function run() { await mystery(); await pending(); }\n";
     let repo = init_repo(&[("web/main.ts", before), ("web/tsconfig.json", r#"{"compilerOptions":{"target":"ES2022","strict":true},"files":["main.ts"]}"#)]);
     let old = current_commit(repo.path());
     repo.commit(&[("web/main.ts", after)], "observe promise");

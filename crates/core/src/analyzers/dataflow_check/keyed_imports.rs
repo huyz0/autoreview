@@ -477,6 +477,14 @@ mod budget_tests {
         assert!(findings.is_empty());
         assert!(coverage.iter().any(|issue| issue.reason == "typed_promise_source_unavailable"), "{coverage:?}");
 
+        std::fs::write(dir.path().join("view.tsx"), "declare function uncertain(): unknown;\nexport async function run() { await ((uncertain())); }\n").unwrap();
+        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
+        assert!(findings.is_empty(), "{findings:#?}");
+        assert!(!coverage.iter().any(|issue| issue.reason == "promise_type_unresolved"), "{coverage:?}");
+        std::fs::write(dir.path().join("view.tsx"), "declare function uncertain(): unknown;\nexport async function run() { await uncertain(); uncertain(); }\n").unwrap();
+        let (_, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
+        assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(2)), "{coverage:?}");
+
         assert_typed_unresolved_receiver(dir.path(), &checker, &rules);
 
         std::fs::write(dir.path().join("view.tsx"), "declare function pending(): Promise<void>;\nfunction forward() { return pending(); }\nfunction again() { return forward(); }\nexport function run() { again(); }\n").unwrap();

@@ -21,7 +21,8 @@ function run(request) {
   }
   if (!ts || typeof ts.readConfigFile !== 'function' || typeof ts.parseJsonConfigFileContent !== 'function' ||
       typeof ts.createProgram !== 'function' || typeof ts.getPreEmitDiagnostics !== 'function' ||
-      typeof ts.isCallExpression !== 'function' || typeof ts.forEachChild !== 'function') {
+      typeof ts.isCallExpression !== 'function' || typeof ts.isAwaitExpression !== 'function' ||
+      typeof ts.isParenthesizedExpression !== 'function' || typeof ts.forEachChild !== 'function') {
     return { status: 'incomplete', reason: 'compiler_api_unsupported' };
   }
   const config = ts.readConfigFile(request.config, ts.sys.readFile);
@@ -49,6 +50,11 @@ function run(request) {
       ts.TypeFlags.BigIntLike | ts.TypeFlags.Void | ts.TypeFlags.Null | ts.TypeFlags.Undefined |
       ts.TypeFlags.ESSymbolLike;
     return !!(type.flags & primitive) && !checker.getPropertyOfType(type, 'then');
+  }
+  function directlyAwaited(node) {
+    let value = node;
+    while (value.parent && ts.isParenthesizedExpression(value.parent) && value.parent.expression === value) value = value.parent;
+    return !!value.parent && ts.isAwaitExpression(value.parent) && value.parent.expression === value;
   }
   const files = new Map();
   function indexCalls(file) {
@@ -84,7 +90,7 @@ function run(request) {
     const selected = cached.calls.get(call.start);
     if (!selected) return { ...call, status: 'unavailable' };
     const type = checker.getTypeAtLocation(selected);
-    return { ...call, status: promiseLike(type) ? 'promise_like' : definitelyNotPromise(type) ? 'not_promise' : 'not_proven' };
+    return { ...call, status: promiseLike(type) ? 'promise_like' : definitelyNotPromise(type) ? 'not_promise' : directlyAwaited(selected) ? 'observed' : 'not_proven' };
   });
   return { status: 'ok', calls };
 }

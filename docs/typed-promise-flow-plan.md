@@ -147,7 +147,10 @@ these call sites are reported as incomplete instead of being counted as clean.
 An experimental custom call-sequence rule may also set `source: typed-promise`
 on a TypeScript or TSX `must-use` contract. It sends call sites to the trusted
 compiler and tracks only confirmed promise-like returns. Known primitive
-non-promises are excluded; unknown types, unavailable sources, project errors,
+non-promises are excluded; unknown types remain coverage limitations unless
+the call itself is directly awaited (including through parentheses). This
+observation does not classify the return type, and an unresolved call on the
+same line still retains its warning. Unavailable sources, project errors,
 and unmodeled verified calls remain coverage limitations. Direct synchronous
 helpers whose sole return forwards a verified call preserve that call's origin,
 including simple multi-hop chains. It also follows a single `if`/`else` tree
