@@ -500,6 +500,33 @@ mod budget_tests {
     }
 
     #[test]
+    fn checkout_historical_general_promise_observation() {
+        use autoreview_dataflow::call_order::{CallOrderSpec, ContractLanguage, ContractMode, ResultContract};
+        use autoreview_schema::Severity;
+        use sha2::{Digest, Sha256};
+        let Ok(root) = std::env::var("AUTOREVIEW_CHECKOUT_SNAPSHOTS") else { return };
+        let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
+        let rule = CallOrderRuleDef { id: "test-general".into(), language: "TypeScript".into(), category: "correctness".into(), severity: Severity::Medium, message: "unused promise".into(), pack_id: None, metadata: None,
+            spec: CallOrderSpec { rule_id: "test-general".into(), after: vec![], unless: vec![], before: vec![], check_before_return: false, identity: None, contract: Some(ResultContract { mode: ContractMode::MustUse, language: ContractLanguage::Web, import: String::new(), methods: vec![], borrows: vec![], acquire_awaited: false, complete_observed: false, typed_promise_factory: false, typed_promise: true, typed_go_error: false }) } };
+        for (snapshot, paths) in [
+            ("checkout-before", [("src/github-api-helper.ts", vec![50, 73], "2e46ea960c1801edf58c290119ec163f6d026268383bd14a9389c391be557b79"), ("src/git-auth-helper.ts", vec![151], "b0bd2bc1430896f60a6a7408bb92756b7ef0849f74b3a109fcee0196636fe4f8")]),
+            ("checkout-after", [("src/github-api-helper.ts", vec![], "2f4e94b66e6e65e9bff4cc99bc0b277a3b12586e6153a76f25a986f2a0ffea97"), ("src/git-auth-helper.ts", vec![], "b3e6098b77265c520c09830820dd6448c02a3b304394da2615ee9d1996a604b7")]),
+        ] {
+            let dir = Path::new(&root).join(snapshot);
+            let checker = TrustedTypeScript { node: "node".into(), compiler: compiler.clone(), config: dir.join("tsconfig-autoreview.json").to_str().unwrap().into() };
+            for (path, expected, digest) in paths {
+                let bytes = std::fs::read(dir.join(path)).unwrap();
+                assert_eq!(format!("{:x}", Sha256::digest(bytes)), digest, "{snapshot}/{path}");
+                let (findings, coverage) = with_resolver(&dir, |resolver| run_group(resolver, &[path.to_owned()], &[(&rule, Language::TypeScript)], &dir, (Some(&checker), TYPED_UNIT_LIMIT)));
+                let lines: Vec<_> = findings.iter().filter(|finding| finding.location.path == path).map(|finding| finding.location.range.start_line).collect();
+                assert_eq!(lines, expected, "{snapshot}/{path}: {findings:#?}");
+                assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved"), "{snapshot}/{path}: {coverage:?}");
+                assert!(!coverage.iter().any(|issue| issue.reason == "typescript_checker_incomplete"), "{snapshot}/{path}: {coverage:?}");
+            }
+        }
+    }
+
+    #[test]
     fn builtin_typed_rule_fixtures_cover_typescript_and_tsx() {
         let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
         let rules = super::super::super::call_order_rules::load_call_order_rules(&[]);
