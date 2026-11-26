@@ -16,6 +16,12 @@ It does not claim that every unsupported construct has been catalogued.
 | A result-producing call is in an unmodeled standalone conditional | Direct calls in the arms of such an expression report `unmodeled_conditional_result` for applicable result-use rules. The supported conditional form has bounded, side-effect-free boolean tests and modeled arguments; unsupported tests or arms remain incomplete. | Extend expression modeling without treating unsupported branches as clean. Other result expression shapes still need separate coverage. |
 | External static tool is unavailable or fails | Review reports include structured analyzer-scoped issues for unavailable ast-grep and golangci-lint and for execution errors from ast-grep, golangci-lint, and Clippy. Clippy findings remain available even when another target fails. Cargo audit errors identify the affected lockfile. Existing text warnings remain. | Other tools and partial failures still need structured coverage; do not imply that other analyzers failed. |
 
+The experimental Go error probe distinguishes package or call-site budget
+exhaustion, package loading, type checking, snapshot mismatches, and rejected
+requests in rule-scoped coverage. Unknown or malformed probe responses and
+process failures retain the generic incomplete-checker reason. These reports
+do not expose raw subprocess errors or identify the failing package yet.
+
 Rust lowering supports non-tail statement matches with a simple scrutinee,
 including supported direct calls, and a final wildcard. Arms can use literals,
 qualified unit variants, and simple tuple variants such as `Some(_)` or
