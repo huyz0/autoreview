@@ -52,7 +52,9 @@ deep tier.
   labels, Go OpenTelemetry spans that can exit without ending, and Java
   OpenTelemetry scopes discarded without a cleanup owner.
 - **Test checks** flag equality assertions that compare the same variable
-  in supported Testify, JUnit, Kotlin Test, Jest-style, and Rust APIs.
+  in supported Testify, JUnit, Kotlin Test, Jest-style, and Rust APIs. They
+  also detect discarded MSW `delay` promises imported from `msw` or
+  `msw/utils/delay` in JavaScript, TypeScript, and TSX.
 - **Complexity metrics** with YAML-configurable thresholds. Java and Rust use
   syntax trees to measure function length, parameters, nesting, branches, and
   explicit returns. Rust also checks required trait items and oversized

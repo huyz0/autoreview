@@ -219,6 +219,25 @@ func ignoredReturn(a, b string) {
 }
 
 #[test]
+fn msw_delay_results_are_tracked_in_web_languages() {
+    for (extension, language) in [("js", "javascript"), ("ts", "typescript"), ("tsx", "typescript")] {
+        for (module, kind) in [("msw", "msw-delay"), ("msw/utils/delay", "msw-utils-delay")] {
+            let rule = format!("{language}-{kind}-unobserved-promise");
+            let path = format!("handler.{extension}");
+            let source = format!("import {{ delay as pause }} from '{module}';\nimport * as msw from '{module}';\nexport function ignored() {{ const pending = pause(20); }}\nexport function ignoredNamespace() {{ msw.delay(30); }}\nexport async function observed() {{ await pause(40); }}\nexport function forwarded() {{ return pause(50); }}\n");
+            let root = write_single_file(&path, &source);
+            assert_helper_locations(root.path(), &path, &rule, &[(path.as_str(), 3), (path.as_str(), 4)]);
+            let unrelated = "import { delay } from 'other';\nexport function handler() { delay(20); }\n";
+            std::fs::write(root.path().join(&path), unrelated).unwrap();
+            assert_helper_locations(root.path(), &path, &rule, &[]);
+            let shadowed = format!("import {{ delay }} from '{module}';\nexport function handler(delay) {{ delay(20); }}\n");
+            std::fs::write(root.path().join(&path), shadowed).unwrap();
+            assert_helper_locations(root.path(), &path, &rule, &[]);
+        }
+    }
+}
+
+#[test]
 fn ignored_results_follow_helpers_through_web_reexports() {
     for (extension, rule) in [("js", "javascript-node-fs-discarded-promise"), ("ts", "typescript-node-fs-discarded-promise"), ("tsx", "typescript-node-fs-discarded-promise")] {
         let root = tempfile::tempdir().unwrap();

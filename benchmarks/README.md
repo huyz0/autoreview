@@ -98,6 +98,29 @@ git fetch --depth 2 https://github.com/uwaserver/uwas.git 72ff1f5897e89e6d38ecb9
 autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/uwas-rename.yaml
 ```
 
+`niverwizard-msw-delay.yaml` records one MIT-licensed TypeScript fix across
+three mock-handler files. The built-in MSW delay rule finds all four labelled
+discarded promises before the fix and none in the corrected files; all three
+cases complete without reported coverage limitations. They share one fix
+commit and are not independent fixes or a general accuracy estimate. The
+rule uses MSW's documented delay contract and does not need project packages
+or a TypeScript compiler. Reproduce with:
+
+```sh
+git init niverwizard
+cd niverwizard
+git fetch --depth 2 https://github.com/kiLeo13/NiverWizard.git fec608d7dfc4a763079bf9a02ab31d4f38fb17b4
+autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/niverwizard-msw-delay.yaml
+```
+
+The experimental general typed-promise rule was also tried on these files
+with installed dependencies and a separately configured compatible compiler.
+Replay reported all three cases incomplete because other call types could
+not be classified; that experiment is not scored. The project pins
+TypeScript 7, whose package does not expose the compiler API expected by the
+current probe. This API-specific replay does not establish general support for
+that compiler or project-wide promise analysis.
+
 `checkout-promise.yaml` exercises the experimental general promise source on
 the MIT-licensed actions/checkout fix documented in `docs/benchmark-candidates.md`.
 The normal replay currently exits nonzero and marks both cases incomplete due

@@ -73,6 +73,28 @@ owned-coroutine-scope-uncancelled:
     references: ["https://kotlinlang.org/api/kotlinx.coroutines/kotlinx-coroutines-core/kotlinx.coroutines/-coroutine-scope.html"]
   languages: {Kotlin: {}}
 
+msw-delay-unobserved-promise:
+  severity: warning
+  category: correctness
+  kind: call-sequence
+  message: "Await or return the MSW delay promise so the response is actually delayed."
+  contract: {mode: must-use, import: msw, methods: [delay]}
+  metadata:
+    subcategory: [testing.mocking]
+    references: ["https://mswjs.io/docs/api/delay"]
+  languages: {JavaScript: {}, TypeScript: {}}
+
+msw-utils-delay-unobserved-promise:
+  severity: warning
+  category: correctness
+  kind: call-sequence
+  message: "Await or return the MSW delay promise so the response is actually delayed."
+  contract: {mode: must-use, import: "msw/utils/delay", methods: [delay]}
+  metadata:
+    subcategory: [testing.mocking]
+    references: ["https://mswjs.io/api/delay"]
+  languages: {JavaScript: {}, TypeScript: {}}
+
 node-fs-discarded-promise:
   severity: warning
   category: correctness

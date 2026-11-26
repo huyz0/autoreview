@@ -1,0 +1,22 @@
+cases:
+  - name: NiverWizard event mocks discard delays
+    rule: &rule {tool: autoreview-dataflow, id: typescript-msw-delay-unobserved-promise}
+    evidence: &evidence
+      kind: historical
+      source: https://github.com/kiLeo13/NiverWizard/commit/fec608d7dfc4a763079bf9a02ab31d4f38fb17b4
+      license: MIT
+      rationale: >-
+        Mock response handlers discarded MSW delay promises. The fix makes
+        the handlers async and awaits the delays. Labels cover each entire file.
+    before: {commit: 1647b59a7e58d79d1430156e0c34e7bc1314a27a, path: frontend/src/api/mocks/handlers/event.ts, lines: [9, 35]}
+    after: {commit: fec608d7dfc4a763079bf9a02ab31d4f38fb17b4, path: frontend/src/api/mocks/handlers/event.ts, lines: []}
+  - name: NiverWizard namespace mock discards delay
+    rule: *rule
+    evidence: *evidence
+    before: {commit: 1647b59a7e58d79d1430156e0c34e7bc1314a27a, path: frontend/src/api/mocks/handlers/namespace.ts, lines: [8]}
+    after: {commit: fec608d7dfc4a763079bf9a02ab31d4f38fb17b4, path: frontend/src/api/mocks/handlers/namespace.ts, lines: []}
+  - name: NiverWizard user mock discards delay
+    rule: *rule
+    evidence: *evidence
+    before: {commit: 1647b59a7e58d79d1430156e0c34e7bc1314a27a, path: frontend/src/api/mocks/handlers/user.ts, lines: [8]}
+    after: {commit: fec608d7dfc4a763079bf9a02ab31d4f38fb17b4, path: frontend/src/api/mocks/handlers/user.ts, lines: []}
