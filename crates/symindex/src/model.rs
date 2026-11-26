@@ -44,6 +44,7 @@ pub struct MethodDecl {
     pub return_type_text: Option<String>,
     pub own_field_accesses: Vec<AccessRef>,
     pub foreign_accesses: Vec<ForeignAccessRef>,
+    pub helper_accesses: Vec<HelperAccess>,
     pub chains: Vec<CallChain>,
     /// True when the method body is empty, or its only statement is a
     /// `throw` whose text mentions `UnsupportedOperationException` or
@@ -71,6 +72,18 @@ pub struct ForeignAccessRef {
     pub receiver_type: Option<String>,
     pub member_name: String,
     pub line: u32,
+}
+
+/// Foreign-member accesses on a caller parameter inside a resolved helper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelperAccess {
+    pub receiver_type: String,
+    pub type_file: PathBuf,
+    pub type_line: u32,
+    pub helper_file: PathBuf,
+    pub helper_line: u32,
+    pub helper_end_line: u32,
+    pub count: usize,
 }
 
 /// One maximal chain of consecutive `.member`/`.method()` accesses off a

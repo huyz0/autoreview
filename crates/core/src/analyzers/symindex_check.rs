@@ -12,7 +12,7 @@
 //! built over the *entire* repo (per the plan's whole-repo-always scoping
 //! decision — Feature Envy inherently needs to see the envied type's own
 //! file, not just the envious method's file), but this only reports a
-//! result anchored in a file the current diff actually touched.
+//! result involving a file the current diff touched.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -48,7 +48,7 @@ fn path_str(path: &Path) -> String {
 const RELEVANT_EXTENSIONS: &[&str] = &[".go", ".java", ".kt", ".kts", ".ts", ".mts", ".cts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
 
 /// Runs the symbol-index queries over the whole repo and reports only
-/// results anchored in a file the current diff touched. Returns an empty
+/// results whose caller or contributing helper the current diff touched. Returns an empty
 /// list (not an error) when the diff touches no file in a language
 /// `autoreview-symindex` extracts from (see `RELEVANT_EXTENSIONS`).
 pub fn run_symindex_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
@@ -84,7 +84,8 @@ pub fn run_symindex_check_with_tier4(repo_root: &Path, changed_files: &[String],
     let mut findings: Vec<AgentFinding> = chains.into_iter().filter(|c| changed_set.contains(&path_str(&c.file))).map(chain_to_finding).collect();
     findings.extend(
         envy.into_iter()
-            .filter(|e| changed_set.contains(&path_str(&e.file)))
+            .filter(|e| changed_set.contains(&path_str(&e.file))
+                || e.helper_evidence.iter().any(|helper| changed_set.contains(&path_str(&helper.helper_file))))
             .filter_map(|e| envy_to_finding_with_tier4(&index, e, tier4_records.as_deref())),
     );
     findings.extend(clumps.iter().filter_map(|c| clump_to_finding(c, &changed_set)));
@@ -126,7 +127,9 @@ fn chain_to_finding(chain: autoreview_symindex::ChainFinding) -> AgentFinding {
 fn envy_to_finding_with_tier4(index: &SymbolIndex, envy: autoreview_symindex::FeatureEnvyFinding, tier4_records: Option<&[autoreview_symindex::Tier4Access]>) -> Option<AgentFinding> {
     // The suggested refactor moves code to the collaborator. Require a
     // declaration we can point to in the repository.
-    index.find_type(&envy.envied_type)?;
+    if envy.helper_evidence.is_empty() {
+        index.find_type(&envy.envied_type)?;
+    }
     let verdict = tier4_records.map(|records| autoreview_symindex::confirm_feature_envy(records, &envy));
     if verdict == Some(autoreview_symindex::Tier4Verdict::Contradicted) {
         return None;
@@ -136,15 +139,40 @@ fn envy_to_finding_with_tier4(index: &SymbolIndex, envy: autoreview_symindex::Fe
 
 fn envy_to_finding(index: &SymbolIndex, envy: autoreview_symindex::FeatureEnvyFinding, tier4_verdict: Option<autoreview_symindex::Tier4Verdict>) -> AgentFinding {
     let path = path_str(&envy.file);
-    let related_locations = index.find_type(&envy.envied_type).map(|t| {
-        vec![Location {
-            path: path_str(&t.file),
-            range: LocationRange { start_line: t.start_line, ..Default::default() },
+    let related_locations = if let Some(first) = envy.helper_evidence.first() {
+        let mut locations = vec![Location {
+            path: path_str(&first.type_file),
+            range: LocationRange { start_line: first.type_line, ..Default::default() },
             snippet: envy.envied_type.clone(),
             side: Side::New,
-        }]
-    });
-    let heuristic_caveat = "This heuristic counts direct parameter accesses and matches the collaborator by name. Confirm the related declaration before moving the method.";
+        }];
+        let mut seen = HashSet::new();
+        for helper in &envy.helper_evidence {
+            if seen.insert((&helper.helper_file, helper.helper_line)) {
+                locations.push(Location {
+                    path: path_str(&helper.helper_file),
+                    range: LocationRange { start_line: helper.helper_line, end_line: Some(helper.helper_end_line), ..Default::default() },
+                    snippet: "Cross-file helper".to_string(),
+                    side: Side::New,
+                });
+            }
+        }
+        Some(locations)
+    } else {
+        index.find_type(&envy.envied_type).map(|t| {
+            vec![Location {
+                path: path_str(&t.file),
+                range: LocationRange { start_line: t.start_line, ..Default::default() },
+                snippet: envy.envied_type.clone(),
+                side: Side::New,
+            }]
+        })
+    };
+    let (access_scope, heuristic_caveat) = if envy.helper_evidence.is_empty() {
+        ("via a parameter", "This heuristic counts direct parameter accesses and matches the collaborator by name. Confirm the related declaration before moving the method.")
+    } else {
+        ("including accesses in cross-file helpers", "This heuristic follows parameter bindings within the Go package. Check the linked helpers and collaborator declaration before moving the method.")
+    };
     let (message_suffix, confidence) = match tier4_verdict {
         Some(autoreview_symindex::Tier4Verdict::Confirmed) => (
             " Confirmed by real type-checking (Tier 4: golang.org/x/tools/go/packages) — this isn't just a name-based guess.".to_string(),
@@ -159,7 +187,7 @@ fn envy_to_finding(index: &SymbolIndex, envy: autoreview_symindex::FeatureEnvyFi
         confidence,
         title: "Possible Feature Envy".to_string(),
         message: format!(
-            "`{}.{}` accesses `{}` {} times (via a parameter) versus {} access(es) to its own fields — it may belong on `{}` instead (Fowler's Feature Envy smell).{message_suffix}",
+            "`{}.{}` accesses `{}` {} times ({access_scope}) versus {} access(es) to its own fields — it may belong on `{}` instead (Fowler's Feature Envy smell).{message_suffix}",
             envy.owner_type, envy.method, envy.envied_type, envy.envied_access_count, envy.own_access_count, envy.envied_type
         ),
         location: Location { path, range: LocationRange { start_line: envy.line, ..Default::default() }, snippet: format!("{}.{}", envy.owner_type, envy.method), side: Side::New },
@@ -317,6 +345,96 @@ mod tests {
     }
 
     #[test]
+    fn reports_go_feature_envy_through_a_cross_file_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "billing/invoice.go", r#"
+package billing
+type Invoice struct{}
+func (i Invoice) Total(other, customer *Customer) int {
+    alias := customer
+    return amounts(other, alias)
+}
+func (i Invoice) Taxed(customer *Customer) int {
+    return costs(customer) + customer.Tax
+}
+"#);
+        write_file(dir.path(), "billing/customer.go", "package billing\ntype Customer struct { Balance, Fee, Tax int }\n");
+        write_file(dir.path(), "billing/amounts.go", r#"
+package billing
+func amounts(unused, customer *Customer) int {
+    alias := customer
+    return alias.Balance + alias.Fee + alias.Tax
+}
+func costs(customer *Customer) int { return customer.Balance + customer.Fee }
+"#);
+        write_file(dir.path(), "unrelated/customer.go", "package billing\ntype Customer struct{}\n");
+
+        let findings = run_symindex_check(dir.path(), &["billing/invoice.go".to_string()]);
+        let envy: Vec<_> = findings.iter().filter(|f| f.source.rule_id.as_deref() == Some("feature-envy")).collect();
+        assert_eq!(envy.len(), 2, "got: {findings:#?}");
+        for finding in &envy {
+            assert!(finding.message.contains("`Customer` 3 times"));
+            let related = finding.related_locations.as_ref().unwrap();
+            assert_eq!(related[0].path, "billing/customer.go");
+            assert_eq!(related[1].path, "billing/amounts.go");
+        }
+        assert_eq!(envy[0].location.path, "billing/invoice.go");
+        assert_eq!(envy[0].location.range.start_line, 4);
+        assert_eq!(envy[0].related_locations.as_ref().unwrap()[1].range.end_line, Some(6));
+
+        let helper_only = run_symindex_check(dir.path(), &["billing/amounts.go".to_string()]);
+        assert_eq!(helper_only.iter().filter(|finding| finding.source.rule_id.as_deref() == Some("feature-envy")).count(), 2);
+        let unrelated = run_symindex_check(dir.path(), &["unrelated/customer.go".to_string()]);
+        assert!(unrelated.iter().all(|finding| finding.source.rule_id.as_deref() != Some("feature-envy")));
+    }
+
+    #[test]
+    fn skips_go_helper_forwarding_and_ambiguous_bindings() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "invoice.go", r#"
+package billing
+type Invoice struct{}
+type Customer struct { Balance, Fee, Tax int }
+func (c *Customer) Total() int { return c.Balance + c.Fee + c.Tax }
+func (i Invoice) Forward(customer *Customer) int {
+    return forward(customer) + forward(customer) + forward(customer)
+}
+func (i Invoice) Shadow(wide func(*Customer) int, customer *Customer) int {
+    return wide(customer)
+}
+func (i Invoice) Reassigned(customer, other *Customer) int {
+    alias := customer
+    alias = other
+    return wide(alias)
+}
+func (i Invoice) WrongSlot(customer *Customer) int {
+    return wideSecond(customer, loadCustomer())
+}
+func (i Invoice) Repeat(customer *Customer) int {
+    return two(customer) + two(customer)
+}
+func (i Invoice) Ambiguous(customer *Customer) int { return duplicate(customer) }
+func (i Invoice) FunctionValue(customer *Customer) int { return platform(customer) }
+"#);
+        write_file(dir.path(), "helpers.go", r#"
+package billing
+func forward(customer *Customer) int { return customer.Total() }
+func wide(customer *Customer) int { return customer.Balance + customer.Fee + customer.Tax }
+func wideSecond(unused, customer *Customer) int { return customer.Balance + customer.Fee + customer.Tax }
+func loadCustomer() *Customer { return nil }
+func two(customer *Customer) int { return customer.Balance + customer.Fee }
+"#);
+        let duplicate = "package billing\nfunc duplicate(c *Customer) int { return c.Balance + c.Fee + c.Tax }\n";
+        write_file(dir.path(), "duplicate_windows.go", duplicate);
+        write_file(dir.path(), "duplicate_linux.go", duplicate);
+        write_file(dir.path(), "platform_linux.go", "package billing\nfunc platform(c *Customer) int { return c.Balance + c.Fee + c.Tax }\n");
+        write_file(dir.path(), "platform_windows.go", "package billing\nvar (\n platform = forward\n)\n");
+
+        let findings = run_symindex_check(dir.path(), &["invoice.go".to_string()]);
+        assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("feature-envy")), "got: {findings:#?}");
+    }
+
+    #[test]
     fn does_not_report_feature_envy_below_the_threshold() {
         let dir = tempfile::tempdir().unwrap();
         write_file(dir.path(), "Widget.java", "class Widget {\n    int total(Customer c) {\n        return c.getBalance();\n    }\n}\n");
@@ -386,6 +504,7 @@ mod tests {
             envied_type: "Other".to_string(),
             envied_access_count: 3,
             own_access_count: 0,
+            helper_evidence: Vec::new(),
         }
     }
 

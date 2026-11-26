@@ -24,6 +24,9 @@ use tree_sitter::Node;
 
 use crate::model::{AccessRef, CallChain, ForeignAccessRef, MethodDecl, NamedSlot, TypeDecl};
 
+mod helper_envy;
+pub(crate) use helper_envy::GoHelperEnvy;
+
 fn text<'a>(node: Node, source: &'a [u8]) -> &'a str {
     node.utf8_text(source).unwrap_or("")
 }
@@ -175,6 +178,7 @@ fn extract_method(node: Node, source: &[u8], file: &Path) -> Option<(String, Met
             return_type_text,
             own_field_accesses,
             foreign_accesses,
+            helper_accesses: Vec::new(),
             chains,
             is_trivial_body: false,
         },

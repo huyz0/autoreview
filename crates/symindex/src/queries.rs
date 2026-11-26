@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
-use crate::model::{MethodDecl, NamedSlot, SymbolIndex, TypeDecl};
+use crate::model::{HelperAccess, MethodDecl, NamedSlot, SymbolIndex, TypeDecl};
 
 /// One message-chain finding: a call chain at or above the reporting
 /// threshold, anchored at the method it was found in.
@@ -55,45 +55,56 @@ pub struct FeatureEnvyFinding {
     pub envied_type: String,
     pub envied_access_count: usize,
     pub own_access_count: usize,
+    pub helper_evidence: Vec<HelperAccess>,
 }
 
-/// Feature Envy: a method envies a foreign type when accesses to it (via a
-/// method parameter — see the plan's scope decision, locals aren't
-/// tracked) reach `min_foreign_accesses` and exceed the method's own-field
-/// access count by at least `margin`. Foreign accesses are grouped by the
-/// parameter's declared type text (not by parameter name — two
-/// differently-named params of the same type both count toward that
-/// type's envy), so a method juggling several unrelated foreign types is
-/// judged per type, not by a single combined count.
+/// Score accesses to each collaborator type independently. Go can also
+/// contribute accesses from a resolved helper that works on a forwarded
+/// parameter. A finding must clear both the absolute floor and the margin
+/// over the caller's own-field accesses.
 pub fn find_feature_envy(index: &SymbolIndex, min_foreign_accesses: usize, margin: i64) -> Vec<FeatureEnvyFinding> {
     let mut findings = Vec::new();
-    for m in index.methods() {
-        if m.foreign_accesses.is_empty() {
-            continue;
-        }
-        let own_count = m.own_field_accesses.len();
-
-        let mut by_type: BTreeMap<String, usize> = BTreeMap::new();
-        for access in &m.foreign_accesses {
-            let Some(receiver_type) = &access.receiver_type else { continue };
-            *by_type.entry(receiver_type.clone()).or_insert(0) += 1;
-        }
-
-        for (envied_type, envied_access_count) in by_type {
-            if envied_access_count >= min_foreign_accesses && envied_access_count as i64 - own_count as i64 >= margin {
+    for method in index.methods() {
+        let own_count = method.own_field_accesses.len();
+        for (envied_type, score) in feature_envy_scores(method) {
+            if score.count >= min_foreign_accesses && score.count as i64 - own_count as i64 >= margin {
                 findings.push(FeatureEnvyFinding {
-                    file: m.file.clone(),
-                    line: m.start_line,
-                    owner_type: m.owner_type.clone(),
-                    method: m.name.clone(),
-                    envied_type,
-                    envied_access_count,
+                    file: method.file.clone(),
+                    line: method.start_line,
+                    owner_type: method.owner_type.clone(),
+                    method: method.name.clone(),
+                    envied_type: envied_type.to_owned(),
+                    envied_access_count: score.count,
                     own_access_count: own_count,
+                    helper_evidence: score.helpers.into_iter().cloned().collect(),
                 });
             }
         }
     }
     findings
+}
+
+#[derive(Default)]
+struct FeatureEnvyScore<'a> {
+    count: usize,
+    helpers: Vec<&'a HelperAccess>,
+}
+
+fn feature_envy_scores(method: &MethodDecl) -> BTreeMap<&str, FeatureEnvyScore<'_>> {
+    let mut scores: BTreeMap<&str, FeatureEnvyScore<'_>> = BTreeMap::new();
+    for access in &method.helper_accesses {
+        let score = scores.entry(&access.receiver_type).or_default();
+        score.count += access.count;
+        score.helpers.push(access);
+    }
+    for raw_type in method.foreign_accesses.iter().filter_map(|access| access.receiver_type.as_deref()) {
+        // The helper index has already identified the declaration behind this Go pointer type.
+        let receiver_type = raw_type.strip_prefix('*').map(str::trim_start)
+            .filter(|name| scores.get(name).is_some_and(|score| !score.helpers.is_empty()))
+            .unwrap_or(raw_type);
+        scores.entry(receiver_type).or_default().count += 1;
+    }
+    scores
 }
 
 /// Whether Data Clumps are compared across the whole index or only within
@@ -242,6 +253,7 @@ mod tests {
             return_type_text: None,
             own_field_accesses: vec![],
             foreign_accesses: vec![],
+            helper_accesses: Vec::new(),
             chains: vec![CallChain {
                 root_text: "owner".to_string(),
                 depth,
@@ -302,6 +314,7 @@ mod tests {
             return_type_text: None,
             own_field_accesses,
             foreign_accesses,
+            helper_accesses: Vec::new(),
             chains: vec![],
             is_trivial_body: false,
         }
@@ -363,6 +376,7 @@ mod tests {
             return_type_text: None,
             own_field_accesses: vec![],
             foreign_accesses: vec![],
+            helper_accesses: Vec::new(),
             chains: vec![],
             is_trivial_body: false,
         }
@@ -451,6 +465,7 @@ mod tests {
             return_type_text: None,
             own_field_accesses: vec![],
             foreign_accesses: vec![],
+            helper_accesses: Vec::new(),
             chains: vec![],
             is_trivial_body: true,
         }
