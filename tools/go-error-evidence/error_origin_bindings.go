@@ -31,16 +31,10 @@ func forwardedBindings(body *ast.BlockStmt, param *types.Var, info *types.Info, 
 	return bindings
 }
 
-func isBindingContext(ident *ast.Ident, stack []ast.Node, param *types.Var, info *types.Info, summaries map[callee]*errorOrigin, bindings map[*types.Var]*ast.CallExpr) bool {
-	if len(stack) < 3 || info.Uses[ident] != param {
-		return false
-	}
-	call, ok := stack[len(stack)-2].(*ast.CallExpr)
-	if !ok {
-		return false
-	}
-	assign, ok := stack[len(stack)-3].(*ast.AssignStmt)
-	if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 || assign.Rhs[0] != call {
+func isBindingContext(ident *ast.Ident, stack []ast.Node, info *types.Info, summaries map[callee]*errorOrigin, bindings map[*types.Var]*ast.CallExpr) bool {
+	call, parent := enclosingCall(stack)
+	assign, ok := parent.(*ast.AssignStmt)
+	if !ok || call == nil || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 || assign.Rhs[0] != call {
 		return false
 	}
 	name, ok := assign.Lhs[0].(*ast.Ident)

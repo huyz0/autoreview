@@ -105,7 +105,7 @@ func contextReturnsOnly(body *ast.BlockStmt, param *types.Var, info *types.Info,
 		case *ast.Ident:
 			if info.Uses[item] == param {
 				selector, ok := parent.(*ast.SelectorExpr)
-				if (!ok || selector.X != item || (selector.Sel.Name != "Err" && selector.Sel.Name != "Done")) && !isForwardedContext(item, stack, param, info, summaries) && !isBindingContext(item, stack, param, info, summaries, bindings) {
+				if (!ok || selector.X != item || (selector.Sel.Name != "Err" && selector.Sel.Name != "Done")) && !isForwardedContext(item, stack, info, summaries) && !isBindingContext(item, stack, info, summaries, bindings) {
 					valid = false
 				}
 			}
@@ -149,20 +149,22 @@ func isContextError(expr ast.Expr, param *types.Var, info *types.Info) bool {
 	return ok && info.Uses[ident] == param
 }
 
-func isForwardedContext(ident *ast.Ident, stack []ast.Node, param *types.Var, info *types.Info, summaries map[callee]*errorOrigin) bool {
-	if len(stack) < 3 {
-		return false
-	}
-	call, ok := stack[len(stack)-2].(*ast.CallExpr)
-	if !ok {
-		return false
-	}
-	ret, ok := stack[len(stack)-3].(*ast.ReturnStmt)
-	if !ok || len(ret.Results) != 1 || ret.Results[0] != call {
+func isForwardedContext(ident *ast.Ident, stack []ast.Node, info *types.Info, summaries map[callee]*errorOrigin) bool {
+	call, parent := enclosingCall(stack)
+	ret, ok := parent.(*ast.ReturnStmt)
+	if !ok || call == nil || len(ret.Results) != 1 || ret.Results[0] != call {
 		return false
 	}
 	index, ok := forwardedParameter(call, info, summaries)
-	return ok && call.Args[index] == ident && info.Uses[ident] == param
+	return ok && call.Args[index] == ident
+}
+
+func enclosingCall(stack []ast.Node) (*ast.CallExpr, ast.Node) {
+	if len(stack) < 3 {
+		return nil, nil
+	}
+	call, _ := stack[len(stack)-2].(*ast.CallExpr)
+	return call, stack[len(stack)-3]
 }
 
 func isForwardedError(expr ast.Expr, param *types.Var, info *types.Info, summaries map[callee]*errorOrigin) bool {
