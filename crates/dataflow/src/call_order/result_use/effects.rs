@@ -117,6 +117,7 @@ impl Lower<'_, '_, '_> {
     }
 
     fn statement(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
+        if site::identifier(node) && site::discarded_conditional_arm(node) { return; }
         let value = if let Some(closure) = self.inside {
             closure_result(node, closure)
         } else if self.returns_to_caller {

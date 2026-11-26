@@ -9,8 +9,7 @@ pub(super) fn lower(cfg: &mut Cfg<Stmt>, node: Node<'_>, source: &[u8], current:
     if !simple_test(test, source) { return None; }
     let yes = arm_value(expression.child_by_field_name("consequence")?)?;
     let no = arm_value(expression.child_by_field_name("alternative")?)?;
-    let allow_binding = !matches!(mode, Mode::Discard);
-    if ![yes, no].into_iter().all(|arm| simple_arm(arm, source, allow_binding)) { return None; }
+    if ![yes, no].into_iter().all(|arm| simple_arm(arm, source)) { return None; }
     let literal = arm_value(test)?.kind();
     cfg.nodes[current].condition = keyed_syntax::condition_value(test, source);
     super::super::record_evaluation(cfg, current, test);
@@ -72,9 +71,8 @@ fn lower_arm(cfg: &mut Cfg<Stmt>, arm: Node<'_>, source: &[u8], nodes: (NodeId, 
     }
 }
 
-fn simple_arm(arm: Node<'_>, source: &[u8], allow_binding: bool) -> bool {
-    (allow_binding && arm.kind() == "identifier")
-        || matches!(arm.kind(), "null" | "true" | "false" | "number" | "string")
+fn simple_arm(arm: Node<'_>, source: &[u8]) -> bool {
+    matches!(arm.kind(), "identifier" | "null" | "true" | "false" | "number" | "string")
         || (matches!(arm.kind(), "call_expression" | "method_invocation")
             && site::capture(arm, source).is_some_and(|site| site.arguments.iter().all(|argument|
                 argument.as_ref().is_some_and(|value| !matches!(value, IdentityOperand::CallResult { .. })))))
