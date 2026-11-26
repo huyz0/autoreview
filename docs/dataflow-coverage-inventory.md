@@ -18,9 +18,10 @@ It does not claim that every unsupported construct has been catalogued.
 
 The experimental Go error probe distinguishes package or call-site budget
 exhaustion, package loading, type checking, snapshot mismatches, and rejected
-requests in rule-scoped coverage. Unknown or malformed probe responses and
-process failures retain the generic incomplete-checker reason. These reports
-do not expose raw subprocess errors or identify the failing package yet.
+requests in coverage, scoped to a repository-relative package directory when
+available. Unknown or malformed probe responses and process failures retain
+the generic rule-scoped incomplete-checker reason. These reports do not expose
+raw subprocess errors.
 
 Rust lowering supports non-tail statement matches with a simple scrutinee,
 including supported direct calls, and a final wildcard. Arms can use literals,

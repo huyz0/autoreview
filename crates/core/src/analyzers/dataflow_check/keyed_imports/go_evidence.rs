@@ -8,6 +8,7 @@ use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, check_key
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use super::Source;
+use super::package_coverage::package_limitation;
 
 const PACKAGE_LIMIT: usize = 8;
 const CALL_LIMIT: usize = 2048;
@@ -177,7 +178,7 @@ fn check_with_probe_and_callees(
     for (index, (dir, group)) in groups.into_iter().filter(|(_, group)| !group.calls.is_empty()).enumerate() {
         if index >= PACKAGE_LIMIT || group.calls.len() > CALL_LIMIT {
             let reason = if index >= PACKAGE_LIMIT { "go_error_package_limit" } else { "go_error_call_limit" };
-            verified.discovery.limitations.push(KeyedLimitation { reason, path: None, line: None });
+            verified.discovery.limitations.push(package_limitation(root, &dir, reason));
             continue;
         }
         let package_sources = (include_callees || include_error_origins).then(|| package_source_hashes(&dir)).flatten();
@@ -188,7 +189,7 @@ fn check_with_probe_and_callees(
             Ok(results) => for ((unit, start), result) in group.indices.into_iter().zip(results) {
                 record_result(&mut verified, units, sources, &request, (unit, start, result));
             },
-            Err(reason) => verified.discovery.limitations.push(KeyedLimitation { reason, path: None, line: None }),
+            Err(reason) => verified.discovery.limitations.push(package_limitation(root, &dir, reason)),
         }
     }
     (check_keyed_units_with_verified_components(spec, units, verified.discovery, &verified.components), verified.callees)
