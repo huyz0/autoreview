@@ -43,69 +43,7 @@ impl Lower<'_, '_, '_> {
     }
 
     fn visit<'tree>(&self, node: Node<'tree>, demand: Demand, todo: &mut Vec<Visit<'tree>>, effects: &mut Vec<Effect>) {
-        if let Some((arguments, summary)) = self.helper_call(node) {
-            let multi = (arguments.len() == 1).then(|| transparent(arguments[0]))
-                .and_then(|call| self.plan.result_components.get(&call.start_byte()).map(|shape| (call, shape)));
-            let arguments = if let Some((call, shape)) = multi {
-                let Some(origin) = self.origin(call) else { return; };
-                self.reads(call, effects);
-                (0..shape.count).map(|index| {
-                    let place = Place::CallComponent(call.start_byte(), index);
-                    let value = if shape.indices.contains(&index) {
-                        let mut component = origin.clone();
-                        component.component = Some(index);
-                        Value::Source(component)
-                    } else { Value::Other };
-                    effects.push(Effect::Write(vec![Write { target: Some(place), value }]));
-                    Some(place)
-                }).collect()
-            } else { arguments
-                .into_iter()
-                .map(|argument| {
-                    if let Some(place) = self.place(argument, false) {
-                        return Some(place);
-                    }
-                    let temporary = Place::CallResult(argument.start_byte());
-                    let value = self.value(argument, effects);
-                    effects.push(Effect::Write(vec![Write { target: Some(temporary), value }]));
-                    Some(temporary)
-                })
-                .collect() };
-            let origins = |values: &[(super::Origin, bool)]| {
-                values
-                    .iter()
-                    .cloned()
-                    .map(|(mut origin, used)| {
-                        let call = (self.plan.syntax.unit, node.start_byte());
-                        if !origin.calls.contains(&call) {
-                            origin.calls.push(call);
-                            origin.calls.sort_unstable();
-                        }
-                        (origin, used)
-                    })
-                    .collect()
-            };
-            let opaque_origins = |values: &[super::Origin]| {
-                values.iter().cloned().map(|mut origin| {
-                    let call = (self.plan.syntax.unit, node.start_byte());
-                    if !origin.calls.contains(&call) { origin.calls.push(call); origin.calls.sort_unstable(); }
-                    origin
-                }).collect()
-            };
-            effects.push(Effect::ApplyHelper(Box::new(HelperCall {
-                arguments,
-                demand,
-                when_discarded: summary.when_discarded.parameters.clone(),
-                when_observed: summary.when_observed.parameters.clone(),
-                origins_discarded: origins(&summary.when_discarded.origins),
-                origins_observed: origins(&summary.when_observed.origins),
-                opaque_discarded: summary.when_discarded.opaque_parameters.clone(),
-                opaque_observed: summary.when_observed.opaque_parameters.clone(),
-                opaque_origins_discarded: opaque_origins(&summary.when_discarded.opaque_origins),
-                opaque_origins_observed: opaque_origins(&summary.when_observed.opaque_origins),
-            })));
-            return;
-        }
+        if self.add_helper_effect(node, demand, effects) { return; }
         if let Some(closure) = self.closures.literal(node) {
             let snapshots = closure
                 .snapshots
@@ -126,6 +64,71 @@ impl Lower<'_, '_, '_> {
         }
         let parts: Vec<_> = site::children(node).collect();
         todo.extend(parts.into_iter().rev().map(|child| Visit::Syntax(child, Demand::Observed)));
+    }
+
+    fn add_helper_effect(&self, node: Node<'_>, demand: Demand, effects: &mut Vec<Effect>) -> bool {
+        let Some((arguments, summary)) = self.helper_call(node) else { return false; };
+        let multi = (arguments.len() == 1).then(|| transparent(arguments[0]))
+            .and_then(|call| self.plan.result_components.get(&call.start_byte()).map(|shape| (call, shape)));
+        let arguments = if let Some((call, shape)) = multi {
+            let Some(origin) = self.origin(call) else { return true; };
+            self.reads(call, effects);
+            (0..shape.count).map(|index| {
+                let place = Place::CallComponent(call.start_byte(), index);
+                let value = if shape.indices.contains(&index) {
+                    let mut component = origin.clone();
+                    component.component = Some(index);
+                    Value::Source(component)
+                } else { Value::Other };
+                effects.push(Effect::Write(vec![Write { target: Some(place), value }]));
+                Some(place)
+            }).collect()
+        } else { arguments
+            .into_iter()
+            .map(|argument| {
+                if let Some(place) = self.place(argument, false) {
+                    return Some(place);
+                }
+                let temporary = Place::CallResult(argument.start_byte());
+                let value = self.value(argument, effects);
+                effects.push(Effect::Write(vec![Write { target: Some(temporary), value }]));
+                Some(temporary)
+            })
+            .collect() };
+        let origins = |values: &[(super::Origin, bool)]| {
+            values
+                .iter()
+                .cloned()
+                .map(|(mut origin, used)| {
+                    let call = (self.plan.syntax.unit, node.start_byte());
+                    if !origin.calls.contains(&call) {
+                        origin.calls.push(call);
+                        origin.calls.sort_unstable();
+                    }
+                    (origin, used)
+                })
+                .collect()
+        };
+        let opaque_origins = |values: &[super::Origin]| {
+            values.iter().cloned().map(|mut origin| {
+                let call = (self.plan.syntax.unit, node.start_byte());
+                if !origin.calls.contains(&call) { origin.calls.push(call); origin.calls.sort_unstable(); }
+                origin
+            }).collect()
+        };
+        effects.push(Effect::ApplyHelper(Box::new(HelperCall {
+            arguments,
+            demand,
+            when_discarded: summary.when_discarded.parameters.clone(),
+            when_observed: summary.when_observed.parameters.clone(),
+            origins_discarded: origins(&summary.when_discarded.origins),
+            origins_observed: origins(&summary.when_observed.origins),
+            opaque_discarded: summary.when_discarded.opaque_parameters.clone(),
+            opaque_observed: summary.when_observed.opaque_parameters.clone(),
+            opaque_origins_discarded: opaque_origins(&summary.when_discarded.opaque_origins),
+            opaque_origins_observed: opaque_origins(&summary.when_observed.opaque_origins),
+        })));
+        true
     }
 
     fn opaque_arguments(&self, node: Node<'_>, effects: &mut Vec<Effect>) {

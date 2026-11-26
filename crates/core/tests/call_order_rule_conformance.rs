@@ -167,6 +167,14 @@ fn every_call_order_rule_declares_a_category() {
     }
 }
 
+fn assert_unresolved_receiver_cases(cases: &[(&str, &str, &str, u32)]) {
+    for &(path, rule, source, line) in cases {
+        let root = write_single_file(path, source);
+        let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &[path.into()], &[]);
+        assert!(result.coverage.iter().any(|issue| issue.reason == "unresolved_result_receiver" && issue.rule.as_deref() == Some(rule) && issue.path.as_deref() == Some(path) && issue.line == Some(line)), "{path}: {:?}", result.coverage);
+    }
+}
+
 #[test]
 fn unresolved_receivers_track_bindings_across_languages() {
     let cases = [
@@ -177,11 +185,7 @@ fn unresolved_receivers_track_bindings_across_languages() {
         ("main.kt", "kotlin-discarded-run-catching-result", "import kotlin.runCatching\nfun run() { val value = runCatching { 1 }; unknown(value) }\n", 2),
         ("lib.rs", "rust-discarded-remove-file-result", "use std::fs::remove_file;\nfn run(path: &str) { let value = remove_file(path); unknown(value); }\n", 2),
     ];
-    for (path, rule, source, line) in cases {
-        let root = write_single_file(path, source);
-        let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &[path.into()], &[]);
-        assert!(result.coverage.iter().any(|issue| issue.reason == "unresolved_result_receiver" && issue.rule.as_deref() == Some(rule) && issue.path.as_deref() == Some(path) && issue.line == Some(line)), "{path}: {:?}", result.coverage);
-    }
+    assert_unresolved_receiver_cases(&cases);
 }
 
 #[test]
@@ -236,11 +240,7 @@ fn unresolved_helpers_receiving_direct_results_are_reported() {
         ("main.kt", "kotlin-discarded-run-catching-result", "import kotlin.runCatching\nfun run() { mystery(runCatching({ 1 })) }\n", 2),
         ("lib.rs", "rust-discarded-remove-file-result", "use std::fs::remove_file;\nfn run(path: &str) { external(remove_file(path)); }\n", 2),
     ];
-    for (path, rule, source, line) in cases {
-        let root = write_single_file(path, source);
-        let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &[path.into()], &[]);
-        assert!(result.coverage.iter().any(|issue| issue.reason == "unresolved_result_receiver" && issue.rule.as_deref() == Some(rule) && issue.path.as_deref() == Some(path) && issue.line == Some(line)), "{path}: {:?}", result.coverage);
-    }
+    assert_unresolved_receiver_cases(&cases);
     let path = "main.js";
     let source = "import { rename } from 'node:fs/promises';\nfunction consume(value) { return value; }\nasync function run(a, b) { await consume(rename(a, b)); other(await rename(a, b)); }\n";
     let root = write_single_file(path, source);
