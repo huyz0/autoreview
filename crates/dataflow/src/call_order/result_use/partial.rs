@@ -3,8 +3,11 @@
 //! analysis rather than guessing about helper or guard behavior.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+mod guards;
+
 use super::{Body, Effect, Origin, Place, Plan, Value, Write};
 use crate::cfg::{Cfg, EdgeKind, IdentityOperand, NodeId, Stmt};
+use guards::{guard, supported_edges};
 use tree_sitter::Node;
 
 const PATH_LIMIT: usize = 8192;
@@ -240,59 +243,6 @@ fn supported(
         && body.effects.iter().flatten().all(supported_effect)
 }
 
-fn supported_edges(
-    cfg: &Cfg<Stmt>,
-    plan: &Plan<'_, '_>,
-    node: NodeId,
-    outgoing: &[(NodeId, EdgeKind)],
-    branches: usize,
-) -> bool {
-    let has_branch = outgoing
-        .iter()
-        .any(|(_, edge)| matches!(edge, EdgeKind::True | EdgeKind::False));
-    if has_branch && cfg.nodes[node].condition.is_none() {
-        return false;
-    }
-    if outgoing.iter().any(|(target, edge)| {
-        *edge == EdgeKind::Exceptional
-            && !cfg.nodes[*target]
-                .stmts
-                .iter()
-                .any(|stmt| matches!(stmt, Stmt::Throw { .. }))
-    }) {
-        return false;
-    }
-    if let Some((name, _)) = &cfg.nodes[node].condition {
-        let identity = guard(plan, name);
-        if (branches > 1 || plan.syntax.repeated_guard(name)) && identity.is_none() {
-            return false;
-        }
-        if identity
-            .as_ref()
-            .is_some_and(|identity| guard_is_rebound(cfg, name, identity))
-        {
-            return false;
-        }
-    }
-    true
-}
-
-fn guard_is_rebound(cfg: &Cfg<Stmt>, name: &str, identity: &IdentityOperand) -> bool {
-    let root = match identity {
-        IdentityOperand::Binding(value) | IdentityOperand::Scoped { name: value, .. } => {
-            Some(value.as_str())
-        }
-        _ => None,
-    };
-    cfg.nodes
-        .iter()
-        .flat_map(|node| &node.stmts)
-        .any(|stmt| match stmt {
-            Stmt::Rebind(write) => write.target().0 == name || root == Some(write.target().0),
-            _ => false,
-        })
-}
-
 fn supported_effect(effect: &Effect) -> bool {
     match effect {
         Effect::Read(Place::Local(_)) => true,
@@ -365,11 +315,9 @@ fn unobserved_path(
         if state.active && (state.aliases.is_empty() || node == body.flow.exit) {
             return Some(true);
         }
-        for &(to, edge) in &edges[node] {
-            if let Some(next) = branch(state.clone(), cfg, plan, node, edge) {
-                pending.push((to, next));
-            }
-        }
+        pending.extend(edges[node].iter().filter_map(|&(to, edge)| {
+            branch(state.clone(), cfg, plan, node, edge).map(|next| (to, next))
+        }));
     }
     Some(false)
 }
@@ -433,12 +381,4 @@ fn branch(
     }
     state.guards.insert(identity, truth);
     Some(state)
-}
-
-fn guard(plan: &Plan<'_, '_>, name: &str) -> Option<IdentityOperand> {
-    match name {
-        "true" => Some(IdentityOperand::Boolean(true)),
-        "false" => Some(IdentityOperand::Boolean(false)),
-        _ => plan.syntax.resolve(&BTreeMap::new(), name, usize::MAX),
-    }
 }
