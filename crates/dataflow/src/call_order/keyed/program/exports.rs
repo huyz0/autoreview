@@ -178,11 +178,10 @@ impl ExportTargets for Program<'_, '_, '_> {
     }
 
     fn owned(&self, unit: usize, binding: &super::KeyedImport, name: &str, arity: usize) -> Resolution {
-        Resolution {
-            targets: self.units[unit].frames.iter().copied()
-                .filter(|index| self.frames[*index].matches_export(binding, name, arity)).collect(),
-            ..Resolution::default()
-        }
+        let targets: BTreeSet<_> = self.units[unit].frames.iter().copied()
+            .filter(|index| self.frames[*index].matches_export(binding, name, arity)).collect();
+        let incomplete = targets.is_empty() && binding.owner.is_some() && binding.local.ends_with("::");
+        Resolution { targets, incomplete, ..Resolution::default() }
     }
 }
 

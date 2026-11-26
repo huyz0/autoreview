@@ -150,6 +150,7 @@ fn rust_uses(
             .map_or((usage.as_str(), None), |(path, alias)| (path.trim(), Some(alias.trim())));
         let Some((module, member)) = qualified.rsplit_once("::") else { return Vec::new() };
         let mut bindings = Vec::new();
+        let mut associated = false;
         if let Some(file) = (!conditional).then(|| resolve_use_module(resolver, path, dir, module)).flatten() {
             if let Some(binding) = resolver.binding(&file, alias.unwrap_or(member), Some(member), None, true) {
                 bindings.push(binding);
@@ -157,6 +158,7 @@ fn rust_uses(
             if let Some((owner_file, owner)) = is_relative(module).then(|| associated_type_origin(resolver, &file, member)).flatten() {
                 let local = format!("{}::", alias.unwrap_or(member));
                 if let Some(binding) = resolver.binding(&owner_file, &local, None, Some(&owner), true) {
+                    associated = true;
                     bindings.push(binding);
                 }
             }
@@ -169,7 +171,7 @@ fn rust_uses(
             .or_else(|| private_parent_namespace(resolver, path, module_path))).flatten();
         if let Some(file) = namespace {
             if let Some(binding) = resolver.binding(&file, &local, None, None, true) { bindings.push(binding); }
-        } else if is_relative(module_path) {
+        } else if is_relative(module_path) && !(associated && associated::simple_calls(input.node, &local, source)) {
             record_unresolved(input, node, &local, coverage);
         }
         if bindings.is_empty() && is_relative(module_path) && member != "self" {

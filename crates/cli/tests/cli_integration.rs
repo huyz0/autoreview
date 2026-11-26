@@ -696,12 +696,12 @@ fn rust_imported_associated_helper_reaches_review_report() {
     assert!(report["findings"].as_array().unwrap().iter().any(|finding|
         finding["source"]["ruleId"] == "rust-discarded-remove-file-result"
             && finding["location"]["path"] == "src/support.rs" && finding["location"]["range"]["startLine"] == 4), "{report}");
-    assert!(report["analysisCoverage"].as_array().unwrap().iter().any(|issue|
-        issue["reason"] == "unresolved_rust_module_import" && issue["path"] == "src/worker.rs"), "{report}");
+    assert!(!report["analysisCoverage"].as_array().is_some_and(|issues| issues.iter().any(|issue|
+        issue["reason"] == "unresolved_rust_module_import" && issue["path"] == "src/worker.rs")), "{report}");
 }
 
 #[test]
-fn rust_reexported_associated_helper_reaches_review_and_reports_replay_limit() {
+fn rust_reexported_associated_helper_reaches_review_and_replay() {
     let support = "use std::fs::remove_file;\npub(crate) struct Files;\nimpl Files {\n    pub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n}\n";
     let bad = "use crate::api::Store as Disk;\nfn run(path: &str) { Disk::remove(path); }\n";
     let fixed = "use crate::api::Store as Disk;\nfn run(path: &str) -> std::io::Result<()> { Disk::remove(path) }\n";
@@ -714,17 +714,34 @@ fn rust_reexported_associated_helper_reaches_review_and_reports_replay_limit() {
         "before": {"commit":before, "entry":"src/worker.rs", "path":"src/support.rs", "lines":[4]},
         "after": {"commit":after, "entry":"src/worker.rs", "path":"src/support.rs", "lines":[]}}]});
     std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
-    let replay = failed_replay_report(repo.path());
-    assert_eq!(replay["coverage"][0]["incomplete"], 1, "{replay}");
-    assert!(replay["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue|
-        issue["reason"] == "unresolved_rust_module_import" && issue["path"] == "src/worker.rs"), "{replay}");
+    let replay = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().success();
+    let replay: serde_json::Value = serde_json::from_slice(&replay.get_output().stdout).unwrap();
+    assert_eq!(replay["rules"][0]["truePositives"], 1, "{replay}");
+    assert_eq!(replay["rules"][0]["falsePositives"], 0, "{replay}");
     repo.commit(&[("src/worker.rs", bad)], "discard associated result");
     let review = static_review_report(&repo, &after, None);
     assert!(review["findings"].as_array().unwrap().iter().any(|finding|
         finding["source"]["ruleId"] == "rust-discarded-remove-file-result" && finding["location"]["path"] == "src/support.rs"
             && finding["location"]["range"]["startLine"] == 4), "{review}");
-    assert!(review["analysisCoverage"].as_array().unwrap().iter().any(|issue|
-        issue["reason"] == "unresolved_rust_module_import" && issue["path"] == "src/worker.rs"), "{review}");
+    assert!(!review["analysisCoverage"].as_array().is_some_and(|issues| issues.iter().any(|issue|
+        issue["reason"] == "unresolved_rust_module_import" && issue["path"] == "src/worker.rs")), "{review}");
+}
+
+#[test]
+fn rust_unknown_associated_method_blocks_replay_scoring() {
+    let support = "pub(crate) struct Files;\nimpl Files { pub(crate) fn known() {} }\n";
+    let repo = init_repo(&[("src/lib.rs", "mod support; mod worker;\n"), ("src/support.rs", support),
+        ("src/worker.rs", "use crate::support::Files;\nfn run() { Files::unknown(); }\n")]);
+    let commit = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name": "unknown associated helper", "rule": {"tool":"autoreview-dataflow", "id":"rust-discarded-remove-file-result"},
+        "before": {"commit":commit, "path":"src/worker.rs", "lines":[]},
+        "after": {"commit":commit, "path":"src/worker.rs", "lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let replay = failed_replay_report(repo.path());
+    assert_eq!(replay["coverage"][0]["incomplete"], 1, "{replay}");
+    assert!(replay["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "unresolved_helper_target" && issue["path"] == "src/worker.rs"), "{replay}");
 }
 
 #[test]

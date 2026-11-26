@@ -662,7 +662,21 @@ fn rust_imported_associated_helpers_preserve_result_usage() {
         std::fs::write(root.path().join("src/support.rs"), guarded).unwrap();
         let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
         assert!(!result.findings.iter().any(|finding| finding.location.path == "src/support.rs" && finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result")), "{:#?}", result.findings);
-        assert!(result.coverage.iter().any(|issue| issue.reason == "unresolved_rust_module_import" && issue.path.as_deref() == Some("src/worker.rs")), "{:?}", result.coverage);
+        assert!(result.coverage.iter().any(|issue| matches!(issue.reason.as_str(), "unresolved_rust_module_import" | "unresolved_helper_target") && issue.path.as_deref() == Some("src/worker.rs")), "{:?}", result.coverage);
+    }
+}
+
+#[test]
+fn unresolved_imported_associated_methods_report_coverage() {
+    let root = tempfile::tempdir().unwrap();
+    let src = root.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(src.join("lib.rs"), "mod support; mod worker;\n").unwrap();
+    std::fs::write(src.join("support.rs"), "pub(crate) struct Files;\nimpl Files { pub(crate) fn known() {} }\n").unwrap();
+    for call in ["Store::unknown();", "Store::unknown()", "Store::known(1);", "Store::unknown::<u8>();", "let f = || Store::unknown(); f();", "let _ = async { Store::unknown(); };", "if true { Store::unknown(); }"] {
+        std::fs::write(src.join("worker.rs"), format!("use crate::support::Files as Store;\nfn run() {{ {call} }}\n")).unwrap();
+        let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
+        assert!(result.coverage.iter().any(|issue| matches!(issue.reason.as_str(), "unresolved_rust_module_import" | "unresolved_helper_target") && issue.path.as_deref() == Some("src/worker.rs")), "{call}: {:?}", result.coverage);
     }
 }
 
