@@ -78,7 +78,9 @@ report `context_error_or_nil` and the zero-based context parameter index,
 excluding any method receiver. This
 means the supported explicit return expressions are the parameter's `Err()`,
 predeclared `nil`, or a direct call to a same-package helper with an already
-established summary and the same context parameter. Helper summaries use at
+established summary and the same context parameter. A fresh, single-result
+error binding can also be returned after nil comparisons when it is never
+reassigned or otherwise used. Helper summaries use at
 most 16 passes; unresolved or recursive-only flows stay unknown. It does not
 prove that the context implementation is
 well behaved, that callers check the error, or that suppressing it is correct.
