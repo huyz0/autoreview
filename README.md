@@ -253,7 +253,8 @@ for supported rule kinds.
 
 ### Replay rules and opt into a merge gate
 
-Use `autoreview rules replay` to compare a built-in rule's findings with
+Use `autoreview rules replay` to compare a built-in rule or a registered custom
+call-sequence rule's findings with
 hand-labelled lines in complete files at known-bad and fixed Git commits.
 The JSON report shows precision, recall, and the lines each case missed or
 reported unexpectedly. Set `--suite` to use a different YAML file.
