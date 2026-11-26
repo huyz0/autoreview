@@ -29,7 +29,7 @@ pub(super) fn verify(
 fn record_classifications(positions: &[(usize, usize)], result: TypeScriptResult, verified: &mut Positions, classified: &mut Positions) {
     for ((unit, start), result) in positions.iter().copied().zip(result.calls.unwrap_or_default()) {
         if result.status == "promise_like" { verified.entry(unit).or_default().insert(start); }
-        if matches!(result.status.as_str(), "promise_like" | "not_promise") { classified.entry(unit).or_default().insert(start); }
+        if matches!(result.status.as_str(), "promise_like" | "not_promise" | "observed") { classified.entry(unit).or_default().insert(start); }
     }
 }
 

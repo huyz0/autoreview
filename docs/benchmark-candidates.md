@@ -71,6 +71,14 @@ restores the older compiler's catch-variable behavior without disabling
 declaration checks. The opt-in regression below checks the labeled files'
 SHA-256 hashes and requires the unresolved-type warnings to remain visible.
 
+An inspection of the before revision's two labeled files found unproven calls
+at `github-api-helper.ts:39,137` (`Buffer`), and `git-auth-helper.ts:54,56,148`
+(`URL`, `Buffer`, and `RegExpMatchArray | null`). These are structural types;
+the absence of a declared `then` property does not prove that every runtime
+value lacks one. Directly awaited unknown calls can now be recognized as
+observed, but the remaining calls and imported dependencies still require
+sound result-use evidence before this replay can be scored.
+
 For a reproducible source-level observation, first follow the clone, checkout,
 and dependency installation steps for this case in [the benchmark README](../benchmarks/README.md).
 Then, from the `checkout` directory:

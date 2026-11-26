@@ -73,6 +73,13 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
     const checked = invoke();
     assert.equal(checked.status, 'ok');
     assert.deepEqual(checked.calls.map(call => call.status), ['promise_like', 'not_promise', 'not_proven', 'not_proven', 'promise_like', 'not_proven', 'not_proven']);
+    const awaiting = 'declare function unknownValue(): any; declare function knownPromise(): Promise<void>; async function run() { await ((unknownValue())); await unknownValue().value; await knownPromise(); unknownValue(); }';
+    fs.writeFileSync(file, awaiting);
+    calls = [...awaiting.matchAll(/\b(?:unknownValue|knownPromise)\(\)/g)].slice(2)
+      .map(match => ({ path: file, start: Buffer.byteLength(awaiting.slice(0, match.index)), source_sha256: hash(awaiting) }));
+    assert.deepEqual(invoke().calls.map(call => call.status), ['observed', 'not_proven', 'promise_like', 'not_proven']);
+    fs.writeFileSync(file, source);
+    calls = names.map(name => ({ path: file, start: Buffer.byteLength(source.slice(0, source.lastIndexOf(name))), source_sha256: hash(source) }));
     calls = [calls[1], calls[0], calls[1], { ...calls[0], source_sha256: 'wrong' }, { ...calls[0], path: path.join(directory, 'missing.ts') }];
     assert.deepEqual(invoke().calls.map(call => call.status), ['not_promise', 'promise_like', 'not_promise', 'source_changed', 'unavailable']);
     calls = Array.from(source.matchAll(/\bsync\(\);/g), match => ({ path: file, start: Buffer.byteLength(source.slice(0, match.index)), source_sha256: hash(source) })).reverse();
