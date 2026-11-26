@@ -102,6 +102,8 @@ fn empty_summary(parameters: usize) -> HelperSummary {
     let empty = HelperOutcome {
         parameters: vec![false; parameters],
         origins: Vec::new(),
+        opaque_parameters: vec![false; parameters],
+        opaque_origins: Vec::new(),
     };
     HelperSummary {
         when_discarded: empty.clone(),
@@ -139,6 +141,9 @@ fn set_origin_paths(summary: &mut HelperSummary, path: &str) {
             if origin.path.is_none() {
                 origin.path = (!path.is_empty()).then(|| path.to_owned());
             }
+        }
+        for origin in &mut outcome.opaque_origins {
+            if origin.path.is_none() { origin.path = (!path.is_empty()).then(|| path.to_owned()); }
         }
     }
 }

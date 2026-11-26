@@ -39,7 +39,7 @@ pub(in crate::call_order) fn check_units_with_components(
         return (Vec::new(), false, limitations);
     }
     let (summaries, summary_limit) = summaries::build(&program, units);
-    let hits = collect_hits(&program, units, &summaries);
+    let hits = collect_hits(&program, units, &summaries, &mut limitations);
     let mut combined = BTreeMap::new();
     for hit in hits {
         let key = (hit.path.clone(), hit.source_line, hit.trigger_call.clone());
@@ -132,6 +132,7 @@ fn source_limitation(unit: &KeyedUnit<'_, '_, '_>, start: usize, reason: &'stati
 
 fn collect_hits(
     program: &Program<'_, '_, '_>, units: &[KeyedUnit<'_, '_, '_>], summaries: &BTreeMap<usize, HelperSummary>,
+    limitations: &mut Vec<super::super::keyed::KeyedLimitation>,
 ) -> Vec<CallOrderHit> {
     let mut hits = Vec::new();
     let mut frame_index = 0;
@@ -152,6 +153,9 @@ fn collect_hits(
                 continue;
             }
             let analysis = effects::lower(plan, function, unit.source, false, &calls);
+            limitations.extend(analysis.opaque_origins().into_iter().map(|(_, origin)| super::super::keyed::KeyedLimitation {
+                reason: "unresolved_result_receiver", path: origin.path.or_else(|| Some(unit.path.to_owned())), line: Some(origin.line),
+            }));
             hits.extend(analysis.unused().map(|(node, origin)| make_hit(node, origin, unit, units)));
         }
     }
