@@ -223,9 +223,13 @@ impl<'src> Syntax<'src> {
     }
 
     pub(super) fn models_cleanup(&self, cleanup: &[NamePattern], modeled: &HashSet<usize>) -> bool {
+        self.unmodeled_cleanup(cleanup, modeled).is_none()
+    }
+
+    pub(super) fn unmodeled_cleanup(&self, cleanup: &[NamePattern], modeled: &HashSet<usize>) -> Option<usize> {
         let values = Values::new();
-        self.calls.iter().all(|(start, name)| {
-            modeled.contains(start) || !self.may_match_cleanup(cleanup, name, *start, &values)
+        self.calls.iter().find_map(|(start, name)| {
+            (!modeled.contains(start) && self.may_match_cleanup(cleanup, name, *start, &values)).then_some(*start)
         })
     }
 

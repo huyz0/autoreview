@@ -65,6 +65,7 @@ pub(in crate::call_order) struct Frame<'spec, 'src, 'graph> {
     pub plan: Option<Plan<'spec, 'src>>,
     scope: Scope,
     unsupported_rust_line: Option<u32>,
+    declined_cleanup: Option<(u32, bool)>,
     rust_match_bindings: Vec<u32>,
     pub(in crate::call_order) params: Vec<String>,
 }
@@ -132,9 +133,12 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             Some(export(node, source, name))
         });
         self.units[unit].frames.push(self.frames.len());
+        let plan = Plan::new(spec, function.graph, node, source, unit);
+        let declined_cleanup = plan.is_none().then(|| Plan::declined_cleanup(spec, function.graph, node, source, unit)).flatten();
         self.frames.push(Frame {
             graph: function.graph,
-            plan: Plan::new(spec, function.graph, node, source, unit),
+            plan,
+            declined_cleanup,
             unit,
             scope,
             unsupported_rust_line: (node.kind() == "function_item" && !crate::lower::rust::supports_function(node))
@@ -208,7 +212,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
     }
 
     pub(in crate::call_order) fn resolution_limitations(&self) -> Vec<super::KeyedLimitation> {
-        if self.unresolved.borrow().is_empty() && self.frames.iter().all(|frame| frame.unsupported_rust_line.is_none() && frame.rust_match_bindings.is_empty()) {
+        if self.unresolved.borrow().is_empty() && self.frames.iter().all(|frame| frame.unsupported_rust_line.is_none() && frame.rust_match_bindings.is_empty() && frame.declined_cleanup.is_none()) {
             return Vec::new();
         }
         let mut pending: Vec<_> = self.units.iter().filter(|unit| unit.entry)
@@ -224,6 +228,16 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         let mut limitations: Vec<_> = reachable.iter().filter_map(|&frame| self.frames[frame].unsupported_rust_line.map(|line| super::KeyedLimitation {
             reason: "unsupported_rust_control_flow", path: self.path(self.frames[frame].unit), line: Some(line),
         })).collect();
+        let has_registration = reachable.iter().any(|&frame| {
+            let frame = &self.frames[frame];
+            frame.plan.as_ref().is_some_and(Plan::has_registration)
+                || frame.declined_cleanup.is_some_and(|(_, registered)| registered)
+        });
+        if has_registration {
+            limitations.extend(reachable.iter().filter_map(|&frame| self.frames[frame].declined_cleanup.map(|(line, _)| super::KeyedLimitation {
+                reason: "unmodeled_cleanup_call", path: self.path(self.frames[frame].unit), line: Some(line),
+            })));
+        }
         limitations.extend(reachable.iter().flat_map(|&frame| self.frames[frame].rust_match_bindings.iter().map(move |&line| super::KeyedLimitation {
             reason: "rust_match_binding_projection", path: self.path(self.frames[frame].unit), line: Some(line),
         })));

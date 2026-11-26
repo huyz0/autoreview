@@ -131,6 +131,29 @@ fn replay_excludes_ambiguous_helpers_even_without_a_known_result_source() {
 }
 
 #[test]
+fn replay_excludes_unmodeled_keyed_cleanup() {
+    let bad = "export function run(root, key, flag) {\n root.register(key);\n return flag ? root.remove(key) : undefined;\n}\n";
+    let clean = "export function run(root, key) { root.register(key); root.remove(key); }\n";
+    let repo = init_repo(&[("main.js", bad)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("main.js", clean)], "model cleanup");
+    let after = current_commit(repo.path());
+    let pack = tempfile::tempdir().unwrap();
+    std::fs::write(pack.path().join("rulepack.yaml"), "id: custom\nversion: '1'\n").unwrap();
+    std::fs::write(pack.path().join("rule.yml"), "id: custom-cleanup\nlanguage: JavaScript\ncategory: correctness\nseverity: warning\nkind: call-sequence\nmessage: Clean up.\nafter: [{call: register}]\nunless: [{call: remove}]\ncheckBeforeReturn: true\nidentity: {receiver: true, keyArgument: 0}\n").unwrap();
+    std::fs::create_dir_all(repo.path().join(".autoreview")).unwrap();
+    let path = serde_json::to_string(&pack.path().to_string_lossy()).unwrap();
+    std::fs::write(repo.path().join(".autoreview/rulepacks.yaml"), format!("packs:\n  - id: custom\n    trust: shadow\n    source:\n      kind: local\n      path: {path}\n")).unwrap();
+    let suite = serde_json::json!({"cases": [{"name":"unmodeled", "rule":{"tool":"autoreview-dataflow","id":"custom-cleanup"}, "before":{"commit":before,"path":"main.js","lines":[]}, "after":{"commit":after,"path":"main.js","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let report = failed_replay_report(repo.path());
+    assert_eq!(report["coverage"][0]["incomplete"], 1, "{report}");
+    assert_eq!(report["coverage"][0]["completed"], 0, "{report}");
+    assert!(report["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "unmodeled_cleanup_call" && issue["path"] == "main.js" && issue["line"] == 3), "{report}");
+}
+
+#[test]
 fn replay_evaluates_a_registered_custom_call_sequence_rule() {
     let bad = "package main\nimport \"os\"\nfunc move(a, b string) { os.Rename(a, b) }\n";
     let fixed = "package main\nimport \"os\"\nfunc move(a, b string) error { return os.Rename(a, b) }\n";
