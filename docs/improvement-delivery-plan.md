@@ -45,8 +45,11 @@ Same-file calls to supported private or public inherent functions also trace
 results through `Self::` forwarding; review and replay have regression tests.
 Shadowed type names, local imports and unresolved same-file associated calls
 are reported as incomplete rather than assigned a guessed target.
-Trait dispatch, generic types and implementations, conditional compilation,
-re-exported types and ambiguous declarations need further work.
+Explicit, unique re-exports of these supported types can also be followed
+through verified module edges, including renamed and multi-hop exports.
+Glob exports, conditional or ambiguous bindings, trait dispatch, generic
+types and implementations still need further work. The Rust import coverage
+warning remains conservative even for supported re-exported calls.
 
 Results reaching an unresolved receiver now produce a coverage limitation
 instead of implying the receiver was verified. Supported flows include direct

@@ -667,6 +667,45 @@ fn rust_imported_associated_helpers_preserve_result_usage() {
 }
 
 #[test]
+fn rust_reexported_associated_helpers_preserve_result_usage() {
+    let root = tempfile::tempdir().unwrap();
+    let src = root.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::write(src.join("lib.rs"), "mod support; mod facade; mod worker;\n").unwrap();
+    std::fs::write(src.join("support.rs"), "use std::fs::remove_file;\npub(crate) struct Files;\nimpl Files {\n    pub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n    pub(crate) fn forward(value: std::io::Result<()>) -> std::io::Result<()> { value }\n}\n").unwrap();
+    std::fs::write(src.join("facade.rs"), "pub(crate) use crate::support::Files as Store;\n").unwrap();
+    let worker = "use crate::facade::Store as Disk;\nfn ignored(path: &str) { Disk::remove(path); }\nfn observed(path: &str) -> std::io::Result<()> { Disk::forward(Disk::remove(path)) }\n";
+    std::fs::write(src.join("worker.rs"), worker).unwrap();
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", &[("src/support.rs", 4)]);
+    std::fs::write(src.join("worker.rs"), worker.replace("fn ignored(path: &str) { Disk::remove(path); }", "fn ignored(path: &str) -> std::io::Result<()> { Disk::remove(path) }")).unwrap();
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", &[]);
+
+    std::fs::write(src.join("worker.rs"), worker).unwrap();
+    let support = std::fs::read_to_string(src.join("support.rs")).unwrap();
+    std::fs::write(src.join("support.rs"), support.replace("{ remove_file(path) }", "{ let _ = format!(\"{path}\"); remove_file(path) }")).unwrap();
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", &[("src/support.rs", 4)]);
+    std::fs::write(src.join("support.rs"), support).unwrap();
+    std::fs::write(src.join("lib.rs"), "mod support; mod middle; mod facade; mod worker;\n").unwrap();
+    std::fs::write(src.join("middle.rs"), "pub(crate) use crate::support::Files as Inner;\n").unwrap();
+    std::fs::write(src.join("facade.rs"), "pub(crate) use crate::middle::Inner as Store;\n").unwrap();
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", &[("src/support.rs", 4)]);
+
+    for facade in [
+        "#[cfg(feature = \"files\")] pub(crate) use crate::support::Files as Store;\n",
+        "pub(crate) use crate::support::Files as Store; pub(crate) use crate::middle::Inner as Store;\n",
+        "pub(crate) use crate::support::Files as Store; pub(crate) use crate::middle::*;\n",
+        "pub(crate) use crate::support::Files as Store; make_items!();\n",
+        "pub(crate) use crate::{support::Files as Store, middle::{Inner as Store}};\n",
+        "pub(crate) use crate::facade::Store;\n",
+    ] {
+        std::fs::write(src.join("facade.rs"), facade).unwrap();
+        assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", &[]);
+        let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
+        assert!(result.coverage.iter().any(|issue| issue.reason == "unresolved_rust_module_import" && issue.path.as_deref() == Some("src/worker.rs")), "{facade}: {:?}", result.coverage);
+    }
+}
+
+#[test]
 fn imported_rust_helpers_preserve_result_usage() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("src")).unwrap();
