@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use tree_sitter::Node;
 
-use super::super::super::keyed::{KeyedLimitation, KeyedUnit, program::Program};
+use super::super::super::keyed::{KeyedFunction, KeyedLimitation, KeyedUnit, program::Program};
 use crate::lower::site;
 
 // A whole-statement evaluation is not enough to model a conditional source:
@@ -11,25 +11,28 @@ pub(super) fn limitations(program: &Program<'_, '_, '_>, units: &[KeyedUnit<'_, 
     let mut index = 0;
     for unit in units {
         for function in unit.functions {
-            if reachable.contains(&index) {
-                if let Some(plan) = program.frames[index].plan.as_ref().filter(|plan| plan.has_registration()) {
-                    let mut pending = vec![function.node];
-                    while let Some(node) = pending.pop() {
-                        if let Some(arm) = conditional_arm(node) {
-                            let source = site::name(node, unit.source).is_some_and(|name| plan.source_mode_at(&name, node.start_byte()).is_some());
-                            let modeled = function.graph.nodes.iter().flat_map(|block| &block.evaluations).any(|evaluation|
-                                arm.start_byte() <= evaluation.span.start && evaluation.span.end <= arm.end_byte()
-                                    && evaluation.span.start <= node.start_byte() && node.end_byte() <= evaluation.span.end);
-                            if source && !modeled {
-                                result.push(KeyedLimitation { reason: "unmodeled_conditional_result", path: Some(unit.path.to_owned()), line: Some(node.start_position().row as u32 + 1) });
-                            }
-                        }
-                        pending.extend(site::children(node));
-                    }
-                }
-            }
+            if reachable.contains(&index) { result.extend(scan(program, unit, function, index)); }
             index += 1;
         }
+    }
+    result
+}
+
+fn scan(program: &Program<'_, '_, '_>, unit: &KeyedUnit<'_, '_, '_>, function: &KeyedFunction<'_, '_>, index: usize) -> Vec<KeyedLimitation> {
+    let Some(plan) = program.frames[index].plan.as_ref().filter(|plan| plan.has_registration()) else { return Vec::new(); };
+    let mut result = Vec::new();
+    let mut pending = vec![function.node];
+    while let Some(node) = pending.pop() {
+        if let Some(arm) = conditional_arm(node) {
+            let source = site::name(node, unit.source).is_some_and(|name| plan.source_mode_at(&name, node.start_byte()).is_some());
+            let modeled = function.graph.nodes.iter().flat_map(|block| &block.evaluations).any(|evaluation|
+                arm.start_byte() <= evaluation.span.start && evaluation.span.end <= arm.end_byte()
+                    && evaluation.span.start <= node.start_byte() && node.end_byte() <= evaluation.span.end);
+            if source && !modeled {
+                result.push(KeyedLimitation { reason: "unmodeled_conditional_result", path: Some(unit.path.to_owned()), line: Some(node.start_position().row as u32 + 1) });
+            }
+        }
+        pending.extend(site::children(node));
     }
     result
 }

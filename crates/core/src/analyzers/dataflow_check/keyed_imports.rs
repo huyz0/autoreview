@@ -396,6 +396,13 @@ mod budget_tests {
         assert!(coverage.iter().any(|issue| issue.reason == "unmodeled_conditional_result" && issue.line == Some(3)), "{coverage:?}");
     }
 
+    fn assert_general_coverage_cases(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
+        assert_awaited_unknown_coverage(dir, checker, rules);
+        assert_conditional_typed_coverage(dir, checker, rules);
+        assert_async_return_unknown_coverage(dir, checker, rules);
+        assert_typed_unresolved_receiver(dir, checker, rules);
+    }
+
     fn assert_async_return_unknown_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
         let source = "declare function uncertain(): any;\nexport async function direct() { return uncertain(); }\nexport async function guarded() { try { return uncertain(); } finally { return 1; } }\n";
         for path in ["returned.ts", "returned.tsx"] {
@@ -514,10 +521,7 @@ mod budget_tests {
         assert!(findings.is_empty());
         assert!(coverage.iter().any(|issue| issue.reason == "typed_promise_source_unavailable"), "{coverage:?}");
 
-        assert_awaited_unknown_coverage(dir.path(), &checker, &rules);
-        assert_conditional_typed_coverage(dir.path(), &checker, &rules);
-        assert_async_return_unknown_coverage(dir.path(), &checker, &rules);
-        assert_typed_unresolved_receiver(dir.path(), &checker, &rules);
+        assert_general_coverage_cases(dir.path(), &checker, &rules);
 
         std::fs::write(dir.path().join("view.tsx"), "declare function pending(): Promise<void>;\nfunction forward() { return pending(); }\nfunction again() { return forward(); }\nexport function run() { again(); }\n").unwrap();
         let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));

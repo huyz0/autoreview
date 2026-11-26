@@ -1,10 +1,11 @@
 use tree_sitter::Node;
 
-use crate::cfg::{CallTarget, Cfg, EdgeKind, IdentityOperand, NodeId, Stmt, ThrowingCall};
+use crate::cfg::{CallTarget, Cfg, EdgeKind, NodeId, Stmt, ThrowingCall};
 
 use super::{keyed_syntax, line, site, StatementLowerer};
 
 mod handlers;
+mod conditional;
 mod switch;
 pub(crate) use switch::supports_go_switch;
 pub(crate) mod loops;
@@ -64,7 +65,7 @@ impl Flow<'_> {
 
     fn ordinary_statement(&self, cfg: &mut Cfg<Stmt>, node: Node<'_>, current: NodeId) -> NodeId {
         if supports_go_switch(node) { return self.go_switch(cfg, node, current); }
-        if let Some(end) = self.conditional_statement(cfg, node, current) { return end; }
+        if let Some(end) = conditional::lower(cfg, node, self.source, current) { return end; }
         let current = keyed_syntax::expression(node).map_or(current, |expr| nested_arguments(cfg, expr, self.source, current));
         let current = self.exceptional_edge(cfg, node, current);
         let conditional = matches!(node.kind(), "if_statement" | "if_expression");
@@ -91,34 +92,6 @@ impl Flow<'_> {
             cfg.emit(end, Stmt::Rebind(write), line(node));
         }
         end
-    }
-
-    fn conditional_statement(&self, cfg: &mut Cfg<Stmt>, node: Node<'_>, current: NodeId) -> Option<NodeId> {
-        if node.kind() != "expression_statement" { return None; }
-        let expression = node.named_child(0).and_then(keyed_syntax::expression_value)?;
-        if expression.kind() != "ternary_expression" { return None; }
-        let test = expression.child_by_field_name("condition")?;
-        if !simple_conditional_test(test, self.source) { return None; }
-        let condition = keyed_syntax::condition_value(test, self.source);
-        let yes = conditional_arm_value(expression.child_by_field_name("consequence")?)?;
-        let no = conditional_arm_value(expression.child_by_field_name("alternative")?)?;
-        if ![yes, no].into_iter().all(|arm| simple_conditional_arm(arm, self.source)) { return None; }
-        let literal = conditional_arm_value(test)?.kind();
-        cfg.nodes[current].condition = condition;
-        super::record_evaluation(cfg, current, test);
-        let join = cfg.push_node(line(node));
-        for (arm, edge, impossible) in [(yes, EdgeKind::True, literal == "false"), (no, EdgeKind::False, literal == "true")] {
-            let start = cfg.push_node(line(arm));
-            if !impossible { cfg.edges.push((current, start, edge)); }
-            let mut end = nested_arguments(cfg, arm, self.source, start);
-            if cfg.keyed_exceptions {
-                if let Some(call) = throwing_call(arm, self.source) { end = cfg.fork_exception(end, call, line(arm)); }
-            }
-            super::record_evaluation(cfg, end, arm);
-            if let Some(call) = direct_call(arm, self.source) { cfg.emit(end, call, line(arm)); }
-            cfg.edges.push((end, join, EdgeKind::Fallthrough));
-        }
-        Some(join)
     }
 
     fn lower_return_value(&self, cfg: &mut Cfg<Stmt>, node: Node<'_>, current: NodeId) {
@@ -172,43 +145,6 @@ impl Flow<'_> {
         );
         Some(Stmt::DeferredBlock(Box::new(graph)))
     }
-}
-
-fn simple_conditional_arm(arm: Node<'_>, source: &[u8]) -> bool {
-    matches!(arm.kind(), "null" | "true" | "false" | "number" | "string")
-        || (matches!(arm.kind(), "call_expression" | "method_invocation")
-            && site::capture(arm, source).is_some_and(|site| site.arguments.iter().all(|argument|
-                argument.as_ref().is_some_and(|value| !matches!(value, IdentityOperand::CallResult { .. })))))
-}
-
-fn conditional_arm_value(mut node: Node<'_>) -> Option<Node<'_>> {
-    while node.kind() == "parenthesized_expression" { node = node.named_child(0)?; }
-    Some(node)
-}
-
-fn simple_conditional_test(node: Node<'_>, source: &[u8]) -> bool {
-    let mut pending = vec![node];
-    let mut remaining = 256;
-    while let Some(node) = pending.pop() {
-        if remaining == 0 { return false; }
-        remaining -= 1;
-        if matches!(node.kind(), "identifier" | "true" | "false") { continue; }
-        if node.kind() == "parenthesized_expression" {
-            let Some(child) = node.named_child(0) else { return false; };
-            pending.push(child);
-            continue;
-        }
-        if node.kind() == "unary_expression" && node.child_by_field_name("operator").is_some_and(|op| op.utf8_text(source) == Ok("!")) {
-            let Some(child) = node.child_by_field_name("argument") else { return false; };
-            pending.push(child);
-            continue;
-        }
-        let operator = node.child_by_field_name("operator").and_then(|op| op.utf8_text(source).ok());
-        if node.kind() != "binary_expression" || !matches!(operator, Some("&&" | "||")) { return false; }
-        let (Some(left), Some(right)) = (node.child_by_field_name("left"), node.child_by_field_name("right")) else { return false; };
-        pending.extend([left, right]);
-    }
-    true
 }
 
 fn nested_arguments(cfg: &mut Cfg<Stmt>, call: Node<'_>, source: &[u8], mut current: NodeId) -> NodeId {
