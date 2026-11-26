@@ -49,8 +49,8 @@ exited successfully. The first yq-error attempt was incomplete because its
 offline Go package load failed; after fetching the pinned repository objects
 and warming the isolated module/build caches, a fresh run completed as above.
 
-This deliberately small, selected corpus now includes one JavaScript fix,
-but still has no Kotlin or TSX historical cases and covers only a few rule
+The corpus at this revision includes one JavaScript fix,
+but has no Kotlin or TSX historical cases and covers only a few rule
 families. Multiple findings from one fix and repeated snapshots are not
 independent examples. These results are not a population-wide accuracy
 estimate, and absence of reported coverage gaps does not prove completeness.
