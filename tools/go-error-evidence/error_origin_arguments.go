@@ -92,6 +92,7 @@ func integerOperand(expr ast.Expr, param *types.Var, argument constant.Value, in
 type localFunction struct {
 	decl     *ast.FuncDecl
 	function *types.Func
+	info     *types.Info
 }
 
 func localFunctions(files []*ast.File, info *types.Info, enabled bool) map[callee]localFunction {
@@ -103,7 +104,7 @@ func localFunctions(files []*ast.File, info *types.Info, enabled bool) map[calle
 		for _, item := range file.Decls {
 			decl, function, identity := originDeclaration(item, info)
 			if identity != nil {
-				result[*identity] = localFunction{decl: decl, function: function}
+				result[*identity] = localFunction{decl: decl, function: function, info: info}
 			}
 		}
 	}
@@ -125,21 +126,21 @@ func specializeCall(call *ast.CallExpr, info *types.Info, summaries map[callee]*
 	if signature == nil {
 		return nil
 	}
-	return specializeArguments(call, local.decl.Body, signature, info, summaries)
+	return specializeArguments(call, local.decl.Body, signature, info, local.info, summaries)
 }
 
-func specializeArguments(call *ast.CallExpr, body *ast.BlockStmt, signature *types.Signature, info *types.Info, summaries map[callee]*errorOrigin) *errorOrigin {
-	offset := callReceiverOffset(call, info)
+func specializeArguments(call *ast.CallExpr, body *ast.BlockStmt, signature *types.Signature, callerInfo, calleeInfo *types.Info, summaries map[callee]*errorOrigin) *errorOrigin {
+	offset := callReceiverOffset(call, callerInfo)
 	for i := 0; i < signature.Params().Len(); i++ {
 		if i+offset >= len(call.Args) {
 			continue
 		}
-		argument := info.Types[call.Args[i+offset]].Value
+		argument := callerInfo.Types[call.Args[i+offset]].Value
 		param := signature.Params().At(i)
-		if argument == nil || argument.Kind() != constant.Int || !stableIntegerParameter(body, param, info) {
+		if argument == nil || argument.Kind() != constant.Int || !stableIntegerParameter(body, param, calleeInfo) {
 			continue
 		}
-		if origin := specializeContext(body, signature, integerAssumption{param: param, value: argument}, info, summaries); origin != nil {
+		if origin := specializeContext(body, signature, integerAssumption{param: param, value: argument}, calleeInfo, summaries); origin != nil {
 			origin.Specialized = &integerEvidence{Parameter: i, Value: argument.ExactString()}
 			return origin
 		}

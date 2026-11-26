@@ -72,13 +72,16 @@ func analyze(req request) response {
 	if reason != "" {
 		return incomplete(reason)
 	}
-	origins, reason := dependencyErrorOrigins(loaded, req.IncludeErrorOrigins)
+	origins, functions, reason := dependencyErrorOrigins(loaded, req.IncludeErrorOrigins)
 	if reason != "" {
 		return incomplete(reason)
 	}
 	indexes := indexCalls(fset, byPath)
 	indexErrorOriginsInto(files, info, req.IncludeErrorOrigins, origins)
-	analysis := callAnalysis{info: info, origins: origins, functions: localFunctions(files, info, req.IncludeErrorOrigins), request: req, remaining: 256}
+	for identity, function := range localFunctions(files, info, req.IncludeErrorOrigins) {
+		functions[identity] = function
+	}
+	analysis := callAnalysis{info: info, origins: origins, functions: functions, request: req, remaining: 256}
 	result := response{Version: 2, Status: "ok", Calls: make([]callResult, 0, len(req.Calls))}
 	for _, call := range req.Calls {
 		node := indexes[call.Path][call.Start]

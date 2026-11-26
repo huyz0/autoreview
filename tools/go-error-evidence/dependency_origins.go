@@ -58,10 +58,11 @@ func sameDirectory(actual, expected string) bool {
 	return aErr == nil && bErr == nil && a.IsDir() && b.IsDir() && os.SameFile(a, b)
 }
 
-func dependencyErrorOrigins(loaded loadedPackage, enabled bool) (map[callee]*errorOrigin, string) {
+func dependencyErrorOrigins(loaded loadedPackage, enabled bool) (map[callee]*errorOrigin, map[callee]localFunction, string) {
 	result := make(map[callee]*errorOrigin)
+	functions := make(map[callee]localFunction)
 	if !enabled {
-		return result, ""
+		return result, functions, ""
 	}
 	type checkedDependency struct {
 		files []*ast.File
@@ -71,9 +72,12 @@ func dependencyErrorOrigins(loaded loadedPackage, enabled bool) (map[callee]*err
 	for _, dependency := range loaded.dependencies {
 		files, info, ok := typecheckDependency(dependency)
 		if !ok {
-			return nil, "dependency_type_errors"
+			return nil, nil, "dependency_type_errors"
 		}
 		checked = append(checked, checkedDependency{files: files, info: info})
+		for identity, function := range localFunctions(files, info, true) {
+			functions[identity] = function
+		}
 	}
 	// Dependencies may be supplied in any order. Revisit verified packages
 	// until summaries stop changing, with the same bound as local helpers.
@@ -86,7 +90,7 @@ func dependencyErrorOrigins(loaded loadedPackage, enabled bool) (map[callee]*err
 			break
 		}
 	}
-	return result, ""
+	return result, functions, ""
 }
 
 func typecheckDependency(dependency verifiedDependency) ([]*ast.File, *types.Info, bool) {
