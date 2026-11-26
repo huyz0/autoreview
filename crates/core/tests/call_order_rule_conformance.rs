@@ -187,16 +187,21 @@ fn conditional_test_result(root: &tempfile::TempDir, path: &str) -> autoreview_c
     autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &[path.into()], &[])
 }
 
+fn conditional_finding_fixture(path: &str, rule: &str, source: &str) -> tempfile::TempDir {
+    let root = write_single_file(path, source);
+    let result = conditional_test_result(&root, path);
+    let hits: Vec<_> = result.findings.iter().filter(|hit| hit.source.rule_id.as_deref() == Some(rule)).collect();
+    assert_eq!(hits.len(), 1, "{path}: {hits:#?} {:?}", result.coverage);
+    assert_eq!(hits[0].location.range.start_line, 3);
+    root
+}
+
 #[test]
 fn conditional_return_results_flow_through_helpers() {
     for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
         let source = "import { rename } from 'node:fs/promises';\nfunction make(a, b, flag) {\n return flag ? rename(a, b) : null;\n}\nexport function run(a, b, flag) { make(a, b, flag); }\n";
-        let root = write_single_file(path, source);
+        let root = conditional_finding_fixture(path, rule, source);
         let check = || conditional_test_result(&root, path);
-        let result = check();
-        let hits: Vec<_> = result.findings.iter().filter(|hit| hit.source.rule_id.as_deref() == Some(rule)).collect();
-        assert_eq!(hits.len(), 1, "{path}: {hits:#?} {:?}", result.coverage);
-        assert_eq!(hits[0].location.range.start_line, 3);
         std::fs::write(root.path().join(path), source.replace("export function run(a, b, flag) { make(a, b, flag); }", "export async function run(a, b, flag) { await make(a, b, flag); }")).unwrap();
         let result = check();
         assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
@@ -222,12 +227,8 @@ fn conditional_return_results_flow_through_helpers() {
 fn discarded_results_in_conditional_statements_are_tracked() {
     for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
         let source = "import { rename } from 'node:fs/promises';\nexport function run(a, b, flag) {\n flag ? rename(a, b) : null;\n}\n";
-        let root = write_single_file(path, source);
+        let root = conditional_finding_fixture(path, rule, source);
         let check = || conditional_test_result(&root, path);
-        let result = check();
-        let hits: Vec<_> = result.findings.iter().filter(|hit| hit.source.rule_id.as_deref() == Some(rule)).collect();
-        assert_eq!(hits.len(), 1, "{path}: {hits:#?} {:?}", result.coverage);
-        assert_eq!(hits[0].location.range.start_line, 3);
         std::fs::write(root.path().join(path), source.replace("flag ? rename(a, b) : null;", "((flag ? (rename(a, b)) : null));")).unwrap();
         let result = check();
         assert_eq!(result.findings.iter().filter(|hit| hit.source.rule_id.as_deref() == Some(rule)).count(), 1, "{path}: {:?}", result.coverage);
