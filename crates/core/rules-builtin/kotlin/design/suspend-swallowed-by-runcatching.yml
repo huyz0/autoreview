@@ -7,6 +7,6 @@ message: "A suspending call inside `runCatching { }` also catches `CancellationE
 rule:
   pattern: runCatching { $$$BODY }
   inside:
-    stopBy: {kind: function_declaration}
+    stopBy: {any: [{kind: function_declaration}, {kind: anonymous_function}]}
     kind: function_declaration
     has: {kind: modifiers, has: {kind: function_modifier, regex: ^suspend$}}
