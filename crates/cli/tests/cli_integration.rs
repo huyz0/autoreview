@@ -514,6 +514,34 @@ fn report_path_from_stdout(stdout: &str) -> PathBuf {
 }
 
 #[test]
+fn unresolved_kotlin_callback_reaches_review_and_blocks_replay() {
+    if !ast_grep_available() { return; }
+    let clean = "suspend fun run() {\n work()\n}\n";
+    let callback = "suspend fun run() {\n register { runBlocking { work() } }\n}\n";
+    let repo = init_repo(&[("Main.kt", clean)]);
+    let base = current_commit(repo.path());
+    repo.commit(&[("Main.kt", callback)], "register callback");
+    let before = current_commit(repo.path());
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["diff", "--base", &base, "--head", &before, "--static-only"]).assert().success();
+    let report = report_path_from_stdout(&String::from_utf8_lossy(&output.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    assert!(report["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "callback_execution_unresolved" && issue["rule"] == "kotlin-runblocking-in-suspend-function" && issue["path"] == "Main.kt" && issue["line"] == 2), "{report}");
+    repo.commit(&[("Main.kt", clean)], "remove callback");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"unresolved callback", "rule":{"tool":"ast-grep","id":"kotlin-runblocking-in-suspend-function"}, "before":{"commit":before,"path":"Main.kt","lines":[]}, "after":{"commit":after,"path":"Main.kt","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    assert_incomplete_replay(&failed_replay_report(repo.path()), "callback_execution_unresolved", "Main.kt", 2);
+    let unrelated = serde_json::json!({"cases": [{"name":"unrelated rule", "rule":{"tool":"ast-grep","id":"kotlin-thread-sleep-in-suspend"}, "before":{"commit":before,"path":"Main.kt","lines":[]}, "after":{"commit":after,"path":"Main.kt","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), unrelated.to_string()).unwrap();
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().success();
+    let report: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(report["coverage"][0]["completed"], 1, "{report}");
+}
+
+#[test]
 fn diff_reports_dataflow_syntax_limitations_without_warning_on_clean_files() {
     let repo = init_repo(&[("main.go", "package main\nfunc main() {}\n")]);
     let base = current_commit(repo.path());

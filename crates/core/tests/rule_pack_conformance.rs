@@ -209,6 +209,26 @@ fn kotlin_suspend_checks_use_the_nearest_function_modifiers() {
 }
 
 #[test]
+fn kotlin_callback_findings_report_unresolved_execution() {
+    if !ast_grep_available() {
+        return;
+    }
+    let repo = tempfile::tempdir().unwrap();
+    let checks = "runBlocking { work() }; Thread.sleep(1); runCatching { work() }; try { work() } finally { cleanup() }";
+    let source = format!("suspend fun run() {{\n {checks}\n callbacks.register {{ {checks} }}\n listOf(1).map {{ {checks} }}\n}}\n");
+    std::fs::write(repo.path().join("example.kt"), source).unwrap();
+    let result = autoreview_core::run_ast_grep_with_coverage(repo.path(), &["example.kt".into()], &[]).unwrap();
+    for rule in ["kotlin-runblocking-in-suspend-function", "kotlin-thread-sleep-in-suspend", "kotlin-suspend-swallowed-by-runcatching", "kotlin-suspend-call-in-finally-without-noncancellable"] {
+        let findings: Vec<_> = result.findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some(rule)).collect();
+        assert_eq!(findings.len(), 3, "{rule}");
+        assert_eq!(findings[0].confidence, 1.0, "{rule}");
+        assert!(findings[1..].iter().all(|finding| finding.confidence < 1.0 && finding.message.contains("unresolved")), "{rule}");
+        let lines: Vec<_> = result.coverage.iter().filter(|issue| issue.rule.as_deref() == Some(rule) && issue.reason == "callback_execution_unresolved").map(|issue| issue.line.unwrap()).collect();
+        assert_eq!(lines, [3, 4], "{rule}");
+    }
+}
+
+#[test]
 fn typescript_pattern_catalog_has_tsx_parity() {
     if !ast_grep_available() {
         return;

@@ -162,11 +162,12 @@ imports can still escape the current diagnostics. A clean replay is evidence
 for this case, not a guarantee of complete analysis in general.
 
 `redicloud-coroutines.yaml` records an EUPL-1.2 Kotlin fix that removes two
-blocking calls from suspend functions. Replay detects both labeled calls. It
-also flags an authenticator callback in both revisions, so the replay exits
-unsuccessfully with two false positives. The callback is registered for later
-invocation, rather than executed at the registration site. These two reports
-refer to the same callback in different snapshots. Inline lambdas such as
+blocking calls from suspend functions. The pattern also flags an authenticator
+callback in both revisions. Replay now reports the first revision as incomplete
+because it cannot establish when that callback executes, and does not score the
+case. Earlier replay counted two true positives and the same callback as a false
+positive in each revision. The callback is registered for later invocation,
+rather than executed at the registration site. Inline lambdas such as
 `map` can execute immediately, so excluding all nested lambdas would miss real
 blocking calls. This case does not measure general Kotlin rule accuracy.
 
