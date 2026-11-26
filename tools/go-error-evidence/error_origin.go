@@ -8,8 +8,14 @@ import (
 // This is evidence about explicit returned values, not about whether the
 // caller should suppress them. Missing evidence always means unknown.
 type errorOrigin struct {
-	Kind             string `json:"kind"`
-	ContextParameter int    `json:"contextParameter"`
+	Kind             string           `json:"kind"`
+	ContextParameter int              `json:"contextParameter"`
+	Specialized      *integerEvidence `json:"specialized,omitempty"`
+}
+
+type integerEvidence struct {
+	Parameter int    `json:"parameter"`
+	Value     string `json:"value"`
 }
 
 const errorOriginPassLimit = 16
@@ -62,6 +68,14 @@ func originDeclaration(item ast.Decl, info *types.Info) (*ast.FuncDecl, *types.F
 }
 
 func summarizeContextReturns(decl *ast.FuncDecl, function *types.Func, info *types.Info, summaries map[callee]*errorOrigin) *errorOrigin {
+	signature := singleUnnamedError(function)
+	if signature == nil {
+		return nil
+	}
+	return contextOrigin(decl.Body, signature, info, summaries, unreachableErrorBranches(decl.Body, info))
+}
+
+func singleUnnamedError(function *types.Func) *types.Signature {
 	signature, ok := function.Type().(*types.Signature)
 	if !ok || signature.Results().Len() != 1 {
 		return nil
@@ -70,10 +84,14 @@ func summarizeContextReturns(decl *ast.FuncDecl, function *types.Func, info *typ
 	if result.Name() != "" || !types.Identical(result.Type(), types.Universe.Lookup("error").Type()) {
 		return nil
 	}
+	return signature
+}
+
+func contextOrigin(body *ast.BlockStmt, signature *types.Signature, info *types.Info, summaries map[callee]*errorOrigin, unreachable map[ast.Node]bool) *errorOrigin {
 	var found *errorOrigin
 	for i := 0; i < signature.Params().Len(); i++ {
 		param := signature.Params().At(i)
-		if !isContextParameter(param) || !contextReturnsOnly(decl.Body, param, info, summaries) {
+		if !isContextParameter(param) || !contextReturnsWithReachability(body, param, info, summaries, unreachable) {
 			continue
 		}
 		if found != nil {
@@ -89,24 +107,30 @@ func isContextParameter(param *types.Var) bool {
 	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "context" && named.Obj().Name() == "Context"
 }
 
-func contextReturnsOnly(body *ast.BlockStmt, param *types.Var, info *types.Info, summaries map[callee]*errorOrigin) bool {
-	valid, sawError := true, false
-	unreachable := unreachableErrorBranches(body, info)
-	bindings := forwardedBindings(body, param, info, summaries, unreachable)
+func inspectWithStack(root ast.Node, skip map[ast.Node]bool, visit func(ast.Node, []ast.Node)) {
 	var stack []ast.Node
-	ast.Inspect(body, func(node ast.Node) bool {
+	ast.Inspect(root, func(node ast.Node) bool {
 		if node == nil {
 			stack = stack[:len(stack)-1]
 			return true
 		}
-		if unreachable[node] {
+		if skip[node] {
 			return false
 		}
-		var parent ast.Node
-		if len(stack) > 0 {
-			parent = stack[len(stack)-1]
-		}
 		stack = append(stack, node)
+		visit(node, stack)
+		return true
+	})
+}
+
+func contextReturnsWithReachability(body *ast.BlockStmt, param *types.Var, info *types.Info, summaries map[callee]*errorOrigin, unreachable map[ast.Node]bool) bool {
+	valid, sawError := true, false
+	bindings := forwardedBindings(body, param, info, summaries, unreachable)
+	inspectWithStack(body, unreachable, func(node ast.Node, stack []ast.Node) {
+		var parent ast.Node
+		if len(stack) > 1 {
+			parent = stack[len(stack)-2]
+		}
 		switch item := node.(type) {
 		case *ast.FuncLit, *ast.DeferStmt:
 			valid = false
@@ -134,7 +158,6 @@ func contextReturnsOnly(body *ast.BlockStmt, param *types.Var, info *types.Info,
 				valid = false
 			}
 		}
-		return true
 	})
 	return valid && sawError
 }
@@ -206,11 +229,28 @@ func forwardedParameter(call *ast.CallExpr, info *types.Info, summaries map[call
 	if origin == nil || origin.Kind != "context_error_or_nil" {
 		return 0, false
 	}
-	index := origin.ContextParameter
-	if selector, ok := call.Fun.(*ast.SelectorExpr); ok {
-		if selection := info.Selections[selector]; selection != nil && selection.Kind() == types.MethodExpr {
-			index++
+	index := origin.ContextParameter + callReceiverOffset(call, info)
+	return index, index >= 0 && index < len(call.Args)
+}
+
+func callReceiverOffset(call *ast.CallExpr, info *types.Info) int {
+	fun := call.Fun
+	for {
+		switch item := fun.(type) {
+		case *ast.ParenExpr:
+			fun = item.X
+		case *ast.IndexExpr:
+			fun = item.X
+		case *ast.IndexListExpr:
+			fun = item.X
+		default:
+			selector, ok := fun.(*ast.SelectorExpr)
+			if ok {
+				if selection := info.Selections[selector]; selection != nil && selection.Kind() == types.MethodExpr {
+					return 1
+				}
+			}
+			return 0
 		}
 	}
-	return index, index >= 0 && index < len(call.Args)
 }

@@ -86,7 +86,10 @@ struct Callee { package: String, name: String, #[serde(default, skip_serializing
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ErrorOrigin { kind: String, context_parameter: usize }
+struct ErrorOrigin { kind: String, context_parameter: usize, #[serde(default, skip_serializing_if = "Option::is_none")] specialized: Option<IntegerEvidence> }
+
+#[derive(Clone, Deserialize, Serialize)]
+struct IntegerEvidence { parameter: usize, value: String }
 
 #[derive(Default)]
 pub(super) struct CallEvidence { callee: Option<serde_json::Value>, error_origin: Option<serde_json::Value> }
@@ -136,11 +139,16 @@ impl Verified {
             }
         }
         if let Some(origin) = &result.error_origin {
-            if origin.kind == "context_error_or_nil" && origin.context_parameter < 1024 {
+            if valid_error_origin(origin) {
                 if let Ok(value) = serde_json::to_value(origin) { self.callees.entry((path.to_owned(), start)).or_default().error_origin = Some(value); }
             }
         }
     }
+}
+
+fn valid_error_origin(origin: &ErrorOrigin) -> bool {
+    origin.kind == "context_error_or_nil" && origin.context_parameter < 1024
+        && origin.specialized.as_ref().is_none_or(|item| item.parameter < 1024 && item.value.len() <= 40 && item.value.parse::<i128>().is_ok())
 }
 
 pub(super) fn check_go_rule(
@@ -465,7 +473,7 @@ mod tests {
     fn context_error_evidence_reaches_result_finding() {
         let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
         let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
-        let source = "package sample\nimport (\"context\"; \"errors\")\nfunc operation(ctx context.Context) error { if 1 > 1 { return errors.New(\"unreachable\") }; return ctx.Err() }\nfunc use(ctx context.Context) { operation(ctx) }\n";
+        let source = "package sample\nimport (\"context\"; \"errors\")\nfunc operation(ctx context.Context, n int) error { if n > 1 { return errors.New(\"other\") }; return ctx.Err() }\nfunc use(ctx context.Context) { operation(ctx, 1) }\n";
         let (result, evidence) = analyze_source_with_origins(source, &checker, false, &[], true);
         assert_eq!(result.hits.len(), 1);
         let hit = &result.hits[0];
@@ -475,6 +483,8 @@ mod tests {
         let origin = &finding.meta.unwrap()["goErrorOrigin"];
         assert_eq!(origin["kind"], "context_error_or_nil");
         assert_eq!(origin["contextParameter"], 0);
+        assert_eq!(origin["specialized"]["parameter"], 1);
+        assert_eq!(origin["specialized"]["value"], "1");
     }
 
     #[test]
