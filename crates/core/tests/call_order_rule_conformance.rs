@@ -387,6 +387,17 @@ fn assert_no_helper_finding(root: &tempfile::TempDir, path: &str, rule: &str) {
     assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
 }
 
+fn assert_assigned_helper_pair(root: &tempfile::TempDir, path: &str, rule: &str, source: &str) {
+    std::fs::write(root.path().join(path), source).unwrap();
+    let result = conditional_test_result(root, path);
+    assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+    assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+    let bad = source.replace("if (flag) { const pending", "if (!flag) { const pending").replace("if (flag) { ", "if (!flag) { ").replace("if flag { let value", "if !flag { let value");
+    std::fs::write(root.path().join(path), bad).unwrap();
+    let result = conditional_test_result(root, path);
+    assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+}
+
 #[test]
 fn caller_and_helper_guards_are_correlated() {
     for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
@@ -430,12 +441,7 @@ fn assigned_helper_result_respects_correlated_guards() {
     for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
         let source = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport async function run(a, b, flag) { if (flag) { const pending = rename(a, b); const forwarded = consume(pending, flag); await forwarded; } }\n";
         let root = write_single_file(path, source);
-        let result = conditional_test_result(&root, path);
-        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
-        assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
-        std::fs::write(root.path().join(path), source.replace("if (flag) { const pending", "if (!flag) { const pending")).unwrap();
-        let result = conditional_test_result(&root, path);
-        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        assert_assigned_helper_pair(&root, path, rule, source);
         let later = source.replace("if (flag) { const pending", "if (!flag) { const pending").replace("await forwarded;", "await pending;");
         std::fs::write(root.path().join(path), later).unwrap();
         let result = conditional_test_result(&root, path);
@@ -455,12 +461,7 @@ fn assigned_helper_result_respects_correlated_guards() {
         let extension = path.rsplit('.').next().unwrap();
         std::fs::write(root.path().join(format!("helper.{extension}")), "export function consume(value, flag) { if (flag) return value; }\n").unwrap();
         let imported = source.replace("function consume(value, flag) { if (flag) return value; }", "import { consume } from './helper';");
-        std::fs::write(root.path().join(path), &imported).unwrap();
-        let result = conditional_test_result(&root, path);
-        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
-        std::fs::write(root.path().join(path), imported.replace("if (flag) { const pending", "if (!flag) { const pending")).unwrap();
-        let result = conditional_test_result(&root, path);
-        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        assert_assigned_helper_pair(&root, path, rule, &imported);
     }
 }
 
@@ -473,13 +474,7 @@ fn assigned_helper_results_follow_jvm_and_rust_guards() {
     ];
     for (path, rule, source) in cases {
         let root = write_single_file(path, source);
-        let result = conditional_test_result(&root, path);
-        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
-        assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
-        let bad = source.replace("if (flag) { ", "if (!flag) { ").replace("if flag { let value", "if !flag { let value");
-        std::fs::write(root.path().join(path), bad).unwrap();
-        let result = conditional_test_result(&root, path);
-        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        assert_assigned_helper_pair(&root, path, rule, source);
     }
 }
 

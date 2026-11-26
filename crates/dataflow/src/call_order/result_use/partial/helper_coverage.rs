@@ -214,27 +214,40 @@ fn helper_observes(
             continue;
         }
         if let Demand::Slot(slot) = call.demand {
-            if slot_observes(call, state, evidence, conditional, index, slot) {
+            if slot_observes(call, state, evidence, conditional, (index, slot)) {
                 return true;
             }
             continue;
         }
-        let base = match call.demand {
-            Demand::Observed => call.unobserved_observed.get(index),
-            Demand::Discarded => call.unobserved_discarded.get(index),
-            Demand::Slot(_) => None,
-        };
-        let guarded = guarded_value(call, state, index, matches!(call.demand, Demand::Observed));
-        let value = guarded.or_else(|| base.copied().flatten());
-        if value == Some(false) && !conditional {
+        if direct_helper_observes(call, state, evidence, conditional, index) {
             return true;
         }
-        *evidence = if !conditional && guarded == Some(true) && *evidence != Evidence::Unknown {
-            Evidence::Definite
-        } else {
-            Evidence::Unknown
-        };
     }
+    false
+}
+
+fn direct_helper_observes(
+    call: &super::super::HelperCall,
+    state: &State,
+    evidence: &mut Evidence,
+    conditional: bool,
+    index: usize,
+) -> bool {
+    let base = match call.demand {
+        Demand::Observed => call.unobserved_observed.get(index),
+        Demand::Discarded => call.unobserved_discarded.get(index),
+        Demand::Slot(_) => None,
+    };
+    let guarded = guarded_value(call, state, index, matches!(call.demand, Demand::Observed));
+    let value = guarded.or_else(|| base.copied().flatten());
+    if value == Some(false) && !conditional {
+        return true;
+    }
+    *evidence = if !conditional && guarded == Some(true) && *evidence != Evidence::Unknown {
+        Evidence::Definite
+    } else {
+        Evidence::Unknown
+    };
     false
 }
 
@@ -243,9 +256,9 @@ fn slot_observes(
     state: &mut State,
     evidence: &mut Evidence,
     conditional: bool,
-    index: usize,
-    slot: Place,
+    target: (usize, Place),
 ) -> bool {
+    let (index, slot) = target;
     let guarded_discarded = guarded_value(call, state, index, false);
     let guarded_observed = guarded_value(call, state, index, true);
     let discarded =
