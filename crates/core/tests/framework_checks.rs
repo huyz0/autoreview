@@ -47,6 +47,90 @@ process.env.OTHER_SETTING = '0';
 }
 
 #[test]
+fn node_tls_client_options_are_linked_to_the_resolved_operation_and_final_value() {
+    let js = r#"const https = require('https');
+const options = { "rejectUnauthorized": false };
+https.get('https://service.test', options);
+require('node:tls').connect({ rejectUnauthorized: false });
+new https.Agent({ rejectUnauthorized: true });
+new https.Agent({ rejectUnauthorized: false, ...settings });
+new https.Agent({ rejectUnauthorized: false, rejectUnauthorized: true });
+new https.Agent({ ...settings, rejectUnauthorized: false });
+const unrelated = { rejectUnauthorized: false };
+other.Agent({ rejectUnauthorized: false });
+const changed = { rejectUnauthorized: false };
+changed.rejectUnauthorized = true;
+new https.Agent(changed);
+function fixture(https) { new https.Agent({ rejectUnauthorized: false }); }
+"#;
+    let ts = r#"import { connect as dial } from 'node:tls';
+import * as web from 'node:https';
+import type { Agent as TypeOnly } from 'node:https';
+dial({ rejectUnauthorized: false });
+web.request({ 'rejectUnauthorized': false });
+web.createServer({ rejectUnauthorized: false });
+new TypeOnly({ rejectUnauthorized: false });
+dial(443, 'service.test', { rejectUnauthorized: false });
+dial(443, { rejectUnauthorized: false, ['rejectUnauthorized']: true });
+"#;
+    let tsx = "import https from 'https';\nconst view = <main />;\nnew https.Agent({ rejectUnauthorized: false });";
+    let found = scan(&[("client.js", js), ("client.ts", ts), ("view.tsx", tsx)], &["client.js", "client.ts", "view.tsx"]);
+    let locations: Vec<_> = found.iter()
+        .filter(|finding| matches!(finding.source.rule_id.as_deref(),
+            Some("javascript-tls-verification-disabled" | "typescript-tls-verification-disabled")))
+        .map(|finding| (finding.location.path.as_str(), finding.location.range.start_line))
+        .collect();
+    assert_eq!(locations, [("client.js", 2), ("client.js", 4), ("client.js", 8), ("client.ts", 4), ("client.ts", 5), ("client.ts", 8), ("view.tsx", 3)], "{found:#?}");
+    assert!(found.iter().any(|finding| finding.related_locations.as_ref().is_some_and(|sites| {
+        sites.iter().any(|site| site.path == "client.js" && site.range.start_line == 3)
+    })));
+    assert!(found.iter().filter(|finding| matches!(finding.source.rule_id.as_deref(),
+        Some("javascript-tls-verification-disabled" | "typescript-tls-verification-disabled")))
+        .all(|finding| finding.severity == autoreview_schema::Severity::High));
+}
+
+#[test]
+fn go_tls_assignment_requires_a_config_from_crypto_tls() {
+    let go = r#"package fixture
+import secure "crypto/tls"
+type config struct { InsecureSkipVerify bool }
+func configure(incoming *secure.Config) {
+    cfg := &secure.Config{}
+    cfg.InsecureSkipVerify = true
+    incoming.InsecureSkipVerify = true
+    var typed secure.Config
+    typed.InsecureSkipVerify = true
+    cfg.InsecureSkipVerify = false
+    local := config{}
+    local.InsecureSkipVerify = true
+    {
+        cfg := config{}
+        cfg.InsecureSkipVerify = true
+    }
+}
+func shadowLiteral(incoming *secure.Config) {
+    true := false
+    incoming.InsecureSkipVerify = true
+}
+"#;
+    let unrelated = r#"package unrelated
+import secure "example.test/tls"
+func configure(cfg *secure.Config) { cfg.InsecureSkipVerify = true }
+"#;
+    let shadowed_peer = "package shadowed\nconst true = false\n";
+    let shadowed_client = "package shadowed\nimport \"crypto/tls\"\nfunc configure(cfg *tls.Config) { cfg.InsecureSkipVerify = true }\n";
+    let found = scan(
+        &[("client.go", go), ("different/client.go", unrelated), ("shadowed/override.go", shadowed_peer), ("shadowed/client.go", shadowed_client)],
+        &["client.go", "different/client.go", "shadowed/client.go"],
+    );
+    let lines: Vec<_> = found.iter()
+        .filter(|finding| finding.source.rule_id.as_deref() == Some("go-tls-verification-disabled-by-assignment"))
+        .map(|finding| (finding.location.path.as_str(), finding.location.range.start_line))
+        .collect();
+    assert_eq!(lines, [("client.go", 6), ("client.go", 7), ("client.go", 9)], "{found:#?}");
+}
+
+#[test]
 fn constructor_dispatch_reports_resolved_overridable_calls() {
     let source = r#"class Base {
     Base(String value) {

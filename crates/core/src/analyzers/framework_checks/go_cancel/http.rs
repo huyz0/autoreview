@@ -2,7 +2,7 @@ use autoreview_schema::AgentFinding;
 use tree_sitter::Node;
 
 use super::super::{children, descendants, location, text, Rule};
-use super::package::{local_names, File};
+use super::package::{local_names, package_alias, File};
 
 pub(in crate::analyzers::framework_checks) const RULE: Rule = Rule {
     id: "go-http-handler-discards-request-context",
@@ -41,21 +41,6 @@ pub(super) fn findings(file: &File) -> Vec<AgentFinding> {
                 })
         })
         .collect()
-}
-
-fn package_alias<'a>(file: &'a File, path: &str, default: &'a str) -> Option<&'a str> {
-    descendants(file.root())
-        .filter(|node| node.kind() == "import_spec")
-        .find_map(|import| {
-            let value = text(import.child_by_field_name("path")?, &file.source);
-            if value.trim_matches(['"', '`']) != path {
-                return None;
-            }
-            let alias = import
-                .child_by_field_name("name")
-                .map_or(default, |name| text(name, &file.source));
-            (!matches!(alias, "." | "_")).then_some(alias)
-        })
 }
 
 fn handler_request<'tree>(function: Node<'tree>, source: &str, http: &str) -> Option<Node<'tree>> {

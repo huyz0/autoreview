@@ -7,6 +7,7 @@ mod select_io;
 mod sql;
 mod tasks;
 mod test_state;
+mod tls;
 pub(super) mod syntax;
 
 use std::collections::HashMap;
@@ -38,6 +39,7 @@ impl RustReviewRule {
             "rust-timeout-consumes-join-handle" => &["reliability.cancellation", "concurrency.task-lifecycle"],
             "rust-sqlx-pool-write-during-transaction" => &["persistence.transaction-boundaries", "persistence.data-integrity"],
             "rust-tokio-select-restarts-read-exact" => &["concurrency.cancellation-safety"],
+            "rust-tls-invalid-certificates" | "rust-tls-invalid-hostnames" => &["transport.tls"],
             _ => &[],
         }
     }
@@ -61,6 +63,7 @@ pub(super) fn rules() -> impl Iterator<Item = &'static RustReviewRule> {
         .chain(design::RULES)
         .chain(tasks::RULES)
         .chain(test_state::RULES)
+        .chain(tls::RULES)
         .copied()
         .chain(std::iter::once(&select_io::RULE))
 }
@@ -162,6 +165,7 @@ fn analyze_file(path: &str, text: &str) -> Vec<AgentFinding> {
         tasks::check(&mut review, node);
         select_io::check(&mut review, node);
         test_state::check(&mut review, node);
+        tls::check(&mut review, node);
     }
     review.findings
 }
