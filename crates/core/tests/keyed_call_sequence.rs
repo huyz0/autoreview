@@ -78,6 +78,20 @@ const RECEIVER: &str = "{receiver: true, keyArgument: 0}";
 const ARGUMENT: &str = "{collectionArgument: 0, keyArgument: 2}";
 
 #[test]
+fn conditional_returns_track_cleanup_on_each_branch() {
+    let source = "function pending(root, key, flag) {\n root.register(key);\n return flag ? root.remove(key) : null;\n}\n";
+    for (language, path) in [("JavaScript", "main.js"), ("TypeScript", "main.ts"), ("TypeScript", "main.tsx")] {
+        assert_eq!(findings(language, path, source, RECEIVER, true).len(), 1, "{path}");
+        let both = source.replace(": null", ": root.remove(key)");
+        assert!(findings(language, path, &both, RECEIVER, true).is_empty(), "{path}");
+        let wrong = both.replace(": root.remove(key)", ": root.remove('other')");
+        assert_eq!(findings(language, path, &wrong, RECEIVER, true).len(), 1, "{path}");
+        let finally = source.replace("return flag ? root.remove(key) : null;", "try { return flag ? root.remove(key) : null; } finally { root.remove(key); }");
+        assert!(findings(language, path, &finally, RECEIVER, true).is_empty(), "{path}");
+    }
+}
+
+#[test]
 fn conditional_statement_cleanup_tracks_each_branch() {
     let source = "function pending(root, key, flag) {\n root.register(key);\n flag ? root.remove(key) : null;\n}\n";
     for (language, path) in [("JavaScript", "main.js"), ("TypeScript", "main.ts"), ("TypeScript", "main.tsx")] {
