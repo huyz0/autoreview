@@ -31,16 +31,17 @@ fn scan_frame(program: &Program<'_, '_, '_>, unit: &KeyedUnit<'_, '_, '_>, funct
     let mut pending = vec![function.node];
     while let Some(node) = pending.pop() {
         if node != function.node && nested_function(node) { continue; }
-        if let Some((outer, wrapped)) = receiver(node, unit.source, plan) {
-            let reached = frame.graph.nodes.iter().zip(&flow.reachable).any(|(block, reached)| *reached && block.evaluations.iter().any(|evaluation| evaluation.span.start <= outer.start_byte() && outer.end_byte() <= evaluation.span.end));
-            let modeled = !wrapped && modeled_receiver(program, &calls, outer.start_byte());
-            if reached && !modeled {
-                limitations.push(KeyedLimitation { reason: if wrapped { "wrapped_result_receiver" } else { "unresolved_result_receiver" }, path: Some(unit.path.to_owned()), line: Some(node.start_position().row as u32 + 1) });
-            }
-        }
+        limitations.extend(receiver_issue(program, index, unit, plan, &flow, &calls, node));
         pending.extend(node.named_children(&mut node.walk()));
     }
     limitations
+}
+
+fn receiver_issue(program: &Program<'_, '_, '_>, index: usize, unit: &KeyedUnit<'_, '_, '_>, plan: &Plan<'_, '_>, flow: &Flow, calls: &BTreeSet<(usize, usize)>, node: Node<'_>) -> Option<KeyedLimitation> {
+    let (outer, wrapped) = receiver(node, unit.source, plan)?;
+    let reached = program.frames[index].graph.nodes.iter().zip(&flow.reachable).any(|(block, reached)| *reached && block.evaluations.iter().any(|evaluation| evaluation.span.start <= outer.start_byte() && outer.end_byte() <= evaluation.span.end));
+    let modeled = !wrapped && modeled_receiver(program, calls, outer.start_byte());
+    (reached && !modeled).then(|| KeyedLimitation { reason: if wrapped { "wrapped_result_receiver" } else { "unresolved_result_receiver" }, path: Some(unit.path.to_owned()), line: Some(node.start_position().row as u32 + 1) })
 }
 
 fn modeled_receiver(program: &Program<'_, '_, '_>, calls: &BTreeSet<(usize, usize)>, start: usize) -> bool {
