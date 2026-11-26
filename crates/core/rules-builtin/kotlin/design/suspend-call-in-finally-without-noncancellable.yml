@@ -15,8 +15,11 @@ rule:
       kind: simple_identifier
       regex: ^NonCancellable$
   inside:
-    stopBy: end
+    stopBy:
+      kind: function_declaration
     kind: function_declaration
     has:
-      stopBy: end
-      regex: ^suspend$
+      kind: modifiers
+      has:
+        kind: function_modifier
+        regex: ^suspend$
