@@ -8,7 +8,7 @@ mod helper_coverage;
 mod parameters;
 
 pub(super) use helper_coverage::has_partial_helper;
-pub(super) use parameters::unobserved_parameters;
+pub(super) use parameters::{unique_parameter_guard, unobserved_parameters, ParameterQuery};
 
 use super::{Body, Demand, Effect, Origin, Place, Plan, Value, Write};
 use crate::cfg::{Cfg, EdgeKind, IdentityOperand, NodeId, Stmt};

@@ -1,20 +1,56 @@
 use std::collections::BTreeSet;
 
 use super::{
-    branch, cyclic, hidden_at, outgoing, straight_line, supported_edges,
-    supported_effect_with_return, Body, Cfg, EdgeKind, Effect, Node, Place, Plan, State, Stmt,
-    Value, Visits,
+    branch, cyclic, guard, hidden_at, outgoing, straight_line, supported_edges,
+    supported_effect_with_return, Body, Cfg, EdgeKind, Effect, IdentityOperand, Node, Place, Plan,
+    State, Stmt, Value, Visits,
 };
 
+pub(in crate::call_order::result_use) fn unique_parameter_guard(
+    cfg: &Cfg<Stmt>,
+    plan: &Plan<'_, '_>,
+    parameters: &[String],
+) -> Option<(usize, IdentityOperand)> {
+    let mut guards = BTreeSet::new();
+    for node in &cfg.nodes {
+        if let Some((name, _)) = &node.condition {
+            let identity = guard(plan, name)?;
+            if !matches!(identity, IdentityOperand::Boolean(_)) {
+                guards.insert(identity);
+            }
+        }
+    }
+    let values: Vec<_> = guards.into_iter().collect();
+    let [identity] = values.as_slice() else {
+        return None;
+    };
+    let index = parameters
+        .iter()
+        .position(|name| guard(plan, name).as_ref() == Some(identity))?;
+    Some((index, identity.clone()))
+}
+
 /// `None` means that this helper is outside the bounded model.
+pub(in crate::call_order::result_use) struct ParameterQuery<'a> {
+    pub parameters: &'a [Option<Place>],
+    pub return_used: bool,
+    pub has_closures: bool,
+    pub assumed_guard: Option<(IdentityOperand, bool)>,
+}
+
 pub(in crate::call_order::result_use) fn unobserved_parameters(
     body: &Body,
     cfg: &Cfg<Stmt>,
     plan: &Plan<'_, '_>,
     syntax: (Node<'_>, &[u8]),
-    options: (&[Option<Place>], bool, bool),
+    query: ParameterQuery<'_>,
 ) -> Vec<Option<bool>> {
-    let (parameters, return_used, has_closures) = options;
+    let ParameterQuery {
+        parameters,
+        return_used,
+        has_closures,
+        assumed_guard,
+    } = query;
     if parameters.len() > 64 {
         return vec![None; parameters.len()];
     }
@@ -50,7 +86,14 @@ pub(in crate::call_order::result_use) fn unobserved_parameters(
                 return parameter_read_before_branch(body, cfg, syntax, parameter, return_used)
                     .then_some(false);
             }
-            unobserved(body, cfg, plan, &edges, (parameter, return_used))
+            unobserved(
+                body,
+                cfg,
+                plan,
+                &edges,
+                (parameter, return_used),
+                assumed_guard.clone(),
+            )
         })
         .collect()
 }
@@ -87,6 +130,7 @@ fn unobserved(
     plan: &Plan<'_, '_>,
     edges: &[Vec<(usize, EdgeKind)>],
     target: (Place, bool),
+    assumed_guard: Option<(IdentityOperand, bool)>,
 ) -> Option<bool> {
     let (parameter, return_used) = target;
     let mut initial = State {
@@ -94,6 +138,9 @@ fn unobserved(
         ..State::default()
     };
     initial.aliases.insert(parameter);
+    if let Some((identity, truth)) = assumed_guard {
+        initial.guards.insert(identity, truth);
+    }
     let mut pending = vec![(body.flow.entry, initial)];
     let mut seen = Visits::default();
     while let Some((node, mut state)) = pending.pop() {
