@@ -64,6 +64,7 @@ pub(in crate::call_order) struct Frame<'spec, 'src, 'graph> {
     export: Option<Export>,
     pub plan: Option<Plan<'spec, 'src>>,
     scope: Scope,
+    unsupported_rust_line: Option<u32>,
     pub(in crate::call_order) params: Vec<String>,
 }
 
@@ -135,6 +136,8 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             plan: Plan::new(spec, function.graph, node, source, unit),
             unit,
             scope,
+            unsupported_rust_line: (node.kind() == "function_item" && !crate::lower::rust::supports_function(node))
+                .then_some(node.start_position().row as u32 + 1),
             params: params.unwrap_or_default(),
             export,
         });
@@ -201,7 +204,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
     }
 
     pub(in crate::call_order) fn resolution_limitations(&self) -> Vec<super::KeyedLimitation> {
-        if self.unresolved.borrow().is_empty() {
+        if self.unresolved.borrow().is_empty() && self.frames.iter().all(|frame| frame.unsupported_rust_line.is_none()) {
             return Vec::new();
         }
         let mut pending: Vec<_> = self.units.iter().filter(|unit| unit.entry)
@@ -214,12 +217,16 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
                 pending.extend(self.resolved_calls(index, frame.graph, plan).into_iter().map(|(_, target)| target));
             }
         }
-        self.unresolved.borrow().iter().filter_map(|&(frame, start, reason)| {
+        let mut limitations: Vec<_> = reachable.iter().filter_map(|&frame| self.frames[frame].unsupported_rust_line.map(|line| super::KeyedLimitation {
+            reason: "unsupported_rust_control_flow", path: self.path(self.frames[frame].unit), line: Some(line),
+        })).collect();
+        limitations.extend(self.unresolved.borrow().iter().filter_map(|&(frame, start, reason)| {
             if !reachable.contains(&frame) { return None; }
             let unit = &self.units[self.frames[frame].unit];
             let line = unit.source.get(..start).map(|before| before.iter().filter(|byte| **byte == b'\n').count() as u32 + 1);
             Some(super::KeyedLimitation { reason, path: self.path(self.frames[frame].unit), line })
-        }).collect()
+        }));
+        limitations
     }
 
     /// Return reachable modeled calls with their source positions and unique

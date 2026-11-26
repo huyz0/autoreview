@@ -666,13 +666,19 @@ fn rust_imported_associated_helpers_preserve_result_usage() {
     }
 }
 
-#[test]
-fn unresolved_imported_associated_methods_report_coverage() {
+fn associated_coverage_fixture() -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
     let src = root.path().join("src");
     std::fs::create_dir(&src).unwrap();
     std::fs::write(src.join("lib.rs"), "mod support; mod worker;\n").unwrap();
     std::fs::write(src.join("support.rs"), "pub(crate) struct Files;\nimpl Files { pub(crate) fn known() {} }\n").unwrap();
+    root
+}
+
+#[test]
+fn unresolved_imported_associated_methods_report_coverage() {
+    let root = associated_coverage_fixture();
+    let src = root.path().join("src");
     for call in ["Store::unknown();", "Store::unknown()", "Store::known(1);", "Store::unknown::<u8>();", "let f = || Store::unknown(); f();", "let _ = async { Store::unknown(); };", "if true { Store::unknown(); }"] {
         std::fs::write(src.join("worker.rs"), format!("use crate::support::Files as Store;\nfn run() {{ {call} }}\n")).unwrap();
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
@@ -682,11 +688,8 @@ fn unresolved_imported_associated_methods_report_coverage() {
 
 #[test]
 fn imported_associated_call_in_skipped_function_reports_coverage() {
-    let root = tempfile::tempdir().unwrap();
+    let root = associated_coverage_fixture();
     let src = root.path().join("src");
-    std::fs::create_dir(&src).unwrap();
-    std::fs::write(src.join("lib.rs"), "mod support; mod worker;\n").unwrap();
-    std::fs::write(src.join("support.rs"), "pub(crate) struct Files;\nimpl Files { pub(crate) fn known() {} }\n").unwrap();
     for body in ["Store::unknown(); match 1 { _ => {} }", "Store::known(); let (a, b) = (1, 2);"] {
         std::fs::write(src.join("worker.rs"), format!("use crate::support::Files as Store;\nfn run() {{ {body} }}\n")).unwrap();
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
@@ -695,6 +698,19 @@ fn imported_associated_call_in_skipped_function_reports_coverage() {
     std::fs::write(src.join("worker.rs"), "use crate::support::Files as Store;\nfn run() { Store::known(); }\n").unwrap();
     let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
     assert!(!result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", result.coverage);
+}
+
+#[test]
+fn skipped_rust_helper_coverage_follows_reachable_calls() {
+    let root = associated_coverage_fixture();
+    let src = root.path().join("src");
+    std::fs::write(src.join("support.rs"), "pub(crate) struct Files;\nimpl Files {\n pub(crate) fn known() { match 1 { _ => {} } }\n pub(crate) fn spare() { match 1 { _ => {} } }\n}\n").unwrap();
+    std::fs::write(src.join("worker.rs"), "use crate::support::Files as Store;\nfn run() { Store::known(); }\n").unwrap();
+    let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
+    let lines: std::collections::BTreeSet<_> = result.coverage.iter().filter(|issue| issue.reason == "unsupported_rust_control_flow"
+        && issue.path.as_deref() == Some("src/support.rs") && issue.rule.as_deref() == Some("rust-discarded-remove-file-result"))
+        .map(|issue| issue.line).collect();
+    assert_eq!(lines, std::collections::BTreeSet::from([Some(3)]), "{:?}", result.coverage);
 }
 
 #[test]
