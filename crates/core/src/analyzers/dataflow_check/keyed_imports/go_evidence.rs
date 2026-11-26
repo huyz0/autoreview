@@ -68,6 +68,14 @@ struct Callee { package: String, name: String, #[serde(default, skip_serializing
 
 pub(super) type CalleeEvidence = BTreeMap<(String, usize), serde_json::Value>;
 
+pub(super) fn finding(path: &str, source: Option<&str>, rule: &super::CallOrderRuleDef, hit: &autoreview_dataflow::call_order::CallOrderHit, callees: &CalleeEvidence) -> super::AgentFinding {
+    let mut finding = super::super::dsl::call_order_finding(path, source, rule, hit);
+    if let Some(callee) = hit.source_start.and_then(|start| callees.get(&(path.to_owned(), start))) {
+        finding.meta.get_or_insert_with(Default::default).insert("goTypeCheckedCallee".into(), callee.clone());
+    }
+    finding
+}
+
 struct Group {
     indices: Vec<(usize, usize)>,
     calls: Vec<Call>,
@@ -105,12 +113,16 @@ pub(super) fn check_go_rule(
     spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, root: &Path,
 ) -> (KeyedCheckResult, CalleeEvidence) {
     let Some(checker) = TrustedGo::from_environment() else { return (check_keyed_units_with_coverage(spec, units), BTreeMap::new()); };
-    check_with_probe_and_callees(spec, units, sources, root, &checker, std::env::var_os("AUTOREVIEW_GO_CALLEE_EVIDENCE").is_some_and(|value| value == "1"))
+    let options = ProbeOptions { root, checker: &checker, include_callees: std::env::var_os("AUTOREVIEW_GO_CALLEE_EVIDENCE").is_some_and(|value| value == "1") };
+    check_with_probe_and_callees(spec, units, sources, options)
 }
 
+struct ProbeOptions<'a> { root: &'a Path, checker: &'a TrustedGo, include_callees: bool }
+
 fn check_with_probe_and_callees(
-    spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, root: &Path, checker: &TrustedGo, include_callees: bool,
+    spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, options: ProbeOptions<'_>,
 ) -> (KeyedCheckResult, CalleeEvidence) {
+    let ProbeOptions { root, checker, include_callees } = options;
     let mut verified = Verified { discovery: FactorySourceDiscovery { candidates: BTreeMap::new(), limitations: Vec::new() }, components: BTreeMap::new(), callees: BTreeMap::new() };
     let groups = collect_groups(units, sources, root, &mut verified.discovery.limitations);
     for (index, (dir, group)) in groups.into_iter().filter(|(_, group)| !group.calls.is_empty()).enumerate() {
@@ -296,8 +308,7 @@ mod tests {
         let rules = crate::analyzers::call_order_rules::load_call_order_rules(&[]);
         let rule = rules.iter().find(|rule| rule.id == "go-project-error-result-unobserved").unwrap();
         let hit = result.hits.iter().find(|hit| hit.source_line == 4 && hit.trigger_call == "first").unwrap();
-        let mut finding = super::super::super::dsl::call_order_finding("main.go", Some(source), rule, hit);
-        super::super::attach_go_callee(&mut finding, "main.go", hit.source_start, &callees);
+        let finding = super::finding("main.go", Some(source), rule, hit, &callees);
         assert_eq!(finding.meta.unwrap()["goTypeCheckedCallee"]["name"], "first");
     }
 
@@ -331,6 +342,6 @@ mod tests {
         let units = [KeyedUnit { path: "main.go", source: source.as_bytes(), functions: &functions, imports: &[], exports: &[], entry: true }];
         let rules = crate::analyzers::call_order_rules::load_call_order_rules(&[]);
         let rule = rules.iter().find(|rule| rule.id == "go-project-error-result-unobserved").unwrap();
-        check_with_probe_and_callees(&rule.spec, &units, &sources, dir.path(), checker, include_callees)
+        check_with_probe_and_callees(&rule.spec, &units, &sources, ProbeOptions { root: dir.path(), checker, include_callees })
     }
 }

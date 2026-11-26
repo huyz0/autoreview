@@ -25,14 +25,7 @@ func run() {
 `
 	snippets := []string{"operation()\n", "other()\n", "good()\n", "customResult()\n", "aliased()\n", "error(nil)"}
 	want := []string{"error", "multi_error", "not_proven", "not_proven", "error", "not_proven"}
-	req := request{Files: []sourceFile{{Path: "main.go", Source: src}}}
-	for _, snippet := range snippets {
-		pos := strings.LastIndex(src, snippet)
-		if pos < 0 {
-			t.Fatalf("missing %q", snippet)
-		}
-		req.Calls = append(req.Calls, callSite{Path: "main.go", Start: pos})
-	}
+	req := callsInSource(t, src, snippets, false)
 	got := analyze(req)
 	if got.Status != "ok" {
 		t.Fatalf("unexpected result: %+v", got)
@@ -118,28 +111,19 @@ func use(w worker, i waiter, x wrapper, f func() error) {
 }
 `
 	snippets := []string{"local();", "w.Wait();", "i.Wait();", "x.Wait();", "f();", `strings.TrimSpace(" x ")`}
-	req := request{Files: []sourceFile{{Path: "main.go", Source: src}}, IncludeCallees: true}
-	for _, snippet := range snippets {
-		req.Calls = append(req.Calls, callSite{Path: "main.go", Start: strings.LastIndex(src, snippet)})
-	}
+	req := callsInSource(t, src, snippets, true)
 	got := analyze(req)
 	if got.Status != "ok" {
 		t.Fatalf("unexpected result: %+v", got)
 	}
-	if got.Calls[0].Callee == nil || *got.Calls[0].Callee != (callee{Package: "autoreview.local/package", Name: "local"}) {
-		t.Fatalf("local: %+v", got.Calls[0])
-	}
-	if got.Calls[1].Callee == nil || *got.Calls[1].Callee != (callee{Package: "autoreview.local/package", Name: "Wait", Receiver: "worker"}) {
-		t.Fatalf("method: %+v", got.Calls[1])
-	}
+	assertCallee(t, got.Calls[0], callee{Package: "autoreview.local/package", Name: "local"})
+	assertCallee(t, got.Calls[1], callee{Package: "autoreview.local/package", Name: "Wait", Receiver: "worker"})
 	for _, i := range []int{2, 3, 4} {
 		if got.Calls[i].Callee != nil {
 			t.Errorf("dynamic call %s resolved: %+v", snippets[i], got.Calls[i])
 		}
 	}
-	if got.Calls[5].Callee == nil || *got.Calls[5].Callee != (callee{Package: "strings", Name: "TrimSpace"}) {
-		t.Fatalf("import: %+v", got.Calls[5])
-	}
+	assertCallee(t, got.Calls[5], callee{Package: "strings", Name: "TrimSpace"})
 	req.IncludeCallees = false
 	for _, call := range analyze(req).Calls {
 		if call.Callee != nil {
@@ -157,10 +141,7 @@ func use(fs []func() error, i int) {
 }
 `
 	snippets := []string{"generic[int](1);", `pair[int, string](1, "");`, "(generic[int])(1);", "fs[i]()"}
-	req := request{Files: []sourceFile{{Path: "main.go", Source: src}}, IncludeCallees: true}
-	for _, snippet := range snippets {
-		req.Calls = append(req.Calls, callSite{Path: "main.go", Start: strings.LastIndex(src, snippet)})
-	}
+	req := callsInSource(t, src, snippets, true)
 	got := analyze(req)
 	if got.Status != "ok" || len(got.Calls) != 4 {
 		t.Fatalf("unexpected result: %+v", got)
@@ -172,5 +153,25 @@ func use(fs []func() error, i int) {
 	}
 	if got.Calls[3].Callee != nil {
 		t.Fatalf("indexed function value resolved: %+v", got.Calls[3])
+	}
+}
+
+func callsInSource(t *testing.T, src string, snippets []string, includeCallees bool) request {
+	t.Helper()
+	req := request{Files: []sourceFile{{Path: "main.go", Source: src}}, IncludeCallees: includeCallees}
+	for _, snippet := range snippets {
+		pos := strings.LastIndex(src, snippet)
+		if pos < 0 {
+			t.Fatalf("missing %q", snippet)
+		}
+		req.Calls = append(req.Calls, callSite{Path: "main.go", Start: pos})
+	}
+	return req
+}
+
+func assertCallee(t *testing.T, got callResult, expected callee) {
+	t.Helper()
+	if got.Callee == nil || *got.Callee != expected {
+		t.Fatalf("callee: got %+v, expected %+v", got, expected)
 	}
 }

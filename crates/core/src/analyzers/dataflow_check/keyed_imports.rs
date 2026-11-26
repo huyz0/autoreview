@@ -10,7 +10,6 @@ use tree_sitter::Node;
 
 use super::cache::{ParseCache, ParsedFile, SummaryCaches};
 use super::dispatch::profile;
-use super::dsl::call_order_finding;
 use super::functions::{web_named_functions, web_result_functions};
 use super::{call_order_rules::CallOrderRuleDef, AgentFinding};
 
@@ -185,24 +184,18 @@ fn run_sources(
                 .as_ref()
                 .and_then(|entry| entry.registration_path.as_deref())
                 .unwrap_or(path);
-            let mut finding = call_order_finding(
+            go_evidence::finding(
                 path,
                 sources.get(origin).map(|file| file.parsed.0.as_str()),
                 rule,
                 hit,
-            );
-            attach_go_callee(&mut finding, path, hit.source_start, &callees);
-            finding
+                &callees,
+            )
         }));
     }
     findings
 }
 
-fn attach_go_callee(finding: &mut AgentFinding, path: &str, start: Option<usize>, callees: &go_evidence::CalleeEvidence) {
-    if let Some(callee) = start.and_then(|start| callees.get(&(path.to_owned(), start))) {
-        finding.meta.get_or_insert_with(Default::default).insert("goTypeCheckedCallee".into(), callee.clone());
-    }
-}
 
 impl Resolver<'_> {
     fn load(&self, entries: &BTreeSet<String>) -> (BTreeMap<String, Source>, Vec<AnalysisCoverageIssue>) {
