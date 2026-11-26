@@ -13,6 +13,7 @@ pub(in crate::call_order::result_use) struct Origin {
 pub(in crate::call_order::result_use) enum Value {
     Source(Origin),
     Copy(Place),
+    Aggregate(Vec<Value>),
     Other,
 }
 
@@ -25,6 +26,7 @@ pub(in crate::call_order::result_use) enum Effect {
     Read(Place),
     OpaqueRead(Place),
     OpaqueOnly(Vec<Effect>),
+    ObservedOnly(Vec<Effect>),
     Write(Vec<Write>),
     Invoke(usize, Demand),
     ApplyHelper(Box<HelperCall>),

@@ -427,10 +427,11 @@ fn static_review_report(repo: &autoreview_test_support::TestRepo, base: &str, ta
 
 #[test]
 fn unresolved_assigned_result_crosses_helpers_in_review_and_replay() {
-    for helper in ["export function send(value) { unknown(value); }\n", "export function send(value) { unknown([value]); }\n"] {
-        let before = "import { rename } from 'node:fs/promises';\nimport { send } from './helper';\nexport function run(a, b) { const pending = rename(a, b); send(pending); }\n";
+    for (helper, argument) in [("unknown(value)", "pending"), ("unknown([value])", "pending"), ("unknown(value)", "[pending]")] {
+        let helper = format!("export function send(value) {{ {helper}; }}\n");
+        let before = format!("import {{ rename }} from 'node:fs/promises';\nimport {{ send }} from './helper';\nexport function run(a, b) {{ const pending = rename(a, b); const values = {argument}; send(values); }}\n");
         let after = "import { rename } from 'node:fs/promises';\nexport async function run(a, b) { await rename(a, b); }\n";
-        let repo = init_repo(&[("main.js", before), ("helper.js", helper)]);
+        let repo = init_repo(&[("main.js", &before), ("helper.js", &helper)]);
         let old = current_commit(repo.path());
         repo.commit(&[("main.js", after)], "observe rename promise");
         let fixed = current_commit(repo.path());
@@ -439,7 +440,7 @@ fn unresolved_assigned_result_crosses_helpers_in_review_and_replay() {
         let report = failed_replay_report(repo.path());
         assert_eq!(report["coverage"][0]["incomplete"], 1, "{report}");
         assert!(report["failures"][0]["error"].as_str().unwrap().contains("unresolved helper"), "{report}");
-        repo.commit(&[("main.js", before)], "pass promise through helper");
+        repo.commit(&[("main.js", &before)], "pass promise through helper");
         let review = static_review_report(&repo, &fixed, None);
         assert!(review["analysisCoverage"].as_array().unwrap().iter().any(|issue|
             issue["reason"] == "unresolved_result_receiver" && issue["rule"] == "javascript-node-fs-discarded-promise"

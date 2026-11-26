@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 
-use super::{transfer_writes, Analysis, Body, Demand, Effect, HelperCall, Live, NodeId, Origin, Place};
+use super::{Analysis, Body, Demand, Effect, HelperCall, Live, NodeId, Origin, Place};
 
 impl Analysis {
     pub(super) fn opaque_origins(&self) -> Vec<(NodeId, Origin)> {
@@ -51,16 +51,32 @@ fn transfer(effects: &[Effect], live: &mut Live, closures: &[Body], mut report: 
         match effect {
             Effect::OpaqueRead(place) => { live.insert(*place); }
             Effect::OpaqueOnly(nested) => transfer(nested, live, closures, report.as_deref_mut()),
+            Effect::ObservedOnly(_) => {}
             // A known use before an opaque call settles that path. Other paths
             // retain their uncertainty when the control-flow facts are joined.
             Effect::Read(place) => { live.remove(place); }
-            Effect::Write(writes) => transfer_writes(writes, live, Some(&mut |origin, used| {
-                if used { if let Some(report) = &mut report { report(origin); } }
-            })),
+            Effect::Write(writes) => opaque_writes(writes, live, report.as_deref_mut()),
             Effect::ApplyHelper(call) => helper(call, live, report.as_deref_mut()),
             Effect::Invoke(index, demand) => invoke(&closures[*index], *demand, live, report.as_deref_mut()),
         }
     }
+}
+
+fn opaque_writes(writes: &[super::Write], live: &mut Live, mut report: Option<&mut Observer<'_>>) {
+    let mut copies = Vec::new();
+    for write in writes.iter().rev() {
+        let used = write.target.is_some_and(|place| live.remove(&place));
+        let mut pending = vec![&write.value];
+        while let Some(value) = pending.pop() {
+            match value {
+                super::Value::Copy(place) if used => copies.push(*place),
+                super::Value::Source(origin) if used => { if let Some(report) = &mut report { report(origin); } }
+                super::Value::Aggregate(items) if used => pending.extend(items),
+                _ => {}
+            }
+        }
+    }
+    live.extend(copies);
 }
 
 fn helper(call: &HelperCall, live: &mut Live, mut report: Option<&mut Observer<'_>>) {
