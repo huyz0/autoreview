@@ -49,6 +49,9 @@ deep tier.
   use only trusted projects. Missing configuration or incomplete analysis is
   reported as coverage limitations. Test packages, cgo, explicit build tags,
   full snapshot verification, and process-tree containment remain unsupported.
+  Set `AUTOREVIEW_GO_MODULE_MODE=vendor` to use a consistent vendored Go
+  dependency tree without downloads; the default uses cached modules in
+  readonly mode. Vendor mode requires a probe built with vendor-mode support.
   Optionally set `AUTOREVIEW_GO_CALLEE_EVIDENCE=1` to include supported resolved
   call identities in finding metadata; this does not change rule decisions.
   The probe requires hashes for every selected package file for this evidence,

@@ -17,13 +17,15 @@ const PACKAGE_FILE_LIMIT: usize = 512;
 pub(super) struct TrustedGo {
     probe: PathBuf,
     go: PathBuf,
+    module_mode: Option<String>,
 }
 
 impl TrustedGo {
     fn from_environment() -> Option<Self> {
         let probe = PathBuf::from(std::env::var_os("AUTOREVIEW_GO_ERROR_PROBE")?);
         let go = PathBuf::from(std::env::var_os("AUTOREVIEW_GO_BINARY")?);
-        (probe.is_absolute() && go.is_absolute()).then_some(Self { probe, go })
+        let module_mode = std::env::var("AUTOREVIEW_GO_MODULE_MODE").ok().filter(|mode| !mode.is_empty());
+        (probe.is_absolute() && go.is_absolute()).then_some(Self { probe, go, module_mode })
     }
 }
 
@@ -35,6 +37,8 @@ struct Request<'a> {
     expected_sources: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     package_sources: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    module_mode: Option<&'a str>,
     calls: Vec<Call>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     include_callees: bool,
@@ -136,7 +140,7 @@ fn check_with_probe_and_callees(
             continue;
         }
         let package_sources = include_callees.then(|| package_source_hashes(&dir)).flatten();
-        let mut request = Request { package_dir: &dir, go_binary: &checker.go, expected_sources: group.expected, package_sources, calls: group.calls, include_callees };
+        let mut request = Request { package_dir: &dir, go_binary: &checker.go, expected_sources: group.expected, package_sources, module_mode: checker.module_mode.as_deref(), calls: group.calls, include_callees };
         let results = verify(&checker.probe, &request).or_else(|| {
             if !request.include_callees { return None; }
             request.include_callees = false;
@@ -281,7 +285,7 @@ mod tests {
     #[test]
     fn go_probe_sources_flow_into_result_use() {
         let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
-        let checker = TrustedGo { probe: probe.into(), go: go.into() };
+        let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
         let source = "package sample\nfunc operation() error { return nil }\nfunc run() { operation() }\nfunc observed() error { return operation() }\nfunc branch(n int) { switch n { case 1: operation(); default: return } }\nfunc unsupported(n int) { switch n { case 1: operation(); fallthrough; default: return } }\nfunc anonymous() { func() error { return nil }() }\nfunc helper() error { return operation() }\nfunc discardedHelper() { helper() }\nfunc inspected() { if err := operation(); err != nil { return } }\nfunc overwritten() { err := operation(); err = nil; if err != nil { return } }\nfunc overwrittenInSwitch(n int) { err := operation(); switch n { case 1: err = nil; default: err = nil }; if err != nil { return } }\nfunc readOnOneBranch(n int) { err := operation(); switch n { case 1: err = nil; default: }; if err != nil { return } }\nfunc deferred() { defer operation() }\nfunc detached() { go operation() }\nfunc sink(err error) {}\nfunc passedButIgnored() { sink(operation()) }\nfunc handle(err error) { if err != nil { return } }\nfunc passedAndUsed() { handle(operation()) }\n";
         let result = analyze_source(source, &checker);
         assert_eq!(result.hits.iter().map(|hit| hit.source_line).collect::<Vec<_>>(), [3, 5, 7, 9, 11, 12, 14, 17], "limitations: {:?}", result.limitations.iter().map(|item| item.reason).collect::<Vec<_>>());
@@ -309,7 +313,7 @@ mod tests {
     #[test]
     fn go_multi_result_components_are_tracked_independently() {
         let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
-        let checker = TrustedGo { probe: probe.into(), go: go.into() };
+        let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
         let source = "package sample\nfunc pair() (int, error) { return 1, nil }\nfunc two() (error, error) { return nil, nil }\nfunc sink(n int, err error) {}\nfunc ignored() { v, _ := pair(); _ = v }\nfunc checked() { v, err := pair(); if err != nil { return }; _ = v }\nfunc overwritten() { v, err := pair(); err = nil; if err != nil { return }; _ = v }\nfunc both() { a, b := two(); if a != nil { return }; _ = b }\nfunc forwarded() (int, error) { return pair() }\nfunc nested() { sink(pair()) }\nfunc bare() { pair() }\nfunc declared() { var v, e = pair(); _ = v; if e != nil { return } }\nfunc reassigned() { var v int; var e error; v, e = pair(); e = nil; _ = v; if e != nil { return } }\nfunc use(n int, err error) { if err != nil { return } }\nfunc nestedUsed() { use(pair()) }\nfunc unresolved(s func(int, error)) { s(pair()) }\nfunc one(a, b error) { if a != nil { return } }\nfunc twoUsed(a, b error) { if a != nil || b != nil { return } }\nfunc nestedOne() { one(two()) }\nfunc nestedBoth() { twoUsed(two()) }\n";
         let result = analyze_source(source, &checker);
         assert_eq!(result.hits.iter().map(|hit| hit.source_line).collect::<Vec<_>>(), [5, 7, 8, 10, 11, 13, 19], "limitations: {:?}", result.limitations.iter().map(|item| (item.reason, item.line)).collect::<Vec<_>>());
@@ -319,7 +323,7 @@ mod tests {
     #[test]
     fn go_callee_evidence_tracks_exact_origin_and_keeps_dynamic_calls_unknown() {
         let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
-        let checker = TrustedGo { probe: probe.into(), go: go.into() };
+        let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
         let source = "package sample\nfunc first() error { return nil }\nfunc second() error { return nil }\nfunc use(f func() error) { first(); second(); f() }\nfunc duplicate() { first(); first() }\n";
         let (result, callees) = analyze_source_with_evidence(source, &checker, true);
         assert_eq!(result.hits.len(), 4);
@@ -342,7 +346,7 @@ mod tests {
     #[test]
     fn old_go_probe_falls_back_to_result_type_analysis() {
         let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_LEGACY_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
-        let checker = TrustedGo { probe: probe.into(), go: go.into() };
+        let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
         let source = "package sample\nfunc operation() error { return nil }\nfunc use() { operation() }\n";
         let (result, callees) = analyze_source_with_evidence(source, &checker, true);
         assert_eq!(result.hits.len(), 1);
@@ -351,15 +355,42 @@ mod tests {
     }
 
     #[test]
+    fn old_go_probe_does_not_silently_ignore_vendor_mode() {
+        let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_LEGACY_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
+        let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: Some("vendor".into()) };
+        let source = "package sample\nfunc operation() error { return nil }\nfunc use() { operation() }\n";
+        let (result, _) = analyze_source_with_evidence(source, &checker, true);
+        assert!(result.hits.is_empty());
+        assert!(result.limitations.iter().any(|item| item.reason == "go_error_checker_incomplete"));
+    }
+
+    #[test]
     fn callee_evidence_covers_selected_files_not_loaded_as_helpers() {
         let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
-        let checker = TrustedGo { probe: probe.into(), go: go.into() };
+        let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
         let source = "package sample\nfunc operation() error { return nil }\nfunc use() { operation() }\n";
         let extra = [("other.go", "package sample\nvar setting = 1\n"), ("other_test.go", "package sample\nthis is not parsed\n")];
         let (result, callees) = analyze_source_with_files(source, &checker, true, &extra);
         let start = source.rfind("operation()").unwrap();
         assert_eq!(result.hits.len(), 1);
         assert_eq!(callees[&("main.go".to_owned(), start)]["name"], "operation");
+    }
+
+    #[test]
+    fn vendored_go_dependency_flows_into_findings() {
+        let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
+        let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: Some("vendor".into()) };
+        let source = "package sample\nimport dep \"example.invalid/offline-dep\"\nfunc use() { dep.Operation() }\n";
+        let files = [
+            ("go.mod", "module example.test/probe\n\ngo 1.22\n\nrequire example.invalid/offline-dep v1.0.0\n"),
+            ("vendor/modules.txt", "# example.invalid/offline-dep v1.0.0\n## explicit; go 1.22\nexample.invalid/offline-dep\n"),
+            ("vendor/example.invalid/offline-dep/dep.go", "package dep\nfunc Operation() error { return nil }\n"),
+        ];
+        let (result, callees) = analyze_source_with_files(source, &checker, true, &files);
+        assert_eq!(result.hits.len(), 1);
+        assert!(result.limitations.is_empty());
+        let call = &callees[&("main.go".into(), source.find("dep.Operation()").unwrap())];
+        assert_eq!(call["package"], "example.invalid/offline-dep");
     }
 
     fn analyze_source(source: &str, checker: &TrustedGo) -> KeyedCheckResult {
@@ -374,7 +405,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("go.mod"), "module example.test/probe\n\ngo 1.22\n").unwrap();
         std::fs::write(dir.path().join("main.go"), source).unwrap();
-        for (name, contents) in extra { std::fs::write(dir.path().join(name), contents).unwrap(); }
+        for (name, contents) in extra {
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
         let tree = autoreview_langsupport::parser_for(Language::Go).unwrap().parse(source, None).unwrap();
         let parsed = Rc::new((source.to_owned(), tree));
         let sources = BTreeMap::from([("main.go".to_owned(), Source { language: Language::Go, parsed, imports: vec![], exports: vec![] })]);

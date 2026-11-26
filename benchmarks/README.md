@@ -132,6 +132,13 @@ git fetch --depth 2 https://github.com/cilium/cilium.git fb7b8f905fc3e00fa17aa51
 autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/cilium-swallowed-error.yaml
 ```
 
+An exploratory vendor-mode Go probe on the pinned fixed revision, with
+`GOOS=linux`, resolved the cancellation call to
+`github.com/cilium/cilium/pkg/rate.Limiter.Wait`. The Windows archive extraction
+reported failures for some symlinks, so this observation is not a complete
+snapshot or a scored replay. It establishes neither the method's error paths
+nor that the current static rule suppresses the warning.
+
 Coverage reporting is not exhaustive: unsupported expressions and unresolved
 imports can still escape the current diagnostics. A clean replay is evidence
 for this case, not a guarantee of complete analysis in general.

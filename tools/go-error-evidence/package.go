@@ -47,11 +47,17 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	return b.Buffer.Write(p)
 }
 
-func loadPackage(fset *token.FileSet, dir, binary string) (loadedPackage, string) {
+func loadPackage(fset *token.FileSet, dir, binary, mode string) (loadedPackage, string) {
 	if !filepath.IsAbs(dir) || !filepath.IsAbs(binary) {
 		return loadedPackage{}, "invalid_package_config"
 	}
-	packages, ok := listPackages(dir, binary)
+	if mode != "" && mode != "readonly" && mode != "vendor" {
+		return loadedPackage{}, "invalid_module_mode"
+	}
+	if mode == "" {
+		mode = "readonly"
+	}
+	packages, ok := listPackages(dir, binary, mode)
 	if !ok {
 		return loadedPackage{}, "package_load_failed"
 	}
@@ -76,12 +82,12 @@ func assemblePackage(fset *token.FileSet, target listedPackage, exports map[stri
 	return loadedPackage{files: sources, importer: importer.ForCompiler(fset, "gc", lookup), path: target.ImportPath}, ""
 }
 
-func listPackages(dir, binary string) ([]listedPackage, bool) {
+func listPackages(dir, binary, mode string) ([]listedPackage, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, binary, "list", "-deps", "-export", "-json", ".")
 	command.Dir = dir
-	command.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "GOFLAGS=-mod=readonly")
+	command.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "GOFLAGS=-mod="+mode)
 	var output limitedBuffer
 	output.limit = maxListOutput
 	command.Stdout = &output
