@@ -5,7 +5,25 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 function run(request) {
-  const ts = require(request.typescriptModule);
+  let ts;
+  try {
+    ts = require(request.typescriptModule);
+  } catch (error) {
+    // TypeScript 7's native package does not expose the legacy CommonJS
+    // compiler API at its package root. Do not execute a different compiler.
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(request.typescriptModule, 'package.json'), 'utf8'));
+      if (pkg.name === 'typescript' && Number.parseInt(pkg.version, 10) >= 7) {
+        return { status: 'incomplete', reason: 'compiler_api_unsupported' };
+      }
+    } catch (_) { /* Preserve the original load failure. */ }
+    throw error;
+  }
+  if (!ts || typeof ts.readConfigFile !== 'function' || typeof ts.parseJsonConfigFileContent !== 'function' ||
+      typeof ts.createProgram !== 'function' || typeof ts.getPreEmitDiagnostics !== 'function' ||
+      typeof ts.isCallExpression !== 'function' || typeof ts.forEachChild !== 'function') {
+    return { status: 'incomplete', reason: 'compiler_api_unsupported' };
+  }
   const config = ts.readConfigFile(request.config, ts.sys.readFile);
   if (config.error) return { status: 'incomplete', reason: 'config_unreadable' };
   const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, path.dirname(request.config), undefined, request.config);
@@ -15,6 +33,9 @@ function run(request) {
     return { status: 'incomplete', reason: 'project_type_errors' };
   }
   const checker = program.getTypeChecker();
+  if (typeof checker.getAwaitedType !== 'function' || typeof checker.getPropertyOfType !== 'function') {
+    return { status: 'incomplete', reason: 'compiler_api_unsupported' };
+  }
   function promiseLike(type) {
     if (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) return false;
     if (type.isUnion()) return type.types.every(promiseLike);

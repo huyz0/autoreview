@@ -105,6 +105,27 @@ mod tests {
     use autoreview_dataflow::call_order::{FactorySourceDiscovery, KeyedLimitation, KeyedUnit};
 
     #[test]
+    fn unsupported_compiler_api_is_reported_without_claiming_coverage() {
+        let dir = tempfile::tempdir().unwrap();
+        let package = dir.path().join("typescript");
+        std::fs::create_dir(&package).unwrap();
+        std::fs::write(package.join("package.json"), r#"{"name":"typescript","version":"7.0.2","type":"module"}"#).unwrap();
+        let file = dir.path().join("sample.ts");
+        let source = "pending();\n";
+        std::fs::write(&file, source).unwrap();
+        let config = dir.path().join("tsconfig.json");
+        std::fs::write(&config, "{}").unwrap();
+        let units = [KeyedUnit { path: "sample.ts", source: source.as_bytes(), functions: &[], imports: &[], exports: &[], entry: true }];
+        let discovery = FactorySourceDiscovery { candidates: BTreeMap::from([(0, BTreeSet::from([0]))]),
+            limitations: vec![KeyedLimitation { reason: "promise_type_unresolved", path: Some("sample.ts".into()), line: Some(1) }] };
+        let options = CheckerConfig { node: "node", compiler: package.to_str().unwrap(), config: config.to_str().unwrap(), root: dir.path(), timeout: Duration::from_secs(10) };
+        let result = verify_candidates(&options, &units, discovery);
+        assert!(result.candidates.is_empty());
+        assert!(result.limitations.iter().any(|issue| issue.reason == "typescript_compiler_api_unsupported"));
+        assert!(result.limitations.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(1)));
+    }
+
+    #[test]
     fn checker_proves_a_call_and_fails_closed() {
         let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
         let dir = tempfile::tempdir().unwrap();
@@ -207,6 +228,10 @@ mod tests {
         let changed = verify_candidates(&options, &units, discovery());
         assert!(changed.candidates.is_empty());
         assert_eq!(changed.limitations.len(), 2);
+        std::fs::write(&file, format!("{source}\nconst invalid: number = 'wrong';\n")).unwrap();
+        let errors = verify_candidates(&options, &units, discovery());
+        assert!(errors.candidates.is_empty());
+        assert!(errors.limitations.iter().any(|issue| issue.reason == "typescript_project_type_errors"));
     }
 
     #[test]

@@ -31,8 +31,10 @@ pub fn verify_candidates(
         limitations.push(checker_limitation());
         return FactorySourceDiscovery { candidates: verified, limitations };
     };
-    if !batch.calls.is_empty() && !batches::verify(options, &batch, &mut verified, &mut classified, check) {
-        limitations.push(checker_limitation());
+    if !batch.calls.is_empty() {
+        if let Err(reason) = batches::verify(options, &batch, &mut verified, &mut classified, check) {
+            limitations.push(KeyedLimitation { reason, path: None, line: None });
+        }
     }
     retain_unresolved(&mut limitations, units, &discovery.candidates, &classified);
     FactorySourceDiscovery { candidates: verified, limitations }

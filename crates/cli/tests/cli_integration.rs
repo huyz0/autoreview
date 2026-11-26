@@ -192,6 +192,14 @@ fn nested_typescript_config_follows_replay_snapshots() {
     assert_eq!(report["rules"][0]["truePositives"], 1, "{report}");
     assert_eq!(report["coverage"][0]["completed"], 1, "{report}");
     assert_eq!(report["coverage"][0]["incomplete"], 0, "{report}");
+    let unsupported = repo.path().join("unsupported.cjs");
+    std::fs::write(&unsupported, "module.exports = {};\n").unwrap();
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .env("AUTOREVIEW_TYPESCRIPT_MODULE", &unsupported).env("AUTOREVIEW_TYPESCRIPT_CONFIG", "web/tsconfig.json")
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
+    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(report["coverage"][0]["incomplete"], 1, "{report}");
+    assert!(report["failures"][0]["error"].as_str().unwrap().contains("compiler does not provide the API"), "{report}");
     repo.commit(&[("web/tsconfig.json", r#"{"compilerOptions":{"target":"ES2022"},"files":[]}"#)], "remove source from config");
     let changed_config = current_commit(repo.path());
     let mut changed_suite = suite;

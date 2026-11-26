@@ -12,20 +12,31 @@ type Positions = BTreeMap<usize, BTreeSet<usize>>;
 pub(super) fn verify(
     options: &CheckerConfig<'_>, batch: &CallBatch, verified: &mut Positions, classified: &mut Positions,
     mut check: impl FnMut(&str, &TypeScriptRequest<'_>, Duration) -> Option<TypeScriptResult>,
-) -> bool {
+) -> Result<(), &'static str> {
     let started = Instant::now();
-    let Some((ranges, skipped)) = ranges(options, &batch.calls) else { return false };
+    let Some((ranges, skipped)) = ranges(options, &batch.calls) else { return Err("typescript_checker_incomplete") };
     for range in ranges {
         let remaining = options.timeout.saturating_sub(started.elapsed());
-        if remaining.is_zero() { return false; }
+        if remaining.is_zero() { return Err("typescript_checker_incomplete"); }
         let request = TypeScriptRequest { typescript_module: options.compiler, config: options.config, calls: &batch.calls[range.clone()] };
-        let Some(result) = check(options.node, &request, remaining).filter(|result| result.status == "ok") else { return false };
+        let Some(result) = check(options.node, &request, remaining) else { return Err("typescript_checker_incomplete") };
+        if result.status != "ok" { return Err(limitation_reason(result.reason.as_deref())); }
         for ((unit, start), result) in batch.positions[range].iter().copied().zip(result.calls.unwrap_or_default()) {
             if result.status == "promise_like" { verified.entry(unit).or_default().insert(start); }
             if matches!(result.status.as_str(), "promise_like" | "not_promise") { classified.entry(unit).or_default().insert(start); }
         }
     }
-    !skipped
+    if skipped { Err("typescript_checker_incomplete") } else { Ok(()) }
+}
+
+fn limitation_reason(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("compiler_api_unsupported") => "typescript_compiler_api_unsupported",
+        Some("project_type_errors") => "typescript_project_type_errors",
+        Some("config_invalid") => "typescript_config_invalid",
+        Some("config_unreadable") => "typescript_config_unreadable",
+        _ => "typescript_checker_incomplete",
+    }
 }
 
 fn ranges(options: &CheckerConfig<'_>, calls: &[TypeScriptCall]) -> Option<(Vec<Range<usize>>, bool)> {
@@ -62,6 +73,15 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn checker_failures_use_only_known_structured_reasons() {
+        assert_eq!(limitation_reason(Some("compiler_api_unsupported")), "typescript_compiler_api_unsupported");
+        assert_eq!(limitation_reason(Some("project_type_errors")), "typescript_project_type_errors");
+        assert_eq!(limitation_reason(Some("config_invalid")), "typescript_config_invalid");
+        assert_eq!(limitation_reason(Some("config_unreadable")), "typescript_config_unreadable");
+        assert_eq!(limitation_reason(Some("untrusted arbitrary output")), "typescript_checker_incomplete");
+    }
+
+    #[test]
     fn batches_fit_both_protocol_bounds_and_keep_completed_results_on_failure() {
         let options = CheckerConfig { node: "node", compiler: "compiler", config: "config", root: Path::new("."), timeout: Duration::from_secs(10) };
         let calls: Vec<_> = (0..2000).map(|start| TypeScriptCall { path: format!("{}é\n", "x".repeat(160)), start, source_sha256: "a".repeat(64) }).collect();
@@ -83,7 +103,7 @@ mod tests {
             invocations += 1;
             (invocations == 1).then(|| TypeScriptResult { status: "ok".into(), reason: None, calls: Some(request.calls.iter().map(|call| TypeScriptCallResult { path: call.path.clone(), start: call.start, source_sha256: call.source_sha256.clone(), status: "promise_like".into() }).collect()) })
         });
-        assert!(!complete);
+        assert_eq!(complete, Err("typescript_checker_incomplete"));
         assert_eq!(verified[&0].len(), first_len);
         assert_eq!(classified[&0].len(), first_len);
         assert_eq!(invocations, 2);
@@ -103,7 +123,7 @@ mod tests {
         let complete = verify(&options, &batch, &mut verified, &mut classified, |_, request, _| {
             Some(TypeScriptResult { status: "ok".into(), reason: None, calls: Some(request.calls.iter().map(|call| TypeScriptCallResult { path: call.path.clone(), start: call.start, source_sha256: call.source_sha256.clone(), status: "promise_like".into() }).collect()) })
         });
-        assert!(!complete);
+        assert_eq!(complete, Err("typescript_checker_incomplete"));
         assert_eq!(verified[&0], BTreeSet::from([0, 2]));
         assert_eq!(classified[&0], BTreeSet::from([0, 2]));
     }

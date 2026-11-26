@@ -32,8 +32,10 @@ deep tier.
   `AUTOREVIEW_TYPESCRIPT_CONFIG` names an absolute config path or a path
   relative to the repository root, such as `web/tsconfig.json`. Relative
   paths must remain inside the root and resolve separately for each replay
-  snapshot. Without a
-  configured checker, coverage reports identify the skipped rule. This check
+  snapshot. Coverage reports distinguish unsupported compiler APIs, project
+  type errors, and configuration failures. The current checker requires the
+  legacy TypeScript compiler API; TypeScript 7's native API is not supported.
+  Without a configured checker, coverage reports identify the skipped rule. This check
   only covers supported, unambiguous factory and import shapes.
 - **Experimental Go error checks** can flag unused `error` results from type-checked calls, including
   supported multi-result assignments and calls passed to uniquely resolved helpers.

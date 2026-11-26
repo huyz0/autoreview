@@ -126,6 +126,13 @@ compiler configuration the typed contract is reported as skipped. This is an
 experimental interface; compiler distribution, descendant-process containment,
 and broader review and replay coverage still require work.
 
+The probe requires the legacy JavaScript compiler API, including
+`getAwaitedType`. TypeScript 7's native package has a different API and is
+reported as unsupported; it is not silently replaced by another compiler.
+Coverage distinguishes this case from project type errors and unreadable or
+invalid configuration. TypeScript 7 support needs an independently verified
+promise-type test and native subprocess lifecycle handling.
+
 Candidate requests are split into bounded batches to stay within the probe's
 input and output limits. All batches share one deadline. If a batch fails,
 completed batches keep their verified results and unverified candidates retain
