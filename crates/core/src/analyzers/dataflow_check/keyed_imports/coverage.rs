@@ -52,12 +52,18 @@ fn limitation_detail(reason: &str) -> &'static str {
 }
 
 fn verified_detail(reason: &str) -> Option<&'static str> {
-    Some(match reason {
+    go_detail(reason).or_else(|| Some(match reason {
             "unmodeled_contract_handle" => "A matching resource or task acquisition occurs in a function with unsupported handle storage or transfer; this rule skipped the function.",
             "unmodeled_conditional_result" => "A result-producing call occurs in a conditional expression whose branches could not be modeled; result-use analysis may be incomplete.",
             "verified_source_unmodeled" => "A verified result source is outside modeled function flow; result-use analysis skipped this call.",
-            "typed_go_error_source_unavailable" => "Go error type verification is not configured; this rule was skipped.",
             "invalid_result_components" => "Verified result component information was invalid; analysis skipped the affected call.",
+            _ => return None,
+    }))
+}
+
+fn go_detail(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+            "typed_go_error_source_unavailable" => "Go error type verification is not configured; this rule was skipped.",
             "go_multi_result_unmodeled" => "A multi-result Go call with an error occurs in an unsupported context; result-use analysis skipped this call.",
             "go_error_checker_incomplete" => "Go error type verification could not complete for this package; result-use analysis may be incomplete.",
             "go_error_package_limit" => "The Go error checker package limit was reached; remaining packages were not verified.",
