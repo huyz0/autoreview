@@ -257,13 +257,17 @@ fn partial_result_observation_respects_correlated_guards() {
     }
 }
 
+fn assert_partial_helper_coverage(root: &tempfile::TempDir, path: &str, rule: &str) {
+    let result = conditional_test_result(root, path);
+    assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+}
+
 #[test]
 fn partial_helper_observation_reports_incomplete_analysis() {
     for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
         let source = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b, flag) { const pending = rename(a, b); return consume(pending, flag); }\n";
         let root = write_single_file(path, source);
-        let result = conditional_test_result(&root, path);
-        assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        assert_partial_helper_coverage(&root, path, rule);
         let fixed = source.replace("if (flag) return value;", "if (flag) return value; else return value;");
         std::fs::write(root.path().join(path), fixed).unwrap();
         let result = conditional_test_result(&root, path);
@@ -282,8 +286,7 @@ fn partial_helper_observation_reports_incomplete_analysis() {
         let extension = path.rsplit('.').next().unwrap();
         std::fs::write(root.path().join(format!("helper.{extension}")), "export function consume(value, flag) { if (flag) return value; }\n").unwrap();
         std::fs::write(root.path().join(path), imported).unwrap();
-        let result = conditional_test_result(&root, path);
-        assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        assert_partial_helper_coverage(&root, path, rule);
     }
 }
 
@@ -297,8 +300,7 @@ fn partial_helper_observation_reports_incomplete_across_languages() {
     ];
     for (path, rule, source) in cases {
         let root = write_single_file(path, source);
-        let result = conditional_test_result(&root, path);
-        assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        assert_partial_helper_coverage(&root, path, rule);
     }
 }
 

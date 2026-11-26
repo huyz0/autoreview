@@ -12,7 +12,7 @@ pub(super) use parameters::unobserved_parameters;
 
 use super::{Body, Demand, Effect, Origin, Place, Plan, Value, Write};
 use crate::cfg::{Cfg, EdgeKind, IdentityOperand, NodeId, Stmt};
-use guards::{guard, supported_edges};
+use guards::{guard, hidden_at, supported_edges, throws, Visits};
 use tree_sitter::Node;
 
 const PATH_LIMIT: usize = 8192;
@@ -265,20 +265,6 @@ fn supported_effect_with_return(effect: &Effect, allow_return: bool) -> bool {
     }
 }
 
-fn hidden_at(cfg: &Cfg<Stmt>, node: NodeId, syntax: (Node<'_>, &[u8])) -> bool {
-    cfg.nodes[node].evaluations.iter().any(|range| {
-        super::effects::evaluation(syntax.0, range)
-            .is_some_and(|value| has_conditional(value, syntax.1))
-    })
-}
-
-fn throws(cfg: &Cfg<Stmt>, node: NodeId) -> bool {
-    cfg.nodes[node]
-        .stmts
-        .iter()
-        .any(|stmt| matches!(stmt, Stmt::Throw { .. }))
-}
-
 fn cyclic(body: &Body) -> bool {
     let mut indegree: Vec<_> = body.flow.predecessors.iter().map(Vec::len).collect();
     let mut queue: VecDeque<_> = body
@@ -313,16 +299,10 @@ fn unobserved_path(
     edges: &[Vec<(NodeId, EdgeKind)>],
     origin: &Origin,
 ) -> Option<bool> {
-    let mut seen = BTreeSet::new();
+    let mut seen = Visits::default();
     let mut pending = vec![(body.flow.entry, State::default())];
     while let Some((node, mut state)) = pending.pop() {
-        if !seen.insert((node, state.clone())) {
-            continue;
-        }
-        if seen.len() > PATH_LIMIT {
-            return None;
-        }
-        if throws(cfg, node) {
+        if !seen.enter(cfg, node, &state)? {
             continue;
         }
         if observed(&body.effects[node], origin, &mut state) {

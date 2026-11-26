@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use super::{
-    branch, cyclic, hidden_at, outgoing, supported_edges, supported_effect_with_return, throws,
-    Body, Cfg, EdgeKind, Effect, Node, Place, Plan, State, Stmt, Value, PATH_LIMIT,
+    branch, cyclic, hidden_at, outgoing, supported_edges, supported_effect_with_return, Body, Cfg,
+    EdgeKind, Effect, Node, Place, Plan, State, Stmt, Value, Visits,
 };
 
 /// `None` means that this helper is outside the bounded model.
@@ -67,15 +67,9 @@ fn unobserved(
     };
     initial.aliases.insert(parameter);
     let mut pending = vec![(body.flow.entry, initial)];
-    let mut seen = BTreeSet::new();
+    let mut seen = Visits::default();
     while let Some((node, mut state)) = pending.pop() {
-        if !seen.insert((node, state.clone())) {
-            continue;
-        }
-        if seen.len() > PATH_LIMIT {
-            return None;
-        }
-        if throws(cfg, node) {
+        if !seen.enter(cfg, node, &state)? {
             continue;
         }
         if observes(&body.effects[node], &mut state, return_used) {
