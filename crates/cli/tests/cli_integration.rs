@@ -701,6 +701,33 @@ fn rust_imported_associated_helper_reaches_review_report() {
 }
 
 #[test]
+fn rust_reexported_associated_helper_reaches_review_and_reports_replay_limit() {
+    let support = "use std::fs::remove_file;\npub(crate) struct Files;\nimpl Files {\n    pub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n}\n";
+    let bad = "use crate::api::Store as Disk;\nfn run(path: &str) { Disk::remove(path); }\n";
+    let fixed = "use crate::api::Store as Disk;\nfn run(path: &str) -> std::io::Result<()> { Disk::remove(path) }\n";
+    let repo = init_repo(&[("src/lib.rs", "mod support; mod api; mod worker;\n"), ("src/support.rs", support),
+        ("src/api.rs", "pub(crate) use crate::support::Files as Store;\n"), ("src/worker.rs", bad)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("src/worker.rs", fixed)], "observe associated result");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name": "reexported associated helper", "rule": {"tool":"autoreview-dataflow", "id":"rust-discarded-remove-file-result"},
+        "before": {"commit":before, "entry":"src/worker.rs", "path":"src/support.rs", "lines":[4]},
+        "after": {"commit":after, "entry":"src/worker.rs", "path":"src/support.rs", "lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let replay = failed_replay_report(repo.path());
+    assert_eq!(replay["coverage"][0]["incomplete"], 1, "{replay}");
+    assert!(replay["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "unresolved_rust_module_import" && issue["path"] == "src/worker.rs"), "{replay}");
+    repo.commit(&[("src/worker.rs", bad)], "discard associated result");
+    let review = static_review_report(&repo, &after, None);
+    assert!(review["findings"].as_array().unwrap().iter().any(|finding|
+        finding["source"]["ruleId"] == "rust-discarded-remove-file-result" && finding["location"]["path"] == "src/support.rs"
+            && finding["location"]["range"]["startLine"] == 4), "{review}");
+    assert!(review["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "unresolved_rust_module_import" && issue["path"] == "src/worker.rs"), "{review}");
+}
+
+#[test]
 fn rust_module_alias_results_reach_the_review_report() {
     let root = "mod support; mod worker;\n";
     let support = "use std::fs::remove_file;\npub(crate) fn discard(value: std::io::Result<()>) {}\npub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n";

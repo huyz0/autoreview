@@ -3,6 +3,8 @@ use autoreview_dataflow::call_order::has_rust_attributes as has_attributes;
 
 mod parent;
 use parent::private_parent_namespace;
+mod associated;
+use associated::associated_type_origin;
 
 use super::{children, issue, text, AnalysisCoverageIssue, ImportSource, KeyedExport, KeyedImport, Language, Node, Path, PathBuf, Resolver};
 
@@ -152,9 +154,9 @@ fn rust_uses(
             if let Some(binding) = resolver.binding(&file, alias.unwrap_or(member), Some(member), None, true) {
                 bindings.push(binding);
             }
-            if is_relative(module) && local_associated_type(resolver, &file, member) {
+            if let Some((owner_file, owner)) = is_relative(module).then(|| associated_type_origin(resolver, &file, member)).flatten() {
                 let local = format!("{}::", alias.unwrap_or(member));
-                if let Some(binding) = resolver.binding(&file, &local, None, Some(member), true) {
+                if let Some(binding) = resolver.binding(&owner_file, &local, None, Some(&owner), true) {
                     bindings.push(binding);
                 }
             }
@@ -176,18 +178,6 @@ fn rust_uses(
         bindings
     }).collect()
 
-}
-
-fn local_associated_type(resolver: &Resolver<'_>, path: &Path, name: &str) -> bool {
-    let Some(parsed) = resolver.cache.get(path, Language::Rust) else { return false };
-    let root = parsed.1.root_node();
-    if root.has_error() { return false; }
-    let matching: Vec<_> = children(root).into_iter().filter(|node|
-        node.child_by_field_name("name").and_then(|part| text(part, &parsed.0)) == Some(name)).collect();
-    matches!(matching.as_slice(), [node] if matches!(node.kind(), "struct_item" | "enum_item")
-        && !has_attributes(*node) && node.child_by_field_name("type_parameters").is_none()
-        && children(*node).into_iter().find(|child| child.kind() == "visibility_modifier")
-            .and_then(|visibility| text(visibility, &parsed.0)).is_some_and(|visibility| matches!(visibility, "pub" | "pub(crate)")))
 }
 
 fn is_relative(path: &str) -> bool {

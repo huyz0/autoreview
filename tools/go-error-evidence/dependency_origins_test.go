@@ -3,11 +3,45 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestDependencyOriginsAreIndependentOfPackageOrder(t *testing.T) {
+	dir := t.TempDir()
+	main := "package sample\nimport (\"context\"; \"example.test/cross/outer\")\nfunc use(ctx context.Context) { outer.Wrapper(ctx) }\n"
+	outer := "package outer\nimport (\"context\"; \"example.test/cross/inner\")\nfunc Wrapper(ctx context.Context) error { return inner.Leaf(ctx) }\n"
+	inner := "package inner\nimport \"context\"\nfunc Leaf(ctx context.Context) error { return ctx.Err() }\n"
+	writeDependencyFiles(t, dir, map[string]string{"go.mod": "module example.test/cross\n\ngo 1.22\n", "main.go": main, "outer/outer.go": outer, "inner/inner.go": inner})
+	snapshots := map[string]dependencySnapshot{
+		"example.test/cross/outer": {Directory: filepath.Join(dir, "outer"), Files: map[string]string{"outer.go": digest(outer)}},
+		"example.test/cross/inner": {Directory: filepath.Join(dir, "inner"), Files: map[string]string{"inner.go": digest(inner)}},
+	}
+	req := request{PackageDir: dir, GoBinary: goBinary(t), ExpectedSources: map[string]string{"main.go": digest(main)}, PackageSources: map[string]string{"main.go": digest(main)}, Calls: []callSite{{"main.go", strings.LastIndex(main, "outer.Wrapper(ctx)")}}, IncludeErrorOrigins: true, DependencySources: snapshots}
+	if got := analyze(req); got.Status != "ok" || got.Calls[0].ErrorOrigin == nil || got.Calls[0].ErrorOrigin.ContextParameter != 0 {
+		t.Fatalf("multi-hop call: %+v", got)
+	}
+	loaded, reason := loadPackage(token.NewFileSet(), dir, goBinary(t), "", snapshots)
+	if reason != "" || len(loaded.dependencies) != 2 {
+		t.Fatalf("load dependencies: %s, %d", reason, len(loaded.dependencies))
+	}
+	// Put the dependent package before its dependency, regardless of go list order.
+	if loaded.dependencies[0].listed.ImportPath != "example.test/cross/outer" {
+		loaded.dependencies[0], loaded.dependencies[1] = loaded.dependencies[1], loaded.dependencies[0]
+	}
+	origins, reason := dependencyErrorOrigins(loaded, true)
+	if origin := origins[callee{Package: "example.test/cross/outer", Name: "Wrapper"}]; reason != "" || origin == nil || origin.ContextParameter != 0 {
+		t.Fatalf("reversed dependencies: reason=%s origin=%+v", reason, origin)
+	}
+	loaded.dependencies = loaded.dependencies[:1]
+	origins, reason = dependencyErrorOrigins(loaded, true)
+	if origin := origins[callee{Package: "example.test/cross/outer", Name: "Wrapper"}]; reason != "" || origin != nil {
+		t.Fatalf("unverified inner dependency: reason=%s origin=%+v", reason, origin)
+	}
+}
 
 func TestVerifiedDependencyErrorOrigin(t *testing.T) {
 	dir := t.TempDir()

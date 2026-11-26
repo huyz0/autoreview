@@ -63,12 +63,28 @@ func dependencyErrorOrigins(loaded loadedPackage, enabled bool) (map[callee]*err
 	if !enabled {
 		return result, ""
 	}
+	type checkedDependency struct {
+		files []*ast.File
+		info  *types.Info
+	}
+	checked := make([]checkedDependency, 0, len(loaded.dependencies))
 	for _, dependency := range loaded.dependencies {
 		files, info, ok := typecheckDependency(dependency)
 		if !ok {
 			return nil, "dependency_type_errors"
 		}
-		indexErrorOriginsInto(files, info, true, result)
+		checked = append(checked, checkedDependency{files: files, info: info})
+	}
+	// Dependencies may be supplied in any order. Revisit verified packages
+	// until summaries stop changing, with the same bound as local helpers.
+	for pass := 0; pass < errorOriginPassLimit; pass++ {
+		before := len(result)
+		for _, dependency := range checked {
+			indexErrorOriginsInto(dependency.files, dependency.info, true, result)
+		}
+		if len(result) == before {
+			break
+		}
 	}
 	return result, ""
 }
