@@ -203,6 +203,31 @@ fn unresolved_receivers_report_results_wrapped_in_web_arrays() {
 }
 
 #[test]
+fn unresolved_receivers_track_assigned_results_in_web_arrays() {
+    for (ext, rule) in [("js", "javascript-node-fs-discarded-promise"), ("ts", "typescript-node-fs-discarded-promise"), ("tsx", "typescript-node-fs-discarded-promise")] {
+        let path = format!("main.{ext}");
+        let source = "import { rename } from 'node:fs/promises';\nfunction local(values) {}\nfunction direct(a, b) { const p = rename(a, b); unknown([p]); }\nfunction alias(a, b) { const p = rename(a, b); const q = p; unknown(...[q]); }\nfunction resolved(a, b) { const p = rename(a, b); local([p]); }\nfunction overwritten(a, b) { let p = rename(a, b); p = null; unknown([p]); }\nasync function observed(a, b) { const p = rename(a, b); unknown([await p]); }\nfunction branch(a, b, flag) { const p = rename(a, b); if (flag) unknown([p]); }\n";
+        let root = write_single_file(&path, source);
+        let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), std::slice::from_ref(&path), &[]);
+        let lines: std::collections::BTreeSet<_> = result.coverage.iter().filter(|issue|
+            issue.reason == "unresolved_result_receiver" && issue.rule.as_deref() == Some(rule))
+            .filter_map(|issue| issue.line).collect();
+        assert_eq!(lines, std::collections::BTreeSet::from([3, 4, 5, 8]), "{ext}: {:?}", result.coverage);
+    }
+}
+
+#[test]
+fn wrapped_assigned_results_propagate_through_imported_helpers() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("helper.js"), "export function send(value) { relay(value); }\nfunction relay(value) { unknown([value]); }\n").unwrap();
+    std::fs::write(root.path().join("main.js"), "import { rename } from 'node:fs/promises';\nimport { send } from './helper';\nfunction run(a, b) { const p = rename(a, b); send(p); }\n").unwrap();
+    let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &["main.js".into()], &[]);
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unresolved_result_receiver"
+        && issue.rule.as_deref() == Some("javascript-node-fs-discarded-promise")
+        && issue.path.as_deref() == Some("main.js") && issue.line == Some(3)), "{:?}", result.coverage);
+}
+
+#[test]
 fn unresolved_receivers_propagate_through_imported_helpers() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("helper.js"), "import { rename } from 'node:fs/promises';\nexport function send(value) { relay(value); }\nexport function make(a, b) { return rename(a, b); }\nexport function forward(value) { return value; }\nfunction relay(value) { unknown(value); }\n").unwrap();

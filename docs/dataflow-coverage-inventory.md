@@ -70,4 +70,7 @@ array or spread passed to a call is reported as `wrapped_result_receiver`.
 The analysis does not yet follow individual array elements into callees, even
 when a helper resolves; the warning can therefore appear for a receiver that
 actually handles every element. An awaited result is not treated as an
-unobserved promise by this check.
+unobserved promise by this check. Results assigned before being placed directly
+in an array or spread argument are also tracked through supported aliases and
+helper calls and reported under `unresolved_result_receiver`. Arrays stored in
+a separate variable before the call are not covered by this tracking.
