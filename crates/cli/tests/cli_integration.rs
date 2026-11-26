@@ -447,6 +447,27 @@ fn unresolved_assigned_result_crosses_helpers_in_review_and_replay() {
 }
 
 #[test]
+fn array_wrapped_result_uncertainty_reaches_review_and_replay() {
+    let before = "import { rename } from 'node:fs/promises';\nexport function run(a, b) { unknown([rename(a, b)]); }\n";
+    let after = "import { rename } from 'node:fs/promises';\nexport async function run(a, b) { unknown([await rename(a, b)]); }\n";
+    let repo = init_repo(&[("main.js", before)]);
+    let old = current_commit(repo.path());
+    repo.commit(&[("main.js", after)], "Observe the result before wrapping it");
+    let fixed = current_commit(repo.path());
+    let suite = serde_json::json!({"cases":[{"name":"wrapped unknown receiver", "rule":{"tool":"autoreview-dataflow","id":"javascript-node-fs-discarded-promise"},
+        "before":{"commit":old,"path":"main.js","lines":[]},"after":{"commit":fixed,"path":"main.js","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let replay = failed_replay_report(repo.path());
+    assert_eq!(replay["coverage"][0]["incomplete"], 1, "{replay}");
+    assert!(replay["failures"][0]["error"].as_str().unwrap().contains("array or spread argument"), "{replay}");
+    repo.commit(&[("main.js", before)], "Pass wrapped result to unknown receiver");
+    let review = static_review_report(&repo, &fixed, None);
+    assert!(review["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "wrapped_result_receiver" && issue["rule"] == "javascript-node-fs-discarded-promise"
+            && issue["path"] == "main.js" && issue["line"] == 2), "{review}");
+}
+
+#[test]
 fn imported_helper_arguments_reach_review_and_replay_across_languages() {
     let fixtures = [
         ("go-os-rename-discarded-error", "worker.go", "package main\nimport (\"os\"; \"example.com/project/helper\")\nfunc run(a, b string) { helper.Ignore(os.Rename(a, b)) }\n", "package main\nimport (\"os\"; \"example.com/project/helper\")\nfunc run(a, b string) error { return helper.Forward(os.Rename(a, b)) }\n", 3),

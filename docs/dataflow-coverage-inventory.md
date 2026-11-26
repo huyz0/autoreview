@@ -64,3 +64,10 @@ rule. The same issues are summarized in `analyzerWarnings` for text reports.
 Dataflow replay fails affected cases instead of treating them as clean. Other
 unresolved imports and unsupported expressions are not yet fully reported, so
 an empty array is not a guarantee of complete coverage.
+
+For JavaScript, TypeScript and TSX, a registered result directly wrapped in an
+array or spread passed to a call is reported as `wrapped_result_receiver`.
+The analysis does not yet follow individual array elements into callees, even
+when a helper resolves; the warning can therefore appear for a receiver that
+actually handles every element. An awaited result is not treated as an
+unobserved promise by this check.
