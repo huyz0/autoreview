@@ -12,7 +12,7 @@ pub(super) use parameters::unobserved_parameters;
 
 use super::{Body, Demand, Effect, Origin, Place, Plan, Value, Write};
 use crate::cfg::{Cfg, EdgeKind, IdentityOperand, NodeId, Stmt};
-use guards::{guard, hidden_at, supported_edges, throws, Visits};
+use guards::{guard, hidden_at, straight_line, supported_edges, throws, Visits};
 use tree_sitter::Node;
 
 const PATH_LIMIT: usize = 8192;
@@ -139,27 +139,13 @@ fn observed_before_branch(
     body: &Body,
     cfg: &Cfg<Stmt>,
     syntax: (Node<'_>, &[u8]),
-    mut node: NodeId,
+    node: NodeId,
     origin: &Origin,
 ) -> bool {
     let mut state = State::default();
-    let mut seen = BTreeSet::new();
-    while seen.insert(node) {
-        if cfg.nodes[node].evaluations.iter().any(|range| {
-            super::effects::evaluation(syntax.0, range)
-                .is_some_and(|value| has_conditional(value, syntax.1))
-        }) {
-            return false;
-        }
-        if let Some(observed) = observe_straight_line(&body.effects[node], origin, &mut state) {
-            return observed;
-        }
-        let [next] = body.flow.successors[node].as_slice() else {
-            return false;
-        };
-        node = *next;
-    }
-    false
+    straight_line(body, cfg, syntax, node, |effects| {
+        observe_straight_line(effects, origin, &mut state)
+    })
 }
 
 fn observe_straight_line(effects: &[Effect], origin: &Origin, state: &mut State) -> Option<bool> {

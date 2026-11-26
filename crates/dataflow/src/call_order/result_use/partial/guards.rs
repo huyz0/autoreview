@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    has_conditional, Cfg, EdgeKind, IdentityOperand, Node, NodeId, Plan, State, Stmt, PATH_LIMIT,
+    has_conditional, Body, Cfg, EdgeKind, Effect, IdentityOperand, Node, NodeId, Plan, State, Stmt,
+    PATH_LIMIT,
 };
 
 #[derive(Default)]
@@ -17,6 +18,29 @@ impl Visits {
         }
         Some(!throws(cfg, node))
     }
+}
+
+pub(super) fn straight_line(
+    body: &Body,
+    cfg: &Cfg<Stmt>,
+    syntax: (Node<'_>, &[u8]),
+    mut node: NodeId,
+    mut check: impl FnMut(&[Effect]) -> Option<bool>,
+) -> bool {
+    let mut seen = BTreeSet::new();
+    while seen.insert(node) {
+        if hidden_at(cfg, node, syntax) {
+            return false;
+        }
+        if let Some(result) = check(&body.effects[node]) {
+            return result;
+        }
+        let [next] = body.flow.successors[node].as_slice() else {
+            return false;
+        };
+        node = *next;
+    }
+    false
 }
 
 pub(super) fn supported_edges(

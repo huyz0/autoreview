@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
 use super::{
-    branch, cyclic, hidden_at, outgoing, supported_edges, supported_effect_with_return, Body, Cfg,
-    EdgeKind, Effect, Node, Place, Plan, State, Stmt, Value, Visits,
+    branch, cyclic, hidden_at, outgoing, straight_line, supported_edges,
+    supported_effect_with_return, Body, Cfg, EdgeKind, Effect, Node, Place, Plan, State, Stmt,
+    Value, Visits,
 };
 
 /// `None` means that this helper is outside the bounded model.
@@ -66,28 +67,18 @@ fn observed_before_branch(
         ..State::default()
     };
     state.aliases.insert(parameter);
-    let mut seen = BTreeSet::new();
-    let mut node = body.flow.entry;
-    while seen.insert(node) {
-        if hidden_at(cfg, node, syntax)
-            || !body.effects[node]
-                .iter()
-                .all(|effect| supported_effect_with_return(effect, true))
+    straight_line(body, cfg, syntax, body.flow.entry, |effects| {
+        if !effects
+            .iter()
+            .all(|effect| supported_effect_with_return(effect, true))
         {
-            return false;
+            return Some(false);
         }
-        if observes(&body.effects[node], &mut state, return_used) {
-            return true;
+        if observes(effects, &mut state, return_used) {
+            return Some(true);
         }
-        if state.aliases.is_empty() {
-            return false;
-        }
-        let [next] = body.flow.successors[node].as_slice() else {
-            return false;
-        };
-        node = *next;
-    }
-    false
+        state.aliases.is_empty().then_some(false)
+    })
 }
 
 fn unobserved(
