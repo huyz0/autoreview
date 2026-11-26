@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
-use crate::model::{HelperAccess, MethodDecl, NamedSlot, SymbolIndex, TypeDecl};
+use crate::model::{HelperAccess, HelperLocation, MethodDecl, NamedSlot, SymbolIndex, TypeDecl};
 
 /// One message-chain finding: a call chain at or above the reporting
 /// threshold, anchored at the method it was found in.
@@ -56,6 +56,12 @@ pub struct FeatureEnvyFinding {
     pub envied_access_count: usize,
     pub own_access_count: usize,
     pub helper_evidence: Vec<HelperAccess>,
+}
+
+impl FeatureEnvyFinding {
+    pub fn helper_locations(&self) -> impl Iterator<Item = &HelperLocation> {
+        self.helper_evidence.iter().flat_map(|access| &access.locations)
+    }
 }
 
 /// Score accesses to each collaborator type independently. Go can also
