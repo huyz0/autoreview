@@ -92,22 +92,38 @@ fn immediate_local(expression: Node<'_>, source: &str) -> bool {
     let mut next = declaration.next_named_sibling();
     for _ in 0..32 {
         let Some(statement) = next else { return false };
-        if statement.kind().contains("comment") {
-            next = statement.next_named_sibling();
-            continue;
+        match local_step(statement, name, source) {
+            LocalStep::Invoke => return true,
+            LocalStep::Alias(alias) => name = alias,
+            LocalStep::Comment => {}
+            LocalStep::Unknown => return false,
         }
-        if statement.kind() == "call_expression" {
-            let Some(navigation) = statement.named_child(0).filter(|node| node.kind() == "navigation_expression") else { return false };
-            let Some(receiver) = navigation.named_child(0) else { return false };
-            return text(receiver, source) == Some(name) && explicit_invoke(receiver, source);
-        }
-        let Some(value) = statement.named_child(1) else { return false };
-        if value.kind() != "identifier" || text(value, source) != Some(name) { return false; }
-        let Some(alias) = simple_val(statement, value, source) else { return false };
-        name = alias;
         next = statement.next_named_sibling();
     }
     false
+}
+
+enum LocalStep<'a> {
+    Invoke,
+    Alias(&'a str),
+    Comment,
+    Unknown,
+}
+
+fn local_step<'a>(statement: Node<'_>, name: &str, source: &'a str) -> LocalStep<'a> {
+    if statement.kind().contains("comment") { return LocalStep::Comment; }
+    if statement.kind() == "call_expression" {
+        let receiver = statement.named_child(0).filter(|node| node.kind() == "navigation_expression")
+            .and_then(|navigation| navigation.named_child(0));
+        return if receiver.is_some_and(|receiver| text(receiver, source) == Some(name) && explicit_invoke(receiver, source)) {
+            LocalStep::Invoke
+        } else {
+            LocalStep::Unknown
+        };
+    }
+    let alias = statement.named_child(1).filter(|value| value.kind() == "identifier" && text(*value, source) == Some(name))
+        .and_then(|value| simple_val(statement, value, source));
+    alias.map_or(LocalStep::Unknown, LocalStep::Alias)
 }
 
 fn simple_val<'a>(declaration: Node<'_>, value: Node<'_>, source: &'a str) -> Option<&'a str> {
