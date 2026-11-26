@@ -1,0 +1,19 @@
+cases:
+  - name: uwas authentication persistence discards rename error
+    rule: {tool: autoreview-dataflow, id: go-os-rename-discarded-error}
+    evidence:
+      kind: historical
+      source: https://github.com/uwaserver/uwas/commit/72ff1f5897e89e6d38ecb9d7a51712ace23afe17
+      license: AGPL-3.0-or-later (dual licensed)
+      rationale: >-
+        Session persistence explicitly discards the atomic rename error;
+        the fix logs a failure. Labels cover the entire file. An earlier
+        rename in the same file already propagates its error.
+    before:
+      commit: ed3e15d884e9d3549e7bc4f4590a7784ea24460a
+      path: internal/auth/persist.go
+      lines: [150]
+    after:
+      commit: 72ff1f5897e89e6d38ecb9d7a51712ace23afe17
+      path: internal/auth/persist.go
+      lines: []
