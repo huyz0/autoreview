@@ -30,6 +30,13 @@ fn failed_replay_report(repo: &std::path::Path) -> serde_json::Value {
     serde_json::from_slice(&result.get_output().stdout).unwrap()
 }
 
+fn assert_incomplete_replay(report: &serde_json::Value, reason: &str, path: &str, line: u32) {
+    assert_eq!(report["coverage"][0]["incomplete"], 1, "{report}");
+    assert_eq!(report["coverage"][0]["completed"], 0, "{report}");
+    assert!(report["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == reason && issue["path"] == path && issue["line"] == line), "{report}");
+}
+
 #[cfg(windows)]
 #[test]
 fn replay_checks_out_unrelated_long_paths_on_windows() {
@@ -141,10 +148,7 @@ fn replay_excludes_unmodeled_contract_handle_storage() {
     let suite = serde_json::json!({"cases": [{"name":"stored handle", "rule":{"tool":"autoreview-dataflow","id":"go-gzip-writer-unclosed"}, "before":{"commit":before,"path":"main.go","lines":[]}, "after":{"commit":after,"path":"main.go","lines":[]}}]});
     std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
     let report = failed_replay_report(repo.path());
-    assert_eq!(report["coverage"][0]["incomplete"], 1, "{report}");
-    assert_eq!(report["coverage"][0]["completed"], 0, "{report}");
-    assert!(report["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue|
-        issue["reason"] == "unmodeled_contract_handle" && issue["path"] == "main.go" && issue["line"] == 4), "{report}");
+    assert_incomplete_replay(&report, "unmodeled_contract_handle", "main.go", 4);
 }
 
 #[test]
@@ -164,10 +168,7 @@ fn replay_excludes_unmodeled_keyed_cleanup() {
     let suite = serde_json::json!({"cases": [{"name":"unmodeled", "rule":{"tool":"autoreview-dataflow","id":"custom-cleanup"}, "before":{"commit":before,"path":"main.js","lines":[]}, "after":{"commit":after,"path":"main.js","lines":[]}}]});
     std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
     let report = failed_replay_report(repo.path());
-    assert_eq!(report["coverage"][0]["incomplete"], 1, "{report}");
-    assert_eq!(report["coverage"][0]["completed"], 0, "{report}");
-    assert!(report["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue|
-        issue["reason"] == "unmodeled_cleanup_call" && issue["path"] == "main.js" && issue["line"] == 3), "{report}");
+    assert_incomplete_replay(&report, "unmodeled_cleanup_call", "main.js", 3);
 }
 
 #[test]

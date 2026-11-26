@@ -40,7 +40,6 @@ fn limitation_detail(reason: &str) -> &'static str {
     verified_detail(reason).or_else(|| typed_detail(reason)).unwrap_or(match reason {
             "path_budget" => "The path-state budget was exhausted; this rule skipped the affected root.",
             "unmodeled_cleanup_call" => "A possible cleanup call was not represented in the control-flow graph; this rule skipped the affected function.",
-            "unmodeled_contract_handle" => "A matching resource or task acquisition occurs in a function with unsupported handle storage or transfer; this rule skipped the function.",
             "helper_summary_limit" => "Helper summaries did not converge within the analysis budget; cross-file result tracking was skipped.",
             "unsupported_rust_control_flow" => "Rust control flow in this function could not be lowered; call-sequence analysis was skipped.",
             "rust_match_binding_projection" => "Rust match pattern names are tracked as distinct local identities; their relationship to the matched value and whether they denote constants are not resolved.",
@@ -54,6 +53,7 @@ fn limitation_detail(reason: &str) -> &'static str {
 
 fn verified_detail(reason: &str) -> Option<&'static str> {
     Some(match reason {
+            "unmodeled_contract_handle" => "A matching resource or task acquisition occurs in a function with unsupported handle storage or transfer; this rule skipped the function.",
             "verified_source_unmodeled" => "A verified result source is outside modeled function flow; result-use analysis skipped this call.",
             "typed_go_error_source_unavailable" => "Go error type verification is not configured; this rule was skipped.",
             "invalid_result_components" => "Verified result component information was invalid; analysis skipped the affected call.",

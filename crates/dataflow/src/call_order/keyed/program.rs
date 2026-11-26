@@ -8,7 +8,7 @@ mod associated;
 use associated::Associated;
 pub use signature::has_attributes as has_rust_attributes;
 mod exports;
-pub use exports::{resolve_declaration_import, DeclarationResolution, KeyedDeclaration};
+pub use exports::{resolve_declaration_import, DeclarationResolution, KeyedDeclaration, KeyedExport, KeyedImport};
 use signature::{candidate, export, parameters, Export};
 
 use super::{CallOrderSpec, Plan, Values};
@@ -27,26 +27,6 @@ pub struct KeyedUnit<'src, 'tree, 'graph> {
     pub imports: &'graph [KeyedImport],
     pub exports: &'graph [KeyedExport],
     pub entry: bool,
-}
-
-/// A named export (local or from another unit), or a wildcard re-export.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum KeyedExport {
-    Named { exported: String, local: String, path: Option<String> },
-    Star { path: String },
-    /// An export whose runtime names cannot be enumerated safely.
-    Unknown,
-}
-
-/// Exact local name or namespace prefix mapped to a repository source file.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct KeyedImport {
-    pub local: String,
-    pub path: String,
-    /// None selects a member by stripping the local namespace prefix.
-    pub name: Option<String>,
-    pub owner: Option<String>,
-    pub exported: bool,
 }
 
 pub(in crate::call_order) struct Program<'spec, 'src, 'graph> {
