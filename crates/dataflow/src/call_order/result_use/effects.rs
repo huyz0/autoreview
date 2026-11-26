@@ -247,12 +247,7 @@ impl Lower<'_, '_, '_> {
     fn value(&self, node: Node<'_>, effects: &mut Vec<Effect>) -> Value {
         let value = transparent(node);
         if self.language == ContractLanguage::Web && value.kind() == "array" {
-            if let Some(members) = self.array_members(value) {
-                let mut reads = Vec::new();
-                self.reads(node, &mut reads);
-                effects.push(Effect::ObservedOnly(reads));
-                return Value::Aggregate(members);
-            }
+            return Value::Aggregate(self.array_members(value, effects));
         }
         if let Some(binding) = self.place(value, false) {
             return Value::Copy(binding);
@@ -271,14 +266,13 @@ impl Lower<'_, '_, '_> {
         Value::Other
     }
 
-    fn array_members(&self, node: Node<'_>) -> Option<Vec<Value>> {
+    fn array_members(&self, node: Node<'_>, effects: &mut Vec<Effect>) -> Vec<Value> {
         site::children(node).map(|item| {
-            let item = transparent(item);
-            if item.kind() == "array" { return self.array_members(item).map(Value::Aggregate); }
-            if let Some(place) = self.place(item, false) { return Some(Value::Copy(place)); }
-            if let Some(origin) = self.origin(item) { return Some(Value::Source(origin)); }
-            if matches!(item.kind(), "number" | "string" | "true" | "false" | "null") { return Some(Value::Other); }
-            None
+            let member = self.value(item, effects);
+            if let Value::Copy(place) = member {
+                effects.push(Effect::ObservedOnly(vec![Effect::Read(place)]));
+                Value::Copy(place)
+            } else { member }
         }).collect()
     }
 

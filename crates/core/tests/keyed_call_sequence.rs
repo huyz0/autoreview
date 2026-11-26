@@ -1415,6 +1415,31 @@ function pending(root, key, bad) {
 }
 
 #[test]
+fn array_element_helper_exceptions_reach_finally() {
+    let source = r#"function choose(key, bad) { if (bad) throw new Error(); return key; }
+function pending(root, key, bad) {
+    root.register(key);
+    try { const values = [choose(key, bad)]; }
+    finally { root.remove(key); }
+}"#;
+    assert_clean_js(source);
+    let wrong = source.replace("finally { root.remove(key); }", "finally { root.remove('other'); }");
+    let hits = findings("JavaScript", "worker.js", &wrong, RECEIVER, true);
+    assert!(hits.iter().any(|hit| hit.message == "Clean up root and key before implicit throw"), "{hits:?}");
+}
+
+#[test]
+fn optional_call_does_not_evaluate_array_element_cleanup() {
+    let source = r#"function cleanup(root, key) { root.remove(key); }
+function pending(root, key, maybe) {
+    root.register(key);
+    maybe?.([cleanup(root, key)]);
+}"#;
+    let hits = findings("JavaScript", "worker.js", source, RECEIVER, true);
+    assert!(hits.iter().any(|hit| hit.message == "Clean up root and key before fallthrough"), "{hits:?}");
+}
+
+#[test]
 fn optional_calls_do_not_unconditionally_execute_nested_cleanup() {
     let source = r#"function cleanup(root, key) { root.remove(key); }
 function pending(root, key, maybe) {

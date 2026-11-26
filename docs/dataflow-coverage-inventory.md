@@ -74,5 +74,7 @@ unobserved promise by this check. Results assigned before being placed directly
 in an array or spread argument are also tracked through supported aliases and
 helper calls and reported under `unresolved_result_receiver`. Simple array
 literals can also be stored and aliased before a call, including arrays returned
-or passed through supported helpers. This does not model array mutations,
-arbitrary expressions inside the literal, or all collection APIs.
+or passed through supported helpers. Known elements remain tracked when another
+element uses an unsupported expression; direct calls to supported helpers in
+array literals are followed. This does not model array mutations, every element
+expression, or all collection APIs.

@@ -146,6 +146,12 @@ impl Flow<'_> {
 }
 
 fn nested_arguments(cfg: &mut Cfg<Stmt>, call: Node<'_>, source: &[u8], mut current: NodeId) -> NodeId {
+    if call.kind() == "array" {
+        for item in site::children(call) {
+            current = nested_value(cfg, item, source, current);
+        }
+        return current;
+    }
     if !matches!(call.kind(), "call_expression" | "method_invocation" | "new_expression") {
         return current;
     }
@@ -155,17 +161,23 @@ fn nested_arguments(cfg: &mut Cfg<Stmt>, call: Node<'_>, source: &[u8], mut curr
         return current;
     }
     let Some(arguments) = site::arguments(call) else { return current };
-    for value in site::children(arguments).filter_map(|argument| nested_call(argument, source)) {
-        current = nested_arguments(cfg, value, source, current);
-        if cfg.keyed_exceptions {
-            if let Some(call) = throwing_call(value, source) {
-                current = cfg.fork_exception(current, call, line(value));
-            }
-        }
-        if let Some(call) = direct_call(value, source) {
-            cfg.emit(current, call, line(value));
+    for argument in site::children(arguments) {
+        current = nested_value(cfg, argument, source, current);
+    }
+    current
+}
+
+fn nested_value(cfg: &mut Cfg<Stmt>, argument: Node<'_>, source: &[u8], current: NodeId) -> NodeId {
+    let Some(value) = site::argument(argument).and_then(keyed_syntax::expression_value) else { return current; };
+    if value.kind() == "array" { return nested_arguments(cfg, value, source, current); }
+    let Some(value) = nested_call(argument, source) else { return current; };
+    let mut current = nested_arguments(cfg, value, source, current);
+    if cfg.keyed_exceptions {
+        if let Some(call) = throwing_call(value, source) {
+            current = cfg.fork_exception(current, call, line(value));
         }
     }
+    if let Some(call) = direct_call(value, source) { cfg.emit(current, call, line(value)); }
     current
 }
 
