@@ -41,6 +41,7 @@ fn limitation_detail(reason: &str) -> &'static str {
             "path_budget" => "The path-state budget was exhausted; this rule skipped the affected root.",
             "helper_summary_limit" => "Helper summaries did not converge within the analysis budget; cross-file result tracking was skipped.",
             "unresolved_helper_target" => "The helper target is ambiguous or depends on unavailable exports; cross-file call-sequence analysis may be incomplete.",
+            "unresolved_result_receiver" => "A result was passed directly to an unresolved helper; whether the helper uses it could not be determined.",
             "reexport_resolution_limit" => "The re-export resolution budget was exhausted; cross-file call-sequence analysis may be incomplete.",
             _ => "The rule could not model a path safely; analysis of the affected root was skipped.",
     })

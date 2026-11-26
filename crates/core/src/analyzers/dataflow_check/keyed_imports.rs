@@ -468,6 +468,11 @@ mod budget_tests {
         assert!(findings.is_empty());
         assert!(coverage.iter().any(|issue| issue.reason == "typed_promise_source_unavailable"), "{coverage:?}");
 
+        std::fs::write(dir.path().join("view.tsx"), "declare function pending(): Promise<void>;\ndeclare function sink(value: Promise<void>): void;\nexport function run() { sink(pending()); }\n").unwrap();
+        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
+        assert!(findings.is_empty(), "{findings:#?}");
+        assert!(coverage.iter().any(|issue| issue.reason == "unresolved_result_receiver" && issue.line == Some(3)), "{coverage:?}");
+
         std::fs::write(dir.path().join("view.tsx"), "declare function pending(): Promise<void>;\nfunction forward() { return pending(); }\nfunction again() { return forward(); }\nexport function run() { again(); }\n").unwrap();
         let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
         assert_eq!(findings.len(), 1, "{findings:#?} {coverage:?}");

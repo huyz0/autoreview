@@ -47,6 +47,13 @@ are reported as incomplete rather than assigned a guessed target.
 Trait dispatch, generic types and implementations, conditional compilation,
 re-exported types and ambiguous declarations need further work.
 
+Direct result-producing calls passed to an unresolved receiver now produce a
+coverage limitation instead of implying the receiver was verified. This
+applies to supported syntactic contracts and verified typed sources. It does
+not yet cover values assigned to locals or fields before an unresolved call,
+and it does not infer whether arbitrary external APIs actually consume them.
+Those flows remain part of the helper-flow work above.
+
 ## 2. Measure rule accuracy
 
 Extend the existing labelled Git replay workflow with documented, reproducible

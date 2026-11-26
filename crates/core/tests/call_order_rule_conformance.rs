@@ -168,6 +168,32 @@ fn every_call_order_rule_declares_a_category() {
 }
 
 #[test]
+fn unresolved_helpers_receiving_direct_results_are_reported() {
+    let cases = [
+        ("main.go", "go-os-rename-discarded-error", "package main\nimport \"os\"\nfunc run(a, b string) { external(os.Rename(a, b)) }\n", 3),
+        ("main.js", "javascript-node-fs-discarded-promise", "import { rename } from 'node:fs/promises';\nfunction run(a, b) { external(rename(a, b)); }\n", 2),
+        ("main.ts", "typescript-node-fs-discarded-promise", "import { rename } from 'node:fs/promises';\nfunction run(a, b) { external(rename(a, b)); }\n", 2),
+        ("main.tsx", "typescript-node-fs-discarded-promise", "import { rename } from 'node:fs/promises';\nfunction run(a, b) { external(rename(a, b)); }\n", 2),
+        ("Main.java", "java-discarded-objects-comparison", "import java.util.Objects;\nclass Main { void run(Object a, Object b) { external(Objects.equals(a, b)); } }\n", 2),
+        ("main.kt", "kotlin-discarded-run-catching-result", "import kotlin.runCatching\nfun run() { mystery(runCatching({ 1 })) }\n", 2),
+        ("lib.rs", "rust-discarded-remove-file-result", "use std::fs::remove_file;\nfn run(path: &str) { external(remove_file(path)); }\n", 2),
+    ];
+    for (path, rule, source, line) in cases {
+        let root = write_single_file(path, source);
+        let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &[path.into()], &[]);
+        assert!(result.coverage.iter().any(|issue| issue.reason == "unresolved_result_receiver" && issue.rule.as_deref() == Some(rule) && issue.path.as_deref() == Some(path) && issue.line == Some(line)), "{path}: {:?}", result.coverage);
+    }
+    let path = "main.js";
+    let source = "import { rename } from 'node:fs/promises';\nfunction consume(value) { return value; }\nasync function run(a, b) { await consume(rename(a, b)); other(await rename(a, b)); }\n";
+    let root = write_single_file(path, source);
+    let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &[path.into()], &[]);
+    assert!(!result.coverage.iter().any(|issue| issue.reason == "unresolved_result_receiver" && issue.rule.as_deref() == Some("javascript-node-fs-discarded-promise")), "{:?}", result.coverage);
+    std::fs::write(root.path().join(path), "import { rename } from 'node:fs/promises';\nfunction run(a, b) { if (false) { unknown(rename(a, b)); } }\n").unwrap();
+    let dead = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &[path.into()], &[]);
+    assert!(!dead.coverage.iter().any(|issue| issue.reason == "unresolved_result_receiver" && issue.rule.as_deref() == Some("javascript-node-fs-discarded-promise")), "{:?}", dead.coverage);
+}
+
+#[test]
 fn ignored_results_follow_imported_helper_arguments_and_returns() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("helper")).unwrap();
