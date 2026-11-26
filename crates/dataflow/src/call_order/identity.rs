@@ -165,6 +165,13 @@ impl<'src> Syntax<'src> {
         self.bindings.stable_boolean(name, at)
     }
 
+    pub(super) fn stable_identity(&self, name: &str, at: usize) -> Option<IdentityOperand> {
+        match self.bindings.stable_identity(name, at)? {
+            IdentityOperand::Binding(name) => Some(IdentityOperand::Scoped { name, owner: self.owner, unit: self.unit }),
+            value => Some(value),
+        }
+    }
+
     pub(super) fn local_result_binding(&self, name: &str, start: usize, defining: bool) -> Option<usize> {
         self.bindings.local_value(name, start, defining)
     }
