@@ -5,6 +5,7 @@ mod java;
 mod jest;
 pub(super) mod outbox;
 mod prisma;
+mod promise_value;
 mod rabbitmq;
 mod react;
 mod web;
@@ -40,7 +41,7 @@ fn rules() -> impl Iterator<Item = &'static Rule> {
         &react::INTERVAL_RULE,
         &prisma::RULE,
         &rabbitmq::RULE,
-    ].into_iter().chain(fetch::RULES).chain(discarded_strings::RULES)
+    ].into_iter().chain(fetch::RULES).chain(discarded_strings::RULES).chain(promise_value::RULES)
 }
 
 pub(super) fn semantic_ids() -> impl Iterator<Item = String> {
@@ -83,6 +84,7 @@ pub fn run_framework_checks(root: &Path, changed: &[String]) -> Vec<AgentFinding
         web_findings.extend(rabbitmq::inspect(path, source, file));
         web_findings.extend(jest::inspect(root, path, source, file));
         web_findings.extend(fetch::inspect(path, source, file));
+        web_findings.extend(promise_value::inspect(path, source, file));
         web_findings
     }));
     findings
