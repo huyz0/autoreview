@@ -8,6 +8,7 @@ use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, check_key
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use super::Source;
+use super::package_coverage::package_limitation;
 
 const PACKAGE_LIMIT: usize = 8;
 const CALL_LIMIT: usize = 2048;
@@ -192,19 +193,6 @@ fn check_with_probe_and_callees(
         }
     }
     (check_keyed_units_with_verified_components(spec, units, verified.discovery, &verified.components), verified.callees)
-}
-
-fn package_limitation(root: &Path, dir: &Path, reason: &'static str) -> KeyedLimitation {
-    let path = if is_package_reason(reason) {
-        root.canonicalize().ok().and_then(|root| dir.strip_prefix(root).ok().map(Path::to_owned))
-            .and_then(|path| path.to_str().map(|value| if value.is_empty() { ".".into() } else { value.replace('\\', "/") }))
-    } else { None };
-    KeyedLimitation { reason, path, line: None }
-}
-
-pub(super) fn is_package_reason(reason: &str) -> bool {
-    matches!(reason, "go_error_package_limit" | "go_error_call_limit" | "go_error_package_load_incomplete" |
-        "go_error_typecheck_incomplete" | "go_error_source_mismatch" | "go_error_probe_invalid_request")
 }
 
 fn record_result(verified: &mut Verified, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, request: &Request<'_>, item: (usize, usize, CallResult)) {
@@ -422,21 +410,6 @@ mod tests {
         assert_eq!(probe_reason(Some("invalid_module_mode")), "go_error_probe_invalid_request");
         assert_eq!(probe_reason(Some("unrecognized private details")), "go_error_checker_incomplete");
         assert_eq!(probe_reason(None), "go_error_checker_incomplete");
-    }
-
-    #[test]
-    fn package_limitations_only_expose_paths_within_the_repository() {
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let package = root.path().join("pkg").join("worker");
-        std::fs::create_dir_all(&package).unwrap();
-        let root = root.path().canonicalize().unwrap();
-        let package = package.canonicalize().unwrap();
-        let outside = outside.path().canonicalize().unwrap();
-        assert_eq!(package_limitation(&root, &package, "go_error_call_limit").path.as_deref(), Some("pkg/worker"));
-        assert_eq!(package_limitation(&root, &root, "go_error_call_limit").path.as_deref(), Some("."));
-        assert!(package_limitation(&root, &outside, "go_error_call_limit").path.is_none());
-        assert!(package_limitation(&root, &package, "go_error_checker_incomplete").path.is_none());
     }
 
     #[test]

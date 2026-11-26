@@ -29,7 +29,7 @@ pub(super) fn record_rule_limits(coverage: &mut Vec<AnalysisCoverageIssue>, rule
     for limitation in limitations {
         let detail = limitation_detail(limitation.reason);
         let scope = if limitation.path.is_none() { "rule" }
-            else if super::go_evidence::is_package_reason(limitation.reason) { "package" }
+            else if super::package_coverage::is_package_reason(limitation.reason) { "package" }
             else { "function" };
         let mut record = issue(limitation.path.as_deref(), limitation.reason, scope, detail);
         record.line = limitation.line.filter(|line| *line > 0);

@@ -19,6 +19,7 @@ mod rust;
 mod web;
 mod typed;
 mod go_evidence;
+mod package_coverage;
 mod coverage;
 use coverage::{issue, record_flow_limits, record_rule_limits, scope_coverage};
 use typed::{check_typed_rule, TrustedTypeScript};
