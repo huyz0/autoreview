@@ -115,23 +115,8 @@ impl Lower<'_> {
             let fallback = (!last).then(|| self.cfg.push_node(super::line(arm)));
             self.edge(next, start, if last { EdgeKind::Fallthrough } else { EdgeKind::True });
             if let Some(fallback) = fallback { self.edge(next, fallback, EdgeKind::False); }
-            let mut arm_names = names.clone();
-            for binding in arm_bindings(arm) {
-                let name = self.text(binding).to_owned();
-                arm_names.insert(name.clone(), self.fresh(&name));
-                if self.cfg.keyed_flow.is_some() {
-                    self.cfg.emit(start, Stmt::Rebind(BindingWrite { name: name.clone(), start: binding.start_byte(),
-                        value: Some(IdentityOperand::Fresh { name, start: binding.start_byte(), age: 0, unit: 0 }) }), super::line(binding));
-                }
-            }
-            let guard = arm.child_by_field_name("pattern").and_then(|pattern| pattern.child_by_field_name("condition"));
-            let body_start = if let Some(guard) = guard {
-                let checked = self.evaluate(Some(guard), start, &arm_names);
-                let selected = self.cfg.push_node(super::line(value));
-                self.edge(checked, selected, EdgeKind::True);
-                self.edge(checked, fallback?, EdgeKind::False);
-                selected
-            } else { start };
+            let mut arm_names = self.bind_arm(arm, start, names);
+            let body_start = self.guard_entry(arm, start, fallback, &arm_names)?;
             if let Some(end) = self.statement(value, body_start, &mut arm_names) { ends.push(end); }
             if let Some(fallback) = fallback { next = fallback; }
         }
@@ -139,6 +124,29 @@ impl Lower<'_> {
         let join = self.cfg.push_node(super::line(node));
         for end in ends { self.edge(end, join, EdgeKind::Fallthrough); }
         Some(join)
+    }
+
+    fn bind_arm(&mut self, arm: Node<'_>, start: NodeId, names: &Bindings) -> Bindings {
+        let mut arm_names = names.clone();
+        for binding in arm_bindings(arm) {
+            let name = self.text(binding).to_owned();
+            arm_names.insert(name.clone(), self.fresh(&name));
+            if self.cfg.keyed_flow.is_some() {
+                self.cfg.emit(start, Stmt::Rebind(BindingWrite { name: name.clone(), start: binding.start_byte(),
+                    value: Some(IdentityOperand::Fresh { name, start: binding.start_byte(), age: 0, unit: 0 }) }), super::line(binding));
+            }
+        }
+        arm_names
+    }
+
+    fn guard_entry(&mut self, arm: Node<'_>, start: NodeId, fallback: Option<NodeId>, names: &Bindings) -> Option<NodeId> {
+        let guard = arm.child_by_field_name("pattern").and_then(|pattern| pattern.child_by_field_name("condition"));
+        let Some(guard) = guard else { return Some(start) };
+        let checked = self.evaluate(Some(guard), start, names);
+        let selected = self.cfg.push_node(super::line(arm.child_by_field_name("value")?));
+        self.edge(checked, selected, EdgeKind::True);
+        self.edge(checked, fallback?, EdgeKind::False);
+        Some(selected)
     }
 }
 

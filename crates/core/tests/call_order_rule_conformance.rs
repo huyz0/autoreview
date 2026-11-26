@@ -768,19 +768,17 @@ fn rust_unbound_enum_match_tracks_results() {
     }
 }
 
-#[test]
-fn rust_literal_match_checks_cleanup_on_each_arm() {
+fn assert_rust_match_cleanup(rule: &str, source: &str) {
     use autoreview_core::ResolvedRulePack;
     use autoreview_schema::RulePackTrust;
     let repo = tempfile::tempdir().unwrap();
     let pack = tempfile::tempdir().unwrap();
-    std::fs::write(pack.path().join("rust.yml"), "id: rust-match-cleanup\nkind: call-sequence\nlanguage: Rust\ncategory: correctness\nseverity: warning\nmessage: Finish before leaving\nafter: [{call: begin}]\nunless: [{call: finish}]\ncheckBeforeReturn: true\n").unwrap();
-    let source = "fn partial() {\n match begin() { Some(_) => { finish(); }, _ => {} };\n}\nfn closed() {\n match begin() { Some(_) => { finish(); }, _ => { finish(); } };\n}\n";
+    std::fs::write(pack.path().join("rust.yml"), format!("id: {rule}\nkind: call-sequence\nlanguage: Rust\ncategory: correctness\nseverity: warning\nmessage: Finish before leaving\nafter: [{{call: begin}}]\nunless: [{{call: finish}}]\ncheckBeforeReturn: true\n")).unwrap();
     std::fs::write(repo.path().join("lib.rs"), source).unwrap();
     let result = run_dataflow_check_with_coverage(repo.path(), repo.path(), &["lib.rs".into()], &[ResolvedRulePack {
         id: "match-cleanup".into(), local_path: pack.path().to_owned(), trust: RulePackTrust::Full,
     }]);
-    let lines: Vec<_> = result.findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some("rust-match-cleanup"))
+    let lines: Vec<_> = result.findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some(rule))
         .map(|finding| finding.location.range.start_line).collect();
     assert_eq!(lines.len(), 1, "{lines:?}: {:#?}", result.findings);
     assert!(lines[0] <= 3, "{lines:?}");
@@ -788,22 +786,15 @@ fn rust_literal_match_checks_cleanup_on_each_arm() {
 }
 
 #[test]
+fn rust_literal_match_checks_cleanup_on_each_arm() {
+    let source = "fn partial() {\n match begin() { Some(_) => { finish(); }, _ => {} };\n}\nfn closed() {\n match begin() { Some(_) => { finish(); }, _ => { finish(); } };\n}\n";
+    assert_rust_match_cleanup("rust-match-cleanup", source);
+}
+
+#[test]
 fn rust_match_guard_side_effects_reach_later_arms() {
-    use autoreview_core::ResolvedRulePack;
-    use autoreview_schema::RulePackTrust;
-    let repo = tempfile::tempdir().unwrap();
-    let pack = tempfile::tempdir().unwrap();
-    std::fs::write(pack.path().join("rust.yml"), "id: rust-guard-cleanup\nkind: call-sequence\nlanguage: Rust\ncategory: correctness\nseverity: warning\nmessage: Finish before leaving\nafter: [{call: begin}]\nunless: [{call: finish}]\ncheckBeforeReturn: true\n").unwrap();
     let source = "fn partial(flag: u8) {\n match flag { 0 if begin() => { finish(); }, _ => {} };\n}\nfn clean(flag: u8) {\n match flag { 0 if begin() => { finish(); }, _ => { finish(); } };\n}\n";
-    std::fs::write(repo.path().join("lib.rs"), source).unwrap();
-    let result = run_dataflow_check_with_coverage(repo.path(), repo.path(), &["lib.rs".into()], &[ResolvedRulePack {
-        id: "guard-cleanup".into(), local_path: pack.path().to_owned(), trust: RulePackTrust::Full,
-    }]);
-    let lines: Vec<_> = result.findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some("rust-guard-cleanup"))
-        .map(|finding| finding.location.range.start_line).collect();
-    assert_eq!(lines.len(), 1, "{lines:?}: {:#?}", result.findings);
-    assert!(lines[0] <= 3, "{lines:?}");
-    assert!(!result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", result.coverage);
+    assert_rust_match_cleanup("rust-guard-cleanup", source);
 }
 
 #[test]
