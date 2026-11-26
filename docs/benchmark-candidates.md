@@ -3,6 +3,29 @@
 These candidates need a matching rule and a verified replay before they can
 contribute to accuracy scores. They are not counted as detected findings.
 
+## JavaScript promise used as a synchronous value
+
+- Repository: https://github.com/chickenpoo351/SilphScope, MIT license at both
+  pinned revisions.
+- Before: `888e9e2be27eefec0bb627f124c0bfcc2b38229d`,
+  `src/get-rom-config.js:10`.
+- Fix: `0079a6f5d13e081dc5a26f683047895e6d1b7465`.
+- Evidence: `crypto.subtle.digest` returns a promise, but the earlier code
+  passes that promise to `Uint8Array` as though it were the digest buffer.
+  The fix awaits the digest before constructing the array. In a local Node
+  experiment with `crypto.subtle.digest('SHA-1', new Uint8Array([1, 2]))`,
+  constructing a typed array from the promise produced zero elements; awaiting
+  that promise first produced a 20-byte digest.
+
+This is a candidate for promise-as-synchronous-value analysis, not an
+ignored-result finding: the promise is passed to a constructor, so a general
+result-use rule can regard it as used. A useful rule needs reliable evidence
+for both the promise-producing API and the receiving operation, including
+shadowing and aliases, and must distinguish promise-aware consumers. The
+before and after files have not been replayed against such a rule and are not
+scored. Any future label must inspect the entire file, check the actual fix
+and parent, and record incomplete analysis separately.
+
 ## Project-defined Go error returns
 
 - Repository: https://github.com/taigrr/yq, MIT license at the pinned revisions.
