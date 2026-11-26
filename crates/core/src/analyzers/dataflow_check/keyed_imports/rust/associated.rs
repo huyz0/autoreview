@@ -6,6 +6,41 @@ use std::collections::HashSet;
 
 type Binding = (PathBuf, String);
 
+// Only defer import coverage to call resolution when every matching call is
+// in a plainly lowered top-level function body. Other syntax keeps the
+// conservative import warning, even if some calls resolve successfully.
+pub(super) fn simple_calls(root: Node<'_>, prefix: &str, source: &str) -> bool {
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "call_expression" {
+            if let Some(member) = node.child_by_field_name("function").and_then(|part| text(part, source))
+                .and_then(|name| name.strip_prefix(prefix)) {
+                if member.is_empty() || !member.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+                    || !simple_call(node, source) { return false; }
+            }
+        }
+        pending.extend(children(node));
+    }
+    true
+}
+
+fn simple_call(node: Node<'_>, source: &str) -> bool {
+    let mut parent = node.parent();
+    while let Some(node) = parent {
+        match node.kind() {
+            "function_item" => {
+                let Some(name) = node.child_by_field_name("name") else { return false };
+                let signature = source.get(node.start_byte()..name.start_byte()).unwrap_or_default();
+                return node.parent().is_some_and(|root| root.kind() == "source_file")
+                    && !signature.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|word| word == "async");
+            }
+            "block" | "expression_statement" | "return_expression" => parent = node.parent(),
+            _ => return false,
+        }
+    }
+    false
+}
+
 // Follow unique explicit re-exports through verified module edges.
 pub(super) fn associated_type_origin(
     resolver: &Resolver<'_>,
