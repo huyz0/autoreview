@@ -8,6 +8,7 @@ use tree_sitter::{Node, Point, Tree};
 struct ParsedSource {
     source: String,
     tree: Tree,
+    remaining_nodes: usize,
 }
 
 const RULES: &[&str] = &[
@@ -18,21 +19,23 @@ const RULES: &[&str] = &[
 ];
 const DETAIL: &str = "The callback's execution timing and identity were not resolved; review whether its body executes in this suspend function.";
 
-pub(super) fn annotate(root: &Path, findings: &mut [AgentFinding]) -> Vec<AnalysisCoverageIssue> {
+pub(super) fn annotate(root: &Path, findings: &mut Vec<AgentFinding>) -> Vec<AnalysisCoverageIssue> {
     let mut trees: HashMap<String, Option<ParsedSource>> = HashMap::new();
     let mut coverage = Vec::new();
-    for finding in findings {
-        let Some(rule) = finding.source.rule_id.as_deref().filter(|rule| RULES.contains(rule)) else { continue };
+    findings.retain_mut(|finding| {
+        let Some(rule) = finding.source.rule_id.as_deref().filter(|rule| RULES.contains(rule)) else { return true };
         if finding.meta.as_ref().is_some_and(|meta| meta.contains_key("rulePackId")) {
-            continue;
+            return true;
         }
         let tree = trees.entry(finding.location.path.clone()).or_insert_with(|| {
             let source = std::fs::read_to_string(root.join(&finding.location.path)).ok()?;
             let tree = parser_for(Language::Kotlin)?.parse(&source, None)?;
-            (!tree.root_node().has_error()).then_some(ParsedSource { source, tree })
+            (!tree.root_node().has_error()).then_some(ParsedSource { source, tree, remaining_nodes: 200_000 })
         });
-        if callback_context(tree.as_ref(), finding) == Some(false) {
-            continue;
+        match callback_context(tree.as_mut(), finding) {
+            Some(Execution::Deferred) => return false,
+            Some(Execution::Immediate) => return true,
+            Some(Execution::Unknown) | None => {}
         }
         finding.confidence = finding.confidence.min(0.5);
         finding.message.push_str(" Callback execution timing is unresolved; verify the execution context.");
@@ -41,25 +44,68 @@ pub(super) fn annotate(root: &Path, findings: &mut [AgentFinding]) -> Vec<Analys
             scope: "function".into(), path: Some(finding.location.path.clone()),
             line: Some(finding.location.range.start_line), rule: Some(rule.into()), detail: DETAIL.into(),
         });
-    }
+        true
+    });
     coverage
 }
 
-fn callback_context(parsed: Option<&ParsedSource>, finding: &AgentFinding) -> Option<bool> {
+enum Execution { Immediate, Deferred, Unknown }
+
+fn callback_context(parsed: Option<&mut ParsedSource>, finding: &AgentFinding) -> Option<Execution> {
     let position = Point::new(
         finding.location.range.start_line.checked_sub(1)? as usize,
         finding.location.range.start_col?.checked_sub(1)? as usize,
     );
-    let parsed = parsed?;
-    let node = parsed.tree.root_node().descendant_for_point_range(position, position)?;
+    let ParsedSource { source, tree, remaining_nodes } = parsed?;
+    let node = tree.root_node().descendant_for_point_range(position, position)?;
+    let mut unknown = false;
     for ancestor in std::iter::successors(Some(node), |node| node.parent()) {
         match ancestor.kind() {
-            "lambda_literal" if !immediately_invoked(ancestor, &parsed.source) => return Some(true),
-            "function_declaration" | "anonymous_function" => return Some(false),
+            "lambda_literal" if !immediately_invoked(ancestor, source) => {
+                if unused_local(ancestor, source, remaining_nodes) == Some(true) { return Some(Execution::Deferred); }
+                unknown = true;
+            }
+            "function_declaration" | "anonymous_function" => return Some(if unknown { Execution::Unknown } else { Execution::Immediate }),
             _ => {}
         }
     }
     None
+}
+
+fn unused_local(lambda: Node<'_>, source: &str, remaining_nodes: &mut usize) -> Option<bool> {
+    let mut expression = lambda;
+    while let Some(parent) = expression.parent().filter(|node| node.kind() == "parenthesized_expression") {
+        expression = parent;
+    }
+    let declaration = expression.parent().filter(|node| node.kind() == "property_declaration")?;
+    if !declaration.parent().is_some_and(|node| matches!(node.kind(), "block" | "lambda_literal")) { return None; }
+    let name = simple_val(declaration, expression, source)?.trim_matches('`');
+    let scope = std::iter::successors(declaration.parent(), |node| node.parent())
+        .find(|node| matches!(node.kind(), "function_declaration" | "anonymous_function"))?;
+    single_identifier(scope, name, source, remaining_nodes)
+}
+
+fn single_identifier(scope: Node<'_>, name: &str, source: &str, remaining_nodes: &mut usize) -> Option<bool> {
+    let mut cursor = scope.walk();
+    let mut count = 0;
+    loop {
+        let node = cursor.node();
+        *remaining_nodes = remaining_nodes.checked_sub(1)?;
+        if node.kind() == "identifier" && text(node, source)?.trim_matches('`') == name {
+            count += 1;
+            if count > 1 { return Some(false); }
+        }
+        if !advance(&mut cursor, scope)? { return Some(count == 1); }
+    }
+}
+
+fn advance(cursor: &mut tree_sitter::TreeCursor<'_>, scope: Node<'_>) -> Option<bool> {
+    if cursor.goto_first_child() { return Some(true); }
+    loop {
+        if cursor.node() == scope { return Some(false); }
+        if cursor.goto_next_sibling() { return Some(true); }
+        if !cursor.goto_parent() { return None; }
+    }
 }
 
 fn immediately_invoked(lambda: Node<'_>, source: &str) -> bool {
@@ -141,4 +187,21 @@ fn simple_val<'a>(declaration: Node<'_>, value: Node<'_>, source: &'a str) -> Op
 
 fn text<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
     node.utf8_text(source.as_bytes()).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unused_local_exhaustion_never_proves_deferred() {
+        let source = "suspend fun run() { val callback = { work() } }";
+        let tree = parser_for(Language::Kotlin).unwrap().parse(source, None).unwrap();
+        let root = tree.root_node();
+        let position = source.find("{ work()").unwrap();
+        let node = root.descendant_for_byte_range(position, position + 1).unwrap();
+        let lambda = std::iter::successors(Some(node), |node| node.parent()).find(|node| node.kind() == "lambda_literal").unwrap();
+        assert_eq!(unused_local(lambda, source, &mut 0), None);
+        assert_eq!(unused_local(lambda, source, &mut 100), Some(true));
+    }
 }

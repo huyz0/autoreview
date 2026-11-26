@@ -46,6 +46,9 @@ immutable local aliases from a literal to an explicit `.invoke()` call, with a
 inner lambda is directly invoked. Intervening statements, mutable bindings,
 bare-name calls, inline library methods, and functional-interface conversions
 remain unresolved.
+An immutable local lambda with no other matching identifier in its enclosing
+function is also recognized as uninvoked, within a shared per-file syntax-node
+budget. Same-named shadowed identifiers conservatively prevent that proof.
 
 1. Add an execution-context result to the shared analysis model, including
    source and callback locations, evidence identity, and an explicit unknown
