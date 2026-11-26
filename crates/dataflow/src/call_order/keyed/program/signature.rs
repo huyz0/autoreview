@@ -27,6 +27,7 @@ pub(super) fn export(node: Node<'_>, source: &[u8], name: String) -> Export {
 }
 
 fn is_visible(node: Node<'_>, source: &[u8], name: &str, associated: bool) -> bool {
+    if node.kind() == "function_item" { return rust_function_visible(node, source, associated); }
     let parent = node.parent();
     let signature = node
         .child_by_field_name("name")
@@ -39,9 +40,6 @@ fn is_visible(node: Node<'_>, source: &[u8], name: &str, associated: bool) -> bo
     };
     match node.kind() {
         "method_declaration" => has(b"static") && !has(b"private"),
-        "function_item" if associated => children(node).find(|child| child.kind() == "visibility_modifier")
-            .and_then(|visibility| visibility.utf8_text(source).ok()).is_some_and(|visibility| matches!(visibility, "pub" | "pub(crate)")),
-        "function_item" => has(b"pub"),
         "arrow_function" | "function_expression" => web_value_visible(parent),
         _ if parent.is_some_and(|parent| parent.kind() == "export_statement") => true,
         _ if node
@@ -52,6 +50,13 @@ fn is_visible(node: Node<'_>, source: &[u8], name: &str, associated: bool) -> bo
         }
         _ => parent.is_some_and(|parent| parent.kind() != "program") && !has(b"private"),
     }
+}
+
+fn rust_function_visible(node: Node<'_>, source: &[u8], associated: bool) -> bool {
+    let visibility = children(node).find(|child| child.kind() == "visibility_modifier")
+        .and_then(|visibility| visibility.utf8_text(source).ok());
+    if associated { visibility.is_some_and(|value| matches!(value, "pub" | "pub(crate)")) }
+    else { visibility.is_some() }
 }
 
 fn web_value_visible(parent: Option<Node<'_>>) -> bool {
