@@ -44,7 +44,12 @@ struct Request<'a> {
     include_callees: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     include_error_origins: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dependency_sources: Option<&'a BTreeMap<String, DependencySnapshot>>,
 }
+
+#[derive(Serialize)]
+struct DependencySnapshot { directory: PathBuf, files: BTreeMap<String, String> }
 
 #[derive(Clone, Deserialize, Serialize)]
 struct Call {
@@ -142,16 +147,23 @@ pub(super) fn check_go_rule(
     spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, root: &Path,
 ) -> (KeyedCheckResult, CalleeEvidence) {
     let Some(checker) = TrustedGo::from_environment() else { return (check_keyed_units_with_coverage(spec, units), BTreeMap::new()); };
-    let options = ProbeOptions { root, checker: &checker, include_callees: std::env::var_os("AUTOREVIEW_GO_CALLEE_EVIDENCE").is_some_and(|value| value == "1"), include_error_origins: std::env::var_os("AUTOREVIEW_GO_ERROR_ORIGIN_EVIDENCE").is_some_and(|value| value == "1") };
-    check_with_probe_and_callees(spec, units, sources, options)
+    let include_error_origins = std::env::var_os("AUTOREVIEW_GO_ERROR_ORIGIN_EVIDENCE").is_some_and(|value| value == "1");
+    let config = std::env::var_os("AUTOREVIEW_GO_ERROR_ORIGIN_DEPENDENCIES");
+    let dependencies = if include_error_origins { config.as_deref().map(|value| value.to_str().ok_or(()).and_then(|text| dependency_snapshots(root, text))).transpose() } else { Ok(None) };
+    let invalid = dependencies.is_err();
+    let dependencies = dependencies.ok().flatten();
+    let options = ProbeOptions { root, checker: &checker, include_callees: std::env::var_os("AUTOREVIEW_GO_CALLEE_EVIDENCE").is_some_and(|value| value == "1"), include_error_origins: include_error_origins && !invalid, dependencies: dependencies.as_ref() };
+    let (mut result, evidence) = check_with_probe_and_callees(spec, units, sources, options);
+    if invalid { result.limitations.push(dependency_limitation()); }
+    (result, evidence)
 }
 
-struct ProbeOptions<'a> { root: &'a Path, checker: &'a TrustedGo, include_callees: bool, include_error_origins: bool }
+struct ProbeOptions<'a> { root: &'a Path, checker: &'a TrustedGo, include_callees: bool, include_error_origins: bool, dependencies: Option<&'a BTreeMap<String, DependencySnapshot>> }
 
 fn check_with_probe_and_callees(
     spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, options: ProbeOptions<'_>,
 ) -> (KeyedCheckResult, CalleeEvidence) {
-    let ProbeOptions { root, checker, include_callees, include_error_origins } = options;
+    let ProbeOptions { root, checker, include_callees, include_error_origins, dependencies } = options;
     let mut verified = Verified { discovery: FactorySourceDiscovery { candidates: BTreeMap::new(), limitations: Vec::new() }, components: BTreeMap::new(), callees: BTreeMap::new() };
     let groups = collect_groups(units, sources, root, &mut verified.discovery.limitations);
     for (index, (dir, group)) in groups.into_iter().filter(|(_, group)| !group.calls.is_empty()).enumerate() {
@@ -160,8 +172,9 @@ fn check_with_probe_and_callees(
             continue;
         }
         let package_sources = (include_callees || include_error_origins).then(|| package_source_hashes(&dir)).flatten();
-        let mut request = Request { package_dir: &dir, go_binary: &checker.go, expected_sources: group.expected, package_sources, module_mode: checker.module_mode.as_deref(), calls: group.calls, include_callees, include_error_origins };
+        let mut request = Request { package_dir: &dir, go_binary: &checker.go, expected_sources: group.expected, package_sources, module_mode: checker.module_mode.as_deref(), calls: group.calls, include_callees, include_error_origins, dependency_sources: dependencies };
         let results = verify_with_fallback(&checker.probe, &mut request);
+        if dependencies.is_some() && request.dependency_sources.is_none() { verified.discovery.limitations.push(dependency_limitation()); }
         match results {
             Some(results) => for ((unit, start), result) in group.indices.into_iter().zip(results) {
                 record_result(&mut verified, units, sources, &request, (unit, start, result));
@@ -183,6 +196,7 @@ fn verify_with_fallback(probe: &Path, request: &mut Request<'_>) -> Option<Vec<C
     verify(probe, request).or_else(|| {
         if !request.include_error_origins { return None; }
         request.include_error_origins = false;
+        request.dependency_sources = None;
         if !request.include_callees { request.package_sources = None; }
         verify(probe, request)
     }).or_else(|| {
@@ -191,6 +205,25 @@ fn verify_with_fallback(probe: &Path, request: &mut Request<'_>) -> Option<Vec<C
         request.package_sources = None;
         verify(probe, request)
     })
+}
+
+fn dependency_limitation() -> KeyedLimitation {
+    KeyedLimitation { reason: "go_dependency_evidence_incomplete", path: None, line: None }
+}
+
+fn dependency_snapshots(root: &Path, config: &str) -> Result<BTreeMap<String, DependencySnapshot>, ()> {
+    let paths: BTreeMap<String, String> = serde_json::from_str(config).map_err(|_| ())?;
+    if paths.is_empty() || paths.len() > PACKAGE_LIMIT { return Err(()); }
+    let root = root.canonicalize().map_err(|_| ())?;
+    paths.into_iter().map(|(package, relative)| {
+        let path = Path::new(&relative);
+        if package.is_empty() || package.len() > 1024 || package.chars().any(char::is_control) || path.is_absolute() { return Err(()); }
+        let directory = root.join(path).canonicalize().map_err(|_| ())?;
+        if !directory.starts_with(&root) || !directory.is_dir() { return Err(()); }
+        let files = package_source_hashes(&directory).ok_or(())?;
+        if files.is_empty() { return Err(()); }
+        Ok((package, DependencySnapshot { directory, files }))
+    }).collect()
 }
 
 fn package_source_hashes(dir: &Path) -> Option<BTreeMap<String, String>> {
@@ -456,6 +489,39 @@ mod tests {
         assert_eq!(origin["contextParameter"], 0);
     }
 
+    #[test]
+    fn context_error_evidence_crosses_verified_dependency() {
+        let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
+        let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
+        let source = "package sample\nimport (\"context\"; \"example.test/probe/dep\")\nfunc wrapper(ctx context.Context) error { return dep.Leaf(ctx) }\nfunc use(ctx context.Context) { wrapper(ctx) }\n";
+        let files = [("dep/dep.go", "package dep\nimport \"context\"\nfunc Leaf(ctx context.Context) error { return ctx.Err() }\n")];
+        let (result, evidence) = analyze_source_with_config(source, &checker, false, &files, true, Some(r#"{"example.test/probe/dep":"dep"}"#));
+        let hit = result.hits.iter().find(|hit| hit.trigger_call == "wrapper").unwrap();
+        assert!(result.limitations.is_empty());
+        let origin = evidence[&(hit.path.clone().unwrap(), hit.source_start.unwrap())].error_origin.as_ref().unwrap();
+        assert_eq!(origin["kind"], "context_error_or_nil");
+    }
+
+    #[test]
+    fn older_probe_reports_unavailable_dependency_evidence_and_keeps_findings() {
+        let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_LEGACY_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
+        let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
+        let source = "package sample\nimport (\"context\"; \"example.test/probe/dep\")\nfunc wrapper(ctx context.Context) error { return dep.Leaf(ctx) }\nfunc use(ctx context.Context) { wrapper(ctx) }\n";
+        let files = [("dep/dep.go", "package dep\nimport \"context\"\nfunc Leaf(ctx context.Context) error { return ctx.Err() }\n")];
+        let (result, evidence) = analyze_source_with_config(source, &checker, false, &files, true, Some(r#"{"example.test/probe/dep":"dep"}"#));
+        assert!(result.hits.iter().any(|hit| hit.trigger_call == "wrapper"));
+        assert!(result.limitations.iter().any(|item| item.reason == "go_dependency_evidence_incomplete"));
+        assert!(evidence.is_empty());
+    }
+
+    #[test]
+    fn dependency_snapshot_paths_must_stay_inside_root() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(dependency_snapshots(dir.path(), r#"{"example.test/dep":".."}"#).is_err());
+        assert!(dependency_snapshots(dir.path(), "not-json").is_err());
+        assert!(dependency_snapshots(dir.path(), "{}").is_err());
+    }
+
     fn analyze_source(source: &str, checker: &TrustedGo) -> KeyedCheckResult {
         analyze_source_with_evidence(source, checker, false).0
     }
@@ -469,6 +535,10 @@ mod tests {
     }
 
     fn analyze_source_with_origins(source: &str, checker: &TrustedGo, include_callees: bool, extra: &[(&str, &str)], include_error_origins: bool) -> (KeyedCheckResult, CalleeEvidence) {
+        analyze_source_with_config(source, checker, include_callees, extra, include_error_origins, None)
+    }
+
+    fn analyze_source_with_config(source: &str, checker: &TrustedGo, include_callees: bool, extra: &[(&str, &str)], include_error_origins: bool, config: Option<&str>) -> (KeyedCheckResult, CalleeEvidence) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("go.mod"), "module example.test/probe\n\ngo 1.22\n").unwrap();
         std::fs::write(dir.path().join("main.go"), source).unwrap();
@@ -488,6 +558,7 @@ mod tests {
         let units = [KeyedUnit { path: "main.go", source: source.as_bytes(), functions: &functions, imports: &[], exports: &[], entry: true }];
         let rules = crate::analyzers::call_order_rules::load_call_order_rules(&[]);
         let rule = rules.iter().find(|rule| rule.id == "go-project-error-result-unobserved").unwrap();
-        check_with_probe_and_callees(&rule.spec, &units, &sources, ProbeOptions { root: dir.path(), checker, include_callees, include_error_origins })
+        let dependencies = config.map(|value| dependency_snapshots(dir.path(), value).unwrap());
+        check_with_probe_and_callees(&rule.spec, &units, &sources, ProbeOptions { root: dir.path(), checker, include_callees, include_error_origins, dependencies: dependencies.as_ref() })
     }
 }

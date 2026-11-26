@@ -26,15 +26,20 @@ type callSite struct {
 	Start int    `json:"start"`
 }
 type request struct {
-	Files               []sourceFile      `json:"files,omitempty"`
-	Calls               []callSite        `json:"calls"`
-	PackageDir          string            `json:"packageDir,omitempty"`
-	GoBinary            string            `json:"goBinary,omitempty"`
-	ExpectedSources     map[string]string `json:"expectedSources,omitempty"`
-	PackageSources      map[string]string `json:"packageSources,omitempty"`
-	ModuleMode          string            `json:"moduleMode,omitempty"`
-	IncludeCallees      bool              `json:"includeCallees,omitempty"`
-	IncludeErrorOrigins bool              `json:"includeErrorOrigins,omitempty"`
+	Files               []sourceFile                  `json:"files,omitempty"`
+	Calls               []callSite                    `json:"calls"`
+	PackageDir          string                        `json:"packageDir,omitempty"`
+	GoBinary            string                        `json:"goBinary,omitempty"`
+	ExpectedSources     map[string]string             `json:"expectedSources,omitempty"`
+	PackageSources      map[string]string             `json:"packageSources,omitempty"`
+	ModuleMode          string                        `json:"moduleMode,omitempty"`
+	IncludeCallees      bool                          `json:"includeCallees,omitempty"`
+	IncludeErrorOrigins bool                          `json:"includeErrorOrigins,omitempty"`
+	DependencySources   map[string]dependencySnapshot `json:"dependencySources,omitempty"`
+}
+type dependencySnapshot struct {
+	Directory string            `json:"directory"`
+	Files     map[string]string `json:"files"`
 }
 type callee struct {
 	Package  string `json:"package"`
@@ -78,7 +83,11 @@ func analyze(req request) response {
 		return incomplete("type_errors")
 	}
 	indexes := indexCalls(fset, byPath)
-	origins := indexErrorOrigins(files, info, req.IncludeErrorOrigins)
+	origins, reason := dependencyErrorOrigins(loaded, req.IncludeErrorOrigins)
+	if reason != "" {
+		return incomplete(reason)
+	}
+	indexErrorOriginsInto(files, info, req.IncludeErrorOrigins, origins)
 	result := response{Version: 2, Status: "ok", Calls: make([]callResult, 0, len(req.Calls))}
 	for _, call := range req.Calls {
 		node := indexes[call.Path][call.Start]
@@ -168,7 +177,7 @@ func functionIdentity(function *types.Func) *callee {
 
 func preparePackage(fset *token.FileSet, req request) (loadedPackage, string) {
 	if req.PackageDir == "" && req.GoBinary == "" {
-		if req.ModuleMode != "" {
+		if req.ModuleMode != "" || len(req.DependencySources) > 0 {
 			return loadedPackage{}, "invalid_request"
 		}
 		return loadedPackage{files: req.Files, importer: importer.Default(), path: "autoreview.local/package"}, ""
@@ -176,7 +185,10 @@ func preparePackage(fset *token.FileSet, req request) (loadedPackage, string) {
 	if len(req.Files) != 0 {
 		return loadedPackage{}, "invalid_request"
 	}
-	loaded, reason := loadPackage(fset, req.PackageDir, req.GoBinary, req.ModuleMode)
+	if len(req.DependencySources) > 0 && !req.IncludeErrorOrigins {
+		return loadedPackage{}, "invalid_request"
+	}
+	loaded, reason := loadPackage(fset, req.PackageDir, req.GoBinary, req.ModuleMode, req.DependencySources)
 	if reason == "" && (!matchesExpectedSources(loaded.files, req.Calls, req.ExpectedSources, false) ||
 		(req.IncludeCallees || req.IncludeErrorOrigins) && !matchesPackageSources(loaded.files, req.PackageSources, req.ExpectedSources)) {
 		return loadedPackage{}, "source_mismatch"

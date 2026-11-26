@@ -30,9 +30,16 @@ type listedPackage struct {
 	Error      *struct{ Err string }
 }
 type loadedPackage struct {
-	files    []sourceFile
-	importer types.Importer
-	path     string
+	files        []sourceFile
+	importer     types.Importer
+	path         string
+	dependencies []verifiedDependency
+}
+
+type verifiedDependency struct {
+	listed  listedPackage
+	files   []sourceFile
+	exports map[string]string
 }
 
 type limitedBuffer struct {
@@ -47,7 +54,7 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	return b.Buffer.Write(p)
 }
 
-func loadPackage(fset *token.FileSet, dir, binary, mode string) (loadedPackage, string) {
+func loadPackage(fset *token.FileSet, dir, binary, mode string, snapshots map[string]dependencySnapshot) (loadedPackage, string) {
 	if reason := packageConfigError(dir, binary, mode); reason != "" {
 		return loadedPackage{}, reason
 	}
@@ -62,7 +69,16 @@ func loadPackage(fset *token.FileSet, dir, binary, mode string) (loadedPackage, 
 	if !ok {
 		return loadedPackage{}, "package_load_incomplete"
 	}
-	return assemblePackage(fset, target, exports)
+	loaded, reason := assemblePackage(fset, target, exports)
+	if reason != "" {
+		return loadedPackage{}, reason
+	}
+	dependencies, ok := verifyDependencySources(packages, target.ImportPath, snapshots, exports)
+	if !ok {
+		return loadedPackage{}, "dependency_source_mismatch"
+	}
+	loaded.dependencies = dependencies
+	return loaded, ""
 }
 
 func packageConfigError(dir, binary, mode string) string {
@@ -80,13 +96,17 @@ func assemblePackage(fset *token.FileSet, target listedPackage, exports map[stri
 	if !ok {
 		return loadedPackage{}, "package_sources_unavailable"
 	}
+	return loadedPackage{files: sources, importer: packageImporter(fset, target, exports), path: target.ImportPath}, ""
+}
+
+func packageImporter(fset *token.FileSet, target listedPackage, exports map[string]string) types.Importer {
 	lookup := func(path string) (io.ReadCloser, error) {
 		if mapped := target.ImportMap[path]; mapped != "" {
 			path = mapped
 		}
 		return os.Open(exports[path])
 	}
-	return loadedPackage{files: sources, importer: importer.ForCompiler(fset, "gc", lookup), path: target.ImportPath}, ""
+	return importer.ForCompiler(fset, "gc", lookup)
 }
 
 func listPackages(dir, binary, mode string) ([]listedPackage, bool) {

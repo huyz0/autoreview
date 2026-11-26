@@ -59,6 +59,8 @@ deep tier.
   `AUTOREVIEW_GO_ERROR_ORIGIN_EVIDENCE=1` optionally adds conservative
   same-package context-error summaries to finding metadata; these summaries
   do not establish that discarding an error is safe.
+  Explicitly configured repository dependencies can also contribute verified
+  source summaries; see [the Go probe documentation](tools/go-error-evidence/README.md).
 - **Framework checks** flag Go context cancellation missed on a branch or
   through a same-package helper, Java Spring transaction self-invocation,
   and Hibernate reads that initialize a mapped lazy collection for each
