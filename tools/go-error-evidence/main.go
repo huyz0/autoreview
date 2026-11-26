@@ -82,19 +82,23 @@ func analyze(req request) response {
 	result := response{Version: 2, Status: "ok", Calls: make([]callResult, 0, len(req.Calls))}
 	for _, call := range req.Calls {
 		node := indexes[call.Path][call.Start]
-		status, count, indexes := callStatus(node, info)
-		item := callResult{Path: call.Path, Start: call.Start, Status: status, ResultCount: count, ErrorIndexes: indexes}
-		if req.IncludeCallees {
-			item.Callee = resolvedCallee(node, info)
-		}
-		if req.IncludeErrorOrigins {
-			if target := resolvedCallee(node, info); target != nil {
-				item.ErrorOrigin = origins[*target]
-			}
-		}
-		result.Calls = append(result.Calls, item)
+		result.Calls = append(result.Calls, makeCallResult(call, node, info, origins, req))
 	}
 	return result
+}
+
+func makeCallResult(call callSite, node *ast.CallExpr, info *types.Info, origins map[callee]*errorOrigin, req request) callResult {
+	status, count, indexes := callStatus(node, info)
+	item := callResult{Path: call.Path, Start: call.Start, Status: status, ResultCount: count, ErrorIndexes: indexes}
+	if req.IncludeCallees {
+		item.Callee = resolvedCallee(node, info)
+	}
+	if req.IncludeErrorOrigins {
+		if target := resolvedCallee(node, info); target != nil {
+			item.ErrorOrigin = origins[*target]
+		}
+	}
+	return item
 }
 
 // resolvedCallee identifies only statically bound calls. Interface calls and

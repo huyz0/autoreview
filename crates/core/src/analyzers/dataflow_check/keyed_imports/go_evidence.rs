@@ -111,16 +111,7 @@ struct Verified {
 impl Verified {
     fn record(&mut self, unit: &KeyedUnit<'_, '_, '_>, file: &Source, position: (usize, usize), result: CallResult) {
         let (index, start) = position;
-        if let Some(callee) = &result.callee {
-            if valid_callee(callee) {
-                if let Ok(value) = serde_json::to_value(callee) { self.callees.entry((unit.path.to_owned(), start)).or_default().callee = Some(value); }
-            }
-        }
-        if let Some(origin) = &result.error_origin {
-            if origin.kind == "context_error_or_nil" && origin.context_parameter < 1024 {
-                if let Ok(value) = serde_json::to_value(origin) { self.callees.entry((unit.path.to_owned(), start)).or_default().error_origin = Some(value); }
-            }
-        }
+        self.record_evidence(unit.path, start, &result);
         match result.status.as_str() {
             "error" => { self.discovery.candidates.entry(index).or_default().insert(start); }
             "multi_error" if multi_supported(file, start, result.result_count) => {
@@ -130,6 +121,19 @@ impl Verified {
             "multi_error" => self.discovery.limitations.push(multi_limitation(unit, start)),
             "not_proven" => {}
             _ => self.discovery.limitations.push(limitation(Some(unit.path))),
+        }
+    }
+
+    fn record_evidence(&mut self, path: &str, start: usize, result: &CallResult) {
+        if let Some(callee) = &result.callee {
+            if valid_callee(callee) {
+                if let Ok(value) = serde_json::to_value(callee) { self.callees.entry((path.to_owned(), start)).or_default().callee = Some(value); }
+            }
+        }
+        if let Some(origin) = &result.error_origin {
+            if origin.kind == "context_error_or_nil" && origin.context_parameter < 1024 {
+                if let Ok(value) = serde_json::to_value(origin) { self.callees.entry((path.to_owned(), start)).or_default().error_origin = Some(value); }
+            }
         }
     }
 }
@@ -157,17 +161,7 @@ fn check_with_probe_and_callees(
         }
         let package_sources = (include_callees || include_error_origins).then(|| package_source_hashes(&dir)).flatten();
         let mut request = Request { package_dir: &dir, go_binary: &checker.go, expected_sources: group.expected, package_sources, module_mode: checker.module_mode.as_deref(), calls: group.calls, include_callees, include_error_origins };
-        let results = verify(&checker.probe, &request).or_else(|| {
-            if !request.include_error_origins { return None; }
-            request.include_error_origins = false;
-            if !request.include_callees { request.package_sources = None; }
-            verify(&checker.probe, &request)
-        }).or_else(|| {
-            if !request.include_callees { return None; }
-            request.include_callees = false;
-            request.package_sources = None;
-            verify(&checker.probe, &request)
-        });
+        let results = verify_with_fallback(&checker.probe, &mut request);
         match results {
             Some(results) => for ((unit, start), mut result) in group.indices.into_iter().zip(results) {
                 if !request.include_callees { result.callee = None; }
@@ -178,6 +172,20 @@ fn check_with_probe_and_callees(
         }
     }
     (check_keyed_units_with_verified_components(spec, units, verified.discovery, &verified.components), verified.callees)
+}
+
+fn verify_with_fallback(probe: &Path, request: &mut Request<'_>) -> Option<Vec<CallResult>> {
+    verify(probe, request).or_else(|| {
+        if !request.include_error_origins { return None; }
+        request.include_error_origins = false;
+        if !request.include_callees { request.package_sources = None; }
+        verify(probe, request)
+    }).or_else(|| {
+        if !request.include_callees { return None; }
+        request.include_callees = false;
+        request.package_sources = None;
+        verify(probe, request)
+    })
 }
 
 fn package_source_hashes(dir: &Path) -> Option<BTreeMap<String, String>> {

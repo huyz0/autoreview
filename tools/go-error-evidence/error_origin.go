@@ -19,24 +19,28 @@ func indexErrorOrigins(files []*ast.File, info *types.Info, enabled bool) map[ca
 	}
 	for _, file := range files {
 		for _, item := range file.Decls {
-			decl, ok := item.(*ast.FuncDecl)
-			if !ok || decl.Body == nil {
-				continue
-			}
-			function, ok := info.Defs[decl.Name].(*types.Func)
-			if !ok {
-				continue
-			}
-			identity := functionIdentity(function)
-			if identity == nil {
-				continue
-			}
-			if origin := summarizeContextReturns(decl, function, info); origin != nil {
-				result[*identity] = origin
-			}
+			indexErrorOrigin(item, info, result)
 		}
 	}
 	return result
+}
+
+func indexErrorOrigin(item ast.Decl, info *types.Info, result map[callee]*errorOrigin) {
+	decl, ok := item.(*ast.FuncDecl)
+	if !ok || decl.Body == nil {
+		return
+	}
+	function, ok := info.Defs[decl.Name].(*types.Func)
+	if !ok {
+		return
+	}
+	identity := functionIdentity(function)
+	if identity == nil {
+		return
+	}
+	if origin := summarizeContextReturns(decl, function, info); origin != nil {
+		result[*identity] = origin
+	}
 }
 
 func summarizeContextReturns(decl *ast.FuncDecl, function *types.Func, info *types.Info) *errorOrigin {
@@ -51,18 +55,20 @@ func summarizeContextReturns(decl *ast.FuncDecl, function *types.Func, info *typ
 	var found *errorOrigin
 	for i := 0; i < signature.Params().Len(); i++ {
 		param := signature.Params().At(i)
-		named, ok := types.Unalias(param.Type()).(*types.Named)
-		if !ok || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != "context" || named.Obj().Name() != "Context" {
+		if !isContextParameter(param) || !contextReturnsOnly(decl.Body, param, info) {
 			continue
 		}
-		if contextReturnsOnly(decl.Body, param, info) {
-			if found != nil {
-				return nil
-			}
-			found = &errorOrigin{Kind: "context_error_or_nil", ContextParameter: i}
+		if found != nil {
+			return nil
 		}
+		found = &errorOrigin{Kind: "context_error_or_nil", ContextParameter: i}
 	}
 	return found
+}
+
+func isContextParameter(param *types.Var) bool {
+	named, ok := types.Unalias(param.Type()).(*types.Named)
+	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "context" && named.Obj().Name() == "Context"
 }
 
 func contextReturnsOnly(body *ast.BlockStmt, param *types.Var, info *types.Info) bool {
