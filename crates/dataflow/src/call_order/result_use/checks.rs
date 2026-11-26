@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+mod forwarding;
 use super::{effects, summaries, CallOrderHit, CallOrderSpec, HelperSummary, KeyedUnit, Origin, Program};
 
 pub(in crate::call_order) fn check_units(
@@ -20,10 +21,14 @@ pub(in crate::call_order) fn check_units_with_components(
     spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<usize, BTreeSet<usize>>,
     components: &BTreeMap<usize, BTreeMap<usize, super::super::ResultComponents>>,
 ) -> (Vec<CallOrderHit>, bool, Vec<super::super::keyed::KeyedLimitation>) {
+    let forwarded = if spec.contract.as_ref().is_some_and(|contract| contract.typed_promise) {
+        forwarding::forwarded_calls(&Program::new(spec, units), units, sources)
+    } else { BTreeMap::new() };
     let mut program = Program::new(spec, units);
     for frame in &mut program.frames {
         if let Some(plan) = &mut frame.plan {
             if let Some(offsets) = sources.get(&frame.unit) { plan.extra_sources.clone_from(offsets); }
+            if let Some(offsets) = forwarded.get(&frame.unit) { plan.extra_sources.retain(|offset| !offsets.contains(offset)); }
             if let Some(shapes) = components.get(&frame.unit) { plan.result_components.clone_from(shapes); }
         }
     }

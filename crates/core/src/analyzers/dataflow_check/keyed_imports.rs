@@ -75,7 +75,7 @@ pub(super) fn run(
         packages: caches,
     };
     let (typed, ordinary): (Vec<_>, Vec<_>) = rules.into_iter().partition(|(rule, _)| {
-        rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory)
+        rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory || contract.typed_promise)
     });
     let checker = TrustedTypeScript::from_environment(&source_root);
     let (mut findings, mut coverage) = run_group(&resolver, paths, &ordinary, &source_root, (None, UNIT_LIMIT));
@@ -154,7 +154,7 @@ fn run_sources(
         .collect();
     let mut findings = Vec::new();
     for &(rule, declared) in rules {
-        let typed = rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory);
+        let typed = rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory || contract.typed_promise);
         let go_typed = rule.spec.contract.as_ref().is_some_and(|contract| contract.typed_go_error);
         let units: Vec<_> = sources
             .iter()
@@ -411,7 +411,7 @@ mod budget_tests {
         let (sources, issues) = with_resolver(dir.path(), |resolver| resolver.load(&entries));
         assert!(issues.is_empty());
         let rule = CallOrderRuleDef { id: "test-typed".into(), language: "TypeScript".into(), category: "correctness".into(), severity: Severity::Medium, message: "unused promise".into(), pack_id: None, metadata: None,
-            spec: CallOrderSpec { rule_id: "test-typed".into(), after: vec![], unless: vec![], before: vec![], check_before_return: false, identity: None, contract: Some(ResultContract { mode: ContractMode::MustUse, language: ContractLanguage::Web, import: String::new(), methods: vec![], borrows: vec![], acquire_awaited: false, complete_observed: false, typed_promise_factory: true, typed_go_error: false }) } };
+            spec: CallOrderSpec { rule_id: "test-typed".into(), after: vec![], unless: vec![], before: vec![], check_before_return: false, identity: None, contract: Some(ResultContract { mode: ContractMode::MustUse, language: ContractLanguage::Web, import: String::new(), methods: vec![], borrows: vec![], acquire_awaited: false, complete_observed: false, typed_promise_factory: true, typed_promise: false, typed_go_error: false }) } };
         let rules = [(&rule, Language::TypeScript)];
         let mut coverage = Vec::new();
         assert!(run_sources(&sources, &entries, &rules, dir.path(), None, &mut coverage).is_empty());
@@ -434,6 +434,63 @@ mod budget_tests {
         assert_eq!(unsupported.len(), 2);
         assert_eq!(unsupported.iter().map(|issue| issue.line).collect::<BTreeSet<_>>(), BTreeSet::from([Some(3), Some(4)]));
         assert!(unsupported.iter().all(|issue| issue.path.as_deref() == Some("main.ts") && issue.rule.as_deref() == Some("test-typed")));
+    }
+
+    #[test]
+    fn general_typed_promise_sources_follow_calls_and_ignore_synchronous_results() {
+        use autoreview_dataflow::call_order::{CallOrderSpec, ContractLanguage, ContractMode, ResultContract};
+        use autoreview_schema::Severity;
+        let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let source = "import { pending, sync } from './api';\nclass Worker { task(): Promise<void> { return pending(); } }\nexport async function run(worker: Worker) {\n  pending();\n  worker.task();\n  sync();\n  await pending();\n}\n";
+        std::fs::write(dir.path().join("main.ts"), source).unwrap();
+        std::fs::write(dir.path().join("api.ts"), "export async function pending(): Promise<void> {}\nexport function sync(): number { return 1; }\n").unwrap();
+        let config = dir.path().join("tsconfig.json");
+        std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true},"include":["*.ts"]}"#).unwrap();
+        let rule = CallOrderRuleDef { id: "test-general".into(), language: "TypeScript".into(), category: "correctness".into(), severity: Severity::Medium, message: "unused promise".into(), pack_id: None, metadata: None,
+            spec: CallOrderSpec { rule_id: "test-general".into(), after: vec![], unless: vec![], before: vec![], check_before_return: false, identity: None, contract: Some(ResultContract { mode: ContractMode::MustUse, language: ContractLanguage::Web, import: String::new(), methods: vec![], borrows: vec![], acquire_awaited: false, complete_observed: false, typed_promise_factory: false, typed_promise: true, typed_go_error: false }) } };
+        let checker = TrustedTypeScript { node: "node".into(), compiler, config: config.to_str().unwrap().into() };
+        let rules = [(&rule, Language::TypeScript)];
+        let paths = ["main.ts".to_owned()];
+        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
+        assert_eq!(findings.iter().map(|finding| finding.location.range.start_line).collect::<BTreeSet<_>>(), BTreeSet::from([4, 5]), "{findings:#?}");
+        assert!(coverage.is_empty(), "{coverage:?}");
+
+        let tsx = "declare function pending(): Promise<void>;\ndeclare function uncertain(): unknown;\nexport function run() { pending(); uncertain(); }\n";
+        std::fs::write(dir.path().join("view.tsx"), tsx).unwrap();
+        std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true,"jsx":"preserve"},"include":["*.ts","*.tsx"]}"#).unwrap();
+        let paths = ["view.tsx".to_owned()];
+        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
+        assert_eq!(findings.len(), 1, "{findings:#?} {coverage:?}");
+        assert_eq!(findings[0].location.range.start_line, 3);
+        assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(3)), "{coverage:?}");
+        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (None, UNIT_LIMIT)));
+        assert!(findings.is_empty());
+        assert!(coverage.iter().any(|issue| issue.reason == "typed_promise_source_unavailable"), "{coverage:?}");
+
+        std::fs::write(dir.path().join("view.tsx"), "declare function pending(): Promise<void>;\nfunction forward() { return pending(); }\nfunction again() { return forward(); }\nexport function run() { again(); }\n").unwrap();
+        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
+        assert_eq!(findings.len(), 1, "{findings:#?} {coverage:?}");
+        assert_eq!(findings[0].location.range.start_line, 2, "{findings:#?}");
+
+        std::fs::write(dir.path().join("view.tsx"), "async function created(): Promise<void> {}\nexport function run() { created(); }\n").unwrap();
+        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
+        assert_eq!(findings.len(), 1, "{findings:#?} {coverage:?}");
+        assert_eq!(findings[0].location.range.start_line, 2);
+
+        std::fs::write(dir.path().join("api.ts"), "declare function pending(): Promise<void>;\nexport function forward() { return pending(); }\n").unwrap();
+        std::fs::write(dir.path().join("view.tsx"), "import { forward } from './api';\nexport function run() { forward(); }\n").unwrap();
+        std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true,"jsx":"preserve"},"files":["view.tsx","api.ts"]}"#).unwrap();
+        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
+        assert_eq!(findings.len(), 1, "{findings:#?} {coverage:?}");
+        assert_eq!(findings[0].location.path, "api.ts");
+        assert_eq!(findings[0].location.range.start_line, 2);
+
+        std::fs::write(dir.path().join("api.ts"), "export function ignore(_value: Promise<void>) {}\nexport function observe(value: Promise<void>) { return value; }\n").unwrap();
+        std::fs::write(dir.path().join("view.tsx"), "import { ignore, observe } from './api';\ndeclare function pending(): Promise<void>;\nexport async function run() {\n  ignore(pending());\n  await observe(pending());\n}\n").unwrap();
+        let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
+        assert_eq!(findings.len(), 1, "{findings:#?} {coverage:?}");
+        assert_eq!(findings[0].location.range.start_line, 4);
     }
 
     #[test]

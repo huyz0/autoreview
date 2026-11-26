@@ -127,6 +127,29 @@ Optional calls and calls with spread arguments are not modeled by the typed
 factory rule. When the imported binding resolves to factory annotation evidence,
 these call sites are reported as incomplete instead of being counted as clean.
 
+An experimental custom call-sequence rule may also set `source: typed-promise`
+on a TypeScript or TSX `must-use` contract. It sends call sites to the trusted
+compiler and tracks only confirmed promise-like returns. Known primitive
+non-promises are excluded; unknown types, unavailable sources, project errors,
+and unmodeled verified calls remain coverage limitations. Direct synchronous
+helpers whose sole return forwards a verified call preserve that call's origin,
+including simple multi-hop chains; cycles and other helper shapes keep the
+outer call as the origin. The source is not enabled as a built-in rule yet:
+its overlap with the factory rule, broader helper shapes, representative
+performance, and the independent historical candidate still need validation.
+
+```yaml
+id: example-unobserved-promise
+language: TypeScript
+category: correctness
+severity: warning
+kind: call-sequence
+message: Observe, await, or return this promise.
+contract:
+  mode: must-use
+  source: typed-promise
+```
+
 ## Evidence and release gate
 
 - Add positive, negative, ambiguity, shadowing, and regression fixtures for

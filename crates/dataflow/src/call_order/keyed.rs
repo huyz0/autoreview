@@ -61,7 +61,7 @@ fn check_with_budget(spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], budg
     if spec.contract.as_ref().is_some_and(|contract| contract.typed_go_error) {
         return KeyedCheckResult { hits: Vec::new(), limitations: vec![KeyedLimitation { reason: "typed_go_error_source_unavailable", path: None, line: None }] };
     }
-    if spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory) {
+    if spec.contract.as_ref().is_some_and(|contract| contract.typed_promise_factory || contract.typed_promise) {
         return KeyedCheckResult { hits: Vec::new(), limitations: vec![KeyedLimitation { reason: "typed_promise_source_unavailable", path: None, line: None }] };
     }
     if spec.tracks_result_use() {
