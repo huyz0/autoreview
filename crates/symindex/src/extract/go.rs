@@ -25,7 +25,7 @@ use tree_sitter::Node;
 use crate::model::{AccessRef, CallChain, ForeignAccessRef, MethodDecl, NamedSlot, TypeDecl};
 
 mod helper_envy;
-pub(crate) use helper_envy::GoHelperEnvy;
+pub(crate) use helper_envy::GoPackageIndex;
 
 fn text<'a>(node: Node, source: &'a [u8]) -> &'a str {
     node.utf8_text(source).unwrap_or("")
@@ -35,60 +35,54 @@ fn line_of(node: Node) -> u32 {
     node.start_position().row as u32 + 1
 }
 
-/// Strips a leading `*` so a pointer-receiver's type text (`*Widget`)
-/// matches the struct name (`Widget`) it declares fields for, and a
-/// trailing `[...]` type-parameter list so a Go 1.18+ generic receiver
-/// (`*Widget[T]`) matches too — otherwise methods on generic types are
-/// silently dropped from the type's method set.
-fn strip_pointer(type_text: &str) -> &str {
-    let without_pointer = type_text.trim_start_matches('*');
-    match without_pointer.find('[') {
-        Some(idx) => &without_pointer[..idx],
-        None => without_pointer,
+/// A pointer or generic receiver uses the same owner name as its struct.
+fn receiver_type_name<'a>(mut ty: Node, source: &'a [u8]) -> Option<&'a str> {
+    if ty.kind() == "pointer_type" {
+        ty = ty.named_child(0)?;
     }
+    if ty.kind() == "generic_type" {
+        ty = ty.child_by_field_name("type")?;
+    }
+    (ty.kind() == "type_identifier").then(|| text(ty, source))
 }
 
 pub fn extract_types(tree: &tree_sitter::Tree, source: &[u8], file: &Path) -> Vec<TypeDecl> {
     let root = tree.root_node();
 
     let mut structs: Vec<TypeDecl> = Vec::new();
-    collect_structs(root, source, file, &mut structs);
+    collect_structs(root, source, file, &mut |_, decl| structs.push(decl));
 
-    let mut methods_by_owner: Vec<(String, MethodDecl)> = Vec::new();
-    collect_methods(root, source, file, &mut methods_by_owner);
-
-    for (owner, mut method) in methods_by_owner {
-        if let Some(type_decl) = structs.iter_mut().find(|t| t.name == owner) {
-            // `walk_accesses` only had the receiver's bound name in scope,
-            // not the struct's actual field list (methods are collected in
-            // a separate pass from structs) — filter own-field accesses
-            // down to real fields now that both are known, same
-            // field-name validation `java.rs` applies inline.
-            method.own_field_accesses.retain(|access| type_decl.fields.iter().any(|f| f.name == access.field_name));
-            type_decl.methods.push(method);
+    let mut cursor = root.walk();
+    for node in root.named_children(&mut cursor).filter(|node| node.kind() == "method_declaration") {
+        let Some(method) = extract_method(node, source, file) else { continue };
+        if let Some(type_decl) = structs.iter_mut().find(|ty| ty.name == method.owner_type) {
+            attach_method(type_decl, method);
         }
-        // A method whose receiver type isn't a struct found in this file
-        // (e.g. defined elsewhere) is silently dropped — cross-file
-        // struct/method attachment isn't attempted in this pass.
     }
 
     structs
 }
 
-fn collect_structs(node: Node, source: &[u8], file: &Path, out: &mut Vec<TypeDecl>) {
+fn attach_method(owner: &mut TypeDecl, mut method: MethodDecl) {
+    // The method body identifies the receiver. Its declaration supplies the field names.
+    method.own_field_accesses.retain(|access| owner.fields.iter().any(|field| field.name == access.field_name));
+    owner.methods.push(method);
+}
+
+fn collect_structs(node: Node, source: &[u8], file: &Path, record: &mut impl FnMut(Node, TypeDecl)) {
     if node.kind() == "type_declaration" {
         let mut cursor = node.walk();
         for spec in node.named_children(&mut cursor) {
             if spec.kind() == "type_spec" {
                 if let Some(type_decl) = extract_struct(spec, source, file) {
-                    out.push(type_decl);
+                    record(spec, type_decl);
                 }
             }
         }
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_structs(child, source, file, out);
+        collect_structs(child, source, file, record);
     }
 }
 
@@ -117,23 +111,11 @@ fn extract_struct(spec: Node, source: &[u8], file: &Path) -> Option<TypeDecl> {
     Some(TypeDecl { name, file: file.to_path_buf(), start_line: line_of(spec), fields, methods: Vec::new(), superclass: None })
 }
 
-fn collect_methods(node: Node, source: &[u8], file: &Path, out: &mut Vec<(String, MethodDecl)>) {
-    if node.kind() == "method_declaration" {
-        if let Some((owner, method)) = extract_method(node, source, file) {
-            out.push((owner, method));
-        }
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_methods(child, source, file, out);
-    }
-}
-
-fn extract_method(node: Node, source: &[u8], file: &Path) -> Option<(String, MethodDecl)> {
+fn extract_method(node: Node, source: &[u8], file: &Path) -> Option<MethodDecl> {
     let receiver_list = node.child_by_field_name("receiver")?;
     let receiver_decl = receiver_list.named_child(0)?;
     let receiver_type_node = receiver_decl.child_by_field_name("type")?;
-    let owner_type = strip_pointer(text(receiver_type_node, source)).to_string();
+    let owner_type = receiver_type_name(receiver_type_node, source)?.to_owned();
     // An unnamed receiver (`func (Widget) Foo()`) has no `name` field.
     let receiver_name = receiver_decl.child_by_field_name("name").map(|n| text(n, source).to_string());
 
@@ -154,10 +136,7 @@ fn extract_method(node: Node, source: &[u8], file: &Path) -> Option<(String, Met
         }
     }
 
-    // own_field_accesses is provisional here — every selector matching the
-    // receiver's bound name is recorded; extract_types filters it down to
-    // real fields once the struct's field list is known (methods and
-    // structs are collected in separate passes, joined by owner-type name).
+    // Receiver selectors are provisional until the method is attached to its struct.
     let mut own_field_accesses = Vec::new();
     let mut foreign_accesses = Vec::new();
     let mut chains = Vec::new();
@@ -166,30 +145,27 @@ fn extract_method(node: Node, source: &[u8], file: &Path) -> Option<(String, Met
         walk_chains(body, source, &mut chains);
     }
 
-    Some((
-        owner_type.clone(),
-        MethodDecl {
-            name,
-            owner_type,
-            file: file.to_path_buf(),
-            start_line: line_of(node),
-            end_line: node.end_position().row as u32 + 1,
-            params,
-            return_type_text,
-            own_field_accesses,
-            foreign_accesses,
-            helper_accesses: Vec::new(),
-            chains,
-            is_trivial_body: false,
-        },
-    ))
+    Some(MethodDecl {
+        name,
+        owner_type,
+        file: file.to_path_buf(),
+        start_line: line_of(node),
+        end_line: node.end_position().row as u32 + 1,
+        params,
+        return_type_text,
+        own_field_accesses,
+        foreign_accesses,
+        helper_accesses: Vec::new(),
+        chains,
+        is_trivial_body: false,
+    })
 }
 
 /// Walks a method body classifying `selector_expression` nodes
 /// (`operand.field`) as an own access (operand text == the receiver's own
 /// bound name) or a foreign access (operand matches a non-receiver
 /// parameter). Field-name validation against the struct's actual field
-/// list happens after the fact in `extract_types` (own accesses are
+/// list happens when attaching the method to its struct (own accesses are
 /// filtered there), since Go's single-pass walk here doesn't have the
 /// struct's field list in scope — methods are collected in a separate pass
 /// from structs and only joined by owner-type name afterward.

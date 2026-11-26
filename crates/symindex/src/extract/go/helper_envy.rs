@@ -3,25 +3,25 @@ use std::path::{Path, PathBuf};
 
 use tree_sitter::Node;
 
-use super::{line_of, text};
+use super::{attach_method, collect_structs, extract_method, line_of, text};
 use crate::model::{HelperAccess, HelperLocation, MethodDecl, TypeDecl};
 
 mod body;
 use body::{extract_caller, extract_helper, Call, Caller, Helper, LocalType};
 
 #[derive(Default)]
-pub(crate) struct GoHelperEnvy {
+pub(crate) struct GoPackageIndex {
     packages: HashMap<(PathBuf, String), Package>,
 }
 
 #[derive(Default)]
 struct Package {
     declarations: HashMap<String, PackageDecl>,
-    callers: Vec<Caller>,
+    methods: Vec<(MethodDecl, Option<Caller>)>,
 }
 
 enum PackageDecl {
-    Struct { file: PathBuf, line: u32 },
+    Struct { file: PathBuf, line: u32, index: usize, generic: bool },
     Helper(Helper),
     Unresolved,
 }
@@ -34,8 +34,13 @@ struct Forwarded<'a> {
     argument_type: &'a LocalType,
 }
 
-impl GoHelperEnvy {
-    pub(crate) fn add_file(&mut self, root: Node, source: &[u8], file: &Path, types: &[TypeDecl], first_type: usize) {
+impl GoPackageIndex {
+    pub(crate) fn add_file(&mut self, root: Node, source: &[u8], file: &Path, types: &mut Vec<TypeDecl>) {
+        let mut struct_indices = HashMap::new();
+        collect_structs(root, source, file, &mut |spec, decl| {
+            struct_indices.insert(spec.id(), types.len());
+            types.push(decl);
+        });
         let mut cursor = root.walk();
         let Some(package_name) = root.named_children(&mut cursor)
             .find(|node| node.kind() == "package_clause")
@@ -45,7 +50,7 @@ impl GoHelperEnvy {
 
         for node in root.named_children(&mut cursor) {
             match node.kind() {
-                "type_declaration" | "const_declaration" | "var_declaration" => package.add_non_functions(node, source, file),
+                "type_declaration" | "const_declaration" | "var_declaration" => package.add_non_functions(node, source, file, &struct_indices),
                 "function_declaration" => {
                     let Some(name) = node.child_by_field_name("name") else { continue };
                     let name = text(name, source);
@@ -55,7 +60,9 @@ impl GoHelperEnvy {
                     package.add_declaration(name, || extract_helper(node, source, file).map_or(PackageDecl::Unresolved, PackageDecl::Helper));
                 }
                 "method_declaration" => {
-                    package.callers.extend(extract_caller(node, source, types, first_type));
+                    if let Some(method) = extract_method(node, source, file) {
+                        package.methods.push((method, extract_caller(node, source)));
+                    }
                 }
                 _ => {}
             }
@@ -63,10 +70,16 @@ impl GoHelperEnvy {
     }
 
     pub(crate) fn attach(self, types: &mut [TypeDecl]) {
-        for package in self.packages.into_values() {
-            for caller in &package.callers {
-                let method = &mut types[caller.type_index].methods[caller.method_index];
-                method.helper_accesses = package.accesses(caller, method);
+        for mut package in self.packages.into_values() {
+            for (mut method, caller) in std::mem::take(&mut package.methods) {
+                let Some(PackageDecl::Struct { file, index, .. }) = package.declarations.get(&method.owner_type) else { continue };
+                if !visible_from(file, &method.file) {
+                    continue;
+                }
+                if let Some(caller) = caller {
+                    method.helper_accesses = package.accesses(&caller, &method);
+                }
+                attach_method(&mut types[*index], method);
             }
         }
     }
@@ -118,20 +131,23 @@ impl Package {
         self.declarations.entry(name.to_owned()).and_modify(|entry| *entry = PackageDecl::Unresolved).or_insert_with(declaration);
     }
 
-    fn add_non_functions(&mut self, declaration: Node, source: &[u8], file: &Path) {
+    fn add_non_functions(&mut self, declaration: Node, source: &[u8], file: &Path, struct_indices: &HashMap<usize, usize>) {
         let mut cursor = declaration.walk();
         for spec in declaration.named_children(&mut cursor) {
             if spec.kind() == "var_spec_list" {
-                self.add_non_functions(spec, source, file);
+                self.add_non_functions(spec, source, file, struct_indices);
                 continue;
             }
-            let is_struct = spec.kind() == "type_spec"
-                && spec.child_by_field_name("type").is_some_and(|node| node.kind() == "struct_type")
-                && spec.child_by_field_name("type_parameters").is_none();
             let mut names = spec.walk();
             for name in spec.children_by_field_name("name", &mut names).filter(Node::is_named) {
-                self.add_declaration(text(name, source), || {
-                    if is_struct { PackageDecl::Struct { file: file.to_path_buf(), line: line_of(spec) } } else { PackageDecl::Unresolved }
+                self.add_declaration(text(name, source), || match struct_indices.get(&spec.id()) {
+                    Some(&index) => PackageDecl::Struct {
+                        file: file.to_path_buf(),
+                        line: line_of(spec),
+                        index,
+                        generic: spec.child_by_field_name("type_parameters").is_some(),
+                    },
+                    None => PackageDecl::Unresolved,
                 });
             }
         }
@@ -148,7 +164,7 @@ impl<'a> Forwarded<'a> {
     ) {
         let name = &self.argument_type.name;
         let Some(count) = self.helper.access_count(self.slot) else { return };
-        let Some(PackageDecl::Struct { file: type_file, line: type_line }) = declarations.get(name) else { return };
+        let Some(PackageDecl::Struct { file: type_file, line: type_line, generic: false, .. }) = declarations.get(name) else { return };
         if name == &method.owner_type || !visible_from(type_file, &method.file) {
             return;
         }

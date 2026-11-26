@@ -4,7 +4,7 @@ use std::path::Path;
 use tree_sitter::Node;
 
 use super::super::{line_of, text};
-use crate::model::{HelperLocation, TypeDecl};
+use crate::model::HelperLocation;
 
 pub(super) struct Helper {
     pub(super) location: HelperLocation,
@@ -14,8 +14,6 @@ pub(super) struct Helper {
 }
 
 pub(super) struct Caller {
-    pub(super) type_index: usize,
-    pub(super) method_index: usize,
     pub(super) params: Vec<Option<LocalType>>,
     pub(super) calls: Vec<Call>,
 }
@@ -113,12 +111,10 @@ fn parameter_member<'a>(node: Node, source: &'a [u8], bindings: &Bindings<'_>) -
     Some((slot, member))
 }
 
-pub(super) fn extract_caller(node: Node, source: &[u8], types: &[TypeDecl], first_type: usize) -> Option<Caller> {
+pub(super) fn extract_caller(node: Node, source: &[u8]) -> Option<Caller> {
     let receiver = node.child_by_field_name("receiver")?.named_child(0)?;
-    let owner = local_type(receiver.child_by_field_name("type")?, source)?;
-    let (type_index, type_decl) = types.iter().enumerate().find(|(_, decl)| decl.name == owner.name)?;
-    let name = text(node.child_by_field_name("name")?, source);
-    let method_index = type_decl.methods.iter().position(|method| method.start_line == line_of(node) && method.name == name)?;
+    // A generic receiver can introduce type parameter names that shadow package types.
+    local_type(receiver.child_by_field_name("type")?, source)?;
     let (params, mut bindings) = function_bindings(node, source)?;
     if let Some(receiver_name) = receiver.child_by_field_name("name") {
         bindings.insert(text(receiver_name, source), None);
@@ -127,7 +123,7 @@ pub(super) fn extract_caller(node: Node, source: &[u8], types: &[TypeDecl], firs
     walk_straight_line(node.child_by_field_name("body")?, source, bindings, |node, bindings| {
         calls.extend(direct_call(node, source, bindings));
     })?;
-    (!calls.is_empty()).then_some(Caller { type_index: first_type + type_index, method_index, params, calls })
+    (!calls.is_empty()).then_some(Caller { params, calls })
 }
 
 fn direct_call(node: Node, source: &[u8], bindings: &Bindings<'_>) -> Option<Call> {
