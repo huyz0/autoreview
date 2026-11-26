@@ -163,15 +163,20 @@ fn check_with_probe_and_callees(
         let mut request = Request { package_dir: &dir, go_binary: &checker.go, expected_sources: group.expected, package_sources, module_mode: checker.module_mode.as_deref(), calls: group.calls, include_callees, include_error_origins };
         let results = verify_with_fallback(&checker.probe, &mut request);
         match results {
-            Some(results) => for ((unit, start), mut result) in group.indices.into_iter().zip(results) {
-                if !request.include_callees { result.callee = None; }
-                if !request.include_error_origins { result.error_origin = None; }
-                verified.record(&units[unit], &sources[units[unit].path], (unit, start), result);
+            Some(results) => for ((unit, start), result) in group.indices.into_iter().zip(results) {
+                record_result(&mut verified, units, sources, &request, (unit, start, result));
             },
             None => verified.discovery.limitations.push(limitation(None)),
         }
     }
     (check_keyed_units_with_verified_components(spec, units, verified.discovery, &verified.components), verified.callees)
+}
+
+fn record_result(verified: &mut Verified, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, request: &Request<'_>, item: (usize, usize, CallResult)) {
+    let (unit, start, mut result) = item;
+    if !request.include_callees { result.callee = None; }
+    if !request.include_error_origins { result.error_origin = None; }
+    verified.record(&units[unit], &sources[units[unit].path], (unit, start), result);
 }
 
 fn verify_with_fallback(probe: &Path, request: &mut Request<'_>) -> Option<Vec<CallResult>> {
