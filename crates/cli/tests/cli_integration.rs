@@ -177,6 +177,25 @@ fn replay_detects_conditional_discarded_promise() {
 }
 
 #[test]
+fn replay_detects_a_result_observed_on_only_one_branch() {
+    let bad = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = rename(a, b);\n if (flag) await pending;\n}\n";
+    assert_conditional_replay(bad, &bad.replace("if (flag) await pending;", "if (flag) await pending; else await pending;"), 3, false);
+}
+
+#[test]
+fn replay_excludes_unmodeled_partial_observation() {
+    let bad = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = rename(a, b);\n if (check(flag)) await pending;\n}\n";
+    let fixed = bad.replace("if (check(flag)) await pending;", "await pending;");
+    let repo = init_repo(&[("main.js", bad)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("main.js", &fixed)], "observe promise");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"partial observation", "rule":{"tool":"autoreview-dataflow","id":"javascript-node-fs-discarded-promise"}, "before":{"commit":before,"path":"main.js","lines":[]}, "after":{"commit":after,"path":"main.js","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    assert_incomplete_replay(&failed_replay_report(repo.path()), "result_use_path_unmodeled", "main.js", 2);
+}
+
+#[test]
 fn replay_detects_discarded_conditional_binding() {
     let bad = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = rename(a, b);\n flag ? pending : null;\n}\n";
     assert_conditional_replay(bad, &bad.replace("\n}\n", "\n await pending;\n}\n"), 3, false);
@@ -1612,15 +1631,32 @@ fn contract_replay_case(id: &str, path: &str, lines: &[u32], before: &str, after
 }
 
 fn assert_contract_replay(repo: &std::path::Path, cases: &[serde_json::Value]) {
+    assert_contract_replay_with_incomplete(repo, cases, &[]);
+}
+
+fn assert_contract_replay_with_incomplete(repo: &std::path::Path, cases: &[serde_json::Value], incomplete: &[(&str, u32)]) {
     std::fs::write(repo.join("contracts.yaml"), serde_json::json!({ "cases": cases }).to_string()).unwrap();
     let replay = Command::cargo_bin("autoreview").unwrap()
         .current_dir(repo)
         .args(["rules", "replay", "--suite", "contracts.yaml"])
         .output().unwrap();
-    assert!(
-        replay.status.success(), "{}\n{}",
+    assert_eq!(
+        replay.status.success(), incomplete.is_empty(), "{}\n{}",
         String::from_utf8_lossy(&replay.stderr), String::from_utf8_lossy(&replay.stdout),
     );
+    let report: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+    let failures = report["failures"].as_array().unwrap();
+    assert_eq!(failures.len(), incomplete.len(), "{report}");
+    assert_eq!(report["cases"].as_array().unwrap().len(), cases.len() - incomplete.len(), "{report}");
+    for &(path, line) in incomplete {
+        assert!(failures.iter().any(|failure| failure["beforePath"] == path && failure["kind"] == "incomplete-analysis"
+            && failure["analysisCoverage"].as_array().is_some_and(|issues| issues.iter().any(|issue|
+                issue["reason"] == "result_use_path_unmodeled" && issue["path"] == path && issue["line"] == line))), "{report}");
+    }
+    for score in report["rules"].as_array().unwrap() {
+        assert_eq!(score["falsePositives"], 0, "{report}");
+        assert_eq!(score["falseNegatives"], 0, "{report}");
+    }
 }
 
 #[test]
@@ -1663,7 +1699,7 @@ fn assigned_api_results_replay_in_every_supported_language() {
     repo.commit(&fixtures.each_ref().map(|(_, path, _, fixed, _)| (*path, fixed.as_str())), "Use the original API results");
     let after = current_commit(repo.path());
     let cases = fixtures.map(|(id, path, _, _, line)| contract_replay_case(id, path, &[line], &before, &after));
-    assert_contract_replay(repo.path(), &cases);
+    assert_contract_replay_with_incomplete(repo.path(), &cases, &[("publish/move.go", 3), ("Label.java", 2)]);
 }
 
 #[test]
@@ -1727,7 +1763,7 @@ fn closure_and_field_result_contracts_replay_across_all_languages() {
         assert!(!lines.is_empty(), "{path}");
         contract_replay_case(id, path, lines, &before, &after)
     }).collect();
-    assert_contract_replay(repo.path(), &cases);
+    assert_contract_replay_with_incomplete(repo.path(), &cases, &[("lib.rs", 20)]);
 }
 
 fn fixture_result_edits(source: &str) -> (Vec<u32>, String) {

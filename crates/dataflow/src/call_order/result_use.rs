@@ -27,6 +27,7 @@ pub use sources::{discover_factory_sources, FactorySourceDiscovery};
 
 mod checks;
 mod opaque;
+mod partial;
 pub(super) use checks::{check_units, check_units_with_components};
 #[cfg(test)]
 use checks::check_units_with_sources;

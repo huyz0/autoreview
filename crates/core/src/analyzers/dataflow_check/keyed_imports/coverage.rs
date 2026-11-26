@@ -39,7 +39,7 @@ pub(super) fn record_rule_limits(coverage: &mut Vec<AnalysisCoverageIssue>, rule
 }
 
 fn limitation_detail(reason: &str) -> &'static str {
-    verified_detail(reason).or_else(|| typed_detail(reason)).unwrap_or(match reason {
+    verified_detail(reason).or_else(|| typed_detail(reason)).or_else(|| result_path_detail(reason)).unwrap_or(match reason {
             "path_budget" => "The path-state budget was exhausted; this rule skipped the affected root.",
             "unmodeled_cleanup_call" => "A possible cleanup call was not represented in the control-flow graph; this rule skipped the affected function.",
             "helper_summary_limit" => "Helper summaries did not converge within the analysis budget; cross-file result tracking was skipped.",
@@ -50,6 +50,14 @@ fn limitation_detail(reason: &str) -> &'static str {
             "wrapped_result_receiver" => "A result was passed in an array or spread argument; the receiver's use of that result could not be determined.",
             "reexport_resolution_limit" => "The re-export resolution budget was exhausted; cross-file call-sequence analysis may be incomplete.",
             _ => "The rule could not model a path safely; analysis of the affected root was skipped.",
+    })
+}
+
+fn result_path_detail(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "result_use_path_limit" => "The path-sensitive result-use budget was exhausted; partial observations could not be checked completely.",
+        "result_use_path_unmodeled" => "This function uses control flow or result effects that the partial-observation check cannot model; a result may be used on only some paths.",
+        _ => return None,
     })
 }
 

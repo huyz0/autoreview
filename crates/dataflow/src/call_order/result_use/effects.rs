@@ -61,7 +61,7 @@ pub(super) fn lower<'src>(
     }
 }
 
-fn evaluation<'tree>(function: Node<'tree>, evaluation: &Evaluation) -> Option<Node<'tree>> {
+pub(super) fn evaluation<'tree>(function: Node<'tree>, evaluation: &Evaluation) -> Option<Node<'tree>> {
     syntax_at(function, &evaluation.span, evaluation.syntax_kind)
 }
 

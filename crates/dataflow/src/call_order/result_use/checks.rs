@@ -159,10 +159,25 @@ fn collect_hits(
             limitations.extend(analysis.opaque_origins().into_iter().map(|(_, origin)| super::super::keyed::KeyedLimitation {
                 reason: "unresolved_result_receiver", path: origin.path.or_else(|| Some(unit.path.to_owned())), line: Some(origin.line),
             }));
-            hits.extend(analysis.unused().map(|(node, origin)| make_hit(node, origin, unit, units)));
+            let unused: Vec<_> = analysis.unused().collect();
+            let syntax = (function.node, unit.source);
+            let (partial, status) = super::partial::unused(&analysis.owner, function.graph, plan, syntax, !analysis.closures.is_empty());
+            let reason = partial_reason(status, &analysis.owner, function.graph, syntax, &unused);
+            if let Some(reason) = reason {
+                limitations.push(super::super::keyed::KeyedLimitation { reason, path: Some(unit.path.to_owned()), line: Some(function.node.start_position().row as u32 + 1) });
+            }
+            hits.extend(unused.into_iter().chain(partial).map(|(node, origin)| make_hit(node, origin, unit, units)));
         }
     }
     hits
+}
+
+fn partial_reason(status: super::partial::Status, body: &super::Body, graph: &crate::cfg::Cfg<crate::cfg::Stmt>, syntax: (tree_sitter::Node<'_>, &[u8]), unused: &[(crate::cfg::NodeId, Origin)]) -> Option<&'static str> {
+    match status {
+        super::partial::Status::Limited => Some("result_use_path_limit"),
+        super::partial::Status::Unsupported if super::partial::has_observed_origin(body, graph, syntax, unused) => Some("result_use_path_unmodeled"),
+        _ => None,
+    }
 }
 
 fn make_hit(node: crate::cfg::NodeId, origin: Origin, unit: &KeyedUnit<'_, '_, '_>, units: &[KeyedUnit<'_, '_, '_>]) -> CallOrderHit {

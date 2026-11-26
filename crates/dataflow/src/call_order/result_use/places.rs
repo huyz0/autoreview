@@ -9,7 +9,7 @@ use crate::lower::site::{children, identifier};
 use super::syntax::{descendants, initializers, transparent};
 use super::Plan;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum Place {
     Local(usize),
     Field(usize, usize),
