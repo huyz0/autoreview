@@ -285,7 +285,6 @@ impl Lower<'_> {
 fn supported(node: Node<'_>) -> bool {
     match node.kind() {
         "function_item" | "closure_expression" | "async_block" | "macro_invocation" => return true,
-        "match_expression" if !supports_match(node) => return false,
         "let_chain" | "let_condition" | "label" | "unsafe_block" => {
             return false
         }
@@ -303,7 +302,8 @@ fn supported(node: Node<'_>) -> bool {
         }
         _ => {}
     }
-    node.named_children(&mut node.walk()).all(supported)
+    (node.kind() != "match_expression" || supports_match(node))
+        && node.named_children(&mut node.walk()).all(supported)
 }
 
 /// Whether this match can be represented without pattern binding or guards.
