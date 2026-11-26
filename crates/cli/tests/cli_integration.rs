@@ -59,6 +59,7 @@ fn replay_reports_analysis_failures_without_losing_successful_cases() {
     assert_eq!(report["failures"][0]["name"], "missing revision");
     assert_eq!(report["failures"][0]["language"], "Go");
     assert_eq!(report["failures"][0]["kind"], "error");
+    assert!(report["failures"][0].get("analysisCoverage").is_none());
     assert_eq!(report["coverage"][0]["language"], "Go");
     assert_eq!(report["coverage"][0]["rule"]["id"], "go-os-rename-discarded-error");
     assert_eq!(report["coverage"][0]["attempted"], 2);
@@ -66,6 +67,7 @@ fn replay_reports_analysis_failures_without_losing_successful_cases() {
     assert_eq!(report["coverage"][0]["incomplete"], 0);
     assert_eq!(report["coverage"][0]["failed"], 1);
     assert_eq!(report["failures"][1]["kind"], "incomplete-analysis");
+    assert!(report["failures"][1]["analysisCoverage"].as_array().is_some_and(|issues| !issues.is_empty()));
     assert_eq!(report["coverage"][1]["language"], "JavaScript");
     assert_eq!(report["coverage"][1]["attempted"], 1);
     assert_eq!(report["coverage"][1]["completed"], 0);
@@ -462,6 +464,10 @@ fn array_wrapped_result_uncertainty_reaches_review_and_replay() {
     let replay = failed_replay_report(repo.path());
     assert_eq!(replay["coverage"][0]["incomplete"], 1, "{replay}");
     assert!(replay["failures"][0]["error"].as_str().unwrap().contains("array or spread argument"), "{replay}");
+    assert!(replay["failures"][0]["error"].as_str().unwrap().contains("main.js:2:"), "{replay}");
+    assert!(replay["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "wrapped_result_receiver" && issue["path"] == "main.js" && issue["line"] == 2
+            && issue["rule"] == "javascript-node-fs-discarded-promise"), "{replay}");
     repo.commit(&[("main.js", before)], "Pass wrapped result to unknown receiver");
     let review = static_review_report(&repo, &fixed, None);
     assert!(review["analysisCoverage"].as_array().unwrap().iter().any(|issue|

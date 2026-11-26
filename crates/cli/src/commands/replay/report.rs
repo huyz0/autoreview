@@ -86,6 +86,8 @@ pub(super) struct CaseFailure {
     after_path: String,
     error: String,
     kind: FailureKind,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    analysis_coverage: Vec<autoreview_schema::AnalysisCoverageIssue>,
 }
 
 pub(super) fn replay_report(repo: &Path, suite: &Suite, frozen: &super::packs::FrozenRules) -> anyhow::Result<ReplayReport> {
@@ -118,6 +120,7 @@ pub(super) fn replay_report(repo: &Path, suite: &Suite, frozen: &super::packs::F
                 language: case_language(&case.before.path, &case.after.path),
                 before_path: case.before.path.clone(), after_path: case.after.path.clone(),
                 kind: if error.downcast_ref::<super::rule::IncompleteAnalysis>().is_some() { FailureKind::IncompleteAnalysis } else { FailureKind::Error },
+                analysis_coverage: error.downcast_ref::<super::rule::IncompleteAnalysis>().map_or_else(Vec::new, |incomplete| incomplete.0.clone()),
                 error: format!("{error:#}"),
             }),
         }
