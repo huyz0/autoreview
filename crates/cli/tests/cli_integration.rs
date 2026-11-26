@@ -131,6 +131,23 @@ fn replay_excludes_ambiguous_helpers_even_without_a_known_result_source() {
 }
 
 #[test]
+fn replay_excludes_unmodeled_contract_handle_storage() {
+    let bad = "package main\nimport (\"compress/gzip\"; \"io\")\nfunc run(out io.Writer, holder *Holder) {\n holder.writer = gzip.NewWriter(out)\n}\n";
+    let clean = "package main\nimport (\"compress/gzip\"; \"io\")\nfunc run(out io.Writer) { w := gzip.NewWriter(out); w.Close() }\n";
+    let repo = init_repo(&[("main.go", bad)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("main.go", clean)], "close writer");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"stored handle", "rule":{"tool":"autoreview-dataflow","id":"go-gzip-writer-unclosed"}, "before":{"commit":before,"path":"main.go","lines":[]}, "after":{"commit":after,"path":"main.go","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let report = failed_replay_report(repo.path());
+    assert_eq!(report["coverage"][0]["incomplete"], 1, "{report}");
+    assert_eq!(report["coverage"][0]["completed"], 0, "{report}");
+    assert!(report["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "unmodeled_contract_handle" && issue["path"] == "main.go" && issue["line"] == 4), "{report}");
+}
+
+#[test]
 fn replay_excludes_unmodeled_keyed_cleanup() {
     let bad = "export function run(root, key, flag) {\n root.register(key);\n return flag ? root.remove(key) : undefined;\n}\n";
     let clean = "export function run(root, key) { root.register(key); root.remove(key); }\n";

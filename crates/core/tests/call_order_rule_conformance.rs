@@ -161,6 +161,38 @@ func Write(out io.Writer, other *gzip.Writer) {
 }
 
 #[test]
+fn unsupported_contract_handle_storage_reports_incomplete_analysis() {
+    let source = "package example\nimport (\"compress/gzip\"; \"io\")\nfunc run(out io.Writer, holder *Holder) {\n holder.writer = gzip.NewWriter(out)\n}\n";
+    let root = write_single_file("main.go", source);
+    let check = || autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &["main.go".into()], &[]);
+    let result = check();
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_contract_handle"
+        && issue.rule.as_deref() == Some("go-gzip-writer-unclosed") && issue.path.as_deref() == Some("main.go") && issue.line == Some(4)), "{:?}", result.coverage);
+    std::fs::write(root.path().join("main.go"), "package example\nimport (\"compress/gzip\"; \"io\")\nfunc run(out io.Writer) { w := gzip.NewWriter(out); w.Close() }\n").unwrap();
+    assert!(!check().coverage.iter().any(|issue| issue.reason == "unmodeled_contract_handle"));
+    std::fs::write(root.path().join("main.go"), "package example\nimport \"compress/gzip\"\nfunc run(gzip Factory, holder *Holder) { holder.writer = gzip.NewWriter(nil) }\n").unwrap();
+    assert!(!check().coverage.iter().any(|issue| issue.reason == "unmodeled_contract_handle"));
+    std::fs::write(root.path().join("go.mod"), "module example.test/project\n\ngo 1.22\n").unwrap();
+    std::fs::create_dir(root.path().join("helper")).unwrap();
+    std::fs::write(root.path().join("helper/writer.go"), "package helper\nimport (\"compress/gzip\"; \"io\")\nfunc Make(out io.Writer, holder *Holder) {\n holder.writer = gzip.NewWriter(out)\n}\n").unwrap();
+    std::fs::write(root.path().join("main.go"), "package example\nimport (\"example.test/project/helper\"; \"io\")\nfunc run(out io.Writer, holder *Holder) { helper.Make(out, holder) }\n").unwrap();
+    let result = check();
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_contract_handle"
+        && issue.rule.as_deref() == Some("go-gzip-writer-unclosed") && issue.path.as_deref() == Some("helper/writer.go") && issue.line == Some(4)), "{:?}", result.coverage);
+    std::fs::write(root.path().join("main.go"), "package example\nimport \"example.test/project/helper\"\nfunc run() {}\n").unwrap();
+    assert!(!check().coverage.iter().any(|issue| issue.reason == "unmodeled_contract_handle"));
+}
+
+#[test]
+fn unsupported_java_future_storage_reports_incomplete_analysis() {
+    let source = "import java.util.concurrent.CompletableFuture;\nclass Main {\n Object pending;\n void run() { pending = CompletableFuture.runAsync(() -> {}); }\n}\n";
+    let root = write_single_file("Main.java", source);
+    let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &["Main.java".into()], &[]);
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_contract_handle"
+        && issue.rule.as_deref() == Some("java-completable-future-unobserved") && issue.path.as_deref() == Some("Main.java") && issue.line == Some(4)), "{:?}", result.coverage);
+}
+
+#[test]
 fn every_call_order_rule_declares_a_category() {
     for rule in discover_call_order_rules() {
         assert!(!rule.category.is_empty(), "{}: kind: call-sequence rule has no category field", rule.id);

@@ -66,6 +66,7 @@ pub(in crate::call_order) struct Frame<'spec, 'src, 'graph> {
     scope: Scope,
     unsupported_rust_line: Option<u32>,
     declined_cleanup: Option<(u32, bool)>,
+    declined_contract: Option<u32>,
     rust_match_bindings: Vec<u32>,
     pub(in crate::call_order) params: Vec<String>,
 }
@@ -135,10 +136,12 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         self.units[unit].frames.push(self.frames.len());
         let plan = Plan::new(spec, function.graph, node, source, unit);
         let declined_cleanup = plan.is_none().then(|| Plan::declined_cleanup(spec, function.graph, node, source, unit)).flatten();
+        let declined_contract = plan.is_none().then(|| Plan::declined_contract(spec, function.graph, node, source, unit)).flatten();
         self.frames.push(Frame {
             graph: function.graph,
             plan,
             declined_cleanup,
+            declined_contract,
             unit,
             scope,
             unsupported_rust_line: (node.kind() == "function_item" && !crate::lower::rust::supports_function(node))
@@ -212,7 +215,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
     }
 
     pub(in crate::call_order) fn resolution_limitations(&self) -> Vec<super::KeyedLimitation> {
-        if self.unresolved.borrow().is_empty() && self.frames.iter().all(|frame| frame.unsupported_rust_line.is_none() && frame.rust_match_bindings.is_empty() && frame.declined_cleanup.is_none()) {
+        if self.unresolved.borrow().is_empty() && self.frames.iter().all(|frame| frame.unsupported_rust_line.is_none() && frame.rust_match_bindings.is_empty() && frame.declined_cleanup.is_none() && frame.declined_contract.is_none()) {
             return Vec::new();
         }
         let mut pending: Vec<_> = self.units.iter().filter(|unit| unit.entry)
@@ -228,6 +231,9 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         let mut limitations: Vec<_> = reachable.iter().filter_map(|&frame| self.frames[frame].unsupported_rust_line.map(|line| super::KeyedLimitation {
             reason: "unsupported_rust_control_flow", path: self.path(self.frames[frame].unit), line: Some(line),
         })).collect();
+        limitations.extend(reachable.iter().filter_map(|&frame| self.frames[frame].declined_contract.map(|line| super::KeyedLimitation {
+            reason: "unmodeled_contract_handle", path: self.path(self.frames[frame].unit), line: Some(line),
+        })));
         let has_registration = reachable.iter().any(|&frame| {
             let frame = &self.frames[frame];
             frame.plan.as_ref().is_some_and(Plan::has_registration)
