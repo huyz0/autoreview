@@ -80,6 +80,24 @@ Coverage reporting is not exhaustive: unsupported expressions and unresolved
 imports can still escape the current diagnostics. A clean replay is evidence
 for this case, not a guarantee of complete analysis in general.
 
+`uwas-rename.yaml` records an independent Go error-handling fix in UWAS,
+dual licensed under AGPL-3.0-or-later or a commercial license. Session
+persistence discarded an `os.Rename` error; the fix logs it. An earlier
+rename in the same file already returns its error. The file-level replay
+detects the discarded result before the fix and no findings afterward: one
+case attempted and completed, with one true positive, no false positives or
+false negatives, and no reported incomplete analysis. This single fix pair
+does not establish general precision or recall, and logging the error does not
+prove that persistence can recover from it. The manifest references the
+upstream commits without redistributing the source. Reproduce it with:
+
+```sh
+git init uwas
+cd uwas
+git fetch --depth 2 https://github.com/uwaserver/uwas.git 72ff1f5897e89e6d38ecb9d7a51712ace23afe17
+autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/uwas-rename.yaml
+```
+
 `checkout-promise.yaml` exercises the experimental general promise source on
 the MIT-licensed actions/checkout fix documented in `docs/benchmark-candidates.md`.
 The normal replay currently exits nonzero and marks both cases incomplete due
