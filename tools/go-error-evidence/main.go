@@ -68,25 +68,15 @@ func analyze(req request) response {
 	if reason != "" {
 		return incomplete(reason)
 	}
-	config := types.Config{Importer: loaded.importer, Error: func(error) {}}
-	files, byPath, reason := parseFiles(fset, loaded.files)
+	files, byPath, info, reason := typecheckTarget(fset, loaded, req)
 	if reason != "" {
 		return incomplete(reason)
 	}
-	info := &types.Info{Types: make(map[ast.Expr]types.TypeAndValue)}
-	if req.IncludeCallees || req.IncludeErrorOrigins {
-		info.Uses = make(map[*ast.Ident]types.Object)
-		info.Selections = make(map[*ast.SelectorExpr]*types.Selection)
-		info.Defs = make(map[*ast.Ident]types.Object)
-	}
-	if _, err := config.Check(loaded.path, fset, files, info); err != nil {
-		return incomplete("type_errors")
-	}
-	indexes := indexCalls(fset, byPath)
 	origins, reason := dependencyErrorOrigins(loaded, req.IncludeErrorOrigins)
 	if reason != "" {
 		return incomplete(reason)
 	}
+	indexes := indexCalls(fset, byPath)
 	indexErrorOriginsInto(files, info, req.IncludeErrorOrigins, origins)
 	result := response{Version: 2, Status: "ok", Calls: make([]callResult, 0, len(req.Calls))}
 	for _, call := range req.Calls {
@@ -94,6 +84,24 @@ func analyze(req request) response {
 		result.Calls = append(result.Calls, makeCallResult(call, node, info, origins, req))
 	}
 	return result
+}
+
+func typecheckTarget(fset *token.FileSet, loaded loadedPackage, req request) ([]*ast.File, map[string]*ast.File, *types.Info, string) {
+	files, byPath, reason := parseFiles(fset, loaded.files)
+	if reason != "" {
+		return nil, nil, nil, reason
+	}
+	info := &types.Info{Types: make(map[ast.Expr]types.TypeAndValue)}
+	if req.IncludeCallees || req.IncludeErrorOrigins {
+		info.Uses = make(map[*ast.Ident]types.Object)
+		info.Selections = make(map[*ast.SelectorExpr]*types.Selection)
+		info.Defs = make(map[*ast.Ident]types.Object)
+	}
+	config := types.Config{Importer: loaded.importer, Error: func(error) {}}
+	if _, err := config.Check(loaded.path, fset, files, info); err != nil {
+		return nil, nil, nil, "type_errors"
+	}
+	return files, byPath, info, ""
 }
 
 func makeCallResult(call callSite, node *ast.CallExpr, info *types.Info, origins map[callee]*errorOrigin, req request) callResult {
@@ -177,15 +185,9 @@ func functionIdentity(function *types.Func) *callee {
 
 func preparePackage(fset *token.FileSet, req request) (loadedPackage, string) {
 	if req.PackageDir == "" && req.GoBinary == "" {
-		if req.ModuleMode != "" || len(req.DependencySources) > 0 {
-			return loadedPackage{}, "invalid_request"
-		}
-		return loadedPackage{files: req.Files, importer: importer.Default(), path: "autoreview.local/package"}, ""
+		return prepareInlinePackage(req)
 	}
-	if len(req.Files) != 0 {
-		return loadedPackage{}, "invalid_request"
-	}
-	if len(req.DependencySources) > 0 && !req.IncludeErrorOrigins {
+	if len(req.Files) != 0 || len(req.DependencySources) > 0 && !req.IncludeErrorOrigins {
 		return loadedPackage{}, "invalid_request"
 	}
 	loaded, reason := loadPackage(fset, req.PackageDir, req.GoBinary, req.ModuleMode, req.DependencySources)
@@ -194,6 +196,13 @@ func preparePackage(fset *token.FileSet, req request) (loadedPackage, string) {
 		return loadedPackage{}, "source_mismatch"
 	}
 	return loaded, reason
+}
+
+func prepareInlinePackage(req request) (loadedPackage, string) {
+	if req.ModuleMode != "" || len(req.DependencySources) > 0 {
+		return loadedPackage{}, "invalid_request"
+	}
+	return loadedPackage{files: req.Files, importer: importer.Default(), path: "autoreview.local/package"}, ""
 }
 
 func parseFiles(fset *token.FileSet, sources []sourceFile) ([]*ast.File, map[string]*ast.File, string) {

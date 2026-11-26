@@ -69,6 +69,10 @@ func loadPackage(fset *token.FileSet, dir, binary, mode string, snapshots map[st
 	if !ok {
 		return loadedPackage{}, "package_load_incomplete"
 	}
+	return assembleWithDependencies(fset, packages, target, exports, snapshots)
+}
+
+func assembleWithDependencies(fset *token.FileSet, packages []listedPackage, target listedPackage, exports map[string]string, snapshots map[string]dependencySnapshot) (loadedPackage, string) {
 	loaded, reason := assemblePackage(fset, target, exports)
 	if reason != "" {
 		return loadedPackage{}, reason

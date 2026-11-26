@@ -24,22 +24,29 @@ func verifyDependencySources(packages []listedPackage, target string, snapshots 
 		if !wanted {
 			continue
 		}
-		if pkg.ImportPath == target || len(pkg.CgoFiles) != 0 || !sameDirectory(pkg.Dir, snapshot.Directory) {
+		dependency, size, ok := verifyDependency(pkg, target, snapshot, exports)
+		if !ok || total+size > dependencyBytesLimit {
 			return nil, false
 		}
-		files, ok := readSources(pkg)
-		if !ok || !matchesPackageSources(files, snapshot.Files, nil) {
-			return nil, false
-		}
-		for _, file := range files {
-			total += len(file.Source)
-		}
-		if total > dependencyBytesLimit {
-			return nil, false
-		}
-		result = append(result, verifiedDependency{listed: pkg, files: files, exports: exports})
+		total += size
+		result = append(result, dependency)
 	}
 	return result, len(result) == len(snapshots)
+}
+
+func verifyDependency(pkg listedPackage, target string, snapshot dependencySnapshot, exports map[string]string) (verifiedDependency, int, bool) {
+	if pkg.ImportPath == target || len(pkg.CgoFiles) != 0 || !sameDirectory(pkg.Dir, snapshot.Directory) {
+		return verifiedDependency{}, 0, false
+	}
+	files, ok := readSources(pkg)
+	if !ok || !matchesPackageSources(files, snapshot.Files, nil) {
+		return verifiedDependency{}, 0, false
+	}
+	total := 0
+	for _, file := range files {
+		total += len(file.Source)
+	}
+	return verifiedDependency{listed: pkg, files: files, exports: exports}, total, true
 }
 
 func sameDirectory(actual, expected string) bool {

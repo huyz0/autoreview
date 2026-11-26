@@ -493,9 +493,7 @@ mod tests {
     fn context_error_evidence_crosses_verified_dependency() {
         let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
         let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
-        let source = "package sample\nimport (\"context\"; \"example.test/probe/dep\")\nfunc wrapper(ctx context.Context) error { return dep.Leaf(ctx) }\nfunc use(ctx context.Context) { wrapper(ctx) }\n";
-        let files = [("dep/dep.go", "package dep\nimport \"context\"\nfunc Leaf(ctx context.Context) error { return ctx.Err() }\n")];
-        let (result, evidence) = analyze_source_with_config(source, &checker, false, &files, true, Some(r#"{"example.test/probe/dep":"dep"}"#));
+        let (result, evidence) = analyze_dependency_fixture(&checker);
         let hit = result.hits.iter().find(|hit| hit.trigger_call == "wrapper").unwrap();
         assert!(result.limitations.is_empty());
         let origin = evidence[&(hit.path.clone().unwrap(), hit.source_start.unwrap())].error_origin.as_ref().unwrap();
@@ -506,9 +504,7 @@ mod tests {
     fn older_probe_reports_unavailable_dependency_evidence_and_keeps_findings() {
         let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_LEGACY_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
         let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
-        let source = "package sample\nimport (\"context\"; \"example.test/probe/dep\")\nfunc wrapper(ctx context.Context) error { return dep.Leaf(ctx) }\nfunc use(ctx context.Context) { wrapper(ctx) }\n";
-        let files = [("dep/dep.go", "package dep\nimport \"context\"\nfunc Leaf(ctx context.Context) error { return ctx.Err() }\n")];
-        let (result, evidence) = analyze_source_with_config(source, &checker, false, &files, true, Some(r#"{"example.test/probe/dep":"dep"}"#));
+        let (result, evidence) = analyze_dependency_fixture(&checker);
         assert!(result.hits.iter().any(|hit| hit.trigger_call == "wrapper"));
         assert!(result.limitations.iter().any(|item| item.reason == "go_dependency_evidence_incomplete"));
         assert!(evidence.is_empty());
@@ -520,6 +516,12 @@ mod tests {
         assert!(dependency_snapshots(dir.path(), r#"{"example.test/dep":".."}"#).is_err());
         assert!(dependency_snapshots(dir.path(), "not-json").is_err());
         assert!(dependency_snapshots(dir.path(), "{}").is_err());
+    }
+
+    fn analyze_dependency_fixture(checker: &TrustedGo) -> (KeyedCheckResult, CalleeEvidence) {
+        let source = "package sample\nimport (\"context\"; \"example.test/probe/dep\")\nfunc wrapper(ctx context.Context) error { return dep.Leaf(ctx) }\nfunc use(ctx context.Context) { wrapper(ctx) }\n";
+        let files = [("dep/dep.go", "package dep\nimport \"context\"\nfunc Leaf(ctx context.Context) error { return ctx.Err() }\n")];
+        analyze_source_with_config(source, checker, &files, (false, true, Some(r#"{"example.test/probe/dep":"dep"}"#)))
     }
 
     fn analyze_source(source: &str, checker: &TrustedGo) -> KeyedCheckResult {
@@ -535,10 +537,11 @@ mod tests {
     }
 
     fn analyze_source_with_origins(source: &str, checker: &TrustedGo, include_callees: bool, extra: &[(&str, &str)], include_error_origins: bool) -> (KeyedCheckResult, CalleeEvidence) {
-        analyze_source_with_config(source, checker, include_callees, extra, include_error_origins, None)
+        analyze_source_with_config(source, checker, extra, (include_callees, include_error_origins, None))
     }
 
-    fn analyze_source_with_config(source: &str, checker: &TrustedGo, include_callees: bool, extra: &[(&str, &str)], include_error_origins: bool, config: Option<&str>) -> (KeyedCheckResult, CalleeEvidence) {
+    fn analyze_source_with_config(source: &str, checker: &TrustedGo, extra: &[(&str, &str)], options: (bool, bool, Option<&str>)) -> (KeyedCheckResult, CalleeEvidence) {
+        let (include_callees, include_error_origins, config) = options;
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("go.mod"), "module example.test/probe\n\ngo 1.22\n").unwrap();
         std::fs::write(dir.path().join("main.go"), source).unwrap();
