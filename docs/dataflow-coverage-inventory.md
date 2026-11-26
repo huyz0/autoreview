@@ -5,12 +5,16 @@ It does not claim that every unsupported construct has been catalogued.
 
 The four Kotlin coroutine pattern rules also report
 `callback_execution_unresolved` when a matched operation occurs inside a
-lambda within a suspend function, except when that lambda is directly invoked
-as a literal and every enclosing lambda is also proved immediate. The finding is retained with reduced
+lambda within a suspend function, except when direct literal invocation or a
+contiguous chain of immutable local aliases followed by `.invoke()` proves it
+immediate, and every enclosing lambda is also proved immediate. The finding is retained with reduced
 confidence because the callback may execute inline or later. Replay and gates
 exclude the affected rule's incomplete scope from verified results. This is
 limited to existing pattern matches: it does not inventory unmatched syntax,
 resolve callback identities, or classify other callback forms as immediate or deferred.
+Alias tracking is limited to 32 subsequent statements, including comments;
+reassignment, control flow, intervening calls, and bare-name invocation remain
+unresolved.
 
 Result-use analysis checks partial observation for directly tracked local
 results on bounded, acyclic paths with supported simple guards. It preserves

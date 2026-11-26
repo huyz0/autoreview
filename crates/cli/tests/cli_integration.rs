@@ -566,6 +566,23 @@ fn directly_invoked_kotlin_lambda_replays_without_hiding_outer_uncertainty() {
 }
 
 #[test]
+fn kotlin_literal_invoke_and_immutable_alias_replay() {
+    if !ast_grep_available() { return; }
+    let bad = "suspend fun run() {\n ({ runBlocking { work() } }).invoke()\n val original = { runBlocking { work() } }\n val copy = original\n copy.invoke()\n}\n";
+    let clean = "suspend fun run() { work() }\n";
+    let repo = init_repo(&[("Main.kt", bad)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("Main.kt", clean)], "remove blocking");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"immediate invocation", "rule":{"tool":"ast-grep","id":"kotlin-runblocking-in-suspend-function"}, "before":{"commit":before,"path":"Main.kt","lines":[2,3]}, "after":{"commit":after,"path":"Main.kt","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().success();
+    let report: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(report["rules"][0]["truePositives"], 2, "{report}");
+}
+
+#[test]
 fn diff_reports_dataflow_syntax_limitations_without_warning_on_clean_files() {
     let repo = init_repo(&[("main.go", "package main\nfunc main() {}\n")]);
     let base = current_commit(repo.path());
