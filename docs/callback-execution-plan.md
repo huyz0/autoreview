@@ -103,6 +103,13 @@ budget. Same-named shadowed identifiers conservatively prevent that proof.
 
 ## Open design decisions
 
+An experimental standalone compiler-IR probe lives in
+`tools/kotlin-callback-evidence`. It records some resolved SAM conversions,
+but it is not connected to review, replay, or rule decisions. Its output does
+not prove execution timing, complete resolution, overload identity, or that
+source and dependency snapshots are unchanged. The README records its limits
+and the additional verification required before using it as rule evidence.
+
 The repository currently has no Kotlin classpath-backed resolver. Before
 claiming a third-party interface is resolved, choose and test a trusted source
 of declaration identity, such as an optional compiler-backed probe or a
