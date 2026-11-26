@@ -3,6 +3,8 @@ use autoreview_dataflow::call_order::has_rust_attributes as has_attributes;
 
 mod parent;
 use parent::private_parent_namespace;
+mod associated;
+use associated::associated_type_origin;
 
 use super::{children, issue, text, AnalysisCoverageIssue, ImportSource, KeyedExport, KeyedImport, Language, Node, Path, PathBuf, Resolver};
 
@@ -176,58 +178,6 @@ fn rust_uses(
         bindings
     }).collect()
 
-}
-
-// Follow only unique, explicit re-exports through verified module edges.
-// Globs, conditional imports and duplicate bindings remain unresolved.
-fn associated_type_origin(resolver: &Resolver<'_>, path: &Path, name: &str) -> Option<(PathBuf, String)> {
-    let mut current = path.to_path_buf();
-    let mut member = name.to_owned();
-    let mut seen = HashSet::new();
-    for _ in 0..32 {
-        if !seen.insert((resolver.relative(&current)?, member.clone())) { return None; }
-        let parsed = resolver.cache.get(&current, Language::Rust)?;
-        let root = parsed.1.root_node();
-        if root.has_error() { return None; }
-        if children(root).into_iter().any(|node| node.kind() == "macro_invocation"
-            || (node.kind() == "expression_statement" && children(node).into_iter().any(|part| part.kind() == "macro_invocation"))) { return None; }
-        let mut next = None;
-        for node in children(root).into_iter().filter(|node| node.kind() == "use_declaration") {
-            let usage = node.child_by_field_name("argument").and_then(|part| text(part, &parsed.0))?;
-            if usage.matches('{').count() > 1 { return None; }
-            let paths = rust_paths(usage.trim());
-            if paths.is_empty() { return None; }
-            for usage in paths {
-                let (qualified, alias) = usage.split_once(" as ").map_or((usage.as_str(), None), |(path, alias)| (path.trim(), Some(alias.trim())));
-                let (module, imported) = qualified.rsplit_once("::")?;
-                if imported == "*" || imported.contains(['{', '}']) { return None; }
-                if alias.unwrap_or(imported) != member { continue; }
-                let visibility = children(node).into_iter().find(|part| part.kind() == "visibility_modifier")
-                    .and_then(|part| text(part, &parsed.0));
-                if has_attributes(node) || !matches!(visibility, Some("pub" | "pub(crate)")) || next.is_some() { return None; }
-                next = Some((reexport_module(resolver, &current, module)?, imported.to_owned()));
-            }
-        }
-        if local_associated_type(resolver, &current, &member) {
-            return next.is_none().then_some((current, member));
-        }
-        if children(root).into_iter().any(|node| node.child_by_field_name("name")
-            .and_then(|part| text(part, &parsed.0)) == Some(member.as_str())) { return None; }
-        (current, member) = next?;
-    }
-    None
-}
-
-fn local_associated_type(resolver: &Resolver<'_>, path: &Path, name: &str) -> bool {
-    let Some(parsed) = resolver.cache.get(path, Language::Rust) else { return false };
-    let root = parsed.1.root_node();
-    if root.has_error() { return false; }
-    let matching: Vec<_> = children(root).into_iter().filter(|node|
-        node.child_by_field_name("name").and_then(|part| text(part, &parsed.0)) == Some(name)).collect();
-    matches!(matching.as_slice(), [node] if matches!(node.kind(), "struct_item" | "enum_item")
-        && !has_attributes(*node) && node.child_by_field_name("type_parameters").is_none()
-        && children(*node).into_iter().find(|child| child.kind() == "visibility_modifier")
-            .and_then(|visibility| text(visibility, &parsed.0)).is_some_and(|visibility| matches!(visibility, "pub" | "pub(crate)")))
 }
 
 fn is_relative(path: &str) -> bool {
