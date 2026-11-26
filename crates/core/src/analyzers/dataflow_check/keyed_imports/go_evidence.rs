@@ -177,7 +177,7 @@ fn check_with_probe_and_callees(
     for (index, (dir, group)) in groups.into_iter().filter(|(_, group)| !group.calls.is_empty()).enumerate() {
         if index >= PACKAGE_LIMIT || group.calls.len() > CALL_LIMIT {
             let reason = if index >= PACKAGE_LIMIT { "go_error_package_limit" } else { "go_error_call_limit" };
-            verified.discovery.limitations.push(KeyedLimitation { reason, path: None, line: None });
+            verified.discovery.limitations.push(package_limitation(root, &dir, reason));
             continue;
         }
         let package_sources = (include_callees || include_error_origins).then(|| package_source_hashes(&dir)).flatten();
@@ -188,10 +188,23 @@ fn check_with_probe_and_callees(
             Ok(results) => for ((unit, start), result) in group.indices.into_iter().zip(results) {
                 record_result(&mut verified, units, sources, &request, (unit, start, result));
             },
-            Err(reason) => verified.discovery.limitations.push(KeyedLimitation { reason, path: None, line: None }),
+            Err(reason) => verified.discovery.limitations.push(package_limitation(root, &dir, reason)),
         }
     }
     (check_keyed_units_with_verified_components(spec, units, verified.discovery, &verified.components), verified.callees)
+}
+
+fn package_limitation(root: &Path, dir: &Path, reason: &'static str) -> KeyedLimitation {
+    let path = if is_package_reason(reason) {
+        root.canonicalize().ok().and_then(|root| dir.strip_prefix(root).ok().map(Path::to_owned))
+            .and_then(|path| path.to_str().map(|value| if value.is_empty() { ".".into() } else { value.replace('\\', "/") }))
+    } else { None };
+    KeyedLimitation { reason, path, line: None }
+}
+
+pub(super) fn is_package_reason(reason: &str) -> bool {
+    matches!(reason, "go_error_package_limit" | "go_error_call_limit" | "go_error_package_load_incomplete" |
+        "go_error_typecheck_incomplete" | "go_error_source_mismatch" | "go_error_probe_invalid_request")
 }
 
 fn record_result(verified: &mut Verified, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, request: &Request<'_>, item: (usize, usize, CallResult)) {
@@ -409,6 +422,21 @@ mod tests {
         assert_eq!(probe_reason(Some("invalid_module_mode")), "go_error_probe_invalid_request");
         assert_eq!(probe_reason(Some("unrecognized private details")), "go_error_checker_incomplete");
         assert_eq!(probe_reason(None), "go_error_checker_incomplete");
+    }
+
+    #[test]
+    fn package_limitations_only_expose_paths_within_the_repository() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let package = root.path().join("pkg").join("worker");
+        std::fs::create_dir_all(&package).unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let package = package.canonicalize().unwrap();
+        let outside = outside.path().canonicalize().unwrap();
+        assert_eq!(package_limitation(&root, &package, "go_error_call_limit").path.as_deref(), Some("pkg/worker"));
+        assert_eq!(package_limitation(&root, &root, "go_error_call_limit").path.as_deref(), Some("."));
+        assert!(package_limitation(&root, &outside, "go_error_call_limit").path.is_none());
+        assert!(package_limitation(&root, &package, "go_error_checker_incomplete").path.is_none());
     }
 
     #[test]

@@ -28,8 +28,10 @@ pub(super) fn record_flow_limits(
 pub(super) fn record_rule_limits(coverage: &mut Vec<AnalysisCoverageIssue>, rule_id: &str, limitations: Vec<autoreview_dataflow::call_order::KeyedLimitation>) {
     for limitation in limitations {
         let detail = limitation_detail(limitation.reason);
-        let mut record = issue(limitation.path.as_deref(), limitation.reason,
-            if limitation.path.is_some() { "function" } else { "rule" }, detail);
+        let scope = if limitation.path.is_none() { "rule" }
+            else if super::go_evidence::is_package_reason(limitation.reason) { "package" }
+            else { "function" };
+        let mut record = issue(limitation.path.as_deref(), limitation.reason, scope, detail);
         record.line = limitation.line.filter(|line| *line > 0);
         record.rule = Some(rule_id.to_owned());
         coverage.push(record);
@@ -132,6 +134,25 @@ pub(super) fn issue(path: Option<&str>, reason: &str, scope: &str, detail: &str)
     AnalysisCoverageIssue {
         analyzer: "call-sequence".into(), reason: reason.into(), scope: scope.into(),
         path: path.map(str::to_owned), line: None, rule: None, detail: detail.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use autoreview_dataflow::call_order::KeyedLimitation;
+
+    #[test]
+    fn go_package_issues_keep_package_scope_and_rule() {
+        let mut coverage = Vec::new();
+        record_rule_limits(&mut coverage, "rule", vec![
+            KeyedLimitation { reason: "go_error_package_load_incomplete", path: Some("pkg/worker".into()), line: None },
+            KeyedLimitation { reason: "go_error_checker_incomplete", path: None, line: None },
+        ]);
+        assert_eq!(coverage[0].scope, "package");
+        assert_eq!(coverage[0].path.as_deref(), Some("pkg/worker"));
+        assert_eq!(coverage[0].rule.as_deref(), Some("rule"));
+        assert_eq!(coverage[1].scope, "rule");
     }
 }
 
