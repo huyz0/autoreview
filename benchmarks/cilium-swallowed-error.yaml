@@ -1,0 +1,34 @@
+cases:
+  - name: cilium suppresses an IPv6 chain rename error
+    rule: {tool: ast-grep, id: go-checked-error-returned-nil}
+    evidence:
+      kind: historical
+      source: https://github.com/cilium/cilium/commit/fb7b8f905fc3e00fa17aa510b0e2d9262c469053
+      license: Apache-2.0
+      rationale: The checked IPv6 rename failure returned nil; the fix returns the error.
+    before:
+      commit: f0cdf8225e9d84d511230d4effc1fe5e8795da63
+      path: pkg/datapath/iptables/custom_chain.go
+      lines: [172]
+    after:
+      commit: fb7b8f905fc3e00fa17aa510b0e2d9262c469053
+      path: pkg/datapath/iptables/custom_chain.go
+      lines: []
+  - name: cilium treats limiter context cancellation as normal shutdown
+    rule: {tool: ast-grep, id: go-checked-error-returned-nil}
+    evidence:
+      kind: historical
+      source: https://github.com/cilium/cilium/blob/fb7b8f905fc3e00fa17aa510b0e2d9262c469053/pkg/datapath/iptables/ipset/node_sync.go
+      license: Apache-2.0
+      rationale: >-
+        The local limiter waits for one token with burst one, so its error is
+        the context error. The adjacent select also returns nil for context
+        completion; this benchmark labels that shutdown handling intentional.
+    before:
+      commit: f0cdf8225e9d84d511230d4effc1fe5e8795da63
+      path: pkg/datapath/iptables/ipset/node_sync.go
+      lines: []
+    after:
+      commit: fb7b8f905fc3e00fa17aa510b0e2d9262c469053
+      path: pkg/datapath/iptables/ipset/node_sync.go
+      lines: []

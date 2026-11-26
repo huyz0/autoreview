@@ -106,9 +106,24 @@ git fetch --depth 2 https://github.com/google/syzkaller.git 9e5c2a555caa92132191
 autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/syzkaller-swallowed-error.yaml
 ```
 
-The same pattern was observed in the pre-fix source of Cilium commit
-`fb7b8f905fc3e00fa17aa510b0e2d9262c469053`; the fixed file has no match for
-this rule. That source-level observation has not been scored by replay.
+`cilium-swallowed-error.yaml` records a second, independent Apache-2.0 fix for
+the same rule. The checked IPv6 chain rename error was returned as `nil`;
+replay finds line 172 in the parent and no findings in the fixed file. It also
+labels normal context cancellation in `pkg/datapath/iptables/ipset/node_sync.go`
+as an intentional `nil` return. The rule currently flags line 101 in both
+revisions, so replay reports one true positive and two false positives and
+exits nonzero. The two false positives are the same unchanged code, not
+independent examples. The cancellation label follows the local limiter's
+one-token, burst-one configuration and the surrounding shutdown handling; it is
+a policy judgment, not proof of intent. These cases are too few to estimate
+general accuracy. Reproduce with:
+
+```sh
+git init cilium
+cd cilium
+git fetch --depth 2 https://github.com/cilium/cilium.git fb7b8f905fc3e00fa17aa510b0e2d9262c469053
+autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/cilium-swallowed-error.yaml
+```
 
 Coverage reporting is not exhaustive: unsupported expressions and unresolved
 imports can still escape the current diagnostics. A clean replay is evidence
