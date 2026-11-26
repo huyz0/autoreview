@@ -48,6 +48,8 @@ struct Label {
     commit: String,
     path: String,
     lines: Vec<u32>,
+    #[serde(default)]
+    entry: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -55,6 +57,8 @@ struct Label {
 struct SnapshotResult {
     commit: String,
     path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entry: Option<String>,
     matched_lines: Vec<u32>,
     unexpected_lines: Vec<u32>,
     missed_lines: Vec<u32>,
@@ -93,6 +97,7 @@ fn compare_lines(
     expected: &[u32],
     commit: String,
     path: String,
+    entry: Option<String>,
 ) -> SnapshotResult {
     let mut remaining = expected.to_vec();
     let mut matched_lines = Vec::new();
@@ -111,6 +116,7 @@ fn compare_lines(
     SnapshotResult {
         commit,
         path,
+        entry,
         matched_lines,
         unexpected_lines,
         missed_lines: remaining,
@@ -126,17 +132,16 @@ fn replay_side(
     pinned: bool,
     packs: &[autoreview_core::ResolvedRulePack],
 ) -> anyhow::Result<SnapshotResult> {
-    let path = Path::new(&label.path);
-    ensure!(
-        !label.path.is_empty()
-            && !label.path.contains('\\')
-            && path
-                .components()
-                .all(|part| matches!(part, Component::Normal(_))),
-        "expected a repository-relative path, got '{}'",
-        label.path
-    );
-    rule.validate_custom_language(path, packs)?;
+    let entry = label.entry.as_deref().unwrap_or(&label.path);
+    ensure!(base.is_none() || entry == label.path,
+        "cross-file replay entries are not supported for revision-comparison rules");
+    for name in [label.path.as_str(), entry] {
+        let path = Path::new(name);
+        ensure!(!name.is_empty() && !name.contains('\\')
+            && path.components().all(|part| matches!(part, Component::Normal(_))),
+            "expected a repository-relative path, got '{}'", name);
+        rule.validate_custom_language(path, packs)?;
+    }
     let commit = resolve_commit(repo, &label.commit)?;
     ensure!(
         !pinned || commit == label.commit,
@@ -150,6 +155,7 @@ fn replay_side(
         snapshots.insert(commit.clone(), checkout_snapshot(repo, &commit)?);
     }
     let snapshot = snapshots[&commit].path();
+    let path = Path::new(&label.path);
     let file = snapshot.join(path);
     ensure!(
         file.symlink_metadata().is_ok_and(|meta| meta.is_file())
@@ -165,6 +171,18 @@ fn replay_side(
             label.path
         );
     }
+    if entry != label.path {
+        let entry_path = Path::new(entry);
+        let file = snapshot.join(entry_path);
+        ensure!(file.symlink_metadata().is_ok_and(|meta| meta.is_file())
+            && file.canonicalize()?.starts_with(snapshot.canonicalize()?),
+            "'{}' must be a regular source file in {commit}", entry);
+        if rule.tool != Tool::AutoreviewDuplication {
+            let source = std::fs::read_to_string(&file)?;
+            ensure!(autoreview_core::parses_cleanly(entry_path, &source) == Some(true),
+                "'{}' must parse successfully in {commit}", entry);
+        }
+    }
     ensure!(
         label
             .lines
@@ -179,7 +197,7 @@ fn replay_side(
             let changed: Vec<_> = facts.files.into_iter().map(|file| file.path).collect();
             super::revision::compare_java_nullability(repo, snapshot, base, &commit, &changed)?
         }
-        None => rule.tool.scan_with_packs(snapshot, std::slice::from_ref(&label.path), &BTreeSet::from([rule.id.clone()]), packs)?,
+        None => rule.tool.scan_with_packs(snapshot, &[entry.to_owned()], &BTreeSet::from([rule.id.clone()]), packs)?,
     };
     let lines = findings
         .into_iter()
@@ -191,6 +209,7 @@ fn replay_side(
         &label.lines,
         commit,
         label.path.clone(),
+        label.entry.clone(),
     ))
 }
 
