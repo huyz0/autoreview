@@ -175,6 +175,8 @@ fn replay_tracks_boolean_helper_guard() {
     assert_conditional_replay(bad, &bad.replace(", false)", ", true)"), 3, false);
     let bound = bad.replace("return consume(rename(a, b), false);", "const enabled = false; return consume(rename(a, b), enabled);");
     assert_conditional_replay(&bound, &bound.replace("enabled = false", "enabled = true"), 3, false);
+    let aliased = bound.replace("return consume(rename(a, b), enabled);", "const alias = enabled; return consume(rename(a, b), alias);");
+    assert_conditional_replay(&aliased, &aliased.replace("enabled = false", "enabled = true"), 3, false);
 }
 
 #[test]

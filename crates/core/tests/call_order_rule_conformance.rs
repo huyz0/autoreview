@@ -373,6 +373,31 @@ fn helper_guards_follow_stable_boolean_bindings() {
 }
 
 #[test]
+fn helper_guards_follow_stable_boolean_aliases() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b) { const enabled = true; const first = enabled; const second = first; return consume(rename(a, b), second); }\n";
+        let root = assert_bound_helper_guard(path, rule, source);
+        for changed in [
+            source.replace("const enabled = true; const first = enabled;", "let enabled = false; enabled = true; const first = enabled;"),
+            source.replace("const enabled = true; const first = enabled;", "let enabled = false; const first = enabled; enabled = true;"),
+            source.replace("const second = first;", "let second = first; second = true;"),
+        ] {
+            std::fs::write(root.path().join(path), changed).unwrap();
+            assert_uncertain_helper_guard(&root, path, rule);
+        }
+    }
+}
+
+#[test]
+fn long_boolean_alias_chains_remain_incomplete() {
+    let mut source = String::from("import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b) { const flag0 = false;\n");
+    for index in 1..=64 { source.push_str(&format!("const flag{index} = flag{};\n", index - 1)); }
+    source.push_str("return consume(rename(a, b), flag64); }\n");
+    let root = write_single_file("main.js", &source);
+    assert_uncertain_helper_guard(&root, "main.js", "javascript-node-fs-discarded-promise");
+}
+
+#[test]
 fn mutable_rust_borrow_keeps_helper_guard_uncertain() {
     let source = "use std::fs::remove_file;\nfn consume(value: std::io::Result<()>, flag: bool) -> std::io::Result<()> { if flag { return value; } Ok(()) }\nfn run(path: &str) -> std::io::Result<()> { let mut enabled = false; let alias = &mut enabled; *alias = true; consume(remove_file(path), enabled) }\n";
     let root = write_single_file("lib.rs", source);
@@ -388,6 +413,13 @@ fn helper_stable_guards_follow_jvm_and_rust_bindings() {
     ];
     for (path, rule, source) in cases {
         assert_bound_helper_guard(path, rule, source);
+        let aliased = match path {
+            "Main.java" => source.replace("return consume(Objects.equals(a,b), enabled)", "final boolean alias = enabled; return consume(Objects.equals(a,b), alias)"),
+            "Main.kt" => source.replace("return consume(runCatching { 1 }, enabled)", "val alias = enabled; return consume(runCatching { 1 }, alias)"),
+            "lib.rs" => source.replace("consume(remove_file(path), enabled)", "let alias = enabled; consume(remove_file(path), alias)"),
+            _ => unreachable!(),
+        };
+        assert_bound_helper_guard(path, rule, &aliased);
     }
 }
 

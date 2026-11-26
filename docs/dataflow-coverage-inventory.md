@@ -24,8 +24,10 @@ Kotlin, JavaScript, TypeScript, TSX, and Rust can
 specialize that guard and report a definite unused result or establish that the
 helper observes it. Go retains the warning because its predeclared boolean
 names can be shadowed and that binding is not yet verified for this check.
-Writes and mutable borrows prevent local specialization; boolean aliases and
-path-dependent assignments remain incomplete.
+Stable boolean alias chains are followed for up to 64 bindings. Writes or
+mutable borrows anywhere in the chain prevent specialization, even when they
+occur after an alias is copied. Longer chains and path-dependent assignments
+remain incomplete.
 This check does not cover every storage shape, helper chain, or expression.
 Merely intersecting liveness sets would produce false positives for correlated guards.
 Discarded conditional arms that reference a tracked binding are modeled when
