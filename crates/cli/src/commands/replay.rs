@@ -155,33 +155,9 @@ fn replay_side(
         snapshots.insert(commit.clone(), checkout_snapshot(repo, &commit)?);
     }
     let snapshot = snapshots[&commit].path();
-    let path = Path::new(&label.path);
-    let file = snapshot.join(path);
-    ensure!(
-        file.symlink_metadata().is_ok_and(|meta| meta.is_file())
-            && file.canonicalize()?.starts_with(snapshot.canonicalize()?),
-        "'{}' must be a regular source file in {commit}",
-        label.path
-    );
-    let source = std::fs::read_to_string(&file)?;
-    if rule.tool != Tool::AutoreviewDuplication {
-        ensure!(
-            autoreview_core::parses_cleanly(path, &source) == Some(true),
-            "'{}' must parse successfully in {commit}",
-            label.path
-        );
-    }
+    let source = validated_source(snapshot, &label.path, &commit, rule.tool)?;
     if entry != label.path {
-        let entry_path = Path::new(entry);
-        let file = snapshot.join(entry_path);
-        ensure!(file.symlink_metadata().is_ok_and(|meta| meta.is_file())
-            && file.canonicalize()?.starts_with(snapshot.canonicalize()?),
-            "'{}' must be a regular source file in {commit}", entry);
-        if rule.tool != Tool::AutoreviewDuplication {
-            let source = std::fs::read_to_string(&file)?;
-            ensure!(autoreview_core::parses_cleanly(entry_path, &source) == Some(true),
-                "'{}' must parse successfully in {commit}", entry);
-        }
+        validated_source(snapshot, entry, &commit, rule.tool)?;
     }
     ensure!(
         label
@@ -211,6 +187,20 @@ fn replay_side(
         label.path.clone(),
         label.entry.clone(),
     ))
+}
+
+fn validated_source(snapshot: &Path, name: &str, commit: &str, tool: Tool) -> anyhow::Result<String> {
+    let path = Path::new(name);
+    let file = snapshot.join(path);
+    ensure!(file.symlink_metadata().is_ok_and(|meta| meta.is_file())
+        && file.canonicalize()?.starts_with(snapshot.canonicalize()?),
+        "'{}' must be a regular source file in {commit}", name);
+    let source = std::fs::read_to_string(file)?;
+    if tool != Tool::AutoreviewDuplication {
+        ensure!(autoreview_core::parses_cleanly(path, &source) == Some(true),
+            "'{}' must parse successfully in {commit}", name);
+    }
+    Ok(source)
 }
 
 fn replay(repo: &Path, suite: &Suite, gate_only: bool) -> anyhow::Result<Vec<CaseResult>> {
