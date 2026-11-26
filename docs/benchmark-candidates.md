@@ -75,9 +75,13 @@ An inspection of the before revision's two labeled files found unproven calls
 at `github-api-helper.ts:39,137` (`Buffer`), and `git-auth-helper.ts:54,56,148`
 (`URL`, `Buffer`, and `RegExpMatchArray | null`). These are structural types;
 the absence of a declared `then` property does not prove that every runtime
-value lacks one. Directly awaited unknown calls can now be recognized as
-observed, but the remaining calls and imported dependencies still require
-sound result-use evidence before this replay can be scored.
+value lacks one. Directly awaited unknown calls and calls directly returned
+from supported async functions can now be recognized as observed. With the
+documented TypeScript 5.6.3 setup, replay of the before revision reported two
+unresolved locations for the deletion case instead of three: the return at
+`github-api-helper.ts:137` is observed by the async function. The other case
+still reported 21 locations. Both cases remain incomplete and unscored; the
+remaining calls and dependencies need sound result-use evidence.
 
 For a reproducible source-level observation, first follow the clone, checkout,
 and dependency installation steps for this case in [the benchmark README](../benchmarks/README.md).

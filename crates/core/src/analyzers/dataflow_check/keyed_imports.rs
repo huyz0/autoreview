@@ -383,6 +383,19 @@ mod budget_tests {
         assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(2)), "{coverage:?}");
     }
 
+    fn assert_async_return_unknown_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
+        let source = "declare function uncertain(): any;\nexport async function direct() { return uncertain(); }\nexport async function guarded() { try { return uncertain(); } finally { return 1; } }\n";
+        for path in ["returned.ts", "returned.tsx"] {
+            std::fs::write(dir.join(path), source).unwrap();
+            let paths = [path.to_owned()];
+            let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            assert!(findings.is_empty(), "{findings:#?}");
+            assert!(!coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(2)), "{coverage:?}");
+            assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(3)), "{coverage:?}");
+            std::fs::remove_file(dir.join(path)).unwrap();
+        }
+    }
+
     #[test]
     fn dependency_budget_reports_only_unvisited_sources() {
         let dir = tempfile::tempdir().unwrap();
@@ -489,6 +502,7 @@ mod budget_tests {
         assert!(coverage.iter().any(|issue| issue.reason == "typed_promise_source_unavailable"), "{coverage:?}");
 
         assert_awaited_unknown_coverage(dir.path(), &checker, &rules);
+        assert_async_return_unknown_coverage(dir.path(), &checker, &rules);
         assert_typed_unresolved_receiver(dir.path(), &checker, &rules);
 
         std::fs::write(dir.path().join("view.tsx"), "declare function pending(): Promise<void>;\nfunction forward() { return pending(); }\nfunction again() { return forward(); }\nexport function run() { again(); }\n").unwrap();
