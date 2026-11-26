@@ -83,7 +83,10 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
       'async function direct() { return ((unknownValue())); }',
       'const arrow = async () => (unknownValue());',
       'class Example { async method() { return unknownValue(); } }',
+      'async function branch(flag: boolean) { if (flag) { return unknownValue(); } else return unknownValue(); }',
+      'async function choose(value: number) { switch (value) { case 1: return unknownValue(); default: return unknownValue(); } }',
       'async function guarded() { try { return unknownValue(); } finally { return 1; } }',
+      'async function nestedGuard(flag: boolean) { try { if (flag) return unknownValue(); } finally { return 1; } }',
       'async function loop() { for (const value of [1]) { return unknownValue(); } return 1; }',
       'function syncReturn() { return unknownValue(); }',
       'async function outer() { function inner() { return unknownValue(); } return inner(); }',
@@ -93,7 +96,7 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
     fs.writeFileSync(file, returns);
     calls = [...returns.matchAll(/\bunknownValue\(\)/g)].slice(1)
       .map(match => ({ path: file, start: Buffer.byteLength(returns.slice(0, match.index)), source_sha256: hash(returns) }));
-    assert.deepEqual(invoke().calls.map(call => call.status), ['observed', 'observed', 'observed', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven']);
+    assert.deepEqual(invoke().calls.map(call => call.status), ['observed', 'observed', 'observed', 'observed', 'observed', 'observed', 'observed', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven']);
     if (require(compiler).NodeFlags.Using) {
       const resources = [
         'declare function unknownValue(): any;',

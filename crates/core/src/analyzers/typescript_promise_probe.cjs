@@ -58,17 +58,25 @@ function run(request) {
     while (value.parent && ts.isParenthesizedExpression(value.parent) && value.parent.expression === value) value = value.parent;
     return !!value.parent && ts.isAwaitExpression(value.parent) && value.parent.expression === value;
   }
-  // Only a direct function-body return without using declarations is safe:
-  // finally blocks, iterator cleanup and resource disposal can replace it.
+  // Only traverse ordinary blocks, ifs and switch cases: finally blocks,
+  // iterator cleanup and resource disposal can replace a pending return.
   function returnedFromAsync(node) {
     let value = node;
     while (value.parent && ts.isParenthesizedExpression(value.parent) && value.parent.expression === value) value = value.parent;
     let current = value.parent;
     if (current && ts.isArrowFunction(current) && current.body === value) return asyncFunction(current);
     if (!current || !ts.isReturnStatement(current) || current.expression !== value) return false;
-    const body = current.parent;
-    const fn = body && body.parent;
-    return !!fn && ts.isBlock(body) && ts.isFunctionLike(fn) && fn.body === body && asyncFunction(fn) && !hasUsing(body);
+    current = current.parent;
+    while (current) {
+      const fn = current.parent;
+      if (fn && ts.isBlock(current) && ts.isFunctionLike(fn) && fn.body === current) {
+        return asyncFunction(fn) && !hasUsing(current);
+      }
+      if (![ts.SyntaxKind.Block, ts.SyntaxKind.IfStatement, ts.SyntaxKind.SwitchStatement,
+        ts.SyntaxKind.CaseBlock, ts.SyntaxKind.CaseClause, ts.SyntaxKind.DefaultClause].includes(current.kind)) return false;
+      current = current.parent;
+    }
+    return false;
   }
   function asyncFunction(node) {
     return !node.asteriskToken && !!node.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword);
