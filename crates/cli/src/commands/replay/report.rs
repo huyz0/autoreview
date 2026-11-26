@@ -26,6 +26,8 @@ pub(super) struct ReplayReport {
     coverage: Vec<CoverageScore>,
     cases: Vec<CaseResult>,
     pub(super) failures: Vec<CaseFailure>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    custom_rule_snapshots: Vec<super::packs::RuleSnapshot>,
 }
 
 #[derive(Serialize)]
@@ -86,7 +88,7 @@ pub(super) struct CaseFailure {
     kind: FailureKind,
 }
 
-pub(super) fn replay_report(repo: &Path, suite: &Suite) -> anyhow::Result<ReplayReport> {
+pub(super) fn replay_report(repo: &Path, suite: &Suite, frozen: &super::packs::FrozenRules) -> anyhow::Result<ReplayReport> {
     ensure!(!suite.cases.is_empty(), "the suite has no cases for the selected rules");
     let mut names = BTreeSet::new();
     let mut snapshots = BTreeSet::new();
@@ -95,10 +97,11 @@ pub(super) fn replay_report(repo: &Path, suite: &Suite) -> anyhow::Result<Replay
     let mut cache = BTreeMap::new();
     for case in &suite.cases {
         let outcome: anyhow::Result<CaseResult> = (|| {
+            if let Some(error) = frozen.errors.get(&case.rule.id) { anyhow::bail!("{error}"); }
             ensure!(!case.name.trim().is_empty() && names.insert(&case.name),
                 "case names must be unique and nonempty: '{}'", case.name);
             let single = Suite { cases: vec![case.clone()], gate: BTreeSet::new() };
-            let result = replay_with_cache(repo, &single, false, &mut cache)?.pop().expect("a single replay case");
+            let result = replay_with_cache(repo, &single, false, &mut cache, &frozen.packs)?.pop().expect("a single replay case");
             let keys: Vec<_> = [&result.before, &result.after].into_iter()
                 .map(|side| (case.rule.clone(), side.commit.clone(), side.path.clone())).collect();
             for key in &keys {
@@ -138,7 +141,7 @@ pub(super) fn replay_report(repo: &Path, suite: &Suite) -> anyhow::Result<Replay
         kind, rules: scores(&cases),
     }).collect();
     let coverage = coverage_scores(&cases, &failures);
-    Ok(ReplayReport { rules: scores(&cases), languages, evidence_kinds, coverage, cases, failures })
+    Ok(ReplayReport { rules: scores(&cases), languages, evidence_kinds, coverage, cases, failures, custom_rule_snapshots: frozen.snapshots.clone() })
 }
 
 fn case_language(before: &str, after: &str) -> String {

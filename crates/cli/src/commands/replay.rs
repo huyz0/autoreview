@@ -1,5 +1,6 @@
 mod rule;
 mod report;
+mod packs;
 
 use report::{replay_report, Evidence, GateReport};
 
@@ -123,6 +124,7 @@ fn replay_side(
     label: &Label,
     base: Option<&str>,
     pinned: bool,
+    packs: &[autoreview_core::ResolvedRulePack],
 ) -> anyhow::Result<SnapshotResult> {
     let path = Path::new(&label.path);
     ensure!(
@@ -134,6 +136,7 @@ fn replay_side(
         "expected a repository-relative path, got '{}'",
         label.path
     );
+    rule.validate_custom_language(path, packs)?;
     let commit = resolve_commit(repo, &label.commit)?;
     ensure!(
         !pinned || commit == label.commit,
@@ -176,7 +179,7 @@ fn replay_side(
             let changed: Vec<_> = facts.files.into_iter().map(|file| file.path).collect();
             super::revision::compare_java_nullability(repo, snapshot, base, &commit, &changed)?
         }
-        None => rule.tool.scan(snapshot, std::slice::from_ref(&label.path), &BTreeSet::from([rule.id.clone()]))?,
+        None => rule.tool.scan_with_packs(snapshot, std::slice::from_ref(&label.path), &BTreeSet::from([rule.id.clone()]), packs)?,
     };
     let lines = findings
         .into_iter()
@@ -192,7 +195,7 @@ fn replay_side(
 }
 
 fn replay(repo: &Path, suite: &Suite, gate_only: bool) -> anyhow::Result<Vec<CaseResult>> {
-    replay_with_cache(repo, suite, gate_only, &mut BTreeMap::new())
+    replay_with_cache(repo, suite, gate_only, &mut BTreeMap::new(), &[])
 }
 
 fn replay_with_cache(
@@ -200,6 +203,7 @@ fn replay_with_cache(
     suite: &Suite,
     gate_only: bool,
     snapshots: &mut BTreeMap<String, tempfile::TempDir>,
+    packs: &[autoreview_core::ResolvedRulePack],
 ) -> anyhow::Result<Vec<CaseResult>> {
     let mut cases = Vec::new();
     let mut names = BTreeSet::new();
@@ -220,7 +224,7 @@ fn replay_with_cache(
             );
         }
         case.rule
-            .check_replay_support()
+            .check_replay_support(packs)
             .with_context(|| format!("case '{}'", case.name))?;
         let base = case.base.as_deref();
         ensure!(
@@ -228,9 +232,9 @@ fn replay_with_cache(
             "case '{}' must specify base only for a rule that compares revisions", case.name
         );
         let base = base.map(|reference| resolve_commit(repo, reference)).transpose()?;
-        let before = replay_side(repo, snapshots, &case.rule, &case.before, base.as_deref(), gate_only)
+        let before = replay_side(repo, snapshots, &case.rule, &case.before, base.as_deref(), gate_only, packs)
             .with_context(|| format!("case '{}' before", case.name))?;
-        let after = replay_side(repo, snapshots, &case.rule, &case.after, base.as_deref(), gate_only)
+        let after = replay_side(repo, snapshots, &case.rule, &case.after, base.as_deref(), gate_only, packs)
             .with_context(|| format!("case '{}' after", case.name))?;
         ensure!(
             before.commit != after.commit,
@@ -313,7 +317,8 @@ fn scores(cases: &[CaseResult]) -> Vec<RuleScore> {
 
 pub(crate) fn run_replay(repo: &Path, suite: &Path) -> anyhow::Result<()> {
     let suite: Suite = serde_yaml::from_slice(&std::fs::read(repo.join(suite))?)?;
-    let report = replay_report(repo, &suite)?;
+    let frozen = packs::freeze_custom_rules(repo, &suite)?;
+    let report = replay_report(repo, &suite, &frozen)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     ensure!(
         report.failures.is_empty() && report

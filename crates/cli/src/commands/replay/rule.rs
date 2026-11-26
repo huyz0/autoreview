@@ -31,6 +31,10 @@ impl std::error::Error for IncompleteAnalysis {}
 
 impl Tool {
     pub(super) fn scan(self, source: &Path, paths: &[String], rules: &BTreeSet<String>) -> anyhow::Result<Vec<AgentFinding>> {
+        self.scan_with_packs(source, paths, rules, &[])
+    }
+
+    pub(super) fn scan_with_packs(self, source: &Path, paths: &[String], rules: &BTreeSet<String>, packs: &[autoreview_core::ResolvedRulePack]) -> anyhow::Result<Vec<AgentFinding>> {
         let findings = match self {
             Self::AstGrep => {
                 ensure!(
@@ -40,13 +44,13 @@ impl Tool {
                         .is_ok_and(|output| output.status.success()),
                     "ast-grep is required for this rule"
                 );
-                autoreview_core::run_ast_grep(source, paths, &[])?
+                autoreview_core::run_ast_grep(source, paths, packs)?
             }
-            Self::AutoreviewComplexity => autoreview_core::run_complexity_check(source, paths, &[]),
+            Self::AutoreviewComplexity => autoreview_core::run_complexity_check(source, paths, packs),
             Self::AutoreviewArchgraph => autoreview_core::run_archgraph_check(source, paths),
             Self::AutoreviewDataflow => {
-                let result = autoreview_core::run_dataflow_check_with_coverage(source, source, paths, &[]);
-                let relevant: Vec<_> = result.coverage.iter().filter(|issue| affects_rules(issue, rules)).collect();
+                let result = autoreview_core::run_dataflow_check_with_coverage(source, source, paths, packs);
+                let relevant: Vec<_> = result.coverage.iter().filter(|issue| affects_rules(issue, rules, packs)).collect();
                 if !relevant.is_empty() {
                     return Err(IncompleteAnalysis(relevant.iter().map(|issue| format!("{}: {}", issue.path.as_deref().unwrap_or("repository"), issue.detail)).collect::<Vec<_>>().join("; ")).into());
                 }
@@ -60,12 +64,12 @@ impl Tool {
     }
 }
 
-fn affects_rules(issue: &autoreview_schema::AnalysisCoverageIssue, rules: &BTreeSet<String>) -> bool {
+fn affects_rules(issue: &autoreview_schema::AnalysisCoverageIssue, rules: &BTreeSet<String>, packs: &[autoreview_core::ResolvedRulePack]) -> bool {
     if let Some(rule) = &issue.rule {
         return rules.contains(rule);
     }
     issue.analyzer != "call-sequence" || rules.iter().any(|id|
-        autoreview_core::find_rule_definition(id, &[]).is_some_and(|rule| rule.kind == "call-sequence"))
+        autoreview_core::find_rule_definition(id, packs).is_some_and(|rule| rule.kind == "call-sequence"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
@@ -84,8 +88,21 @@ impl Rule {
         self.tool == Tool::AutoreviewFrameworks && self.id == "java-new-nullable-return-breaks-caller"
     }
 
-    pub(super) fn check_replay_support(&self) -> anyhow::Result<()> {
-        let definition = autoreview_core::find_rule_definition(&self.id, &[]);
+    pub(super) fn validate_custom_language(&self, path: &Path, packs: &[autoreview_core::ResolvedRulePack]) -> anyhow::Result<()> {
+        let Some(definition) = autoreview_core::find_rule_definition(&self.id, packs) else { return Ok(()) };
+        if definition.source_label != "replay-frozen" { return Ok(()); }
+        #[derive(Deserialize)]
+        struct RuleLanguage { language: String }
+        let language: RuleLanguage = serde_yaml::from_str(&definition.yaml)?;
+        let declared = autoreview_langsupport::Language::from_rule_name(&language.language);
+        let actual = autoreview_langsupport::language_for_path(path);
+        ensure!(declared.zip(actual).is_some_and(|(declared, actual)| actual.matches_rule_language(declared)),
+            "custom replay rule '{}' does not apply to '{}'", self.id, path.display());
+        Ok(())
+    }
+
+    pub(super) fn check_replay_support(&self, packs: &[autoreview_core::ResolvedRulePack]) -> anyhow::Result<()> {
+        let definition = autoreview_core::find_rule_definition(&self.id, packs);
         let kind = definition.as_ref().map(|rule| rule.kind.as_str());
         let supported = match self.tool {
             Tool::AstGrep => kind == Some("pattern"),
@@ -156,6 +173,17 @@ mod tests {
     }
 
     #[test]
+    fn custom_call_sequence_replay_rejects_unresolved_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        let pack = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("main.js"), "import { run } from './missing';\nexport function main() { run(); }\n").unwrap();
+        std::fs::write(pack.path().join("rule.yml"), "id: custom-result\nlanguage: JavaScript\ncategory: correctness\nseverity: warning\nkind: call-sequence\nmessage: use result\ncontract:\n  mode: must-use\n  import: node:fs/promises\n  methods: [rename]\n").unwrap();
+        let packs = [autoreview_core::ResolvedRulePack { id: "custom".into(), local_path: pack.path().to_owned(), trust: autoreview_schema::RulePackTrust::Full }];
+        let error = Tool::AutoreviewDataflow.scan_with_packs(root.path(), &["main.js".into()], &BTreeSet::from(["custom-result".into()]), &packs).unwrap_err();
+        assert!(error.to_string().contains("incomplete"), "{error}");
+    }
+
+    #[test]
     fn dataflow_replay_rejects_ambiguous_barrel_helpers() {
         let root = tempfile::tempdir().unwrap();
         let helper = "import { rename } from 'node:fs/promises';\nexport function move(a, b) { return rename(a, b); }\n";
@@ -208,7 +236,7 @@ mod tests {
             analyzer: "call-sequence".into(), reason: "path_budget".into(), scope: "function".into(),
             path: Some("main.go".into()), line: Some(1), rule: Some("rule-a".into()), detail: "skipped".into(),
         };
-        assert!(affects_rules(&issue, &BTreeSet::from(["rule-a".into()])));
-        assert!(!affects_rules(&issue, &BTreeSet::from(["rule-b".into()])));
+        assert!(affects_rules(&issue, &BTreeSet::from(["rule-a".into()]), &[]));
+        assert!(!affects_rules(&issue, &BTreeSet::from(["rule-b".into()]), &[]));
     }
 }

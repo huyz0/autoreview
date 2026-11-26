@@ -148,6 +148,15 @@ analyzed appear in `failures` with a reason and are excluded from the scores;
 the command exits nonzero if any case fails. Review these failures alongside
 the metrics before drawing conclusions about coverage.
 
+Replay also accepts registered custom call-sequence rules, including rules in
+shadow-trust packs. It resolves packs from the working checkout, validates and
+freezes the selected rule text for both revisions, and reports its pack ID and
+SHA-256 in `customRuleSnapshots`. Duplicate custom IDs are reported as case
+failures; unresolved packs, invalid rules, mismatched languages, and incomplete
+analysis are not scored as clean. Other custom rule kinds are not yet supported
+by replay. The optional merge gate remains restricted to qualified built-in
+rules and does not use working-checkout packs.
+
 ```yaml
 cases:
   - name: comparison uses the wrong operand

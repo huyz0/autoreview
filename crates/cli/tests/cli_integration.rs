@@ -71,6 +71,71 @@ fn replay_reports_analysis_failures_without_losing_successful_cases() {
 }
 
 #[test]
+fn replay_evaluates_a_registered_custom_call_sequence_rule() {
+    let bad = "package main\nimport \"os\"\nfunc move(a, b string) { os.Rename(a, b) }\n";
+    let fixed = "package main\nimport \"os\"\nfunc move(a, b string) error { return os.Rename(a, b) }\n";
+    let repo = init_repo(&[("move.go", bad), ("main.ts", "declare function task(): Promise<void>;\nexport function run() { task(); }\n")]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("move.go", fixed)], "check rename error");
+    let after = current_commit(repo.path());
+    let pack = tempfile::tempdir().unwrap();
+    std::fs::write(pack.path().join("rulepack.yaml"), "id: custom\nversion: '1'\n").unwrap();
+    std::fs::write(pack.path().join("rule.yml"), "id: custom-rename\nlanguage: Go\ncategory: correctness\nseverity: warning\nkind: call-sequence\nmessage: Check the error.\ncontract:\n  mode: must-use\n  import: os\n  methods: [Rename]\n").unwrap();
+    std::fs::create_dir_all(repo.path().join(".autoreview")).unwrap();
+    let path = serde_json::to_string(&pack.path().to_string_lossy()).unwrap();
+    std::fs::write(repo.path().join(".autoreview/rulepacks.yaml"), format!("packs:\n  - id: custom\n    trust: shadow\n    source:\n      kind: local\n      path: {path}\n")).unwrap();
+    let suite = serde_json::json!({"cases": [{"name":"custom", "rule":{"tool":"autoreview-dataflow","id":"custom-rename"}, "before":{"commit":before,"path":"move.go","lines":[3]}, "after":{"commit":after,"path":"move.go","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["rules", "replay", "--suite", "suite.json"]).assert().success();
+    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(report["rules"][0]["truePositives"], 1);
+    assert_eq!(report["coverage"][0]["completed"], 1);
+    assert_eq!(report["customRuleSnapshots"][0]["packId"], "custom");
+    assert_eq!(report["customRuleSnapshots"][0]["sha256"].as_str().unwrap().len(), 64);
+
+    let mut wrong_language = suite.clone();
+    wrong_language["cases"][0]["before"]["path"] = "main.ts".into();
+    wrong_language["cases"][0]["before"]["lines"] = serde_json::json!([]);
+    wrong_language["cases"][0]["after"]["path"] = "main.ts".into();
+    std::fs::write(repo.path().join("suite.json"), wrong_language.to_string()).unwrap();
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
+    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert!(report["cases"].as_array().unwrap().is_empty());
+    assert!(report["failures"][0]["error"].as_str().unwrap().contains("does not apply"));
+
+    std::fs::write(pack.path().join("promise.yml"), "id: custom-promise\nlanguage: TypeScript\ncategory: correctness\nseverity: warning\nkind: call-sequence\nmessage: Observe the promise.\ncontract:\n  mode: must-use\n  source: typed-promise\n").unwrap();
+    let mut incomplete = suite.clone();
+    let mut promise = incomplete["cases"][0].clone();
+    promise["name"] = "promise".into();
+    promise["rule"]["id"] = "custom-promise".into();
+    promise["before"]["path"] = "main.ts".into();
+    promise["before"]["lines"] = serde_json::json!([]);
+    promise["after"]["path"] = "main.ts".into();
+    incomplete["cases"].as_array_mut().unwrap().push(promise);
+    std::fs::write(repo.path().join("suite.json"), incomplete.to_string()).unwrap();
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).env_remove("AUTOREVIEW_TYPESCRIPT_MODULE").args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
+    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(report["cases"][0]["name"], "custom");
+    assert_eq!(report["failures"][0]["kind"], "incomplete-analysis");
+
+    let duplicate = tempfile::tempdir().unwrap();
+    std::fs::write(duplicate.path().join("rulepack.yaml"), "id: duplicate\nversion: '1'\n").unwrap();
+    std::fs::copy(pack.path().join("rule.yml"), duplicate.path().join("rule.yml")).unwrap();
+    let second = serde_json::to_string(&duplicate.path().to_string_lossy()).unwrap();
+    std::fs::write(repo.path().join(".autoreview/rulepacks.yaml"), format!("packs:\n  - id: custom\n    source: {{ kind: local, path: {path} }}\n  - id: duplicate\n    source: {{ kind: local, path: {second} }}\n")).unwrap();
+    let mut mixed = suite.clone();
+    let mut builtin = mixed["cases"][0].clone();
+    builtin["name"] = "builtin".into();
+    builtin["rule"]["id"] = "go-os-rename-discarded-error".into();
+    mixed["cases"].as_array_mut().unwrap().push(builtin);
+    std::fs::write(repo.path().join("suite.json"), mixed.to_string()).unwrap();
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
+    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(report["cases"][0]["name"], "builtin");
+    assert!(report["failures"][0]["error"].as_str().unwrap().contains("ambiguous"));
+}
+
+#[test]
 fn commit_replay_measures_rule_precision_and_gates_only_qualified_changed_lines() {
     if !ast_grep_available() {
         return;
