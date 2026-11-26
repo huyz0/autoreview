@@ -138,6 +138,27 @@ fn replay_excludes_ambiguous_helpers_even_without_a_known_result_source() {
 }
 
 #[test]
+fn replay_detects_conditional_discarded_promise() {
+    let bad = "import { rename } from 'node:fs/promises';\nexport function run(a, b, flag) {\n flag ? rename(a, b) : null;\n}\n";
+    let clean = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n if (flag) { await rename(a, b); }\n}\n";
+    let repo = init_repo(&[("main.js", bad)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("main.js", clean)], "observe conditional promise");
+    let after = current_commit(repo.path());
+    let mut suite = serde_json::json!({"cases": [{"name":"conditional promise", "rule":{"tool":"autoreview-dataflow","id":"javascript-node-fs-discarded-promise"}, "before":{"commit":before,"path":"main.js","lines":[3]}, "after":{"commit":after,"path":"main.js","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["rules", "replay", "--suite", "suite.json"]).assert().success();
+    let report: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(report["rules"][0]["truePositives"], 1, "{report}");
+    assert_eq!(report["coverage"][0]["completed"], 1, "{report}");
+    repo.commit(&[("main.js", &bad.replace("flag ?", "check(flag) ?"))], "use unmodeled condition");
+    suite["cases"][0]["before"]["commit"] = current_commit(repo.path()).into();
+    suite["cases"][0]["before"]["lines"] = serde_json::json!([]);
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    assert_incomplete_replay(&failed_replay_report(repo.path()), "unmodeled_conditional_result", "main.js", 3);
+}
+
+#[test]
 fn replay_excludes_unmodeled_contract_cleanup() {
     let bad = "import java.util.concurrent.CompletableFuture;\nclass Main {\n Object run(Runnable work, boolean flag) {\n  var task = CompletableFuture.runAsync(work);\n  return flag ? task.join() : null;\n }\n}\n";
     let clean = "import java.util.concurrent.CompletableFuture;\nclass Main { void run(Runnable work) { var task = CompletableFuture.runAsync(work); task.join(); } }\n";

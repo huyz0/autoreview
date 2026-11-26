@@ -78,6 +78,29 @@ const RECEIVER: &str = "{receiver: true, keyArgument: 0}";
 const ARGUMENT: &str = "{collectionArgument: 0, keyArgument: 2}";
 
 #[test]
+fn conditional_statement_cleanup_tracks_each_branch() {
+    let source = "function pending(root, key, flag) {\n root.register(key);\n flag ? root.remove(key) : null;\n}\n";
+    for (language, path) in [("JavaScript", "main.js"), ("TypeScript", "main.ts"), ("TypeScript", "main.tsx")] {
+        let hits = findings(language, path, source, RECEIVER, true);
+        assert_eq!(hits.len(), 1, "{path}: {hits:#?}");
+        let both = source.replace(" : null", " : root.remove(key)");
+        assert!(findings(language, path, &both, RECEIVER, true).is_empty());
+        let constant = source.replace("flag ?", "true ?");
+        assert!(findings(language, path, &constant, RECEIVER, true).is_empty());
+        let parenthesized = source.replace("flag ?", "((true)) ?");
+        assert!(findings(language, path, &parenthesized, RECEIVER, true).is_empty());
+        let wrong = both.replace(" : root.remove(key)", " : root.remove('other')");
+        assert_eq!(findings(language, path, &wrong, RECEIVER, true).len(), 1);
+        let correlated = source.replace("}\n", " if (!flag) { root.remove(key); }\n}\n");
+        assert!(findings(language, path, &correlated, RECEIVER, true).is_empty());
+        let reassigned = source.replace("}\n", " flag = true; if (!flag) { root.remove(key); }\n}\n");
+        assert_eq!(findings(language, path, &reassigned, RECEIVER, true).len(), 1);
+        let finally = source.replace(" flag ? root.remove(key) : null;", " try { flag ? root.remove(key) : null; } finally { root.remove(key); }");
+        assert!(findings(language, path, &finally, RECEIVER, true).is_empty());
+    }
+}
+
+#[test]
 fn unlowered_cleanup_reports_incomplete_analysis() {
     let source = "function pending(root, key, flag) {\n root.register(key);\n const result = flag ? root.remove(key) : undefined;\n return result;\n}\n";
     let repo = tempfile::tempdir().unwrap();

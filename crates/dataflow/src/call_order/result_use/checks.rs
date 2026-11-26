@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 mod forwarding;
 mod receivers;
+mod conditionals;
 use super::{effects, summaries, CallOrderHit, CallOrderSpec, HelperSummary, KeyedUnit, Origin, Program};
 
 pub(in crate::call_order) fn check_units(
@@ -65,6 +66,7 @@ fn unmodeled_sources(
     let functions: Vec<_> = units.iter().flat_map(|unit| unit.functions.iter()).collect();
     let reachable = super::sources::reachable_frames(program, units, &functions);
     limitations.extend(receivers::limitations(program, units, &reachable));
+    limitations.extend(conditionals::limitations(program, units, &reachable));
     if sources.keys().any(|index| *index >= units.len()) {
         limitations.push(super::super::keyed::KeyedLimitation { reason: "verified_source_unmodeled", path: None, line: None });
     }

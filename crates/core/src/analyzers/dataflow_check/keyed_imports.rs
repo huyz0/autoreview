@@ -383,6 +383,19 @@ mod budget_tests {
         assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(2)), "{coverage:?}");
     }
 
+    fn assert_conditional_typed_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
+        let source = "declare function pending(): Promise<void>;\ndeclare function check(flag: boolean): boolean;\nexport function run(flag: boolean) { flag ? pending() : null; }\n";
+        let path = dir.join("view.tsx");
+        let paths = ["view.tsx".to_owned()];
+        std::fs::write(&path, source).unwrap();
+        let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+        assert_eq!(findings.len(), 1, "{findings:#?} {coverage:?}");
+        assert!(!coverage.iter().any(|issue| issue.reason == "unmodeled_conditional_result"), "{coverage:?}");
+        std::fs::write(&path, source.replace("flag ?", "check(flag) ?")).unwrap();
+        let (_, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+        assert!(coverage.iter().any(|issue| issue.reason == "unmodeled_conditional_result" && issue.line == Some(3)), "{coverage:?}");
+    }
+
     fn assert_async_return_unknown_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
         let source = "declare function uncertain(): any;\nexport async function direct() { return uncertain(); }\nexport async function guarded() { try { return uncertain(); } finally { return 1; } }\n";
         for path in ["returned.ts", "returned.tsx"] {
@@ -502,6 +515,7 @@ mod budget_tests {
         assert!(coverage.iter().any(|issue| issue.reason == "typed_promise_source_unavailable"), "{coverage:?}");
 
         assert_awaited_unknown_coverage(dir.path(), &checker, &rules);
+        assert_conditional_typed_coverage(dir.path(), &checker, &rules);
         assert_async_return_unknown_coverage(dir.path(), &checker, &rules);
         assert_typed_unresolved_receiver(dir.path(), &checker, &rules);
 
