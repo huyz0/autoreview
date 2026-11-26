@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use super::{
-    branch, cyclic, has_conditional, outgoing, supported_edges, Body, Cfg, EdgeKind, Effect, Node,
-    Place, Plan, State, Stmt, Value, PATH_LIMIT,
+    branch, cyclic, hidden_at, outgoing, supported_edges, supported_effect_with_return, throws,
+    Body, Cfg, EdgeKind, Effect, Node, Place, Plan, State, Stmt, Value, PATH_LIMIT,
 };
 
 /// `None` means that this helper is outside the bounded model.
@@ -11,10 +11,9 @@ pub(in crate::call_order::result_use) fn unobserved_parameters(
     cfg: &Cfg<Stmt>,
     plan: &Plan<'_, '_>,
     syntax: (Node<'_>, &[u8]),
-    parameters: &[Option<Place>],
-    return_used: bool,
-    has_closures: bool,
+    options: (&[Option<Place>], bool, bool),
 ) -> Vec<Option<bool>> {
+    let (parameters, return_used, has_closures) = options;
     if parameters.len() > 64 {
         return vec![None; parameters.len()];
     }
@@ -32,14 +31,16 @@ pub(in crate::call_order::result_use) fn unobserved_parameters(
             .iter()
             .enumerate()
             .all(|(node, out)| supported_edges(cfg, plan, node, out, branches))
-        && body.effects.iter().flatten().all(supported_effect)
-        && !cfg.nodes.iter().enumerate().any(|(index, node)| {
-            body.flow.reachable[index]
-                && node.evaluations.iter().any(|range| {
-                    super::super::effects::evaluation(syntax.0, range)
-                        .is_some_and(|node| has_conditional(node, syntax.1))
-                })
-        });
+        && body
+            .effects
+            .iter()
+            .flatten()
+            .all(|effect| supported_effect_with_return(effect, true))
+        && !cfg
+            .nodes
+            .iter()
+            .enumerate()
+            .any(|(index, _)| body.flow.reachable[index] && hidden_at(cfg, index, syntax));
     parameters
         .iter()
         .map(|parameter| {
@@ -47,25 +48,9 @@ pub(in crate::call_order::result_use) fn unobserved_parameters(
                 return None;
             }
             let parameter = parameter.filter(|place| matches!(place, Place::Local(_)))?;
-            unobserved(body, cfg, plan, &edges, parameter, return_used)
+            unobserved(body, cfg, plan, &edges, (parameter, return_used))
         })
         .collect()
-}
-
-fn supported_effect(effect: &Effect) -> bool {
-    match effect {
-        Effect::Read(Place::Local(_)) => true,
-        Effect::Write(writes) => writes.iter().all(|write| {
-            write
-                .target
-                .is_none_or(|place| matches!(place, Place::Local(_) | Place::Return))
-                && matches!(
-                    write.value,
-                    Value::Source(_) | Value::Copy(Place::Local(_)) | Value::Other
-                )
-        }),
-        _ => false,
-    }
 }
 
 fn unobserved(
@@ -73,9 +58,9 @@ fn unobserved(
     cfg: &Cfg<Stmt>,
     plan: &Plan<'_, '_>,
     edges: &[Vec<(usize, EdgeKind)>],
-    parameter: Place,
-    return_used: bool,
+    target: (Place, bool),
 ) -> Option<bool> {
+    let (parameter, return_used) = target;
     let mut initial = State {
         active: true,
         ..State::default()
@@ -90,11 +75,7 @@ fn unobserved(
         if seen.len() > PATH_LIMIT {
             return None;
         }
-        if cfg.nodes[node]
-            .stmts
-            .iter()
-            .any(|stmt| matches!(stmt, Stmt::Throw { .. }))
-        {
+        if throws(cfg, node) {
             continue;
         }
         if observes(&body.effects[node], &mut state, return_used) {
@@ -116,25 +97,37 @@ fn observes(effects: &[Effect], state: &mut State, return_used: bool) -> bool {
             Effect::Read(place) if state.aliases.contains(place) => return true,
             Effect::Write(writes) => {
                 let previous = state.aliases.clone();
-                if return_used && writes.iter().any(|write| {
-                    write.target == Some(Place::Return)
-                        && matches!(&write.value, Value::Copy(place) if previous.contains(place))
-                }) {
+                if return_used && returns_alias(writes, &previous) {
                     return true;
                 }
-                for target in writes.iter().filter_map(|write| write.target) {
-                    state.aliases.remove(&target);
-                }
-                for write in writes {
-                    if let (Some(target), Value::Copy(source)) = (write.target, &write.value) {
-                        if previous.contains(source) && target != Place::Return {
-                            state.aliases.insert(target);
-                        }
-                    }
-                }
+                update_parameter_aliases(writes, &previous, state);
             }
             _ => {}
         }
     }
     false
+}
+
+fn returns_alias(writes: &[super::Write], previous: &BTreeSet<Place>) -> bool {
+    writes.iter().any(|write| {
+        write.target == Some(Place::Return)
+            && matches!(&write.value, Value::Copy(place) if previous.contains(place))
+    })
+}
+
+fn update_parameter_aliases(
+    writes: &[super::Write],
+    previous: &BTreeSet<Place>,
+    state: &mut State,
+) {
+    for target in writes.iter().filter_map(|write| write.target) {
+        state.aliases.remove(&target);
+    }
+    for write in writes {
+        if let (Some(target), Value::Copy(source)) = (write.target, &write.value) {
+            if previous.contains(source) && target != Place::Return {
+                state.aliases.insert(target);
+            }
+        }
+    }
 }

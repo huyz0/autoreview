@@ -138,7 +138,7 @@ fn summarize(
     let syntax = (function.node, unit.source);
     for (used, outcome) in [(false, &mut summary.when_discarded), (true, &mut summary.when_observed)] {
         outcome.unobserved_parameters = super::partial::unobserved_parameters(
-            &analysis.owner, function.graph, plan, syntax, &parameters, used, !analysis.closures.is_empty(),
+            &analysis.owner, function.graph, plan, syntax, (&parameters, used, !analysis.closures.is_empty()),
         );
     }
     summary

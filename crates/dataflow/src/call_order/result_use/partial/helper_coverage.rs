@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use super::{
-    branch, has_conditional, local_origins, observed, outgoing, supported_edges, Body, Cfg, Demand,
-    EdgeKind, Effect, Node, Origin, Plan, State, Stmt, PATH_LIMIT,
+    branch, hidden_at, local_origins, observed, outgoing, supported_edges, throws, Body, Cfg,
+    Demand, EdgeKind, Effect, Node, Origin, Plan, State, Stmt, PATH_LIMIT,
 };
 use crate::cfg::NodeId;
 
@@ -17,19 +17,17 @@ pub(in crate::call_order::result_use) fn has_partial_helper(
     let edges = outgoing(body, cfg);
     local_origins(body).into_iter().any(|(node, origin)| {
         !unused.iter().any(|(_, other)| *other == origin)
-            && uncertain_path(body, cfg, plan, syntax, &edges, node, &origin)
+            && uncertain_path((body, cfg, plan, syntax), &edges, node, &origin)
     })
 }
 
 fn uncertain_path(
-    body: &Body,
-    cfg: &Cfg<Stmt>,
-    plan: &Plan<'_, '_>,
-    syntax: (Node<'_>, &[u8]),
+    context: (&Body, &Cfg<Stmt>, &Plan<'_, '_>, (Node<'_>, &[u8])),
     edges: &[Vec<(NodeId, EdgeKind)>],
     start: NodeId,
     origin: &Origin,
 ) -> bool {
+    let (body, cfg, plan, syntax) = context;
     let mut pending = vec![(start, State::default(), false)];
     let mut visited = BTreeSet::new();
     let mut found = false;
@@ -40,17 +38,10 @@ fn uncertain_path(
         if visited.len() > PATH_LIMIT {
             return found;
         }
-        if cfg.nodes[node]
-            .stmts
-            .iter()
-            .any(|stmt| matches!(stmt, Stmt::Throw { .. }))
-        {
+        if throws(cfg, node) {
             continue;
         }
-        let conditional = cfg.nodes[node].evaluations.iter().any(|range| {
-            super::super::effects::evaluation(syntax.0, range)
-                .is_some_and(|value| has_conditional(value, syntax.1))
-        });
+        let conditional = hidden_at(cfg, node, syntax);
         if process(
             &body.effects[node],
             origin,
@@ -91,22 +82,33 @@ fn process(
             return true;
         }
         if let Effect::ApplyHelper(call) = effect {
-            for (index, argument) in call.arguments.iter().enumerate() {
-                if !argument.is_some_and(|place| state.aliases.contains(&place)) {
-                    continue;
-                }
-                let value = match call.demand {
-                    Demand::Observed => call.unobserved_observed.get(index),
-                    Demand::Discarded => call.unobserved_discarded.get(index),
-                    Demand::Slot(_) => None,
-                };
-                match value {
-                    Some(Some(false)) if !conditional => return true,
-                    Some(Some(true)) | Some(None) | None => *uncertain = true,
-                    Some(Some(false)) => *uncertain = true,
-                }
+            if helper_observes(call, state, uncertain, conditional) {
+                return true;
             }
         }
+    }
+    false
+}
+
+fn helper_observes(
+    call: &super::super::HelperCall,
+    state: &State,
+    uncertain: &mut bool,
+    conditional: bool,
+) -> bool {
+    for (index, argument) in call.arguments.iter().enumerate() {
+        if !argument.is_some_and(|place| state.aliases.contains(&place)) {
+            continue;
+        }
+        let value = match call.demand {
+            Demand::Observed => call.unobserved_observed.get(index),
+            Demand::Discarded => call.unobserved_discarded.get(index),
+            Demand::Slot(_) => None,
+        };
+        if value == Some(&Some(false)) && !conditional {
+            return true;
+        }
+        *uncertain = true;
     }
     false
 }

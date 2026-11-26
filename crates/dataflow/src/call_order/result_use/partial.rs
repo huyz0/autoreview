@@ -39,13 +39,11 @@ pub(super) fn unused(
     has_closures: bool,
 ) -> (Vec<(NodeId, Origin)>, Status) {
     let edges = outgoing(body, cfg);
-    let hidden = cfg.nodes.iter().enumerate().any(|(index, node)| {
-        body.flow.reachable[index]
-            && node.evaluations.iter().any(|range| {
-                super::effects::evaluation(syntax.0, range)
-                    .is_some_and(|node| has_conditional(node, syntax.1))
-            })
-    });
+    let hidden = cfg
+        .nodes
+        .iter()
+        .enumerate()
+        .any(|(index, _)| body.flow.reachable[index] && hidden_at(cfg, index, syntax));
     if !hidden
         && !edges
             .iter()
@@ -249,19 +247,36 @@ fn supported(
 }
 
 fn supported_effect(effect: &Effect) -> bool {
+    supported_effect_with_return(effect, false)
+}
+
+fn supported_effect_with_return(effect: &Effect, allow_return: bool) -> bool {
     match effect {
         Effect::Read(Place::Local(_)) => true,
         Effect::Write(writes) => writes.iter().all(|write| {
-            write
-                .target
-                .is_none_or(|place| matches!(place, Place::Local(_)))
-                && matches!(
-                    write.value,
-                    Value::Source(_) | Value::Copy(Place::Local(_)) | Value::Other
-                )
+            write.target.is_none_or(|place| {
+                matches!(place, Place::Local(_)) || (allow_return && place == Place::Return)
+            }) && matches!(
+                write.value,
+                Value::Source(_) | Value::Copy(Place::Local(_)) | Value::Other
+            )
         }),
         _ => false,
     }
+}
+
+fn hidden_at(cfg: &Cfg<Stmt>, node: NodeId, syntax: (Node<'_>, &[u8])) -> bool {
+    cfg.nodes[node].evaluations.iter().any(|range| {
+        super::effects::evaluation(syntax.0, range)
+            .is_some_and(|value| has_conditional(value, syntax.1))
+    })
+}
+
+fn throws(cfg: &Cfg<Stmt>, node: NodeId) -> bool {
+    cfg.nodes[node]
+        .stmts
+        .iter()
+        .any(|stmt| matches!(stmt, Stmt::Throw { .. }))
 }
 
 fn cyclic(body: &Body) -> bool {
@@ -307,11 +322,7 @@ fn unobserved_path(
         if seen.len() > PATH_LIMIT {
             return None;
         }
-        if cfg.nodes[node]
-            .stmts
-            .iter()
-            .any(|stmt| matches!(stmt, Stmt::Throw { .. }))
-        {
+        if throws(cfg, node) {
             continue;
         }
         if observed(&body.effects[node], origin, &mut state) {
