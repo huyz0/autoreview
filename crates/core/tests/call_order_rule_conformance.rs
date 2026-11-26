@@ -215,6 +215,12 @@ fn unresolved_receivers_track_assigned_results_and_reassignments() {
         && issue.rule.as_deref() == Some("javascript-node-fs-discarded-promise"))
         .filter_map(|issue| issue.line).collect();
     assert_eq!(lines, BTreeSet::from([2, 3, 4]), "{:?}", result.coverage);
+    let observed = "import { rename } from 'node:fs/promises';\nasync function used(a, b) { const p = rename(a, b); await p; unknown(p); }\nasync function branch(a, b, flag) { const p = rename(a, b); if (flag) await p; unknown(p); }\n";
+    std::fs::write(root.path().join("main.js"), observed).unwrap();
+    let observed = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &["main.js".into()], &[]);
+    let lines: BTreeSet<_> = observed.coverage.iter().filter(|issue| issue.reason == "unresolved_result_receiver"
+        && issue.rule.as_deref() == Some("javascript-node-fs-discarded-promise")).filter_map(|issue| issue.line).collect();
+    assert_eq!(lines, BTreeSet::from([3]), "{:?}", observed.coverage);
     let fields = "import { rename } from 'node:fs/promises';\nfunction run(a, b) { const box = { pending: null }; box.pending = rename(a, b); unknown(box.pending); }\nfunction replaced(a, b) { const box = { pending: null }; box.pending = rename(a, b); box.pending = null; unknown(box.pending); }\n";
     std::fs::write(root.path().join("main.js"), fields).unwrap();
     let fields = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &["main.js".into()], &[]);

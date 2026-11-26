@@ -51,7 +51,9 @@ fn transfer(effects: &[Effect], live: &mut Live, closures: &[Body], mut report: 
         match effect {
             Effect::OpaqueRead(place) => { live.insert(*place); }
             Effect::OpaqueOnly(nested) => transfer(nested, live, closures, report.as_deref_mut()),
-            Effect::Read(_) => {}
+            // A known use before an opaque call settles that path. Other paths
+            // retain their uncertainty when the control-flow facts are joined.
+            Effect::Read(place) => { live.remove(place); }
             Effect::Write(writes) => transfer_writes(writes, live, Some(&mut |origin, used| {
                 if used { if let Some(report) = &mut report { report(origin); } }
             })),
