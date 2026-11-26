@@ -211,6 +211,10 @@ impl<'src> Syntax<'src> {
         self.calls.iter().any(|(_, name)| predicate(name))
     }
 
+    pub(super) fn first_call(&self, predicate: impl Fn(&str) -> bool) -> Option<usize> {
+        self.calls.iter().find_map(|(start, name)| predicate(name).then_some(*start))
+    }
+
     pub(super) fn has_registration(&self, candidates: &[NamePattern]) -> bool {
         self.calls.iter().any(|(_, name)| {
             matches_any(candidates, name)

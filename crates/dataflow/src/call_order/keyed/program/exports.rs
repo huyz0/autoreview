@@ -1,6 +1,26 @@
 use std::collections::BTreeSet;
 
-use super::{KeyedExport, Program, Scope};
+use super::{Program, Scope};
+
+/// A named export (local or from another unit), or a wildcard re-export.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum KeyedExport {
+    Named { exported: String, local: String, path: Option<String> },
+    Star { path: String },
+    /// An export whose runtime names cannot be enumerated safely.
+    Unknown,
+}
+
+/// Exact local name or namespace prefix mapped to a repository source file.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct KeyedImport {
+    pub local: String,
+    pub path: String,
+    /// None selects a member by stripping the local namespace prefix.
+    pub name: Option<String>,
+    pub owner: Option<String>,
+    pub exported: bool,
+}
 
 const EXPORT_STEP_LIMIT: usize = 4096;
 const EXPORT_DEPTH_LIMIT: usize = 128;

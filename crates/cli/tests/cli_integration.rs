@@ -30,6 +30,13 @@ fn failed_replay_report(repo: &std::path::Path) -> serde_json::Value {
     serde_json::from_slice(&result.get_output().stdout).unwrap()
 }
 
+fn assert_incomplete_replay(report: &serde_json::Value, reason: &str, path: &str, line: u32) {
+    assert_eq!(report["coverage"][0]["incomplete"], 1, "{report}");
+    assert_eq!(report["coverage"][0]["completed"], 0, "{report}");
+    assert!(report["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == reason && issue["path"] == path && issue["line"] == line), "{report}");
+}
+
 #[cfg(windows)]
 #[test]
 fn replay_checks_out_unrelated_long_paths_on_windows() {
@@ -131,6 +138,20 @@ fn replay_excludes_ambiguous_helpers_even_without_a_known_result_source() {
 }
 
 #[test]
+fn replay_excludes_unmodeled_contract_handle_storage() {
+    let bad = "package main\nimport (\"compress/gzip\"; \"io\")\nfunc run(out io.Writer, holder *Holder) {\n holder.writer = gzip.NewWriter(out)\n}\n";
+    let clean = "package main\nimport (\"compress/gzip\"; \"io\")\nfunc run(out io.Writer) { w := gzip.NewWriter(out); w.Close() }\n";
+    let repo = init_repo(&[("main.go", bad)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("main.go", clean)], "close writer");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"stored handle", "rule":{"tool":"autoreview-dataflow","id":"go-gzip-writer-unclosed"}, "before":{"commit":before,"path":"main.go","lines":[]}, "after":{"commit":after,"path":"main.go","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let report = failed_replay_report(repo.path());
+    assert_incomplete_replay(&report, "unmodeled_contract_handle", "main.go", 4);
+}
+
+#[test]
 fn replay_excludes_unmodeled_keyed_cleanup() {
     let bad = "export function run(root, key, flag) {\n root.register(key);\n return flag ? root.remove(key) : undefined;\n}\n";
     let clean = "export function run(root, key) { root.register(key); root.remove(key); }\n";
@@ -147,10 +168,7 @@ fn replay_excludes_unmodeled_keyed_cleanup() {
     let suite = serde_json::json!({"cases": [{"name":"unmodeled", "rule":{"tool":"autoreview-dataflow","id":"custom-cleanup"}, "before":{"commit":before,"path":"main.js","lines":[]}, "after":{"commit":after,"path":"main.js","lines":[]}}]});
     std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
     let report = failed_replay_report(repo.path());
-    assert_eq!(report["coverage"][0]["incomplete"], 1, "{report}");
-    assert_eq!(report["coverage"][0]["completed"], 0, "{report}");
-    assert!(report["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue|
-        issue["reason"] == "unmodeled_cleanup_call" && issue["path"] == "main.js" && issue["line"] == 3), "{report}");
+    assert_incomplete_replay(&report, "unmodeled_cleanup_call", "main.js", 3);
 }
 
 #[test]
@@ -1494,6 +1512,8 @@ class Caller {
 
 #[test]
 fn api_contract_rules_replay_on_bad_and_fixed_commits() {
+    // The broader negative fixtures also contain unsupported ownership transfers;
+    // keep this scored replay's clean versions within the modeled flow.
     const FIXTURES: [(&str, &str, &str, &str, u32); 3] = [
         (
             "go-os-rename-discarded-error", "rename/move.go",
@@ -1504,13 +1524,13 @@ fn api_contract_rules_replay_on_bad_and_fixed_commits() {
         (
             "go-gzip-writer-unclosed", "gzip/archive.go",
             include_str!("../../core/tests/fixtures/rules/go-gzip-writer-unclosed/positive.go"),
-            include_str!("../../core/tests/fixtures/rules/go-gzip-writer-unclosed/negative.go"),
+            "package storage\nimport (\"bytes\"; \"compress/gzip\")\nfunc Compress(buffer *bytes.Buffer) { writer := gzip.NewWriter(buffer); writer.Close() }\n",
             15,
         ),
         (
             "java-completable-future-unobserved", "Main.java",
             include_str!("../../core/tests/fixtures/rules/java-completable-future-unobserved/positive.java"),
-            include_str!("../../core/tests/fixtures/rules/java-completable-future-unobserved/negative.java"),
+            "import java.util.concurrent.CompletableFuture;\nclass TaskOwner { void run(Runnable work) { var task = CompletableFuture.runAsync(work); task.join(); } }\n",
             7,
         ),
     ];
