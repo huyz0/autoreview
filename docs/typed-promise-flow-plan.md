@@ -117,8 +117,11 @@ errors. The Node and Rust tests use `AUTOREVIEW_TEST_TYPESCRIPT` to select an
 installed compiler; the Linux CI job installs a pinned version for them. A
 typed contract can opt in through `AUTOREVIEW_TYPESCRIPT_MODULE`, an absolute
 path to a trusted TypeScript installation. `AUTOREVIEW_TYPESCRIPT_CONFIG` can
-select an absolute config path; otherwise the repository-root `tsconfig.json`
-is used. `AUTOREVIEW_NODE_BINARY` optionally selects Node. Without the trusted
+select an absolute config path or a repository-relative path such as
+`web/tsconfig.json`; otherwise the repository-root `tsconfig.json` is used.
+Relative paths cannot traverse outside the root, including through symlinks,
+and resolve within each historical replay snapshot. Absolute paths continue
+to name the same file across snapshots. `AUTOREVIEW_NODE_BINARY` optionally selects Node. Without the trusted
 compiler configuration the typed contract is reported as skipped. This is an
 experimental interface; compiler distribution, descendant-process containment,
 and broader review and replay coverage still require work.

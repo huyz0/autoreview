@@ -29,7 +29,10 @@ deep tier.
   `AUTOREVIEW_TYPESCRIPT_MODULE` to the absolute path of a trusted TypeScript
   installation to enable type verification; Node must also be available.
   The repository-root `tsconfig.json` is used unless
-  `AUTOREVIEW_TYPESCRIPT_CONFIG` names an absolute config path. Without a
+  `AUTOREVIEW_TYPESCRIPT_CONFIG` names an absolute config path or a path
+  relative to the repository root, such as `web/tsconfig.json`. Relative
+  paths must remain inside the root and resolve separately for each replay
+  snapshot. Without a
   configured checker, coverage reports identify the skipped rule. This check
   only covers supported, unambiguous factory and import shapes.
 - **Experimental Go error checks** can flag unused `error` results from type-checked calls, including
