@@ -192,15 +192,20 @@ fn every_builtin_rule_fires_on_its_positive_fixture_and_stays_silent_on_its_nega
 const KOTLIN_COROUTINE_RULES: &[&str] = &["kotlin-runblocking-in-suspend-function", "kotlin-thread-sleep-in-suspend", "kotlin-suspend-swallowed-by-runcatching", "kotlin-suspend-call-in-finally-without-noncancellable"];
 const KOTLIN_COROUTINE_CHECKS: &str = "runBlocking { work() }; Thread.sleep(1); runCatching { work() }; try { work() } finally { cleanup() }";
 
+fn kotlin_test_repo(source: &str) -> tempfile::TempDir {
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("example.kt"), source).unwrap();
+    repo
+}
+
 #[test]
 fn kotlin_suspend_checks_use_the_nearest_function_modifiers() {
     if !ast_grep_available() {
         return;
     }
-    let repo = tempfile::tempdir().unwrap();
     let checks = KOTLIN_COROUTINE_CHECKS;
     let source = format!("suspend fun outer() {{\n fun callback() {{ {checks} }}\n val anonymous = fun() {{ {checks} }}\n {checks}\n listOf(1).map {{ {checks} }}\n}}\nfun ordinary() {{\n suspend fun nested() {{ {checks} }}\n {checks}\n}}\n");
-    std::fs::write(repo.path().join("example.kt"), source).unwrap();
+    let repo = kotlin_test_repo(&source);
     let findings = run_ast_grep(repo.path(), &["example.kt".into()], &[]).unwrap();
     for &rule in KOTLIN_COROUTINE_RULES {
         let lines: Vec<_> = findings.iter()
@@ -216,10 +221,9 @@ fn kotlin_callback_findings_report_unresolved_execution() {
     if !ast_grep_available() {
         return;
     }
-    let repo = tempfile::tempdir().unwrap();
     let checks = KOTLIN_COROUTINE_CHECKS;
     let source = format!("suspend fun run() {{\n {checks}\n callbacks.register {{ {checks} }}\n listOf(1).map {{ {checks} }}\n}}\n");
-    std::fs::write(repo.path().join("example.kt"), source).unwrap();
+    let repo = kotlin_test_repo(&source);
     let result = autoreview_core::run_ast_grep_with_coverage(repo.path(), &["example.kt".into()], &[]).unwrap();
     for &rule in KOTLIN_COROUTINE_RULES {
         let findings: Vec<_> = result.findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some(rule)).collect();
