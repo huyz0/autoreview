@@ -3,17 +3,21 @@
 This inventory records paths that can make a clean dataflow review incomplete.
 It does not claim that every unsupported construct has been catalogued.
 
-Result-use liveness currently merges uses across branches: a value observed on
-one path can be treated as used even when another reachable path drops it. For
-example, `const p = task(); if (flag) await p;` may be reported clean. This is
-an analysis limitation, not evidence that the other path observes the result.
-Fixing it requires path-sensitive handling of correlated guards and helper
-summaries; merely intersecting liveness sets can report false positives when
-creation and observation are protected by the same condition.
+Result-use analysis checks partial observation for directly tracked local
+results on bounded, acyclic paths with supported simple guards. It preserves
+correlated, stable guards, so `const p = task(); if (flag) await p;` is
+reported while a result both created and observed under the same guard stays
+clean. Path-budget exhaustion is reported as `result_use_path_limit`.
+Other cases, including loops, caught exceptions, closures, helper effects,
+complex or unstable guards, and nonlocal storage, still use the older merged
+liveness analysis and may miss a result observed on only one path. When a
+local source is treated as used but cannot be proved observed before the
+unsupported flow, `result_use_path_unmodeled` reports incomplete analysis.
+Merely intersecting liveness sets would produce false positives for correlated guards.
 Discarded conditional arms that reference a tracked binding are modeled when
-the conditional test and arms are supported. With an unsupported condition,
-the fallback can still treat such a reference as a use without reporting a
-limitation; a call directly in an unsupported arm is reported separately.
+the conditional test and arms are supported. An unsupported conditional can
+also produce `result_use_path_unmodeled` when it may hide a local result use;
+a call directly in an unsupported arm is reported separately.
 
 | Condition | Current behavior | Evidence to report |
 | --- | --- | --- |

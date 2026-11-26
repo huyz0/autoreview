@@ -401,8 +401,24 @@ mod budget_tests {
         assert_awaited_unknown_coverage(dir, checker, rules);
         assert_conditional_typed_coverage(dir, checker, rules);
         assert_conditional_assignment_coverage(dir, checker, rules);
+        assert_partial_typed_observation(dir, checker, rules);
         assert_async_return_unknown_coverage(dir, checker, rules);
         assert_typed_unresolved_receiver(dir, checker, rules);
+    }
+
+    fn assert_partial_typed_observation(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
+        let source = "declare function pending(): Promise<void>;\nexport async function run(flag: boolean) {\n const value = pending();\n if (flag) await value;\n}\n";
+        for path in ["partial.ts", "partial.tsx"] {
+            std::fs::write(dir.join(path), source).unwrap();
+            let paths = [path.to_owned()];
+            let check = || with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            let (findings, coverage) = check();
+            assert_eq!(findings.len(), 1, "{path}: {findings:#?} {coverage:?}");
+            std::fs::write(dir.join(path), source.replace("if (flag) await value;", "if (flag) await value; else await value;")).unwrap();
+            let (findings, coverage) = check();
+            assert!(findings.is_empty(), "{path}: {findings:#?} {coverage:?}");
+            std::fs::remove_file(dir.join(path)).unwrap();
+        }
     }
 
     fn assert_conditional_assignment_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {

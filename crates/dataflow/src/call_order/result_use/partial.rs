@@ -1,0 +1,404 @@
+//! Find locally tracked results that are observed on some, but not all, paths.
+//! Unsupported effects and cyclic or ambiguous control flow retain the existing
+//! analysis rather than guessing about helper or guard behavior.
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+use super::{Body, Effect, Origin, Place, Plan, Value};
+use crate::cfg::{Cfg, EdgeKind, IdentityOperand, NodeId, Stmt};
+use tree_sitter::Node;
+
+const PATH_LIMIT: usize = 8192;
+
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct State {
+    active: bool,
+    aliases: BTreeSet<Place>,
+    guards: BTreeMap<IdentityOperand, bool>,
+}
+
+#[derive(PartialEq, Eq)]
+pub(super) enum Status {
+    Complete,
+    Unsupported,
+    Limited,
+}
+
+pub(super) fn unused(
+    body: &Body,
+    cfg: &Cfg<Stmt>,
+    plan: &Plan<'_, '_>,
+    syntax: (Node<'_>, &[u8]),
+    has_closures: bool,
+) -> (Vec<(NodeId, Origin)>, Status) {
+    let edges = outgoing(body, cfg);
+    let hidden = cfg.nodes.iter().enumerate().any(|(index, node)| {
+        body.flow.reachable[index]
+            && node.evaluations.iter().any(|range| {
+                super::effects::evaluation(syntax.0, range)
+                    .is_some_and(|node| has_conditional(node, syntax.1))
+            })
+    });
+    if !hidden
+        && !edges
+            .iter()
+            .flatten()
+            .any(|(_, edge)| matches!(edge, EdgeKind::True | EdgeKind::False))
+    {
+        return (Vec::new(), Status::Complete);
+    }
+    let mut origins = Vec::new();
+    for (node, effects) in body.effects.iter().enumerate() {
+        for effect in effects {
+            if let Effect::Write(writes) = effect {
+                for write in writes {
+                    if let (Some(Place::Local(_)), Value::Source(origin)) =
+                        (write.target, &write.value)
+                    {
+                        origins.push((node, origin.clone()));
+                    }
+                }
+            }
+        }
+    }
+    if origins.is_empty() {
+        return (Vec::new(), Status::Complete);
+    }
+    if origins.len() > 64 {
+        return (Vec::new(), Status::Limited);
+    }
+    if hidden || has_closures || !supported(body, cfg, plan, &edges) {
+        return (Vec::new(), Status::Unsupported);
+    }
+    let mut hits = Vec::new();
+    for (node, origin) in origins {
+        match unobserved_path(body, cfg, plan, &edges, &origin) {
+            Some(true) => hits.push((node, origin)),
+            Some(false) => {}
+            None => return (Vec::new(), Status::Limited),
+        }
+    }
+    (hits, Status::Complete)
+}
+
+pub(super) fn has_observed_origin(
+    body: &Body,
+    cfg: &Cfg<Stmt>,
+    syntax: (Node<'_>, &[u8]),
+    unused: &[(NodeId, Origin)],
+) -> bool {
+    body.effects.iter().enumerate().any(|(node, effects)| {
+        effects.iter().any(|effect| match effect {
+            Effect::Write(writes) => {
+                writes
+                    .iter()
+                    .any(|write| match (&write.value, write.target) {
+                        (Value::Source(origin), Some(Place::Local(_))) => {
+                            !unused.iter().any(|(_, other)| other == origin)
+                                && !observed_before_branch(body, cfg, syntax, node, origin)
+                        }
+                        _ => false,
+                    })
+            }
+            _ => false,
+        })
+    })
+}
+
+fn observed_before_branch(
+    body: &Body,
+    cfg: &Cfg<Stmt>,
+    syntax: (Node<'_>, &[u8]),
+    mut node: NodeId,
+    origin: &Origin,
+) -> bool {
+    let mut state = State::default();
+    let mut seen = BTreeSet::new();
+    while seen.insert(node) {
+        if cfg.nodes[node].evaluations.iter().any(|range| {
+            super::effects::evaluation(syntax.0, range)
+                .is_some_and(|value| has_conditional(value, syntax.1))
+        }) {
+            return false;
+        }
+        for effect in &body.effects[node] {
+            if state.active && !supported_effect(effect) {
+                return false;
+            }
+            if observed(std::slice::from_ref(effect), origin, &mut state) {
+                return true;
+            }
+            if state.active && state.aliases.is_empty() {
+                return false;
+            }
+        }
+        let [next] = body.flow.successors[node].as_slice() else {
+            return false;
+        };
+        node = *next;
+    }
+    false
+}
+
+fn has_conditional(node: Node<'_>, source: &[u8]) -> bool {
+    let mut pending = vec![node];
+    while let Some(node) = pending.pop() {
+        if matches!(
+            node.kind(),
+            "ternary_expression"
+                | "conditional_expression"
+                | "if_expression"
+                | "match_expression"
+                | "when_expression"
+                | "optional_chain"
+                | "logical_expression"
+                | "conjunction_expression"
+                | "disjunction_expression"
+                | "elvis_expression"
+                | "null_coalescing_expression"
+        ) {
+            return true;
+        }
+        if node.kind() == "binary_expression"
+            && node
+                .child_by_field_name("operator")
+                .and_then(|operator| operator.utf8_text(source).ok())
+                .is_some_and(|operator| matches!(operator, "&&" | "||" | "??"))
+        {
+            return true;
+        }
+        if node.kind() == "binary_expression"
+            && node
+                .children(&mut node.walk())
+                .any(|child| matches!(child.kind(), "&&" | "||" | "??" | "?:"))
+        {
+            return true;
+        }
+        pending.extend(node.named_children(&mut node.walk()));
+    }
+    false
+}
+
+fn outgoing(body: &Body, cfg: &Cfg<Stmt>) -> Vec<Vec<(NodeId, EdgeKind)>> {
+    let mut edges = vec![Vec::new(); cfg.nodes.len()];
+    for &(from, to, edge) in &cfg.edges {
+        if body.flow.successors[from].contains(&to) {
+            edges[from].push((to, edge));
+        }
+    }
+    edges
+}
+
+fn supported(
+    body: &Body,
+    cfg: &Cfg<Stmt>,
+    plan: &Plan<'_, '_>,
+    edges: &[Vec<(NodeId, EdgeKind)>],
+) -> bool {
+    if cyclic(body) {
+        return false;
+    }
+    let branches = edges
+        .iter()
+        .filter(|outgoing| {
+            outgoing
+                .iter()
+                .any(|(_, edge)| matches!(edge, EdgeKind::True | EdgeKind::False))
+        })
+        .count();
+    for (node, outgoing) in edges.iter().enumerate() {
+        let has_branch = outgoing
+            .iter()
+            .any(|(_, edge)| matches!(edge, EdgeKind::True | EdgeKind::False));
+        if has_branch && cfg.nodes[node].condition.is_none() {
+            return false;
+        }
+        if outgoing.iter().any(|(target, edge)| {
+            *edge == EdgeKind::Exceptional
+                && !cfg.nodes[*target]
+                    .stmts
+                    .iter()
+                    .any(|stmt| matches!(stmt, Stmt::Throw { .. }))
+        }) {
+            return false;
+        }
+        if let Some((name, _)) = &cfg.nodes[node].condition {
+            let identity = guard(plan, name);
+            if (branches > 1 || plan.syntax.repeated_guard(name)) && identity.is_none() {
+                return false;
+            }
+            if identity
+                .as_ref()
+                .is_some_and(|identity| guard_is_rebound(cfg, name, identity))
+            {
+                return false;
+            }
+        }
+    }
+    body.effects.iter().flatten().all(supported_effect)
+}
+
+fn guard_is_rebound(cfg: &Cfg<Stmt>, name: &str, identity: &IdentityOperand) -> bool {
+    let root = match identity {
+        IdentityOperand::Binding(value) | IdentityOperand::Scoped { name: value, .. } => {
+            Some(value.as_str())
+        }
+        _ => None,
+    };
+    cfg.nodes
+        .iter()
+        .flat_map(|node| &node.stmts)
+        .any(|stmt| match stmt {
+            Stmt::Rebind(write) => write.target().0 == name || root == Some(write.target().0),
+            _ => false,
+        })
+}
+
+fn supported_effect(effect: &Effect) -> bool {
+    match effect {
+        Effect::Read(Place::Local(_)) => true,
+        Effect::Write(writes) => writes.iter().all(|write| {
+            write
+                .target
+                .is_none_or(|place| matches!(place, Place::Local(_)))
+                && matches!(
+                    write.value,
+                    Value::Source(_) | Value::Copy(Place::Local(_)) | Value::Other
+                )
+        }),
+        _ => false,
+    }
+}
+
+fn cyclic(body: &Body) -> bool {
+    let mut indegree: Vec<_> = body.flow.predecessors.iter().map(Vec::len).collect();
+    let mut queue: VecDeque<_> = body
+        .flow
+        .reachable
+        .iter()
+        .enumerate()
+        .filter_map(|(node, reached)| (*reached && indegree[node] == 0).then_some(node))
+        .collect();
+    let mut seen = 0;
+    while let Some(node) = queue.pop_front() {
+        seen += 1;
+        for &next in &body.flow.successors[node] {
+            indegree[next] -= 1;
+            if indegree[next] == 0 {
+                queue.push_back(next);
+            }
+        }
+    }
+    seen != body
+        .flow
+        .reachable
+        .iter()
+        .filter(|reached| **reached)
+        .count()
+}
+
+fn unobserved_path(
+    body: &Body,
+    cfg: &Cfg<Stmt>,
+    plan: &Plan<'_, '_>,
+    edges: &[Vec<(NodeId, EdgeKind)>],
+    origin: &Origin,
+) -> Option<bool> {
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![(body.flow.entry, State::default())];
+    while let Some((node, mut state)) = pending.pop() {
+        if !seen.insert((node, state.clone())) {
+            continue;
+        }
+        if seen.len() > PATH_LIMIT {
+            return None;
+        }
+        if cfg.nodes[node]
+            .stmts
+            .iter()
+            .any(|stmt| matches!(stmt, Stmt::Throw { .. }))
+        {
+            continue;
+        }
+        if observed(&body.effects[node], origin, &mut state) {
+            continue;
+        }
+        if state.active && (state.aliases.is_empty() || node == body.flow.exit) {
+            return Some(true);
+        }
+        for &(to, edge) in &edges[node] {
+            if let Some(next) = branch(state.clone(), cfg, plan, node, edge) {
+                pending.push((to, next));
+            }
+        }
+    }
+    Some(false)
+}
+
+fn observed(effects: &[Effect], origin: &Origin, state: &mut State) -> bool {
+    for effect in effects {
+        match effect {
+            Effect::Read(place) if state.active && state.aliases.contains(place) => return true,
+            Effect::Write(writes) => {
+                let old = state.aliases.clone();
+                for write in writes {
+                    if let Some(target) = write.target {
+                        state.aliases.remove(&target);
+                    }
+                }
+                for write in writes {
+                    match (&write.value, write.target) {
+                        (Value::Source(value), target) if value == origin => {
+                            state.active = true;
+                            if let Some(target) = target {
+                                state.aliases.insert(target);
+                            }
+                        }
+                        (Value::Copy(value), Some(target)) if old.contains(value) => {
+                            state.aliases.insert(target);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn branch(
+    mut state: State,
+    cfg: &Cfg<Stmt>,
+    plan: &Plan<'_, '_>,
+    node: NodeId,
+    edge: EdgeKind,
+) -> Option<State> {
+    if !matches!(edge, EdgeKind::True | EdgeKind::False) {
+        return Some(state);
+    }
+    let (name, polarity) = cfg.nodes[node].condition.as_ref()?;
+    let truth = (edge == EdgeKind::True) == *polarity;
+    let Some(identity) = guard(plan, name) else {
+        return Some(state);
+    };
+    if let IdentityOperand::Boolean(value) = identity {
+        return (value == truth).then_some(state);
+    }
+    if state
+        .guards
+        .get(&identity)
+        .is_some_and(|previous| *previous != truth)
+    {
+        return None;
+    }
+    state.guards.insert(identity, truth);
+    Some(state)
+}
+
+fn guard(plan: &Plan<'_, '_>, name: &str) -> Option<IdentityOperand> {
+    match name {
+        "true" => Some(IdentityOperand::Boolean(true)),
+        "false" => Some(IdentityOperand::Boolean(false)),
+        _ => plan.syntax.resolve(&BTreeMap::new(), name, usize::MAX),
+    }
+}

@@ -43,6 +43,8 @@ fn limitation_detail(reason: &str) -> &'static str {
             "path_budget" => "The path-state budget was exhausted; this rule skipped the affected root.",
             "unmodeled_cleanup_call" => "A possible cleanup call was not represented in the control-flow graph; this rule skipped the affected function.",
             "helper_summary_limit" => "Helper summaries did not converge within the analysis budget; cross-file result tracking was skipped.",
+            "result_use_path_limit" => "The path-sensitive result-use budget was exhausted; partial observations could not be checked completely.",
+            "result_use_path_unmodeled" => "This function uses control flow or result effects that the partial-observation check cannot model; a result may be used on only some paths.",
             "unsupported_rust_control_flow" => "Rust control flow in this function could not be lowered; call-sequence analysis was skipped.",
             "rust_match_binding_projection" => "Rust match pattern names are tracked as distinct local identities; their relationship to the matched value and whether they denote constants are not resolved.",
             "unresolved_helper_target" => "The helper target is ambiguous or depends on unavailable exports; cross-file call-sequence analysis may be incomplete.",

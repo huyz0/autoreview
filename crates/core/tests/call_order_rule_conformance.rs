@@ -210,17 +210,81 @@ fn discarded_conditional_bindings_do_not_consume_results() {
         std::fs::write(root.path().join(path), helper).unwrap();
         let result = check();
         assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
-        let branch = source.replace("\n}\n", "\n if (flag) await pending; else await pending;\n}\n");
+        let branch = source.replace("\n}\n", "\n if (flag) await pending;\n}\n");
         std::fs::write(root.path().join(path), branch).unwrap();
         let result = check();
-        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
         let imported = "import { rename } from 'node:fs/promises';\nimport { ignore } from './helper';\nexport function run(a, b, flag) { const pending = rename(a, b); ignore(pending, flag); }\n";
         std::fs::write(root.path().join(path), imported).unwrap();
         let extension = path.rsplit('.').next().unwrap();
         std::fs::write(root.path().join(format!("helper.{extension}")), "export function ignore(value, flag) { flag ? value : null; }\n").unwrap();
         let result = check();
         assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        std::fs::write(root.path().join(path), source.replace("flag ?", "check(flag) ?")).unwrap();
+        let result = check();
+        assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        let short_circuit = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = rename(a, b);\n flag && await pending;\n}\n";
+        std::fs::write(root.path().join(path), short_circuit).unwrap();
+        let result = check();
+        assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
     }
+}
+
+#[test]
+fn partial_result_observation_respects_correlated_guards() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n let pending;\n if (flag) pending = rename(a, b);\n if (flag) await pending;\n}\n";
+        let root = write_single_file(path, source);
+        let check = || conditional_test_result(&root, path);
+        let result = check();
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        std::fs::write(root.path().join(path), source.replace("if (flag) await", "if (!flag) await")).unwrap();
+        let result = check();
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let both = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = rename(a, b);\n if (flag) await pending; else await pending;\n}\n";
+        std::fs::write(root.path().join(path), both).unwrap();
+        let result = check();
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let alias = both.replace("if (flag) await pending; else await pending;", "const alias = pending; if (flag) await alias;");
+        std::fs::write(root.path().join(path), alias).unwrap();
+        let result = check();
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let reassigned = source.replace("if (flag) await pending;", "flag = !flag; if (!flag) await pending;");
+        std::fs::write(root.path().join(path), reassigned).unwrap();
+        let result = check();
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+    }
+}
+
+#[test]
+fn partial_result_observation_across_languages() {
+    let cases = [
+        ("main.go", "go-os-rename-discarded-error", "package sample\nimport \"os\"\nfunc run(a, b string, flag bool) error {\n err := os.Rename(a, b)\n if flag { return err }\n return nil\n}\n", 4, ("return nil", "return err")),
+        ("Main.java", "java-discarded-objects-comparison", "import java.util.Objects;\nclass Main { boolean run(Object a, Object b, boolean flag) {\n boolean value = Objects.equals(a, b);\n if (flag) return value;\n return false;\n} }\n", 3, ("return false", "return value")),
+        ("Main.kt", "kotlin-discarded-run-catching-result", "import kotlin.runCatching\nfun run(flag: Boolean): Int {\n val value = runCatching { 1 }\n if (flag) return value.getOrThrow()\n return 0\n}\n", 3, ("return 0", "return value.getOrThrow()")),
+        ("lib.rs", "rust-discarded-remove-file-result", "use std::fs::remove_file;\nfn run(path: &str, flag: bool) -> std::io::Result<()> {\n let result = remove_file(path);\n if flag { return result; }\n Ok(())\n}\n", 3, ("Ok(())", "result")),
+    ];
+    for (path, rule, source, line, (from, to)) in cases {
+        let root = write_single_file(path, source);
+        let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &[path.into()], &[]);
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule) && hit.location.range.start_line == line), "{path}: {:?} {:?}", result.findings, result.coverage);
+        std::fs::write(root.path().join(path), source.replace(from, to)).unwrap();
+        let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &[path.into()], &[]);
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+    }
+}
+
+#[test]
+fn partial_result_observation_reports_its_source_budget() {
+    let mut source = String::from("import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n");
+    for index in 0..65 { source.push_str(&format!(" const p{index} = rename(a, b);\n")); }
+    source.push_str(" if (flag) await p0;\n");
+    for index in 1..65 { source.push_str(&format!(" await p{index};\n")); }
+    source.push_str("}\n");
+    let root = write_single_file("main.js", &source);
+    let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &["main.js".into()], &[]);
+    assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_limit" && issue.rule.as_deref() == Some("javascript-node-fs-discarded-promise") && issue.line == Some(2)), "{:?}", result.coverage);
 }
 
 #[test]
@@ -1393,7 +1457,7 @@ func blank(from, to string) {
 "#),
     ("Main.kt", "kotlin-discarded-run-catching-result", r#"import kotlin.runCatching
 fun parse(s: String, active: Boolean): Int {
-    val result = runCatching { s.toInt() }
+    val result = runCatching { s.toInt() } // unused result on inactive path
     if (active) return result.getOrThrow()
     return 0
 }
