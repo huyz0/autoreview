@@ -23,7 +23,9 @@ func run(ctx context.Context) { safe(ctx, true); direct(ctx); other(ctx); reassi
 `
 	snippets := []string{"safe(ctx, true)", "direct(ctx)", "other(ctx)", "reassigned(ctx, ctx)", "escaped(ctx)", "named(ctx)", "deferred(ctx)", "wrapped(ctx)", "shadowNil(ctx)"}
 	got := analyzeOrigins(t, src, snippets)
-	assertErrorOrigins(t, got, snippets, []int{0, 0, -1, -1, -1, -1, -1, -1, -1})
+	t.Run("stable returns", func(t *testing.T) {
+		assertErrorOrigins(t, got, snippets, []int{0, 0, -1, -1, -1, -1, -1, -1, -1})
+	})
 }
 
 func TestContextErrorSummaryPassLimitLeavesLongChainsUnknown(t *testing.T) {
@@ -79,7 +81,9 @@ func run(ctx context.Context, w worker, f func(context.Context) error) { outer(c
 `
 	snippets := []string{"outer(ctx);", "w.method(ctx);", "expression(w, ctx);", "unrelated(ctx);", "otherContext(ctx, ctx);", "dynamic(ctx, f);", "cyclic(ctx) }"}
 	got := analyzeOrigins(t, src, snippets)
-	assertErrorOrigins(t, got, snippets, []int{0, 0, 1, -1, 1, -1, -1})
+	t.Run("helper forwarding", func(t *testing.T) {
+		assertErrorOrigins(t, got, snippets, []int{0, 0, 1, -1, 1, -1, -1})
+	})
 }
 
 func assertErrorOrigins(t *testing.T, got response, snippets []string, expected []int) {
