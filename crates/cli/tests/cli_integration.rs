@@ -745,6 +745,28 @@ fn rust_unknown_associated_method_blocks_replay_scoring() {
 }
 
 #[test]
+fn skipped_rust_function_blocks_replay_and_reaches_review() {
+    let support = "pub(crate) struct Files;\nimpl Files { pub(crate) fn known() {} }\n";
+    let clean = "use crate::support::Files;\nfn run() { Files::known(); }\n";
+    let skipped = "use crate::support::Files;\nfn run() { Files::known(); match 1 { _ => {} } }\n";
+    let repo = init_repo(&[("src/lib.rs", "mod support; mod worker;\n"), ("src/support.rs", support), ("src/worker.rs", skipped)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("src/worker.rs", clean)], "use supported control flow");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"skipped Rust function", "rule":{"tool":"autoreview-dataflow", "id":"rust-discarded-remove-file-result"},
+        "before":{"commit":before, "path":"src/worker.rs", "lines":[]}, "after":{"commit":after, "path":"src/worker.rs", "lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let replay = failed_replay_report(repo.path());
+    assert_eq!(replay["coverage"][0]["incomplete"], 1, "{replay}");
+    assert!(replay["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "unsupported_rust_control_flow" && issue["path"] == "src/worker.rs" && issue["line"] == 2), "{replay}");
+    repo.commit(&[("src/worker.rs", skipped)], "restore unsupported control flow");
+    let review = static_review_report(&repo, &after, None);
+    assert!(review["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "unsupported_rust_control_flow" && issue["path"] == "src/worker.rs" && issue["line"] == 2), "{review}");
+}
+
+#[test]
 fn rust_module_alias_results_reach_the_review_report() {
     let root = "mod support; mod worker;\n";
     let support = "use std::fs::remove_file;\npub(crate) fn discard(value: std::io::Result<()>) {}\npub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n";

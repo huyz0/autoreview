@@ -16,6 +16,14 @@ pub(super) fn record_flow_limits(
             continue;
         }
         for (node, graph) in graphs {
+            if file.language == Language::Rust && !autoreview_dataflow::lower::rust::supports_function(*node) {
+                for (rule, _) in rules.iter().filter(|(_, language)| file.language.matches_rule_language(*language)) {
+                    let mut limitation = issue(Some(path), "unsupported_rust_control_flow", "function", "Rust control flow in this function could not be lowered; call-sequence analysis was skipped.");
+                    limitation.line = Some(node.start_position().row as u32 + 1);
+                    limitation.rule = Some(rule.id.clone());
+                    coverage.push(limitation);
+                }
+            }
             if keyed_flow_exhausted(graph) {
                 let mut limitation = issue(Some(path), "control_flow_limit", "function", "The finally-path lowering budget was exhausted; call-sequence analysis skipped this function.");
                 limitation.line = Some(node.start_position().row as u32 + 1);
