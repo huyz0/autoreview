@@ -11,6 +11,11 @@ import (
 const dependencyLimit = 8
 const dependencyBytesLimit = 16 * 1024 * 1024
 
+type checkedDependency struct {
+	files []*ast.File
+	info  *types.Info
+}
+
 // Only packages in go list's actual dependency graph and with independently
 // supplied, matching build-selected source hashes may contribute summaries.
 func verifyDependencySources(packages []listedPackage, target string, snapshots map[string]dependencySnapshot, exports map[string]string) ([]verifiedDependency, bool) {
@@ -58,23 +63,36 @@ func sameDirectory(actual, expected string) bool {
 	return aErr == nil && bErr == nil && a.IsDir() && b.IsDir() && os.SameFile(a, b)
 }
 
-func dependencyErrorOrigins(loaded loadedPackage, enabled bool) (map[callee]*errorOrigin, string) {
+func dependencyErrorOrigins(loaded loadedPackage, enabled bool) (map[callee]*errorOrigin, map[callee]localFunction, string) {
 	result := make(map[callee]*errorOrigin)
+	functions := make(map[callee]localFunction)
 	if !enabled {
-		return result, ""
+		return result, functions, ""
 	}
-	type checkedDependency struct {
-		files []*ast.File
-		info  *types.Info
+	checked, ok := checkDependencies(loaded.dependencies, functions)
+	if !ok {
+		return nil, nil, "dependency_type_errors"
 	}
-	checked := make([]checkedDependency, 0, len(loaded.dependencies))
-	for _, dependency := range loaded.dependencies {
+	indexDependencyOrigins(checked, result)
+	return result, functions, ""
+}
+
+func checkDependencies(dependencies []verifiedDependency, functions map[callee]localFunction) ([]checkedDependency, bool) {
+	checked := make([]checkedDependency, 0, len(dependencies))
+	for _, dependency := range dependencies {
 		files, info, ok := typecheckDependency(dependency)
 		if !ok {
-			return nil, "dependency_type_errors"
+			return nil, false
 		}
 		checked = append(checked, checkedDependency{files: files, info: info})
+		for identity, function := range localFunctions(files, info, true) {
+			functions[identity] = function
+		}
 	}
+	return checked, true
+}
+
+func indexDependencyOrigins(checked []checkedDependency, result map[callee]*errorOrigin) {
 	// Dependencies may be supplied in any order. Revisit verified packages
 	// until summaries stop changing, with the same bound as local helpers.
 	for pass := 0; pass < errorOriginPassLimit; pass++ {
@@ -86,7 +104,6 @@ func dependencyErrorOrigins(loaded loadedPackage, enabled bool) (map[callee]*err
 			break
 		}
 	}
-	return result, ""
 }
 
 func typecheckDependency(dependency verifiedDependency) ([]*ast.File, *types.Info, bool) {
