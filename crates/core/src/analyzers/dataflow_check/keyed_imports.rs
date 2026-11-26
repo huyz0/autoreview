@@ -400,8 +400,25 @@ mod budget_tests {
     fn assert_general_coverage_cases(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
         assert_awaited_unknown_coverage(dir, checker, rules);
         assert_conditional_typed_coverage(dir, checker, rules);
+        assert_conditional_assignment_coverage(dir, checker, rules);
         assert_async_return_unknown_coverage(dir, checker, rules);
         assert_typed_unresolved_receiver(dir, checker, rules);
+    }
+
+    fn assert_conditional_assignment_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
+        let source = "declare function pending(): Promise<void>;\nexport async function run(flag: boolean) {\n const value = flag ? pending() : null;\n}\n";
+        for path in ["assigned.ts", "assigned.tsx"] {
+            std::fs::write(dir.join(path), source).unwrap();
+            let paths = [path.to_owned()];
+            let check = || with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            let (findings, coverage) = check();
+            assert_eq!(findings.len(), 1, "{path}: {findings:#?} {coverage:?}");
+            std::fs::write(dir.join(path), source.replace("\n}\n", "\n await value;\n}\n")).unwrap();
+            let (findings, coverage) = check();
+            assert!(findings.is_empty(), "{path}: {findings:#?} {coverage:?}");
+            assert!(!coverage.iter().any(|issue| issue.reason == "unmodeled_conditional_result"), "{path}: {coverage:?}");
+            std::fs::remove_file(dir.join(path)).unwrap();
+        }
     }
 
     fn assert_async_return_unknown_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
