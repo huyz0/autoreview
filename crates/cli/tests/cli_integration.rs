@@ -173,6 +173,8 @@ fn replay_tracks_returned_conditional_helper_results() {
 fn replay_tracks_boolean_helper_guard() {
     let bad = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b) { return consume(rename(a, b), false); }\n";
     assert_conditional_replay(bad, &bad.replace(", false)", ", true)"), 3, false);
+    let bound = bad.replace("return consume(rename(a, b), false);", "const enabled = false; return consume(rename(a, b), enabled);");
+    assert_conditional_replay(&bound, &bound.replace("enabled = false", "enabled = true"), 3, false);
 }
 
 #[test]
