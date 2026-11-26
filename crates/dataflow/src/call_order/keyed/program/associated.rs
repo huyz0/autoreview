@@ -36,7 +36,8 @@ impl Associated {
         }
     }
 
-    pub(super) fn register(&mut self, unit: usize, node: Node<'_>, source: &[u8], name: &str, arity: usize, index: usize) {
+    pub(super) fn register(&mut self, unit: usize, declaration: (Node<'_>, &[u8]), name: &str, arity: usize, index: usize) {
+        let (node, source) = declaration;
         if let Some(owner) = signature::local_rust_associated_owner(node, source) {
             self.targets.entry((unit, owner, name.to_owned(), arity))
                 .and_modify(|target| *target = None).or_insert(Some(index));

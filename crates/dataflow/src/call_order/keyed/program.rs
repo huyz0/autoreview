@@ -126,7 +126,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
                 .entry((scope, name.clone(), params.len()))
                 .and_modify(|target| *target = None)
                 .or_insert(Some(self.frames.len()));
-            self.associated.register(unit, node, source, &name, params.len(), self.frames.len());
+            self.associated.register(unit, (node, source), &name, params.len(), self.frames.len());
             Some(export(node, source, name))
         });
         self.units[unit].frames.push(self.frames.len());
