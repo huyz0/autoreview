@@ -116,7 +116,9 @@ exits nonzero. The two false positives are the same unchanged code, not
 independent examples. The cancellation label follows the local limiter's
 one-token, burst-one configuration and the surrounding shutdown handling; it is
 a policy judgment, not proof of intent. These cases are too few to estimate
-general accuracy. Reproduce with:
+general accuracy. The rule is marked for optional model verification, but
+static replay does not run that verifier and this benchmark does not measure
+its effectiveness. Reproduce with:
 
 ```sh
 git init cilium

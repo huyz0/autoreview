@@ -243,6 +243,28 @@ mod tests {
     }
 
     #[test]
+    fn checked_go_error_heuristic_is_verified_and_fails_open() {
+        let ids = crate::semantic_rule_ids(&[]);
+        let mut findings: Vec<_> = ["cancel", "error", "unavailable"].into_iter().map(|id| {
+            let mut finding = make_finding(id, FindingSourceKind::Analyzer, "correctness", Severity::Medium);
+            finding.source.rule_id = Some("go-checked-error-returned-nil".into());
+            finding
+        }).collect();
+        let selected = select_for_verification(&findings, &[], &ids);
+        assert_eq!(selected.len(), 3);
+        let backend = ScriptedBackend { responses: RefCell::new(vec![
+            Ok("```json\n{\"keep\": false, \"reason\": \"context cancellation is handled\"}\n```".into()),
+            Ok("```json\n{\"keep\": true, \"reason\": \"other errors are possible\"}\n```".into()),
+            Err(anyhow::anyhow!("unavailable")),
+        ]) };
+        let result = run_verify_pass(&backend, std::mem::take(&mut findings), "diff", "model", 1, Path::new("."), &[], &ids);
+        assert_eq!(result.checked, 3);
+        assert_eq!(result.suppressed.len(), 1);
+        assert_eq!(result.suppressed[0].finding.id, "cancel");
+        assert_eq!(result.kept.iter().map(|finding| finding.id.as_str()).collect::<Vec<_>>(), ["error", "unavailable"]);
+    }
+
+    #[test]
     fn a_refute_verdict_suppresses_the_finding() {
         let backend = ScriptedBackend { responses: RefCell::new(vec![Ok("```json\n{\"keep\": false, \"reason\": \"snippet doesn't match the diff\"}\n```".to_string())]) };
         let findings = vec![make_finding("a", FindingSourceKind::Agent, "correctness", Severity::High)];
