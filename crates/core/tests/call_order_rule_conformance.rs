@@ -189,6 +189,20 @@ fn unresolved_receivers_track_bindings_across_languages() {
 }
 
 #[test]
+fn unresolved_receivers_report_results_wrapped_in_web_arrays() {
+    for (ext, rule) in [("js", "javascript-node-fs-discarded-promise"), ("ts", "typescript-node-fs-discarded-promise"), ("tsx", "typescript-node-fs-discarded-promise")] {
+        let path = format!("main.{ext}");
+        let source = "import { rename } from 'node:fs/promises';\nfunction consume(values) {}\nfunction array(a, b) { unknown([rename(a, b)]); }\nfunction spread(a, b) { unknown(...[rename(a, b)]); }\nfunction local(a, b) { consume([rename(a, b)]); }\nasync function observed(a, b) { unknown([await rename(a, b)]); }\nfunction noReceiver(a, b) { return [rename(a, b)]; }\n";
+        let root = write_single_file(&path, source);
+        let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), std::slice::from_ref(&path), &[]);
+        let lines: std::collections::BTreeSet<_> = result.coverage.iter().filter(|issue|
+            issue.reason == "wrapped_result_receiver" && issue.rule.as_deref() == Some(rule))
+            .filter_map(|issue| issue.line).collect();
+        assert_eq!(lines, std::collections::BTreeSet::from([3, 4, 5]), "{ext}: {:?}", result.coverage);
+    }
+}
+
+#[test]
 fn unresolved_receivers_propagate_through_imported_helpers() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("helper.js"), "import { rename } from 'node:fs/promises';\nexport function send(value) { relay(value); }\nexport function make(a, b) { return rename(a, b); }\nexport function forward(value) { return value; }\nfunction relay(value) { unknown(value); }\n").unwrap();
