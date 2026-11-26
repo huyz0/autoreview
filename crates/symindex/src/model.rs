@@ -80,10 +80,16 @@ pub struct HelperAccess {
     pub receiver_type: String,
     pub type_file: PathBuf,
     pub type_line: u32,
-    pub helper_file: PathBuf,
-    pub helper_line: u32,
-    pub helper_end_line: u32,
+    /// The helper that supplies the count and any forwarding helpers that lead to it.
+    pub locations: Vec<HelperLocation>,
     pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HelperLocation {
+    pub file: PathBuf,
+    pub start_line: u32,
+    pub end_line: u32,
 }
 
 /// One maximal chain of consecutive `.member`/`.method()` accesses off a

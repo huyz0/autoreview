@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use tree_sitter::Node;
 
 use super::{line_of, text};
-use crate::model::{HelperAccess, MethodDecl, TypeDecl};
+use crate::model::{HelperAccess, HelperLocation, MethodDecl, TypeDecl};
 
 #[derive(Default)]
 pub(crate) struct GoHelperEnvy {
@@ -24,11 +24,10 @@ enum PackageDecl {
 }
 
 struct Helper {
-    file: PathBuf,
-    line: u32,
-    end_line: u32,
+    location: HelperLocation,
     params: Vec<Option<LocalType>>,
     accesses: Vec<MemberAccesses>,
+    calls: Vec<Call>,
 }
 
 struct Caller {
@@ -53,6 +52,14 @@ struct MemberAccesses {
 struct Call {
     name: String,
     arguments: Vec<Option<usize>>,
+}
+
+struct Forwarded<'a> {
+    name: &'a str,
+    helper: &'a Helper,
+    source_slot: usize,
+    slot: usize,
+    argument_type: &'a LocalType,
 }
 
 impl GoHelperEnvy {
@@ -95,43 +102,74 @@ impl GoHelperEnvy {
 
 impl Package {
     fn accesses(&self, caller: &Caller, method: &MethodDecl) -> Vec<HelperAccess> {
-        let mut result = Vec::new();
+        let mut result = BTreeMap::new();
         let mut seen = HashSet::new();
-        for call in &caller.calls {
-            let Some(helper) = self.resolve_helper(call, &method.file) else { continue };
-            for (slot, argument) in call.arguments.iter().enumerate() {
-                let Some(argument_type) = argument.and_then(|i| caller.params[i].as_ref()) else { continue };
-                let Some(access) = self.parameter_access(helper, slot, argument_type, method) else { continue };
-                if seen.insert((call.name.as_str(), slot)) {
-                    result.push(access);
-                }
+        for first in self.forwarded(&caller.calls, &method.file, &caller.params) {
+            if !seen.insert((first.name, first.slot)) {
+                continue;
+            }
+            self.record_access(&first, None, method, &mut result);
+            for second in self.forwarded(&first.helper.calls, &first.helper.location.file, &first.helper.params)
+                .filter(|second| second.source_slot == first.slot)
+            {
+                self.record_access(&second, Some(&first.helper.location), method, &mut result);
             }
         }
-        result
+        result.into_values().collect()
+    }
+
+    fn forwarded<'a>(&'a self, calls: &'a [Call], from: &'a Path, params: &'a [Option<LocalType>]) -> impl Iterator<Item = Forwarded<'a>> + 'a {
+        calls.iter().filter_map(move |call| Some((call, self.resolve_helper(call, from)?)))
+            .flat_map(move |(call, helper)| {
+                call.arguments.iter().enumerate().filter_map(move |(slot, argument)| {
+                    let source_slot = (*argument)?;
+                    let argument_type = params[source_slot].as_ref()?;
+                    (helper.params[slot].as_ref() == Some(argument_type)).then_some(Forwarded {
+                        name: &call.name,
+                        helper,
+                        source_slot,
+                        slot,
+                        argument_type,
+                    })
+                })
+            })
     }
 
     fn resolve_helper(&self, call: &Call, caller_file: &Path) -> Option<&Helper> {
         let PackageDecl::Helper(helper) = self.declarations.get(&call.name)? else { return None };
-        (helper.file != caller_file && helper.params.len() == call.arguments.len() && visible_from(&helper.file, caller_file))
+        let file = &helper.location.file;
+        (file != caller_file && helper.params.len() == call.arguments.len() && visible_from(file, caller_file))
             .then_some(helper)
     }
 
-    fn parameter_access(&self, helper: &Helper, slot: usize, argument_type: &LocalType, method: &MethodDecl) -> Option<HelperAccess> {
-        let accesses = &helper.accesses[slot];
+    fn record_access<'a>(
+        &self,
+        target: &Forwarded<'a>,
+        via: Option<&HelperLocation>,
+        method: &MethodDecl,
+        result: &mut BTreeMap<(&'a str, usize), HelperAccess>,
+    ) {
+        let name = &target.argument_type.name;
+        let accesses = &target.helper.accesses[target.slot];
         // A wrapper around one collaborator operation is ordinary delegation.
-        if argument_type.name == method.owner_type || Some(argument_type) != helper.params[slot].as_ref() || accesses.names.len() < 2 {
-            return None;
+        if name == &method.owner_type || accesses.names.len() < 2 {
+            return;
         }
-        let PackageDecl::Struct { file: type_file, line: type_line } = self.declarations.get(&argument_type.name)? else { return None };
-        visible_from(type_file, &method.file).then(|| HelperAccess {
-            receiver_type: argument_type.name.clone(),
+        let Some(PackageDecl::Struct { file: type_file, line: type_line }) = self.declarations.get(name) else { return };
+        if !visible_from(type_file, &method.file) {
+            return;
+        }
+        // A helper parameter's accesses count once, even when multiple paths reach it.
+        let evidence = result.entry((target.name, target.slot)).or_insert_with(|| HelperAccess {
+            receiver_type: name.clone(),
             type_file: type_file.clone(),
             type_line: *type_line,
-            helper_file: helper.file.clone(),
-            helper_line: helper.line,
-            helper_end_line: helper.end_line,
+            locations: vec![target.helper.location.clone()],
             count: accesses.count,
-        })
+        });
+        if let Some(via) = via.filter(|via| !evidence.locations.contains(via)) {
+            evidence.locations.push(via.clone());
+        }
     }
 
     fn add_declaration(&mut self, name: &str, declaration: impl FnOnce() -> PackageDecl) {
@@ -213,15 +251,25 @@ fn local_type(node: Node, source: &[u8]) -> Option<LocalType> {
 fn extract_helper(node: Node, source: &[u8], file: &Path) -> Option<Helper> {
     let (params, bindings) = function_bindings(node, source)?;
     let mut accesses: Vec<_> = params.iter().map(|_| MemberAccesses::default()).collect();
-    walk_straight_line(node.child_by_field_name("body")?, source, bindings, |node, bindings| {
-        if node.kind() == "selector_expression" {
-            let Some(slot) = node.child_by_field_name("operand").and_then(|operand| bound_param(operand, source, bindings)) else { return };
-            let Some(field) = node.child_by_field_name("field") else { return };
-            accesses[slot].names.insert(text(field, source).to_owned());
+    let mut calls = Vec::new();
+    walk_straight_line(node.child_by_field_name("body")?, source, bindings, |expression, bindings| {
+        if let Some((slot, member)) = parameter_member(expression, source, bindings) {
+            accesses[slot].names.insert(member.to_owned());
             accesses[slot].count += 1;
         }
+        calls.extend(direct_call(expression, source, bindings));
     })?;
-    Some(Helper { file: file.to_path_buf(), line: line_of(node), end_line: node.end_position().row as u32 + 1, params, accesses })
+    let location = HelperLocation { file: file.to_path_buf(), start_line: line_of(node), end_line: node.end_position().row as u32 + 1 };
+    Some(Helper { location, params, accesses, calls })
+}
+
+fn parameter_member<'a>(node: Node, source: &'a [u8], bindings: &Bindings<'_>) -> Option<(usize, &'a str)> {
+    if node.kind() != "selector_expression" {
+        return None;
+    }
+    let slot = bound_param(node.child_by_field_name("operand")?, source, bindings)?;
+    let member = text(node.child_by_field_name("field")?, source);
+    Some((slot, member))
 }
 
 fn extract_caller(node: Node, source: &[u8], types: &[TypeDecl], first_type: usize) -> Option<Caller> {

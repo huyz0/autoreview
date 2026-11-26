@@ -85,7 +85,7 @@ pub fn run_symindex_check_with_tier4(repo_root: &Path, changed_files: &[String],
     findings.extend(
         envy.into_iter()
             .filter(|e| changed_set.contains(&path_str(&e.file))
-                || e.helper_evidence.iter().any(|helper| changed_set.contains(&path_str(&helper.helper_file))))
+                || e.helper_locations().any(|helper| changed_set.contains(&path_str(&helper.file))))
             .filter_map(|e| envy_to_finding_with_tier4(&index, e, tier4_records.as_deref())),
     );
     findings.extend(clumps.iter().filter_map(|c| clump_to_finding(c, &changed_set)));
@@ -147,11 +147,11 @@ fn envy_to_finding(index: &SymbolIndex, envy: autoreview_symindex::FeatureEnvyFi
             side: Side::New,
         }];
         let mut seen = HashSet::new();
-        for helper in &envy.helper_evidence {
-            if seen.insert((&helper.helper_file, helper.helper_line)) {
+        for helper in envy.helper_locations() {
+            if seen.insert(helper) {
                 locations.push(Location {
-                    path: path_str(&helper.helper_file),
-                    range: LocationRange { start_line: helper.helper_line, end_line: Some(helper.helper_end_line), ..Default::default() },
+                    path: path_str(&helper.file),
+                    range: LocationRange { start_line: helper.start_line, end_line: Some(helper.end_line), ..Default::default() },
                     snippet: "Cross-file helper".to_string(),
                     side: Side::New,
                 });
@@ -386,6 +386,91 @@ func costs(customer *Customer) int { return customer.Balance + customer.Fee }
         assert_eq!(helper_only.iter().filter(|finding| finding.source.rule_id.as_deref() == Some("feature-envy")).count(), 2);
         let unrelated = run_symindex_check(dir.path(), &["unrelated/customer.go".to_string()]);
         assert!(unrelated.iter().all(|finding| finding.source.rule_id.as_deref() != Some("feature-envy")));
+    }
+
+    #[test]
+    fn reports_go_feature_envy_two_cross_file_hops_away() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "invoice.go", r#"
+package billing
+type Invoice struct{}
+type Customer struct { Balance, Fee, Tax int }
+func (Invoice) Total(customer *Customer) int {
+    alias := customer
+    return forward(0, alias) + relay(alias)
+}
+func (Invoice) DirectAndIndirect(customer *Customer) int {
+    return totals(customer, 0) + relay(customer)
+}
+"#);
+        write_file(dir.path(), "forward.go", r#"
+package billing
+func forward(fee int, customer *Customer) int {
+    alias := customer
+    return totals(alias, fee)
+}
+"#);
+        write_file(dir.path(), "relay.go", "package billing\nfunc relay(c *Customer) int { return totals(c, 0) }\n");
+        write_file(dir.path(), "totals.go", r#"
+package billing
+func totals(customer *Customer, fee int) int {
+    return customer.Balance + customer.Fee + customer.Tax + fee
+}
+"#);
+
+        let findings = run_symindex_check(dir.path(), &["invoice.go".to_string()]);
+        let envy: Vec<_> = findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some("feature-envy")).collect();
+        assert_eq!(envy.len(), 2, "got: {findings:#?}");
+        assert!(envy.iter().all(|finding| finding.message.contains("`Customer` 3 times")));
+        let related = envy[0].related_locations.as_ref().unwrap();
+        let paths: HashSet<_> = related.iter().map(|location| location.path.as_str()).collect();
+        assert_eq!(paths, HashSet::from(["invoice.go", "forward.go", "relay.go", "totals.go"]));
+        for (file, expected) in [("forward.go", 1), ("relay.go", 2), ("totals.go", 2)] {
+            let findings = run_symindex_check(dir.path(), &[file.to_string()]);
+            assert_eq!(findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some("feature-envy")).count(), expected);
+        }
+    }
+
+    #[test]
+    fn skips_two_hop_ambiguity_and_ordinary_forwarding() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "invoice.go", r#"
+package billing
+type Invoice struct{}
+type Customer struct { Balance, Fee, Tax int }
+func (c *Customer) Total() int { return c.Balance + c.Fee + c.Tax }
+func (Invoice) Ambiguous(c *Customer) int { return uncertain(c) }
+func (Invoice) Shadowed(f func(*Customer) int, c *Customer) int { return shadowed(c, f) }
+func (Invoice) Forward(c *Customer) int { return forwarding(c) + forwarding(c) }
+func (Invoice) WrongSlot(c *Customer) int { return wrongSlot(c, load()) }
+func (Invoice) Repeat(c *Customer) int { return repeated(c) }
+func (Invoice) TooFar(c *Customer) int { return threeHops(c) }
+func (Invoice) SameFile(c *Customer) int { return sameFile(c) }
+"#);
+        write_file(dir.path(), "forward.go", r#"
+package billing
+func uncertain(c *Customer) int { return platform(c) }
+func shadowed(c *Customer, wide func(*Customer) int) int { return wide(c) }
+func forwarding(c *Customer) int { return onlyTotal(c) }
+func wrongSlot(unused, other *Customer) int { return wide(other) }
+func repeated(c *Customer) int { return two(c) + two(c) }
+func threeHops(c *Customer) int { return relay(c) }
+func sameFile(c *Customer) int { return sameFileTarget(c) }
+func sameFileTarget(c *Customer) int { return c.Balance + c.Fee + c.Tax }
+"#);
+        write_file(dir.path(), "leaf.go", r#"
+package billing
+func onlyTotal(c *Customer) int { return c.Total() }
+func two(c *Customer) int { return c.Balance + c.Fee }
+func wide(c *Customer) int { return c.Balance + c.Fee + c.Tax }
+func relay(c *Customer) int { return sameFileTarget(c) }
+func load() *Customer { return nil }
+"#);
+        write_file(dir.path(), "platform_linux.go", "package billing\nfunc platform(c *Customer) int { return c.Balance + c.Fee + c.Tax }\n");
+        write_file(dir.path(), "platform_windows.go", "package billing\nvar platform = onlyTotal\n");
+
+        let findings = run_symindex_check(dir.path(), &["invoice.go".to_string()]);
+        assert!(findings.iter().all(|finding| finding.source.rule_id.as_deref() != Some("feature-envy")), "got: {findings:#?}");
     }
 
     #[test]
