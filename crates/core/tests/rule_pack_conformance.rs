@@ -272,6 +272,22 @@ fn kotlin_local_callback_aliases_require_contiguous_immutable_execution() {
 }
 
 #[test]
+fn kotlin_unused_local_callbacks_do_not_inherit_suspend_execution() {
+    if !ast_grep_available() { return; }
+    let checks = KOTLIN_COROUTINE_CHECKS;
+    let source = format!("suspend fun run() {{\n val unused = {{ {checks} }}\n val called = {{ {checks} }}\n `called`.invoke()\n val passed = {{ {checks} }}\n register(passed)\n val nested = {{ register {{ {checks} }} }}\n val shadow = {{ {checks} }}\n val other = {{ val shadow = 1 }}\n}}\n");
+    let repo = kotlin_test_repo(&source);
+    let result = autoreview_core::run_ast_grep_with_coverage(repo.path(), &["example.kt".into()], &[]).unwrap();
+    for &rule in KOTLIN_COROUTINE_RULES {
+        let findings: Vec<_> = result.findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some(rule)).collect();
+        assert_eq!(findings.iter().map(|finding| finding.location.range.start_line).collect::<Vec<_>>(), [3, 5, 8], "{rule}");
+        assert!(findings.iter().all(|finding| finding.confidence < 1.0), "{rule}");
+        let incomplete: Vec<_> = result.coverage.iter().filter(|issue| issue.rule.as_deref() == Some(rule)).map(|issue| issue.line.unwrap()).collect();
+        assert_eq!(incomplete, [3, 5, 8], "{rule}");
+    }
+}
+
+#[test]
 fn kotlin_callback_alias_budget_remains_incomplete() {
     if !ast_grep_available() { return; }
     for count in [31, 32] {

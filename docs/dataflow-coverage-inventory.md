@@ -15,6 +15,10 @@ resolve callback identities, or classify other callback forms as immediate or de
 Alias tracking is limited to 32 subsequent statements, including comments;
 reassignment, control flow, intervening calls, and bare-name invocation remain
 unresolved.
+An immutable local lambda with no other matching identifier in its enclosing
+function is treated as uninvoked, including when it contains nested callbacks.
+This conservative check counts same-named shadowed identifiers as uses and has
+a shared per-file budget of 200,000 syntax nodes; exhaustion remains incomplete.
 
 Result-use analysis checks partial observation for directly tracked local
 results on bounded, acyclic paths with supported simple guards. It preserves

@@ -583,6 +583,24 @@ fn kotlin_literal_invoke_and_immutable_alias_replay() {
 }
 
 #[test]
+fn kotlin_unused_callback_is_clean_until_invoked() {
+    if !ast_grep_available() { return; }
+    let unused = "suspend fun run() {\n val callback = { runBlocking { work() } }\n}\n";
+    let invoked = "suspend fun run() {\n val callback = { runBlocking { work() } }\n callback.invoke()\n}\n";
+    let repo = init_repo(&[("Main.kt", unused)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("Main.kt", invoked)], "invoke callback");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"local callback lifetime", "rule":{"tool":"ast-grep","id":"kotlin-runblocking-in-suspend-function"}, "before":{"commit":before,"path":"Main.kt","lines":[]}, "after":{"commit":after,"path":"Main.kt","lines":[2]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().success();
+    let report: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(report["rules"][0]["truePositives"], 1, "{report}");
+    assert_eq!(report["coverage"][0]["completed"], 1, "{report}");
+}
+
+#[test]
 fn diff_reports_dataflow_syntax_limitations_without_warning_on_clean_files() {
     let repo = init_repo(&[("main.go", "package main\nfunc main() {}\n")]);
     let base = current_commit(repo.path());
