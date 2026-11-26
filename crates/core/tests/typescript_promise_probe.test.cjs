@@ -24,14 +24,17 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
       'declare function anything(): any;',
       'declare function mixed(): Promise<void> | string;',
       'declare function thenable(): PromiseLike<number>;',
+      'declare function factory(): () => Promise<void>;',
       "const accent = 'é';",
+      "const face = '😀';",
       'const localGlobal = LOCAL_GLOBAL;',
-      'promise(); sync(); anything(); mixed(); thenable();',
+      'promise(); sync(); anything(); mixed(); thenable(); factory()();',
       'function generic<T>(value: T) { return identity(value); }',
       'declare function identity<T>(value: T): T;',
+      'sync();'.repeat(250),
     ].join('\n');
     fs.writeFileSync(file, source);
-    const names = ['promise()', 'sync()', 'anything()', 'mixed()', 'thenable()', 'identity(value)'];
+    const names = ['promise()', 'sync()', 'anything()', 'mixed()', 'thenable()', 'identity(value)', 'factory()()'];
     const hash = text => createHash('sha256').update(text, 'utf8').digest('hex');
     let calls = names.map(name => ({ path: file, start: Buffer.byteLength(source.slice(0, source.lastIndexOf(name))), source_sha256: hash(source) }));
     function invoke() {
@@ -41,7 +44,14 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
     }
     const checked = invoke();
     assert.equal(checked.status, 'ok');
-    assert.deepEqual(checked.calls.map(call => call.status), ['promise_like', 'not_promise', 'not_proven', 'not_proven', 'promise_like', 'not_proven']);
+    assert.deepEqual(checked.calls.map(call => call.status), ['promise_like', 'not_promise', 'not_proven', 'not_proven', 'promise_like', 'not_proven', 'not_proven']);
+    calls = [calls[1], calls[0], calls[1], { ...calls[0], source_sha256: 'wrong' }, { ...calls[0], path: path.join(directory, 'missing.ts') }];
+    assert.deepEqual(invoke().calls.map(call => call.status), ['not_promise', 'promise_like', 'not_promise', 'source_changed', 'unavailable']);
+    calls = Array.from(source.matchAll(/\bsync\(\);/g), match => ({ path: file, start: Buffer.byteLength(source.slice(0, match.index)), source_sha256: hash(source) })).reverse();
+    const bulk = invoke().calls;
+    assert.equal(bulk.length, 251);
+    assert.deepEqual(bulk.map(call => call.start), calls.map(call => call.start));
+    assert.ok(bulk.every(call => call.status === 'not_promise'));
     const shadowed = 'export {}; type Promise<T> = string; declare function fake(): Promise<void>; fake();';
     fs.writeFileSync(file, shadowed);
     calls = [{ path: file, start: Buffer.byteLength(shadowed.slice(0, shadowed.lastIndexOf('fake()'))), source_sha256: hash(shadowed) }];

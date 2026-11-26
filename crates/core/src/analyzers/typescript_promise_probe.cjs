@@ -29,17 +29,38 @@ function run(request) {
       ts.TypeFlags.ESSymbolLike;
     return !!(type.flags & primitive) && !checker.getPropertyOfType(type, 'then');
   }
-  const calls = request.calls.map(call => {
-    const file = program.getSourceFile(call.path);
-    if (!file) return { ...call, status: 'unavailable' };
-    const digest = crypto.createHash('sha256').update(file.text, 'utf8').digest('hex');
-    if (digest !== call.source_sha256) return { ...call, status: 'source_changed' };
-    let selected;
+  const files = new Map();
+  function indexCalls(file) {
+    const nodes = [];
     function visit(node) {
-      if (ts.isCallExpression(node) && Buffer.byteLength(file.text.slice(0, node.getStart(file)), 'utf8') === call.start) selected = node;
+      if (ts.isCallExpression(node)) nodes.push({ node, start: node.getStart(file), order: nodes.length });
       ts.forEachChild(node, visit);
     }
     visit(file);
+    // Accumulate UTF-8 offsets in source order instead of encoding the whole
+    // prefix for every call. Equal starts retain traversal order, so the
+    // innermost call wins just as it did in the original lookup.
+    nodes.sort((a, b) => a.start - b.start || a.order - b.order);
+    const index = new Map();
+    let previous = 0;
+    let bytes = 0;
+    for (const entry of nodes) {
+      bytes += Buffer.byteLength(file.text.slice(previous, entry.start), 'utf8');
+      index.set(bytes, entry.node);
+      previous = entry.start;
+    }
+    return index;
+  }
+  const calls = request.calls.map(call => {
+    const file = program.getSourceFile(call.path);
+    if (!file) return { ...call, status: 'unavailable' };
+    if (!files.has(file)) {
+      files.set(file, { digest: crypto.createHash('sha256').update(file.text, 'utf8').digest('hex'), calls: null });
+    }
+    const cached = files.get(file);
+    if (cached.digest !== call.source_sha256) return { ...call, status: 'source_changed' };
+    if (!cached.calls) cached.calls = indexCalls(file);
+    const selected = cached.calls.get(call.start);
     if (!selected) return { ...call, status: 'unavailable' };
     const type = checker.getTypeAtLocation(selected);
     return { ...call, status: promiseLike(type) ? 'promise_like' : definitelyNotPromise(type) ? 'not_promise' : 'not_proven' };
