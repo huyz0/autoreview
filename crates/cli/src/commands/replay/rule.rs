@@ -50,21 +50,13 @@ impl Tool {
                     "ast-grep is required for this rule"
                 );
                 let result = autoreview_core::run_ast_grep_with_coverage(source, paths, packs)?;
-                let relevant: Vec<_> = result.coverage.into_iter().filter(|issue| affects_rules(issue, rules, packs)).collect();
-                if !relevant.is_empty() {
-                    return Err(IncompleteAnalysis(relevant).into());
-                }
-                result.findings
+                completed_findings(result.findings, result.coverage, rules, packs)?
             }
             Self::AutoreviewComplexity => autoreview_core::run_complexity_check(source, paths, packs),
             Self::AutoreviewArchgraph => autoreview_core::run_archgraph_check(source, paths),
             Self::AutoreviewDataflow => {
                 let result = autoreview_core::run_dataflow_check_with_coverage(source, source, paths, packs);
-                let relevant: Vec<_> = result.coverage.into_iter().filter(|issue| affects_rules(issue, rules, packs)).collect();
-                if !relevant.is_empty() {
-                    return Err(IncompleteAnalysis(relevant).into());
-                }
-                result.findings
+                completed_findings(result.findings, result.coverage, rules, packs)?
             }
             Self::AutoreviewDuplication => autoreview_core::run_duplication_check(source, paths),
             Self::AutoreviewFrameworks => autoreview_core::run_framework_checks(source, paths),
@@ -72,6 +64,14 @@ impl Tool {
         };
         Ok(findings)
     }
+}
+
+fn completed_findings(findings: Vec<AgentFinding>, coverage: Vec<autoreview_schema::AnalysisCoverageIssue>, rules: &BTreeSet<String>, packs: &[autoreview_core::ResolvedRulePack]) -> anyhow::Result<Vec<AgentFinding>> {
+    let relevant: Vec<_> = coverage.into_iter().filter(|issue| affects_rules(issue, rules, packs)).collect();
+    if !relevant.is_empty() {
+        return Err(IncompleteAnalysis(relevant).into());
+    }
+    Ok(findings)
 }
 
 pub(super) fn validated_source(snapshot: &Path, name: &str, commit: &str, tool: Tool) -> anyhow::Result<String> {
