@@ -107,7 +107,8 @@ An experimental standalone compiler-IR probe lives in
 `tools/kotlin-callback-evidence`. It records some resolved SAM conversions,
 but it is not connected to review, replay, or rule decisions. Its output does
 not prove execution timing, complete resolution, overload identity, or that
-source and dependency snapshots are unchanged. The README records its limits
+source and dependency snapshots are unchanged. Simple parameter classifiers can
+distinguish some overloads, but are not complete signatures. The README records its limits
 and the additional verification required before using it as rule evidence.
 
 The repository currently has no Kotlin classpath-backed resolver. Before

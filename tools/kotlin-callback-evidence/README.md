@@ -39,7 +39,11 @@ to overwrite an existing output file.
 Only direct SAM conversions represented in compiler IR as call arguments are
 recorded. Absence of a record does not establish absence of a callback. A
 callee name, parameter index, and SAM type do not uniquely identify an
-overload or establish the runtime target under dynamic dispatch. The source
+overload or establish the runtime target under dynamic dispatch. Version 2
+also records declared regular parameter classifiers in order; generic or
+otherwise unrepresentable types are `null`. This deliberately omits receiver
+types, type arguments, nullability, return types and module identity, so even
+an all-non-null list is not a complete signature. The source
 hash covers bytes read by the plugin, not necessarily the bytes previously
 parsed by the compiler. Dependencies, classpaths and other source files are
 not snapshot-verified. An output file can exist even if a later compiler
