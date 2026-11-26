@@ -273,6 +273,14 @@ fn partial_helper_observation_reports_incomplete_analysis() {
         let source = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b, flag) { const pending = rename(a, b); return consume(pending, flag); }\n";
         let root = write_single_file(path, source);
         assert_partial_helper_coverage(&root, path, rule);
+        let direct = source.replace("const pending = rename(a, b); return consume(pending, flag);", "return consume(rename(a, b), flag);");
+        std::fs::write(root.path().join(path), &direct).unwrap();
+        assert_partial_helper_coverage(&root, path, rule);
+        let fixed_direct = direct.replace("if (flag) return value;", "return value;");
+        std::fs::write(root.path().join(path), fixed_direct).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
         let fixed = source.replace("if (flag) return value;", "if (flag) return value; else return value;");
         std::fs::write(root.path().join(path), fixed).unwrap();
         let result = conditional_test_result(&root, path);
@@ -292,6 +300,9 @@ fn partial_helper_observation_reports_incomplete_analysis() {
         std::fs::write(root.path().join(format!("helper.{extension}")), "export function consume(value, flag) { if (flag) return value; }\n").unwrap();
         std::fs::write(root.path().join(path), imported).unwrap();
         assert_partial_helper_coverage(&root, path, rule);
+        let imported_direct = direct.replace("function consume(value, flag) { if (flag) return value; }", "import { consume } from './helper';");
+        std::fs::write(root.path().join(path), imported_direct).unwrap();
+        assert_partial_helper_coverage(&root, path, rule);
     }
 }
 
@@ -305,6 +316,14 @@ fn partial_helper_observation_reports_incomplete_across_languages() {
     ];
     for (path, rule, source) in cases {
         assert_partial_helper_source(path, rule, source);
+        let direct = match path {
+            "main.go" => source.replace("err := os.Rename(a, b); return consume(err, flag)", "return consume(os.Rename(a, b), flag)"),
+            "Main.java" => source.replace("boolean value = Objects.equals(a,b); return consume(value, flag);", "return consume(Objects.equals(a,b), flag);"),
+            "Main.kt" => source.replace("val value = runCatching { 1 }; return consume(value, flag)", "return consume(runCatching { 1 }, flag)"),
+            "lib.rs" => source.replace("let value = remove_file(path); consume(value, flag)", "consume(remove_file(path), flag)"),
+            _ => unreachable!(),
+        };
+        assert_partial_helper_source(path, rule, &direct);
     }
 }
 
