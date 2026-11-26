@@ -91,12 +91,16 @@ func isContextParameter(param *types.Var) bool {
 
 func contextReturnsOnly(body *ast.BlockStmt, param *types.Var, info *types.Info, summaries map[callee]*errorOrigin) bool {
 	valid, sawError := true, false
-	bindings := forwardedBindings(body, param, info, summaries)
+	unreachable := unreachableErrorBranches(body, info)
+	bindings := forwardedBindings(body, param, info, summaries, unreachable)
 	var stack []ast.Node
 	ast.Inspect(body, func(node ast.Node) bool {
 		if node == nil {
 			stack = stack[:len(stack)-1]
 			return true
+		}
+		if unreachable[node] {
+			return false
 		}
 		var parent ast.Node
 		if len(stack) > 0 {

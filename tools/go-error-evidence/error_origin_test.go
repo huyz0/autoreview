@@ -129,3 +129,18 @@ func run(ctx context.Context) { plain(ctx); inIf(ctx); overwrite(ctx); escaped(c
 	got := analyzeOrigins(t, src, snippets)
 	t.Run("checked bindings", func(t *testing.T) { assertErrorOrigins(t, got, snippets, []int{0, 0, -1, -1, -1, -1}) })
 }
+
+func TestContextErrorOriginsIgnoreOnlyConstantUnreachableBranches(t *testing.T) {
+	src := `package p
+import ("context"; "errors")
+func falseBranch(ctx context.Context) error { if 1 > 1 { return errors.New("other") }; return ctx.Err() }
+func trueBranch(ctx context.Context) error { if true { return ctx.Err() } else { return errors.New("other") } }
+func runtimeBranch(ctx context.Context, n int) error { if n > 1 { return errors.New("other") }; return ctx.Err() }
+func initRuns(ctx context.Context) error { if ctx = context.Background(); false { return nil }; return ctx.Err() }
+func deadMutation(ctx context.Context) error { if false { ctx = context.Background() }; return ctx.Err() }
+func run(ctx context.Context, n int) { falseBranch(ctx); trueBranch(ctx); runtimeBranch(ctx,n); initRuns(ctx); deadMutation(ctx) }
+`
+	snippets := []string{"falseBranch(ctx);", "trueBranch(ctx);", "runtimeBranch(ctx,n);", "initRuns(ctx);", "deadMutation(ctx)"}
+	got := analyzeOrigins(t, src, snippets)
+	t.Run("constant guards", func(t *testing.T) { assertErrorOrigins(t, got, snippets, []int{0, 0, -1, -1, 0}) })
+}

@@ -7,9 +7,12 @@ import (
 )
 
 // Bind only fresh, single-result locals; every subsequent use is checked below.
-func forwardedBindings(body *ast.BlockStmt, param *types.Var, info *types.Info, summaries map[callee]*errorOrigin) map[*types.Var]*ast.CallExpr {
+func forwardedBindings(body *ast.BlockStmt, param *types.Var, info *types.Info, summaries map[callee]*errorOrigin, unreachable map[ast.Node]bool) map[*types.Var]*ast.CallExpr {
 	bindings := make(map[*types.Var]*ast.CallExpr)
 	ast.Inspect(body, func(node ast.Node) bool {
+		if node != nil && unreachable[node] {
+			return false
+		}
 		assign, ok := node.(*ast.AssignStmt)
 		if !ok || assign.Tok != token.DEFINE || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
 			return true
