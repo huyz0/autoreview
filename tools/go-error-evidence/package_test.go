@@ -45,9 +45,7 @@ func TestPackageModeUsesBuildFilesAndLocalDependencies(t *testing.T) {
 	}
 	req.ExpectedSources["main.go"] = hex.EncodeToString(sum[:])
 	write("other.go", "package sample\nfunc helper() {}\n")
-	if got := analyze(req); got.Status != "incomplete" || got.Reason != "source_mismatch" {
-		t.Fatalf("callee evidence requires hashes for all selected files: %+v", got)
-	}
+	assertSourceMismatch(t, req, "callee evidence requires hashes for all selected files")
 	otherSum := sha256.Sum256([]byte("package sample\nfunc helper() {}\n"))
 	req.ExpectedSources["other.go"] = hex.EncodeToString(otherSum[:])
 	if got := analyze(req); got.Status != "ok" {
@@ -59,9 +57,7 @@ func TestPackageModeUsesBuildFilesAndLocalDependencies(t *testing.T) {
 		t.Fatalf("selected files can be verified among extra candidates: %+v", got)
 	}
 	delete(req.PackageSources, "other.go")
-	if got := analyze(req); got.Status != "incomplete" || got.Reason != "source_mismatch" {
-		t.Fatalf("missing selected candidate: %+v", got)
-	}
+	assertSourceMismatch(t, req, "missing selected candidate")
 	req.PackageSources = nil
 	req.ExpectedSources["other.go"] = strings.Repeat("0", 64)
 	if got := analyze(req); got.Status != "incomplete" || got.Reason != "source_mismatch" {
@@ -115,4 +111,11 @@ func goBinary(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return binary
+}
+
+func assertSourceMismatch(t *testing.T, req request, label string) {
+	t.Helper()
+	if got := analyze(req); got.Status != "incomplete" || got.Reason != "source_mismatch" {
+		t.Fatalf("%s: %+v", label, got)
+	}
 }

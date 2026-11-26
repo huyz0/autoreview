@@ -153,10 +153,8 @@ func preparePackage(fset *token.FileSet, req request) (loadedPackage, string) {
 		return loadedPackage{}, "invalid_request"
 	}
 	loaded, reason := loadPackage(fset, req.PackageDir, req.GoBinary)
-	if reason == "" && !matchesExpectedSources(loaded.files, req.Calls, req.ExpectedSources, false) {
-		return loadedPackage{}, "source_mismatch"
-	}
-	if reason == "" && req.IncludeCallees && !matchesPackageSources(loaded.files, req.PackageSources, req.ExpectedSources) {
+	if reason == "" && (!matchesExpectedSources(loaded.files, req.Calls, req.ExpectedSources, false) ||
+		req.IncludeCallees && !matchesPackageSources(loaded.files, req.PackageSources, req.ExpectedSources)) {
 		return loadedPackage{}, "source_mismatch"
 	}
 	return loaded, reason
