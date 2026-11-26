@@ -31,13 +31,14 @@ fn scan_frame(program: &Program<'_, '_, '_>, unit: &KeyedUnit<'_, '_, '_>, funct
     let mut pending = vec![function.node];
     while let Some(node) = pending.pop() {
         if node != function.node && nested_function(node) { continue; }
-        limitations.extend(receiver_issue(program, index, unit, plan, &flow, &calls, node));
+        limitations.extend(receiver_issue(program, index, unit, &flow, &calls, node));
         pending.extend(node.named_children(&mut node.walk()));
     }
     limitations
 }
 
-fn receiver_issue(program: &Program<'_, '_, '_>, index: usize, unit: &KeyedUnit<'_, '_, '_>, plan: &Plan<'_, '_>, flow: &Flow, calls: &BTreeSet<(usize, usize)>, node: Node<'_>) -> Option<KeyedLimitation> {
+fn receiver_issue(program: &Program<'_, '_, '_>, index: usize, unit: &KeyedUnit<'_, '_, '_>, flow: &Flow, calls: &BTreeSet<(usize, usize)>, node: Node<'_>) -> Option<KeyedLimitation> {
+    let plan = program.frames[index].plan.as_ref()?;
     let (outer, wrapped) = receiver(node, unit.source, plan)?;
     let reached = program.frames[index].graph.nodes.iter().zip(&flow.reachable).any(|(block, reached)| *reached && block.evaluations.iter().any(|evaluation| evaluation.span.start <= outer.start_byte() && outer.end_byte() <= evaluation.span.end));
     let modeled = !wrapped && modeled_receiver(program, calls, outer.start_byte());
