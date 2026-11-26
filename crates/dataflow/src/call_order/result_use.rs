@@ -251,6 +251,7 @@ fn transfer(
             }
             Effect::OpaqueRead(_) => {}
             Effect::OpaqueOnly(_) => {}
+            Effect::ObservedOnly(nested) => transfer(nested, live, closures, observe.as_deref_mut()),
             Effect::Write(writes) => {
                 transfer_writes(writes, live, observe.as_deref_mut());
             }

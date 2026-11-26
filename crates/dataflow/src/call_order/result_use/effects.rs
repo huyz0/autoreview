@@ -246,6 +246,14 @@ impl Lower<'_, '_, '_> {
 
     fn value(&self, node: Node<'_>, effects: &mut Vec<Effect>) -> Value {
         let value = transparent(node);
+        if self.language == ContractLanguage::Web && value.kind() == "array" {
+            if let Some(members) = self.array_members(value) {
+                let mut reads = Vec::new();
+                self.reads(node, &mut reads);
+                effects.push(Effect::ObservedOnly(reads));
+                return Value::Aggregate(members);
+            }
+        }
         if let Some(binding) = self.place(value, false) {
             return Value::Copy(binding);
         }
@@ -261,6 +269,17 @@ impl Lower<'_, '_, '_> {
         }
         self.reads(node, effects);
         Value::Other
+    }
+
+    fn array_members(&self, node: Node<'_>) -> Option<Vec<Value>> {
+        site::children(node).map(|item| {
+            let item = transparent(item);
+            if item.kind() == "array" { return self.array_members(item).map(Value::Aggregate); }
+            if let Some(place) = self.place(item, false) { return Some(Value::Copy(place)); }
+            if let Some(origin) = self.origin(item) { return Some(Value::Source(origin)); }
+            if matches!(item.kind(), "number" | "string" | "true" | "false" | "null") { return Some(Value::Other); }
+            None
+        }).collect()
     }
 
     fn place(&self, node: Node<'_>, defining: bool) -> Option<Place> {

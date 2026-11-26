@@ -217,6 +217,32 @@ fn unresolved_receivers_track_assigned_results_in_web_arrays() {
 }
 
 #[test]
+fn unresolved_receivers_track_results_in_stored_arrays() {
+    for (ext, rule) in [("js", "javascript-node-fs-discarded-promise"), ("ts", "typescript-node-fs-discarded-promise"), ("tsx", "typescript-node-fs-discarded-promise")] {
+        let path = format!("main.{ext}");
+        let source = "import { rename } from 'node:fs/promises';\nfunction direct(a, b) { const values = [rename(a, b)]; unknown(values); }\nfunction assigned(a, b) { const p = rename(a, b); const values = [p]; unknown(values); }\nfunction alias(a, b) { const p = rename(a, b); const values = [p]; const q = values; unknown(q); }\nfunction replaced(a, b) { const p = rename(a, b); let values = [p]; values = []; unknown(values); }\nfunction valueReplaced(a, b) { let p = rename(a, b); const values = [p]; p = null; unknown(values); }\nasync function observed(a, b) { const p = rename(a, b); const values = [await p]; unknown(values); }\nfunction branch(a, b, flag) { const p = rename(a, b); const values = [p]; if (flag) unknown(values); }\nfunction mixed(a, b) { const p = rename(a, b); const values = [p, 1, null]; unknown(values); }\n";
+        let root = write_single_file(&path, source);
+        let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), std::slice::from_ref(&path), &[]);
+        let lines: std::collections::BTreeSet<_> = result.coverage.iter().filter(|issue|
+            issue.reason == "unresolved_result_receiver" && issue.rule.as_deref() == Some(rule))
+            .filter_map(|issue| issue.line).collect();
+        assert_eq!(lines, std::collections::BTreeSet::from([2, 3, 4, 6, 8, 9]), "{ext}: {:?}", result.coverage);
+    }
+}
+
+#[test]
+fn stored_array_result_uncertainty_crosses_helper_files() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("helper.js"), "import { rename } from 'node:fs/promises';\nexport function make(a, b) { return [rename(a, b)]; }\nexport function send(values) { unknown(values); }\n").unwrap();
+    std::fs::write(root.path().join("main.js"), "import { rename } from 'node:fs/promises';\nimport { make, send } from './helper';\nfunction passed(a, b) { const p = rename(a, b); const values = [p]; send(values); }\nfunction returned(a, b) { const values = make(a, b); unknown(values); }\n").unwrap();
+    let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &["main.js".into()], &[]);
+    let locations: std::collections::BTreeSet<_> = result.coverage.iter().filter(|issue|
+        issue.reason == "unresolved_result_receiver" && issue.rule.as_deref() == Some("javascript-node-fs-discarded-promise"))
+        .map(|issue| (issue.path.as_deref().unwrap(), issue.line.unwrap())).collect();
+    assert_eq!(locations, std::collections::BTreeSet::from([("main.js", 3), ("helper.js", 2)]), "{:?}", result.coverage);
+}
+
+#[test]
 fn wrapped_assigned_results_propagate_through_imported_helpers() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("helper.js"), "export function send(value) { relay(value); }\nfunction relay(value) { unknown([value]); }\n").unwrap();
