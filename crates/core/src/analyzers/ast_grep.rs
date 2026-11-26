@@ -341,6 +341,28 @@ mod tests {
     }
 
     #[test]
+    fn checked_error_rule_does_not_exempt_arbitrary_wait_methods() {
+        if !ast_grep_available() {
+            eprintln!("skipping: ast-grep not on PATH");
+            return;
+        }
+        let source = r#"package example
+import "context"
+type worker interface { Wait(context.Context) error }
+func run(ctx context.Context, w worker) error {
+    select { case <-ctx.Done(): return nil; default: }
+    if err := w.Wait(ctx); err != nil { return nil }
+    return nil
+}
+"#;
+        let dir = write_repo(&[("main.go", source)]);
+        let findings = run_ast_grep(dir.path(), &["main.go".to_string()], &[]).unwrap();
+        let matches: Vec<_> = findings.iter().filter(|f| f.source.rule_id.as_deref() == Some("go-checked-error-returned-nil")).collect();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].location.range.start_line, 6);
+    }
+
+    #[test]
     fn extract_pattern_rules_for_go_only_copies_no_other_language_subtree() {
         let dest = tempfile::tempdir().unwrap();
         let languages_present: HashSet<Language> = [Language::Go].into_iter().collect();

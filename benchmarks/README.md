@@ -118,7 +118,12 @@ one-token, burst-one configuration and the surrounding shutdown handling; it is
 a policy judgment, not proof of intent. These cases are too few to estimate
 general accuracy. The rule is marked for optional model verification, but
 static replay does not run that verifier and this benchmark does not measure
-its effectiveness. Reproduce with:
+its effectiveness. At the pinned revision, Cilium's `Limiter.Wait` delegates
+to `WaitN(ctx, 1)`, which can also return an error if the requested token count
+exceeds the configured burst. The local constructor supplies a burst of one;
+this conclusion depends on resolving that constructor and implementation, not
+just the spelling `Wait`. An unrelated method with the same name can return
+other errors, even beside an explicit context cancellation check. Reproduce with:
 
 ```sh
 git init cilium
