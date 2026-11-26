@@ -6,8 +6,6 @@ message: "`Thread.sleep()` inside a suspend function blocks the entire underlyin
 rule:
   pattern: Thread.sleep($MS)
   inside:
-    stopBy: end
+    stopBy: {kind: function_declaration}
     kind: function_declaration
-    has:
-      stopBy: end
-      regex: ^suspend$
+    has: {kind: modifiers, has: {kind: function_modifier, regex: ^suspend$}}

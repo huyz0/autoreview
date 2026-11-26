@@ -9,8 +9,6 @@ metadata:
 rule:
   pattern: runBlocking { $$$BODY }
   inside:
-    stopBy: end
+    stopBy: {kind: function_declaration}
     kind: function_declaration
-    has:
-      stopBy: end
-      regex: ^suspend$
+    has: {kind: modifiers, has: {kind: function_modifier, regex: ^suspend$}}

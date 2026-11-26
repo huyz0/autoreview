@@ -190,6 +190,25 @@ fn every_builtin_rule_fires_on_its_positive_fixture_and_stays_silent_on_its_nega
 }
 
 #[test]
+fn kotlin_suspend_checks_use_the_nearest_function_modifiers() {
+    if !ast_grep_available() {
+        return;
+    }
+    let repo = tempfile::tempdir().unwrap();
+    let checks = "runBlocking { work() }; Thread.sleep(1); runCatching { work() }; try { work() } finally { cleanup() }";
+    let source = format!("suspend fun outer() {{\n fun callback() {{ {checks} }}\n {checks}\n listOf(1).map {{ {checks} }}\n}}\nfun ordinary() {{\n suspend fun nested() {{ {checks} }}\n {checks}\n}}\n");
+    std::fs::write(repo.path().join("example.kt"), source).unwrap();
+    let findings = run_ast_grep(repo.path(), &["example.kt".into()], &[]).unwrap();
+    for rule in ["kotlin-runblocking-in-suspend-function", "kotlin-thread-sleep-in-suspend", "kotlin-suspend-swallowed-by-runcatching", "kotlin-suspend-call-in-finally-without-noncancellable"] {
+        let lines: Vec<_> = findings.iter()
+            .filter(|finding| finding.source.rule_id.as_deref() == Some(rule))
+            .map(|finding| finding.location.range.start_line)
+            .collect();
+        assert_eq!(lines, [3, 4, 7], "{rule}");
+    }
+}
+
+#[test]
 fn typescript_pattern_catalog_has_tsx_parity() {
     if !ast_grep_available() {
         return;
