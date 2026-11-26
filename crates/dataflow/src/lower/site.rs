@@ -95,7 +95,9 @@ fn result_is_discarded(call: Node<'_>, source: &[u8]) -> bool {
     let Some(parent) = call.parent() else { return false };
     match parent.kind() {
         "expression_statement" => true,
-        "block" => parent.parent().is_some_and(|owner| owner.kind() == "function_body"),
+        "block" => parent.parent().is_some_and(|owner| owner.kind() == "function_body"
+            || (owner.kind() == "match_arm" && discarded_match_arm(owner))),
+        "match_arm" => discarded_match_arm(parent),
         "let_declaration" => parent.children(&mut parent.walk()).any(|part| part.kind() == "_"),
         "expression_list" => {
             let Some(assignment) = parent.parent().filter(|node| node.kind() == "assignment_statement") else {
@@ -106,6 +108,10 @@ fn result_is_discarded(call: Node<'_>, source: &[u8]) -> bool {
         }
         _ => false,
     }
+}
+
+fn discarded_match_arm(arm: Node<'_>) -> bool {
+    arm.parent().and_then(|body| body.parent()).is_some_and(crate::lower::rust::supports_match)
 }
 
 fn local_call(call: Node<'_>) -> bool {

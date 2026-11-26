@@ -322,7 +322,8 @@ fn unsupported_flow(node: Node<'_>, source: &[u8]) -> bool {
     if node.kind() == "try_statement" {
         return !keyed_flow::supports_try(node);
     }
-    (node.kind() == "expression_switch_statement" && !keyed_flow::supports_go_switch(node)) || matches!(
+    (node.kind() == "match_expression" && !crate::lower::rust::supports_match(node))
+        || (node.kind() == "expression_switch_statement" && !keyed_flow::supports_go_switch(node)) || matches!(
         node.kind(),
         "try_with_resources_statement"
             | "labeled_statement"
@@ -331,7 +332,6 @@ fn unsupported_flow(node: Node<'_>, source: &[u8]) -> bool {
             | "type_switch_statement"
             | "select_statement"
             | "when_expression"
-            | "match_expression"
             | "goto_statement"
             | "go_statement"
     )
