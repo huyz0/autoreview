@@ -48,19 +48,14 @@ func TestVerifiedDependencyErrorOrigin(t *testing.T) {
 	main := "package sample\nimport (\"context\"; \"example.test/cross/dep\")\nfunc wrapper(ctx context.Context) error { return dep.Leaf(ctx) }\nfunc use(ctx context.Context) { wrapper(ctx) }\n"
 	dep := "package dep\nimport \"context\"\nfunc Leaf(ctx context.Context) error { return ctx.Err() }\n"
 	writeDependencyFiles(t, dir, map[string]string{"go.mod": "module example.test/cross\n\ngo 1.22\n", "main.go": main, "dep/dep.go": dep})
-	req := request{PackageDir: dir, GoBinary: goBinary(t), ExpectedSources: map[string]string{"main.go": digest(main)}, PackageSources: map[string]string{"main.go": digest(main)}, Calls: []callSite{{"main.go", strings.LastIndex(main, "wrapper(ctx)")}}, IncludeErrorOrigins: true}
-	if got := analyze(req); got.Status != "ok" || got.Calls[0].ErrorOrigin != nil {
-		t.Fatalf("unverified dependency: %+v", got)
-	}
-	req.DependencySources = map[string]dependencySnapshot{"example.test/cross/dep": {Directory: filepath.Join(dir, "dep"), Files: map[string]string{"dep.go": digest(dep)}}}
+	req := dependencyRequest(t, dir, main, []callSite{{"main.go", strings.LastIndex(main, "wrapper(ctx)")}})
+	assertUnverifiedDependency(t, req)
+	setDependencySnapshot(&req, dir, digest(dep))
 	got := analyze(req)
 	if got.Status != "ok" || got.Calls[0].ErrorOrigin == nil || got.Calls[0].ErrorOrigin.ContextParameter != 0 {
 		t.Fatalf("verified dependency: %+v", got)
 	}
-	req.DependencySources["example.test/cross/dep"] = dependencySnapshot{Directory: filepath.Join(dir, "dep"), Files: map[string]string{"dep.go": strings.Repeat("0", 64)}}
-	if got := analyze(req); got.Status != "incomplete" || got.Reason != "dependency_source_mismatch" {
-		t.Fatalf("stale dependency: %+v", got)
-	}
+	assertStaleDependency(t, &req, dir)
 	unsafeDep := "package dep\nimport (\"context\"; \"errors\")\nfunc Leaf(ctx context.Context) error { if ctx.Err() != nil { return ctx.Err() }; return errors.New(\"other\") }\n"
 	writeDependencyFiles(t, dir, map[string]string{"dep/dep.go": unsafeDep})
 	req.DependencySources["example.test/cross/dep"] = dependencySnapshot{Directory: filepath.Join(dir, "dep"), Files: map[string]string{"dep.go": digest(unsafeDep)}}
@@ -108,16 +103,20 @@ func (*Worker) Guarded(ctx context.Context, n int) error {
 	for _, expression := range []string{"dep.Guarded(ctx, 1)", "dep.Guarded(ctx, 2)", "dep.Guarded(ctx, n)", "dep.Mutated(ctx, 1)", "dep.Escaped(ctx, 1)", "w.Guarded(ctx, 1)", "((*dep.Worker).Guarded)(w, ctx, 1)"} {
 		calls = append(calls, callSite{"main.go", strings.Index(main, expression)})
 	}
-	req := request{PackageDir: dir, GoBinary: goBinary(t), ExpectedSources: map[string]string{"main.go": digest(main)}, PackageSources: map[string]string{"main.go": digest(main)}, Calls: calls, IncludeErrorOrigins: true}
-	if got := analyze(req); got.Status != "ok" || got.Calls[0].ErrorOrigin != nil {
-		t.Fatalf("unverified dependency: %+v", got)
-	}
-	req.DependencySources = map[string]dependencySnapshot{"example.test/cross/dep": {Directory: filepath.Join(dir, "dep"), Files: map[string]string{"dep.go": digest(dep)}}}
+	req := dependencyRequest(t, dir, main, calls)
+	assertUnverifiedDependency(t, req)
+	setDependencySnapshot(&req, dir, digest(dep))
 	got := analyze(req)
 	if got.Status != "ok" || len(got.Calls) != len(calls) {
 		t.Fatalf("analysis: %+v", got)
 	}
-	for i, call := range got.Calls {
+	assertSpecializedCalls(t, got.Calls)
+	assertStaleDependency(t, &req, dir)
+}
+
+func assertSpecializedCalls(t *testing.T, calls []callResult) {
+	t.Helper()
+	for i, call := range calls {
 		want := i == 0 || i == 5 || i == 6
 		if (call.ErrorOrigin != nil) != want {
 			t.Errorf("call %d: origin=%+v, want evidence %v", i, call.ErrorOrigin, want)
@@ -127,8 +126,29 @@ func (*Worker) Guarded(ctx context.Context, n int) error {
 			t.Errorf("call %d: unexpected origin %+v", i, call.ErrorOrigin)
 		}
 	}
-	req.DependencySources["example.test/cross/dep"] = dependencySnapshot{Directory: filepath.Join(dir, "dep"), Files: map[string]string{"dep.go": strings.Repeat("0", 64)}}
-	if got := analyze(req); got.Status != "incomplete" || got.Reason != "dependency_source_mismatch" {
+
+}
+
+func dependencyRequest(t *testing.T, dir, main string, calls []callSite) request {
+	t.Helper()
+	return request{PackageDir: dir, GoBinary: goBinary(t), ExpectedSources: map[string]string{"main.go": digest(main)}, PackageSources: map[string]string{"main.go": digest(main)}, Calls: calls, IncludeErrorOrigins: true}
+}
+
+func setDependencySnapshot(req *request, dir, hash string) {
+	req.DependencySources = map[string]dependencySnapshot{"example.test/cross/dep": {Directory: filepath.Join(dir, "dep"), Files: map[string]string{"dep.go": hash}}}
+}
+
+func assertUnverifiedDependency(t *testing.T, req request) {
+	t.Helper()
+	if got := analyze(req); got.Status != "ok" || got.Calls[0].ErrorOrigin != nil {
+		t.Fatalf("unverified dependency: %+v", got)
+	}
+}
+
+func assertStaleDependency(t *testing.T, req *request, dir string) {
+	t.Helper()
+	setDependencySnapshot(req, dir, strings.Repeat("0", 64))
+	if got := analyze(*req); got.Status != "incomplete" || got.Reason != "dependency_source_mismatch" {
 		t.Fatalf("stale dependency: %+v", got)
 	}
 }

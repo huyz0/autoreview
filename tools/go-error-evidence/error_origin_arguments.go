@@ -126,10 +126,10 @@ func specializeCall(call *ast.CallExpr, info *types.Info, summaries map[callee]*
 	if signature == nil {
 		return nil
 	}
-	return specializeArguments(call, local.decl.Body, signature, info, local.info, summaries)
+	return local.specializeArguments(call, signature, info, summaries)
 }
 
-func specializeArguments(call *ast.CallExpr, body *ast.BlockStmt, signature *types.Signature, callerInfo, calleeInfo *types.Info, summaries map[callee]*errorOrigin) *errorOrigin {
+func (local localFunction) specializeArguments(call *ast.CallExpr, signature *types.Signature, callerInfo *types.Info, summaries map[callee]*errorOrigin) *errorOrigin {
 	offset := callReceiverOffset(call, callerInfo)
 	for i := 0; i < signature.Params().Len(); i++ {
 		if i+offset >= len(call.Args) {
@@ -137,10 +137,10 @@ func specializeArguments(call *ast.CallExpr, body *ast.BlockStmt, signature *typ
 		}
 		argument := callerInfo.Types[call.Args[i+offset]].Value
 		param := signature.Params().At(i)
-		if argument == nil || argument.Kind() != constant.Int || !stableIntegerParameter(body, param, calleeInfo) {
+		if argument == nil || argument.Kind() != constant.Int || !stableIntegerParameter(local.decl.Body, param, local.info) {
 			continue
 		}
-		if origin := specializeContext(body, signature, integerAssumption{param: param, value: argument}, calleeInfo, summaries); origin != nil {
+		if origin := specializeContext(local.decl.Body, signature, integerAssumption{param: param, value: argument}, local.info, summaries); origin != nil {
 			origin.Specialized = &integerEvidence{Parameter: i, Value: argument.ExactString()}
 			return origin
 		}
