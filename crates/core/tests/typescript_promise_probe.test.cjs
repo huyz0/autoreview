@@ -9,6 +9,34 @@ const { createHash } = require('node:crypto');
 const compiler = process.env.AUTOREVIEW_TEST_TYPESCRIPT;
 const probe = path.resolve(__dirname, '../src/analyzers/typescript_promise_probe.cjs');
 
+function removeTemporaryDirectory(directory) {
+  const target = path.resolve(directory);
+  const root = path.resolve(os.tmpdir()) + path.sep;
+  if (!target.startsWith(root) || !path.basename(target).startsWith('autoreview-ts-probe-')) throw new Error('Unexpected temporary directory');
+  fs.rmSync(target, { recursive: true, force: true });
+}
+
+test('distinguishes an unsupported compiler API from a missing module', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'autoreview-ts-probe-'));
+  try {
+    const native = path.join(directory, 'typescript');
+    fs.mkdirSync(native);
+    fs.writeFileSync(path.join(native, 'package.json'), JSON.stringify({ name: 'typescript', version: '7.0.2', type: 'module' }));
+    const oldApi = path.join(directory, 'unsupported.cjs');
+    fs.writeFileSync(oldApi, 'module.exports = {};');
+    const invoke = typescriptModule => {
+      const child = spawnSync(process.execPath, [probe], { input: JSON.stringify({ typescriptModule, config: 'unused', calls: [] }), encoding: 'utf8' });
+      assert.equal(child.status, 0, child.stderr);
+      return JSON.parse(child.stdout);
+    };
+    assert.deepEqual(invoke(native), { status: 'incomplete', reason: 'compiler_api_unsupported' });
+    assert.deepEqual(invoke(oldApi), { status: 'incomplete', reason: 'compiler_api_unsupported' });
+    assert.deepEqual(invoke(path.join(directory, 'missing')), { status: 'incomplete', reason: 'checker_unavailable' });
+  } finally {
+    removeTemporaryDirectory(directory);
+  }
+});
+
 test('checks concrete call types and fails closed on project errors', { skip: !compiler }, () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'autoreview-ts-probe-'));
   try {
@@ -71,9 +99,6 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
     fs.appendFileSync(file, '\nconst broken: number = "wrong";\n');
     assert.deepEqual(invoke(adapter, env), { status: 'incomplete', reason: 'project_type_errors' });
   } finally {
-    const target = path.resolve(directory);
-    const root = path.resolve(os.tmpdir()) + path.sep;
-    if (!target.startsWith(root) || !path.basename(target).startsWith('autoreview-ts-probe-')) throw new Error('Unexpected temporary directory');
-    fs.rmSync(target, { recursive: true, force: true });
+    removeTemporaryDirectory(directory);
   }
 });
