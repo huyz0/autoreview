@@ -82,6 +82,7 @@ pub struct HelperAccess {
     pub type_line: u32,
     pub helper_file: PathBuf,
     pub helper_line: u32,
+    pub helper_end_line: u32,
     pub count: usize,
 }
 

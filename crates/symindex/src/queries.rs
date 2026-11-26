@@ -58,68 +58,53 @@ pub struct FeatureEnvyFinding {
     pub helper_evidence: Vec<HelperAccess>,
 }
 
-/// Feature Envy: a method envies a foreign type when accesses to it (via a
-/// method parameter — see the plan's scope decision, locals aren't
-/// tracked) reach `min_foreign_accesses` and exceed the method's own-field
-/// access count by at least `margin`. Foreign accesses are grouped by the
-/// parameter's declared type text (not by parameter name — two
-/// differently-named params of the same type both count toward that
-/// type's envy), so a method juggling several unrelated foreign types is
-/// judged per type, not by a single combined count. Go can also contribute
-/// evidence from a resolved helper that works on the forwarded parameter.
+/// Score accesses to each collaborator type independently. Go can also
+/// contribute accesses from a resolved helper that works on a forwarded
+/// parameter. A finding must clear both the absolute floor and the margin
+/// over the caller's own-field accesses.
 pub fn find_feature_envy(index: &SymbolIndex, min_foreign_accesses: usize, margin: i64) -> Vec<FeatureEnvyFinding> {
     let mut findings = Vec::new();
-    for m in index.methods() {
-        if m.foreign_accesses.is_empty() && m.helper_accesses.is_empty() {
-            continue;
-        }
-        let own_count = m.own_field_accesses.len();
-
-        let mut by_type: BTreeMap<String, usize> = BTreeMap::new();
-        for access in &m.foreign_accesses {
-            let Some(receiver_type) = &access.receiver_type else { continue };
-            *by_type.entry(receiver_type.clone()).or_insert(0) += 1;
-        }
-
-        let mut helper_by_type: BTreeMap<&str, Vec<&HelperAccess>> = BTreeMap::new();
-        for access in &m.helper_accesses {
-            helper_by_type.entry(&access.receiver_type).or_default().push(access);
-        }
-        let meets_threshold = |count| count >= min_foreign_accesses && count as i64 - own_count as i64 >= margin;
-        for (receiver_type, helper_accesses) in helper_by_type {
-            let direct_count = by_type.remove(receiver_type).unwrap_or(0)
-                + by_type.remove(&format!("*{receiver_type}")).unwrap_or(0);
-            let count = direct_count + helper_accesses.iter().map(|access| access.count).sum::<usize>();
-            if meets_threshold(count) {
+    for method in index.methods() {
+        let own_count = method.own_field_accesses.len();
+        for (envied_type, score) in feature_envy_scores(method) {
+            if score.count >= min_foreign_accesses && score.count as i64 - own_count as i64 >= margin {
                 findings.push(FeatureEnvyFinding {
-                    file: m.file.clone(),
-                    line: m.start_line,
-                    owner_type: m.owner_type.clone(),
-                    method: m.name.clone(),
-                    envied_type: receiver_type.to_owned(),
-                    envied_access_count: count,
+                    file: method.file.clone(),
+                    line: method.start_line,
+                    owner_type: method.owner_type.clone(),
+                    method: method.name.clone(),
+                    envied_type: envied_type.to_owned(),
+                    envied_access_count: score.count,
                     own_access_count: own_count,
-                    helper_evidence: helper_accesses.into_iter().cloned().collect(),
-                });
-            }
-        }
-
-        for (envied_type, envied_access_count) in by_type {
-            if meets_threshold(envied_access_count) {
-                findings.push(FeatureEnvyFinding {
-                    file: m.file.clone(),
-                    line: m.start_line,
-                    owner_type: m.owner_type.clone(),
-                    method: m.name.clone(),
-                    envied_type,
-                    envied_access_count,
-                    own_access_count: own_count,
-                    helper_evidence: Vec::new(),
+                    helper_evidence: score.helpers.into_iter().cloned().collect(),
                 });
             }
         }
     }
     findings
+}
+
+#[derive(Default)]
+struct FeatureEnvyScore<'a> {
+    count: usize,
+    helpers: Vec<&'a HelperAccess>,
+}
+
+fn feature_envy_scores(method: &MethodDecl) -> BTreeMap<&str, FeatureEnvyScore<'_>> {
+    let mut scores: BTreeMap<&str, FeatureEnvyScore<'_>> = BTreeMap::new();
+    for access in &method.helper_accesses {
+        let score = scores.entry(&access.receiver_type).or_default();
+        score.count += access.count;
+        score.helpers.push(access);
+    }
+    for raw_type in method.foreign_accesses.iter().filter_map(|access| access.receiver_type.as_deref()) {
+        // The helper index has already identified the declaration behind this Go pointer type.
+        let receiver_type = raw_type.strip_prefix('*').map(str::trim_start)
+            .filter(|name| scores.get(name).is_some_and(|score| !score.helpers.is_empty()))
+            .unwrap_or(raw_type);
+        scores.entry(receiver_type).or_default().count += 1;
+    }
+    scores
 }
 
 /// Whether Data Clumps are compared across the whole index or only within

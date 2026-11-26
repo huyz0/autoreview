@@ -12,7 +12,7 @@
 //! built over the *entire* repo (per the plan's whole-repo-always scoping
 //! decision — Feature Envy inherently needs to see the envied type's own
 //! file, not just the envious method's file), but this only reports a
-//! result anchored in a file the current diff actually touched.
+//! result involving a file the current diff touched.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -48,7 +48,7 @@ fn path_str(path: &Path) -> String {
 const RELEVANT_EXTENSIONS: &[&str] = &[".go", ".java", ".kt", ".kts", ".ts", ".mts", ".cts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
 
 /// Runs the symbol-index queries over the whole repo and reports only
-/// results anchored in a file the current diff touched. Returns an empty
+/// results whose caller or contributing helper the current diff touched. Returns an empty
 /// list (not an error) when the diff touches no file in a language
 /// `autoreview-symindex` extracts from (see `RELEVANT_EXTENSIONS`).
 pub fn run_symindex_check(repo_root: &Path, changed_files: &[String]) -> Vec<AgentFinding> {
@@ -84,7 +84,8 @@ pub fn run_symindex_check_with_tier4(repo_root: &Path, changed_files: &[String],
     let mut findings: Vec<AgentFinding> = chains.into_iter().filter(|c| changed_set.contains(&path_str(&c.file))).map(chain_to_finding).collect();
     findings.extend(
         envy.into_iter()
-            .filter(|e| changed_set.contains(&path_str(&e.file)))
+            .filter(|e| changed_set.contains(&path_str(&e.file))
+                || e.helper_evidence.iter().any(|helper| changed_set.contains(&path_str(&helper.helper_file))))
             .filter_map(|e| envy_to_finding_with_tier4(&index, e, tier4_records.as_deref())),
     );
     findings.extend(clumps.iter().filter_map(|c| clump_to_finding(c, &changed_set)));
@@ -150,7 +151,7 @@ fn envy_to_finding(index: &SymbolIndex, envy: autoreview_symindex::FeatureEnvyFi
             if seen.insert((&helper.helper_file, helper.helper_line)) {
                 locations.push(Location {
                     path: path_str(&helper.helper_file),
-                    range: LocationRange { start_line: helper.helper_line, ..Default::default() },
+                    range: LocationRange { start_line: helper.helper_line, end_line: Some(helper.helper_end_line), ..Default::default() },
                     snippet: "Cross-file helper".to_string(),
                     side: Side::New,
                 });
@@ -379,6 +380,12 @@ func costs(customer *Customer) int { return customer.Balance + customer.Fee }
         }
         assert_eq!(envy[0].location.path, "billing/invoice.go");
         assert_eq!(envy[0].location.range.start_line, 4);
+        assert_eq!(envy[0].related_locations.as_ref().unwrap()[1].range.end_line, Some(6));
+
+        let helper_only = run_symindex_check(dir.path(), &["billing/amounts.go".to_string()]);
+        assert_eq!(helper_only.iter().filter(|finding| finding.source.rule_id.as_deref() == Some("feature-envy")).count(), 2);
+        let unrelated = run_symindex_check(dir.path(), &["unrelated/customer.go".to_string()]);
+        assert!(unrelated.iter().all(|finding| finding.source.rule_id.as_deref() != Some("feature-envy")));
     }
 
     #[test]
@@ -407,6 +414,7 @@ func (i Invoice) Repeat(customer *Customer) int {
     return two(customer) + two(customer)
 }
 func (i Invoice) Ambiguous(customer *Customer) int { return duplicate(customer) }
+func (i Invoice) FunctionValue(customer *Customer) int { return platform(customer) }
 "#);
         write_file(dir.path(), "helpers.go", r#"
 package billing
@@ -419,6 +427,8 @@ func two(customer *Customer) int { return customer.Balance + customer.Fee }
         let duplicate = "package billing\nfunc duplicate(c *Customer) int { return c.Balance + c.Fee + c.Tax }\n";
         write_file(dir.path(), "duplicate_windows.go", duplicate);
         write_file(dir.path(), "duplicate_linux.go", duplicate);
+        write_file(dir.path(), "platform_linux.go", "package billing\nfunc platform(c *Customer) int { return c.Balance + c.Fee + c.Tax }\n");
+        write_file(dir.path(), "platform_windows.go", "package billing\nvar (\n platform = forward\n)\n");
 
         let findings = run_symindex_check(dir.path(), &["invoice.go".to_string()]);
         assert!(findings.iter().all(|f| f.source.rule_id.as_deref() != Some("feature-envy")), "got: {findings:#?}");

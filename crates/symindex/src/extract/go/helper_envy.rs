@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use tree_sitter::Node;
 
 use super::{line_of, text};
-use crate::model::{HelperAccess, TypeDecl};
+use crate::model::{HelperAccess, MethodDecl, TypeDecl};
 
 #[derive(Default)]
 pub(crate) struct GoHelperEnvy {
@@ -13,14 +13,20 @@ pub(crate) struct GoHelperEnvy {
 
 #[derive(Default)]
 struct Package {
-    structs: HashMap<String, Option<(PathBuf, u32)>>,
-    helpers: HashMap<String, Option<Helper>>,
+    declarations: HashMap<String, PackageDecl>,
     callers: Vec<Caller>,
+}
+
+enum PackageDecl {
+    Struct { file: PathBuf, line: u32 },
+    Helper(Helper),
+    Unresolved,
 }
 
 struct Helper {
     file: PathBuf,
     line: u32,
+    end_line: u32,
     params: Vec<Option<LocalType>>,
     accesses: Vec<MemberAccesses>,
 }
@@ -60,36 +66,17 @@ impl GoHelperEnvy {
 
         for node in root.named_children(&mut cursor) {
             match node.kind() {
-                "type_declaration" => package.add_structs(node, source, file),
+                "type_declaration" | "const_declaration" | "var_declaration" => package.add_non_functions(node, source, file),
                 "function_declaration" => {
                     let Some(name) = node.child_by_field_name("name") else { continue };
                     let name = text(name, source);
                     if matches!(name, "_" | "init") {
                         continue;
                     }
-                    package.helpers.entry(name.to_owned())
-                        .and_modify(|entry| *entry = None)
-                        .or_insert_with(|| extract_helper(node, source, file));
+                    package.add_declaration(name, || extract_helper(node, source, file).map_or(PackageDecl::Unresolved, PackageDecl::Helper));
                 }
                 "method_declaration" => {
-                    let Some(name) = node.child_by_field_name("name") else { continue };
-                    let Some(receiver) = node.child_by_field_name("receiver").and_then(|list| list.named_child(0)) else { continue };
-                    let Some(owner) = receiver.child_by_field_name("type").and_then(|node| local_type(node, source)) else { continue };
-                    let Some((type_index, type_decl)) = types.iter().enumerate().find(|(_, decl)| decl.name == owner.name) else { continue };
-                    let Some(method_index) = type_decl.methods.iter().position(|method| method.start_line == line_of(node) && method.name == text(name, source)) else { continue };
-                    let Some((params, mut bindings)) = function_bindings(node, source) else { continue };
-                    if let Some(receiver_name) = receiver.child_by_field_name("name") {
-                        bindings.insert(text(receiver_name, source), None);
-                    }
-                    let Some(body) = node.child_by_field_name("body") else { continue };
-                    let mut calls = Vec::new();
-                    if walk_straight_line(body, source, bindings, |node, bindings| {
-                        if let Some(call) = direct_call(node, source, bindings) {
-                            calls.push(call);
-                        }
-                    }).is_some() && !calls.is_empty() {
-                        package.callers.push(Caller { type_index: first_type + type_index, method_index, params, calls });
-                    }
+                    package.callers.extend(extract_caller(node, source, types, first_type));
                 }
                 _ => {}
             }
@@ -98,60 +85,85 @@ impl GoHelperEnvy {
 
     pub(crate) fn attach(self, types: &mut [TypeDecl]) {
         for package in self.packages.into_values() {
-            for caller in package.callers {
+            for caller in &package.callers {
                 let method = &mut types[caller.type_index].methods[caller.method_index];
-                let mut seen = HashSet::new();
-                for call in &caller.calls {
-                    let Some(Some(helper)) = package.helpers.get(&call.name) else { continue };
-                    if helper.file == method.file || helper.params.len() != call.arguments.len()
-                        || (is_test_file(&helper.file) && !is_test_file(&method.file)) {
-                        continue;
-                    }
-                    for (slot, argument) in call.arguments.iter().enumerate() {
-                        let Some(argument_type) = argument.and_then(|i| caller.params[i].as_ref()) else { continue };
-                        let accesses = &helper.accesses[slot];
-                        // A wrapper around one collaborator operation is ordinary delegation.
-                        if argument_type.name == method.owner_type || Some(argument_type) != helper.params[slot].as_ref() || accesses.names.len() < 2 {
-                            continue;
-                        }
-                        let Some(Some((type_file, type_line))) = package.structs.get(&argument_type.name) else { continue };
-                        if is_test_file(type_file) && !is_test_file(&method.file) {
-                            continue;
-                        }
-                        if seen.insert((call.name.as_str(), slot)) {
-                            method.helper_accesses.push(HelperAccess {
-                                receiver_type: argument_type.name.clone(),
-                                type_file: type_file.clone(),
-                                type_line: *type_line,
-                                helper_file: helper.file.clone(),
-                                helper_line: helper.line,
-                                count: accesses.count,
-                            });
-                        }
-                    }
-                }
+                method.helper_accesses = package.accesses(caller, method);
             }
         }
     }
 }
 
 impl Package {
-    fn add_structs(&mut self, declaration: Node, source: &[u8], file: &Path) {
+    fn accesses(&self, caller: &Caller, method: &MethodDecl) -> Vec<HelperAccess> {
+        let mut result = Vec::new();
+        let mut seen = HashSet::new();
+        for call in &caller.calls {
+            let Some(helper) = self.resolve_helper(call, &method.file) else { continue };
+            for (slot, argument) in call.arguments.iter().enumerate() {
+                let Some(argument_type) = argument.and_then(|i| caller.params[i].as_ref()) else { continue };
+                let Some(access) = self.parameter_access(helper, slot, argument_type, method) else { continue };
+                if seen.insert((call.name.as_str(), slot)) {
+                    result.push(access);
+                }
+            }
+        }
+        result
+    }
+
+    fn resolve_helper(&self, call: &Call, caller_file: &Path) -> Option<&Helper> {
+        let PackageDecl::Helper(helper) = self.declarations.get(&call.name)? else { return None };
+        (helper.file != caller_file && helper.params.len() == call.arguments.len() && visible_from(&helper.file, caller_file))
+            .then_some(helper)
+    }
+
+    fn parameter_access(&self, helper: &Helper, slot: usize, argument_type: &LocalType, method: &MethodDecl) -> Option<HelperAccess> {
+        let accesses = &helper.accesses[slot];
+        // A wrapper around one collaborator operation is ordinary delegation.
+        if argument_type.name == method.owner_type || Some(argument_type) != helper.params[slot].as_ref() || accesses.names.len() < 2 {
+            return None;
+        }
+        let PackageDecl::Struct { file: type_file, line: type_line } = self.declarations.get(&argument_type.name)? else { return None };
+        visible_from(type_file, &method.file).then(|| HelperAccess {
+            receiver_type: argument_type.name.clone(),
+            type_file: type_file.clone(),
+            type_line: *type_line,
+            helper_file: helper.file.clone(),
+            helper_line: helper.line,
+            helper_end_line: helper.end_line,
+            count: accesses.count,
+        })
+    }
+
+    fn add_declaration(&mut self, name: &str, declaration: impl FnOnce() -> PackageDecl) {
+        self.declarations.entry(name.to_owned()).and_modify(|entry| *entry = PackageDecl::Unresolved).or_insert_with(declaration);
+    }
+
+    fn add_non_functions(&mut self, declaration: Node, source: &[u8], file: &Path) {
         let mut cursor = declaration.walk();
         for spec in declaration.named_children(&mut cursor) {
-            let Some(name) = spec.child_by_field_name("name") else { continue };
+            if spec.kind() == "var_spec_list" {
+                self.add_non_functions(spec, source, file);
+                continue;
+            }
             let is_struct = spec.kind() == "type_spec"
                 && spec.child_by_field_name("type").is_some_and(|node| node.kind() == "struct_type")
                 && spec.child_by_field_name("type_parameters").is_none();
-            self.structs.entry(text(name, source).to_owned())
-                .and_modify(|entry| *entry = None)
-                .or_insert_with(|| is_struct.then(|| (file.to_path_buf(), line_of(spec))));
+            let mut names = spec.walk();
+            for name in spec.children_by_field_name("name", &mut names).filter(Node::is_named) {
+                self.add_declaration(text(name, source), || {
+                    if is_struct { PackageDecl::Struct { file: file.to_path_buf(), line: line_of(spec) } } else { PackageDecl::Unresolved }
+                });
+            }
         }
     }
 }
 
 fn is_test_file(file: &Path) -> bool {
     file.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.ends_with("_test.go"))
+}
+
+fn visible_from(declaration: &Path, caller: &Path) -> bool {
+    !is_test_file(declaration) || is_test_file(caller)
 }
 
 type Bindings<'a> = HashMap<&'a str, Option<usize>>;
@@ -209,7 +221,24 @@ fn extract_helper(node: Node, source: &[u8], file: &Path) -> Option<Helper> {
             accesses[slot].count += 1;
         }
     })?;
-    Some(Helper { file: file.to_path_buf(), line: line_of(node), params, accesses })
+    Some(Helper { file: file.to_path_buf(), line: line_of(node), end_line: node.end_position().row as u32 + 1, params, accesses })
+}
+
+fn extract_caller(node: Node, source: &[u8], types: &[TypeDecl], first_type: usize) -> Option<Caller> {
+    let receiver = node.child_by_field_name("receiver")?.named_child(0)?;
+    let owner = local_type(receiver.child_by_field_name("type")?, source)?;
+    let (type_index, type_decl) = types.iter().enumerate().find(|(_, decl)| decl.name == owner.name)?;
+    let name = text(node.child_by_field_name("name")?, source);
+    let method_index = type_decl.methods.iter().position(|method| method.start_line == line_of(node) && method.name == name)?;
+    let (params, mut bindings) = function_bindings(node, source)?;
+    if let Some(receiver_name) = receiver.child_by_field_name("name") {
+        bindings.insert(text(receiver_name, source), None);
+    }
+    let mut calls = Vec::new();
+    walk_straight_line(node.child_by_field_name("body")?, source, bindings, |node, bindings| {
+        calls.extend(direct_call(node, source, bindings));
+    })?;
+    (!calls.is_empty()).then_some(Caller { type_index: first_type + type_index, method_index, params, calls })
 }
 
 fn direct_call(node: Node, source: &[u8], bindings: &Bindings<'_>) -> Option<Call> {
@@ -262,15 +291,14 @@ fn walk_straight_line<'a>(body: Node, source: &'a [u8], mut bindings: Bindings<'
             }
             _ => return None,
         };
-        let mut unsafe_binding = false;
         walk(statement, &mut |node| {
-            unsafe_binding |= node.kind() == "func_literal" || (node.kind() == "unary_expression"
-                && node.child_by_field_name("operator").is_some_and(|operator| operator.kind() == "&"));
-        });
-        if unsafe_binding {
-            return None;
-        }
-        walk(statement, &mut |node| visit(node, &bindings));
+            if node.kind() == "func_literal" || (node.kind() == "unary_expression"
+                && node.child_by_field_name("operator").is_some_and(|operator| operator.kind() == "&")) {
+                return None;
+            }
+            visit(node, &bindings);
+            Some(())
+        })?;
         bindings.extend(binding);
         returned = statement.kind() == "return_statement";
     }
@@ -285,10 +313,11 @@ fn single_expression<'tree>(statement: Node<'tree>, field: &str) -> Option<Node<
     expressions.next().is_none().then_some(expression)
 }
 
-fn walk(node: Node, visit: &mut impl FnMut(Node)) {
-    visit(node);
+fn walk(node: Node, visit: &mut impl FnMut(Node) -> Option<()>) -> Option<()> {
+    visit(node)?;
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        walk(child, visit);
+        walk(child, visit)?;
     }
+    Some(())
 }
