@@ -363,6 +363,14 @@ mod budget_tests {
         run(&Resolver { root, cache: &parse, packages: &caches })
     }
 
+    fn assert_typed_unresolved_receiver(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
+        std::fs::write(dir.join("view.tsx"), "declare function pending(): Promise<void>;\ndeclare function sink(value: Promise<void>): void;\nexport function run() { sink(pending()); }\n").unwrap();
+        let paths = ["view.tsx".to_owned()];
+        let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+        assert!(findings.is_empty(), "{findings:#?}");
+        assert!(coverage.iter().any(|issue| issue.reason == "unresolved_result_receiver" && issue.line == Some(3)), "{coverage:?}");
+    }
+
     #[test]
     fn dependency_budget_reports_only_unvisited_sources() {
         let dir = tempfile::tempdir().unwrap();
@@ -467,6 +475,8 @@ mod budget_tests {
         let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (None, UNIT_LIMIT)));
         assert!(findings.is_empty());
         assert!(coverage.iter().any(|issue| issue.reason == "typed_promise_source_unavailable"), "{coverage:?}");
+
+        assert_typed_unresolved_receiver(dir.path(), &checker, &rules);
 
         std::fs::write(dir.path().join("view.tsx"), "declare function pending(): Promise<void>;\nfunction forward() { return pending(); }\nfunction again() { return forward(); }\nexport function run() { again(); }\n").unwrap();
         let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
