@@ -47,7 +47,7 @@ pub(in crate::call_order::result_use) fn unobserved_parameters(
         .map(|parameter| {
             let parameter = parameter.filter(|place| matches!(place, Place::Local(_)))?;
             if !supported {
-                return observed_before_branch(body, cfg, syntax, parameter, return_used)
+                return parameter_read_before_branch(body, cfg, syntax, parameter, return_used)
                     .then_some(false);
             }
             unobserved(body, cfg, plan, &edges, (parameter, return_used))
@@ -55,7 +55,7 @@ pub(in crate::call_order::result_use) fn unobserved_parameters(
         .collect()
 }
 
-fn observed_before_branch(
+fn parameter_read_before_branch(
     body: &Body,
     cfg: &Cfg<Stmt>,
     syntax: (Node<'_>, &[u8]),
