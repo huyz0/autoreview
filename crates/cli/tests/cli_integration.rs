@@ -401,6 +401,22 @@ fn assert_rust_helper_review(repo: &autoreview_test_support::TestRepo, base: &st
 }
 
 #[test]
+fn rust_imported_associated_helper_reaches_review_report() {
+    let support = "use std::fs::remove_file;\npub(crate) struct Files;\nimpl Files {\n    pub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n}\n";
+    let before = "use crate::support::Files as Store;\nfn run(path: &str) -> std::io::Result<()> { Store::remove(path) }\n";
+    let after = "use crate::support::Files as Store;\nfn run(path: &str) { Store::remove(path); }\n";
+    let repo = init_repo(&[("src/lib.rs", "mod support; mod worker;\n"), ("src/support.rs", support), ("src/worker.rs", before)]);
+    let base = current_commit(repo.path());
+    repo.commit(&[("src/worker.rs", after)], "discard associated helper result");
+    let report = static_review_report(&repo, &base, None);
+    assert!(report["findings"].as_array().unwrap().iter().any(|finding|
+        finding["source"]["ruleId"] == "rust-discarded-remove-file-result"
+            && finding["location"]["path"] == "src/support.rs" && finding["location"]["range"]["startLine"] == 4), "{report}");
+    assert!(report["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "unresolved_rust_module_import" && issue["path"] == "src/worker.rs"), "{report}");
+}
+
+#[test]
 fn rust_module_alias_results_reach_the_review_report() {
     let root = "mod support; mod worker;\n";
     let support = "use std::fs::remove_file;\npub(crate) fn discard(value: std::io::Result<()>) {}\npub(crate) fn remove(path: &str) -> std::io::Result<()> { remove_file(path) }\n";

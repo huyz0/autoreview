@@ -53,6 +53,7 @@ pub(super) struct Syntax<'src> {
     calls: Vec<(usize, String)>,
     guards: HashMap<String, usize>,
     local_callables: HashSet<&'src str>,
+    type_parameters: HashSet<&'src str>,
     owner: usize,
     pub(super) unit: usize,
 }
@@ -70,12 +71,20 @@ impl<'src> Syntax<'src> {
             unit,
             ..Self::default()
         };
+        for ancestor in std::iter::successors(function.parent(), |node| node.parent()) {
+            if let Some(parameters) = ancestor.child_by_field_name("type_parameters") {
+                syntax.record_type_parameters(parameters, source);
+            }
+        }
         let mut nodes = vec![function];
         while let Some(node) = nodes.pop() {
             if unsupported_flow(node, source) {
                 return None;
             }
             syntax.record_calls_and_guards(node, source);
+            if node.kind() == "type_parameter" {
+                syntax.record_type_parameters(node, source);
+            }
             if let Some(name) = local_callable(node, function, source) {
                 syntax.local_callables.insert(name);
             }
@@ -84,6 +93,21 @@ impl<'src> Syntax<'src> {
         }
         syntax.bindings.record_borrowed_writes();
         Some(syntax)
+    }
+
+    fn record_type_parameters(&mut self, root: Node<'_>, source: &'src [u8]) {
+        let mut pending = vec![root];
+        while let Some(node) = pending.pop() {
+            if node.kind() == "type_parameter" {
+                if let Some(name) = node.child_by_field_name("name").and_then(|name| name.utf8_text(source).ok()) {
+                    self.type_parameters.insert(name);
+                }
+            } else { pending.extend(children(node)); }
+        }
+    }
+
+    pub(super) fn shadows_type(&self, name: &str) -> bool {
+        self.type_parameters.contains(name)
     }
 
     fn record_calls_and_guards(&mut self, node: Node<'_>, source: &[u8]) {

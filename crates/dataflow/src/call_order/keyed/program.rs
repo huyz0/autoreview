@@ -4,6 +4,7 @@ use tree_sitter::Node;
 
 use crate::cfg::{CallSite, CallTarget, Cfg, IdentityOperand, Stmt};
 mod signature;
+pub use signature::has_attributes as has_rust_attributes;
 mod exports;
 pub use exports::{resolve_declaration_import, DeclarationResolution, KeyedDeclaration};
 use signature::{candidate, export, parameters, Export};
@@ -145,7 +146,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
     pub(in crate::call_order) fn target(&self, from: usize, name: &str, site: &CallSite) -> Option<usize> {
         let frame = &self.frames[from];
         let root = name.split(['.', ':']).next()?;
-        if frame.plan.as_ref()?.syntax.taken_name(root) {
+        if frame.plan.as_ref()?.syntax.taken_name(root) || frame.plan.as_ref()?.syntax.shadows_type(root) {
             return None;
         }
         let arity = match site.arguments.as_slice() {
@@ -321,7 +322,7 @@ fn reachable_nodes(cfg: &Cfg<Stmt>) -> Vec<&crate::cfg::CfgNode<Stmt>> {
 
 fn scope(node: Node<'_>, unit: usize) -> Scope {
     std::iter::successors(node.parent(), |parent| parent.parent())
-        .find(|parent| matches!(parent.kind(), "class_body" | "interface_body" | "enum_body"))
+        .find(|parent| matches!(parent.kind(), "class_body" | "interface_body" | "enum_body" | "impl_item"))
         .map_or(Scope::File(unit), |parent| {
             Scope::Class(unit, parent.start_byte())
         })

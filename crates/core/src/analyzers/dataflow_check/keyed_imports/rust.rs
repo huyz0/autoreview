@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use autoreview_dataflow::call_order::has_rust_attributes as has_attributes;
 
 mod parent;
 use parent::private_parent_namespace;
@@ -151,6 +152,12 @@ fn rust_uses(
             if let Some(binding) = resolver.binding(&file, alias.unwrap_or(member), Some(member), None, true) {
                 bindings.push(binding);
             }
+            if is_relative(module) && local_associated_type(resolver, &file, member) {
+                let local = format!("{}::", alias.unwrap_or(member));
+                if let Some(binding) = resolver.binding(&file, &local, None, Some(member), true) {
+                    bindings.push(binding);
+                }
+            }
         }
         let (module_path, default) = if member == "self" {
             (module, module.rsplit("::").next().unwrap_or(module))
@@ -169,6 +176,18 @@ fn rust_uses(
         bindings
     }).collect()
 
+}
+
+fn local_associated_type(resolver: &Resolver<'_>, path: &Path, name: &str) -> bool {
+    let Some(parsed) = resolver.cache.get(path, Language::Rust) else { return false };
+    let root = parsed.1.root_node();
+    if root.has_error() { return false; }
+    let matching: Vec<_> = children(root).into_iter().filter(|node|
+        node.child_by_field_name("name").and_then(|part| text(part, &parsed.0)) == Some(name)).collect();
+    matches!(matching.as_slice(), [node] if matches!(node.kind(), "struct_item" | "enum_item")
+        && !has_attributes(*node) && node.child_by_field_name("type_parameters").is_none()
+        && children(*node).into_iter().find(|child| child.kind() == "visibility_modifier")
+            .and_then(|visibility| text(visibility, &parsed.0)).is_some_and(|visibility| matches!(visibility, "pub" | "pub(crate)")))
 }
 
 fn is_relative(path: &str) -> bool {
@@ -234,12 +253,6 @@ fn declared_module(resolver: &Resolver<'_>, current: &Path, name: &str) -> Optio
         && node.child_by_field_name("name").and_then(|part| text(part, &parsed.0)) == Some(name)).collect();
     let [module] = modules.as_slice() else { return None };
     (!has_attributes(*module)).then(|| rust_module(resolver, &module_dir(current)?.join(name))).flatten()
-}
-
-fn has_attributes(node: Node<'_>) -> bool {
-    std::iter::successors(node.prev_named_sibling(), |node| node.prev_named_sibling())
-        .take_while(|node| matches!(node.kind(), "attribute_item" | "line_comment" | "block_comment"))
-        .any(|node| node.kind() == "attribute_item")
 }
 
 fn rust_paths(usage: &str) -> Vec<String> {
