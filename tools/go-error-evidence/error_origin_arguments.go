@@ -139,7 +139,7 @@ func specializeArguments(call *ast.CallExpr, body *ast.BlockStmt, signature *typ
 		if argument == nil || argument.Kind() != constant.Int || !stableIntegerParameter(body, param, info) {
 			continue
 		}
-		if origin := specializeContext(body, signature, param, argument, info, summaries); origin != nil {
+		if origin := specializeContext(body, signature, integerAssumption{param: param, value: argument}, info, summaries); origin != nil {
 			origin.Specialized = &integerEvidence{Parameter: i, Value: argument.ExactString()}
 			return origin
 		}
@@ -147,13 +147,18 @@ func specializeArguments(call *ast.CallExpr, body *ast.BlockStmt, signature *typ
 	return nil
 }
 
-func specializeContext(body *ast.BlockStmt, signature *types.Signature, integer *types.Var, argument constant.Value, info *types.Info, summaries map[callee]*errorOrigin) *errorOrigin {
+type integerAssumption struct {
+	param *types.Var
+	value constant.Value
+}
+
+func specializeContext(body *ast.BlockStmt, signature *types.Signature, assumption integerAssumption, info *types.Info, summaries map[callee]*errorOrigin) *errorOrigin {
 	unreachable := unreachableErrorBranches(body, info)
 	matched := false
 	ast.Inspect(body, func(node ast.Node) bool {
 		branch, ok := node.(*ast.IfStmt)
 		if ok {
-			matched = markIntegerBranch(branch, integer, argument, info, unreachable) || matched
+			matched = markIntegerBranch(branch, assumption.param, assumption.value, info, unreachable) || matched
 		}
 		return true
 	})
