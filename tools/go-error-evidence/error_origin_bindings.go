@@ -32,7 +32,7 @@ func forwardedBindings(body *ast.BlockStmt, param *types.Var, info *types.Info, 
 }
 
 func isBindingContext(ident *ast.Ident, stack []ast.Node, info *types.Info, summaries map[callee]*errorOrigin, bindings map[*types.Var]*ast.CallExpr) bool {
-	call, parent := enclosingCall(stack)
+	call, parent := checkedContextCall(ident, stack, info, summaries)
 	assign, ok := parent.(*ast.AssignStmt)
 	if !ok || call == nil || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 || assign.Rhs[0] != call {
 		return false
@@ -42,10 +42,7 @@ func isBindingContext(ident *ast.Ident, stack []ast.Node, info *types.Info, summ
 		return false
 	}
 	variable, ok := info.Defs[name].(*types.Var)
-	if !ok || bindings[variable] != call {
-		return false
-	}
-	return callPassesContext(call, ident, info, summaries)
+	return ok && bindings[variable] == call
 }
 
 func isBoundError(expr ast.Expr, info *types.Info, bindings map[*types.Var]*ast.CallExpr) bool {

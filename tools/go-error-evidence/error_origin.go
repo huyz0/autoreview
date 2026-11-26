@@ -150,12 +150,17 @@ func isContextError(expr ast.Expr, param *types.Var, info *types.Info) bool {
 }
 
 func isForwardedContext(ident *ast.Ident, stack []ast.Node, info *types.Info, summaries map[callee]*errorOrigin) bool {
-	call, parent := enclosingCall(stack)
+	call, parent := checkedContextCall(ident, stack, info, summaries)
 	ret, ok := parent.(*ast.ReturnStmt)
-	if !ok || call == nil || len(ret.Results) != 1 || ret.Results[0] != call {
-		return false
+	return ok && call != nil && len(ret.Results) == 1 && ret.Results[0] == call
+}
+
+func checkedContextCall(ident *ast.Ident, stack []ast.Node, info *types.Info, summaries map[callee]*errorOrigin) (*ast.CallExpr, ast.Node) {
+	call, parent := enclosingCall(stack)
+	if call == nil || !callPassesContext(call, ident, info, summaries) {
+		return nil, nil
 	}
-	return callPassesContext(call, ident, info, summaries)
+	return call, parent
 }
 
 func callPassesContext(call *ast.CallExpr, ident *ast.Ident, info *types.Info, summaries map[callee]*errorOrigin) bool {
