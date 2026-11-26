@@ -73,8 +73,12 @@ enum ContractModeYaml {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum ContractSourceYaml {
-    TypedPromiseFactory,
-    TypedGoError,
+    #[serde(rename = "typed-promise-factory")]
+    PromiseFactory,
+    #[serde(rename = "typed-promise")]
+    Promise,
+    #[serde(rename = "typed-go-error")]
+    GoError,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,10 +113,11 @@ impl ContractYaml {
             ContractModeYaml::MustUse => ContractMode::MustUse,
             ContractModeYaml::MustComplete => ContractMode::MustComplete,
         };
-        let typed_promise_factory = matches!(self.source, Some(ContractSourceYaml::TypedPromiseFactory));
-        let typed_go_error = matches!(self.source, Some(ContractSourceYaml::TypedGoError));
+        let typed_promise_factory = matches!(self.source, Some(ContractSourceYaml::PromiseFactory));
+        let typed_promise = matches!(self.source, Some(ContractSourceYaml::Promise));
+        let typed_go_error = matches!(self.source, Some(ContractSourceYaml::GoError));
         if self.source.is_some() {
-            anyhow::ensure!((typed_promise_factory && has_type_syntax || typed_go_error && language == ContractLanguage::Go)
+            anyhow::ensure!(((typed_promise_factory || typed_promise) && has_type_syntax || typed_go_error && language == ContractLanguage::Go)
                 && matches!(mode, ContractMode::MustUse)
                 && self.import.is_empty() && self.methods.is_empty() && self.borrows.is_empty(),
                 "typed sources require their matching language and a must-use contract without API names");
@@ -127,7 +132,7 @@ impl ContractYaml {
             "acquireAwaited and completeObserved require a web must-complete contract");
         Ok(ResultContract {
             mode, language, import: self.import, methods: self.methods, borrows: self.borrows,
-            acquire_awaited: self.acquire_awaited, complete_observed: self.complete_observed, typed_promise_factory, typed_go_error,
+            acquire_awaited: self.acquire_awaited, complete_observed: self.complete_observed, typed_promise_factory, typed_promise, typed_go_error,
         })
     }
 }
@@ -254,6 +259,12 @@ mod tests {
         assert!(validate_call_sequence(&yaml.replace("TypeScript", "Tsx")).is_ok());
         assert!(validate_call_sequence(&yaml.replace("TypeScript", "JavaScript")).is_err());
         assert_invalid_typed_contracts(yaml);
+        let general = yaml.replace("typed-promise-factory", "typed-promise");
+        let parsed = parse_call_order_rule(&general).unwrap();
+        assert!(parsed.spec.contract.as_ref().unwrap().typed_promise);
+        assert!(validate_call_sequence(&general.replace("TypeScript", "Tsx")).is_ok());
+        assert!(validate_call_sequence(&general.replace("TypeScript", "JavaScript")).is_err());
+        assert_invalid_typed_contracts(&general);
     }
 
     #[test]

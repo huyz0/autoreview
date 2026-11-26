@@ -31,6 +31,8 @@ pub struct ResultContract {
     /// Sources are obtained from verified TypeScript callable types instead
     /// of matching a named API. Only valid for web must-use contracts.
     pub typed_promise_factory: bool,
+    /// Sources are all call results independently verified as promises.
+    pub typed_promise: bool,
     /// Sources are independently verified as single-error Go calls.
     pub typed_go_error: bool,
 }
