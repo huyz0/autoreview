@@ -187,7 +187,7 @@ function run(request) {
   function indexCalls(file) {
     const nodes = [];
     function visit(node) {
-      if (ts.isCallExpression(node)) nodes.push({ node, start: node.getStart(file), order: nodes.length });
+      if (ts.isCallExpression(node)) nodes.push({ node, start: node.getStart(file), end: node.getEnd(), order: nodes.length });
       ts.forEachChild(node, visit);
     }
     visit(file);
@@ -195,14 +195,19 @@ function run(request) {
     // prefix for every call. Keep all calls with the same starting offset:
     // a request without an end offset cannot distinguish them.
     nodes.sort((a, b) => a.start - b.start || a.order - b.order);
-    const index = new Map();
+    const offsets = new Map();
     let previous = 0;
     let bytes = 0;
+    for (const offset of [...new Set(nodes.flatMap(entry => [entry.start, entry.end]))].sort((a, b) => a - b)) {
+      bytes += Buffer.byteLength(file.text.slice(previous, offset), 'utf8');
+      offsets.set(offset, bytes);
+      previous = offset;
+    }
+    const index = new Map();
     for (const entry of nodes) {
-      bytes += Buffer.byteLength(file.text.slice(previous, entry.start), 'utf8');
-      if (!index.has(bytes)) index.set(bytes, []);
-      index.get(bytes).push(entry.node);
-      previous = entry.start;
+      const start = offsets.get(entry.start);
+      if (!index.has(start)) index.set(start, []);
+      index.get(start).push({ node: entry.node, end: offsets.get(entry.end) });
     }
     return index;
   }
@@ -215,9 +220,13 @@ function run(request) {
     const cached = files.get(file);
     if (cached.digest !== call.source_sha256) return { ...call, status: 'source_changed' };
     if (!cached.calls) cached.calls = indexCalls(file);
-    const selected = cached.calls.get(call.start);
+    let selected = cached.calls.get(call.start);
     if (!selected) return { ...call, status: 'unavailable' };
-    const statuses = selected.map(node => {
+    if (call.end !== undefined) {
+      selected = selected.filter(entry => entry.end === call.end);
+      if (selected.length !== 1) return { ...call, status: 'unavailable' };
+    }
+    const statuses = selected.map(({ node }) => {
       const type = checker.getTypeAtLocation(node);
       const local = localFunctionLiteral(node);
       return promiseLike(type) || local && asyncFunction(local) ? 'promise_like' : definitelyNotPromise(type) || localReturnsNoValue(local) ? 'not_promise' : directlyAwaited(node) || immediatelyAwaitedBinding(node) || returnedFromAsync(node) ? 'observed' : 'not_proven';
