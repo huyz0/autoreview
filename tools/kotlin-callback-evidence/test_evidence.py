@@ -77,6 +77,20 @@ class EvidenceTest(unittest.TestCase):
         # not be mistaken for a SAM conversion at the setter.
         self.assertFalse(any(record["callee"] == "vendor.Server.setAuthenticator" for record in report["records"]))
 
+    def test_kotlin_local_call_resolution(self) -> None:
+        source = self.root / "resolution.kt"
+        source.write_text(
+            'class Example { fun call(n: Int) { println("member") }; fun same() { println("member same") }; fun run() { val call = { println("lambda") }; call(1); val same = { println("local same") }; same() } }\n'
+            'fun localFunction() { val action = { println("lambda") }; fun action() { println("function") }; action() }\n'
+            'fun localValue() { val action = { println("lambda") }; action() }\n'
+            'fun main() { localFunction(); localValue(); Example().run() }\n', encoding="utf-8"
+        )
+        artifact = self.root / "resolution.jar"
+        subprocess.run([str(self.kotlinc), str(source), "-include-runtime", "-d", str(artifact)], check=True, capture_output=True, timeout=120)
+        java = self.javac.with_name("java.exe" if os.name == "nt" else "java")
+        result = subprocess.run([str(java), "-jar", str(artifact)], check=True, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.stdout.splitlines(), ["function", "lambda", "member", "local same"])
+
     def test_failed_compilation_does_not_produce_evidence(self) -> None:
         result = self.compile("invalid", "fun broken() { missing() }\n")
         self.assertNotEqual(result.returncode, 0)

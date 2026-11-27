@@ -83,7 +83,7 @@ fn callback_context(parsed: Option<&mut ParsedSource>, finding: &AgentFinding) -
     let mut unknown = false;
     for ancestor in std::iter::successors(Some(node), |node| node.parent()) {
         match ancestor.kind() {
-            "lambda_literal" if !immediately_invoked(ancestor, source) => {
+            "lambda_literal" if !immediately_invoked(ancestor, source, remaining_nodes) => {
                 if unused_local(ancestor, source, remaining_nodes) == Some(true) { return Some(Execution::Deferred); }
                 unknown = true;
             }
@@ -104,10 +104,10 @@ fn unused_local(lambda: Node<'_>, source: &str, remaining_nodes: &mut usize) -> 
     let name = simple_val(declaration, expression, source)?.trim_matches('`');
     let scope = std::iter::successors(declaration.parent(), |node| node.parent())
         .find(|node| matches!(node.kind(), "function_declaration" | "anonymous_function"))?;
-    single_identifier(scope, name, source, remaining_nodes)
+    identifier_count(scope, name, source, remaining_nodes, 1)
 }
 
-fn single_identifier(scope: Node<'_>, name: &str, source: &str, remaining_nodes: &mut usize) -> Option<bool> {
+fn identifier_count(scope: Node<'_>, name: &str, source: &str, remaining_nodes: &mut usize, expected: usize) -> Option<bool> {
     let mut cursor = scope.walk();
     let mut count = 0;
     loop {
@@ -115,9 +115,9 @@ fn single_identifier(scope: Node<'_>, name: &str, source: &str, remaining_nodes:
         *remaining_nodes = remaining_nodes.checked_sub(1)?;
         if node.kind() == "identifier" && text(node, source)?.trim_matches('`') == name {
             count += 1;
-            if count > 1 { return Some(false); }
+            if count > expected { return Some(false); }
         }
-        if !advance(&mut cursor, scope)? { return Some(count == 1); }
+        if !advance(&mut cursor, scope)? { return Some(count == expected); }
     }
 }
 
@@ -130,12 +130,12 @@ fn advance(cursor: &mut tree_sitter::TreeCursor<'_>, scope: Node<'_>) -> Option<
     }
 }
 
-fn immediately_invoked(lambda: Node<'_>, source: &str) -> bool {
+fn immediately_invoked(lambda: Node<'_>, source: &str, remaining_nodes: &mut usize) -> bool {
     let mut expression = lambda;
     while let Some(parent) = expression.parent().filter(|node| node.kind() == "parenthesized_expression") {
         expression = parent;
     }
-    direct_call(expression) || explicit_invoke(expression, source) || immediate_local(expression, source)
+    direct_call(expression) || explicit_invoke(expression, source) || immediate_local(expression, lambda, source, remaining_nodes)
 }
 
 fn direct_call(expression: Node<'_>) -> bool {
@@ -153,19 +153,21 @@ fn explicit_invoke(expression: Node<'_>, source: &str) -> bool {
     })
 }
 
-fn immediate_local(expression: Node<'_>, source: &str) -> bool {
+fn immediate_local(expression: Node<'_>, lambda: Node<'_>, source: &str, remaining_nodes: &mut usize) -> bool {
     let Some(declaration) = expression.parent().filter(|node| node.kind() == "property_declaration") else { return false };
     if !declaration.parent().is_some_and(|parent| matches!(parent.kind(), "block" | "lambda_literal")) { return false; }
     let Some(name) = simple_val(declaration, expression, source) else { return false };
-    follow_local(declaration, name, source)
+    let no_parameters = !lambda.named_children(&mut lambda.walk()).any(|node| node.kind() == "lambda_parameters");
+    follow_local(declaration, name, source, no_parameters, remaining_nodes)
 }
 
-fn follow_local<'a>(declaration: Node<'_>, mut name: &'a str, source: &'a str) -> bool {
+fn follow_local<'a>(declaration: Node<'_>, mut name: &'a str, source: &'a str, no_parameters: bool, remaining_nodes: &mut usize) -> bool {
     let mut next = declaration.next_named_sibling();
     for _ in 0..32 {
         let Some(statement) = next else { return false };
         match local_step(statement, name, source) {
             LocalStep::Invoke => return true,
+            LocalStep::BareInvoke => return no_parameters && unique_local_name(declaration, name, source, remaining_nodes),
             LocalStep::Alias(alias) => name = alias,
             LocalStep::Comment => {}
             LocalStep::Unknown => return false,
@@ -177,6 +179,7 @@ fn follow_local<'a>(declaration: Node<'_>, mut name: &'a str, source: &'a str) -
 
 enum LocalStep<'a> {
     Invoke,
+    BareInvoke,
     Alias(&'a str),
     Comment,
     Unknown,
@@ -185,6 +188,10 @@ enum LocalStep<'a> {
 fn local_step<'a>(statement: Node<'_>, name: &str, source: &'a str) -> LocalStep<'a> {
     if statement.kind().contains("comment") { return LocalStep::Comment; }
     if statement.kind() == "call_expression" {
+        if statement.named_child_count() == 2 && statement.named_child(0).is_some_and(|node| node.kind() == "identifier" && text(node, source).is_some_and(|text| text.trim_matches('`') == name.trim_matches('`')))
+            && statement.named_child(1).is_some_and(|args| args.kind() == "value_arguments" && args.named_child_count() == 0) {
+            return LocalStep::BareInvoke;
+        }
         let receiver = statement.named_child(0).filter(|node| node.kind() == "navigation_expression")
             .and_then(|navigation| navigation.named_child(0));
         return if receiver.is_some_and(|receiver| text(receiver, source) == Some(name) && explicit_invoke(receiver, source)) {
@@ -196,6 +203,12 @@ fn local_step<'a>(statement: Node<'_>, name: &str, source: &'a str) -> LocalStep
     let alias = statement.named_child(1).filter(|value| value.kind() == "identifier" && text(*value, source) == Some(name))
         .and_then(|value| simple_val(statement, value, source));
     alias.map_or(LocalStep::Unknown, LocalStep::Alias)
+}
+
+fn unique_local_name(declaration: Node<'_>, name: &str, source: &str, remaining_nodes: &mut usize) -> bool {
+    let scope = std::iter::successors(declaration.parent(), |node| node.parent())
+        .find(|node| matches!(node.kind(), "function_declaration" | "anonymous_function"));
+    scope.is_some_and(|scope| identifier_count(scope, name.trim_matches('`'), source, remaining_nodes, 2) == Some(true))
 }
 
 fn simple_val<'a>(declaration: Node<'_>, value: Node<'_>, source: &'a str) -> Option<&'a str> {
@@ -214,6 +227,7 @@ fn text<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
 
     #[test]
     fn unused_local_exhaustion_never_proves_deferred() {
