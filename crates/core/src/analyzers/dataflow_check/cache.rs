@@ -210,7 +210,7 @@ pub(super) fn content_hash(content: &str) -> String {
 pub(super) struct SummaryCaches<'a> {
     pub(super) parse: &'a ParseCache,
     pub(super) persistent: &'a PersistentSummaryCache,
-    pub(super) java_kotlin_packages: OnceCell<HashMap<String, Vec<PathBuf>>>,
+    pub(super) java_kotlin_packages: OnceCell<autoreview_archgraph::JavaKotlinPackageIndex>,
     pub(super) summary_issues: RefCell<std::collections::BTreeSet<autoreview_schema::AnalysisCoverageIssue>>,
     pub(super) entries: std::collections::BTreeSet<PathBuf>,
 }

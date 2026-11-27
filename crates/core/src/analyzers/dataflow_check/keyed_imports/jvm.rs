@@ -1,10 +1,12 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use autoreview_archgraph::{declared_package, index_java_kotlin_packages};
+use autoreview_archgraph::{declared_package, index_java_kotlin_packages_with_coverage};
 use autoreview_dataflow::call_order::KeyedImport;
-use autoreview_langsupport::Language;
+use autoreview_langsupport::{language_for_path, Language};
+use autoreview_schema::AnalysisCoverageIssue;
 
-use super::{children, text, Resolver};
+use super::{children, issue, text, CallOrderRuleDef, Resolver, Source};
 use tree_sitter::Node;
 
 pub(super) fn imports(
@@ -130,8 +132,28 @@ fn package_files<'a>(resolver: &'a Resolver<'_>, package: &str) -> &'a [PathBuf]
     resolver
         .packages
         .java_kotlin_packages
-        .get_or_init(|| index_java_kotlin_packages(&resolver.root))
-        .get(package)
+        .get_or_init(|| index_java_kotlin_packages_with_coverage(&resolver.root))
+        .packages.get(package)
         .map(Vec::as_slice)
         .unwrap_or_default()
+}
+
+pub(super) fn record_index_coverage(
+    resolver: &Resolver<'_>, sources: &BTreeMap<String, Source>, entries: &BTreeSet<String>,
+    rules: &[(&CallOrderRuleDef, Language)], coverage: &mut Vec<AnalysisCoverageIssue>,
+) {
+    let uses_index = sources.values().any(|file| matches!(file.language, Language::Java | Language::Kotlin)
+        && (autoreview_archgraph::declared_package(&file.parsed.0).is_some()
+            || !autoreview_archgraph::extract_java_kotlin_imports(&file.parsed.0).is_empty()));
+    let Some(index) = resolver.packages.java_kotlin_packages.get().filter(|_| uses_index) else { return };
+    for path in &index.unavailable {
+        let relative = resolver.relative(path);
+        if relative.as_ref().is_some_and(|path| entries.contains(path)) { continue; }
+        for (rule, language) in rules.iter().filter(|(_, language)| matches!(language, Language::Java | Language::Kotlin)) {
+            if !entries.iter().any(|path| language_for_path(Path::new(path)).is_some_and(|actual| actual.matches_rule_language(*language))) { continue; }
+            let mut limitation = issue(relative.as_deref(), "package_index_unavailable", "dependency", "A source or directory could not be inspected during Java/Kotlin package discovery; cross-file call-sequence analysis may be incomplete.");
+            limitation.rule = Some(rule.id.clone());
+            coverage.push(limitation);
+        }
+    }
 }

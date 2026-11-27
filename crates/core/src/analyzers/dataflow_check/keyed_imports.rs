@@ -104,9 +104,11 @@ fn run_group(
         .collect();
     if entries.is_empty() { return (Vec::new(), Vec::new()); }
     let (sources, mut coverage) = if limit == UNIT_LIMIT { resolver.load(&entries) } else { resolver.load_with_limit(&entries, limit) };
+    jvm::record_index_coverage(resolver, &sources, &entries, rules, &mut coverage);
     let findings = run_sources(&sources, &entries, rules, root, checker, &mut coverage);
     (findings, scope_coverage(coverage, rules, &entries))
 }
+
 
 
 fn run_sources(
