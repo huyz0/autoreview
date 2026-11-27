@@ -59,7 +59,7 @@ pub fn check_keyed_units_with_verified_components(
         return KeyedCheckResult { hits: Vec::new(), limitations };
     }
     let (candidates, valid) = sanitize_components(units, verified.candidates, components, &mut limitations);
-    let (hits, exhausted, found) = super::super::result_use::check_units_with_components(spec, units, &candidates, &valid);
+    let (hits, exhausted, found) = super::super::result_use::check_units_with_spans(spec, units, &candidates, &valid, &verified.spans);
     limitations.extend(found);
     if exhausted { limitations.push(KeyedLimitation { reason: "helper_summary_limit", path: None, line: None }); }
     KeyedCheckResult { hits, limitations }

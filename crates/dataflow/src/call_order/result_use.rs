@@ -28,7 +28,9 @@ pub use sources::{discover_factory_sources, FactorySourceDiscovery};
 mod checks;
 mod opaque;
 mod partial;
-pub(super) use checks::{check_units, check_units_with_components};
+pub(super) use checks::{check_units, check_units_with_spans};
+#[cfg(test)]
+use checks::check_units_with_components;
 #[cfg(test)]
 use checks::check_units_with_sources;
 
@@ -364,7 +366,7 @@ mod tests {
             let (hits, exhausted, limits) = check_units_with_components(spec, units, &BTreeMap::from([(0, offsets)]), &BTreeMap::from([(0, shapes)]));
             assert!(!exhausted && limits.is_empty());
             assert_eq!(hits.iter().map(|hit| hit.source_line).collect::<Vec<_>>(), [2, 4, 5]);
-            let invalid = FactorySourceDiscovery { candidates: BTreeMap::from([(0, BTreeSet::from([start]))]), limitations: Vec::new() };
+            let invalid = FactorySourceDiscovery { spans: BTreeMap::new(), candidates: BTreeMap::from([(0, BTreeSet::from([start]))]), limitations: Vec::new() };
             let bad = BTreeMap::from([(0, BTreeMap::from([(start, super::super::ResultComponents { count: 2, indices: vec![2] })]))]);
             let result = super::super::check_keyed_units_with_verified_components(spec, units, invalid, &bad);
             assert!(result.hits.is_empty());

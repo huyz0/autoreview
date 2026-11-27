@@ -173,7 +173,7 @@ fn check_with_probe_and_callees(
     spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, options: ProbeOptions<'_>,
 ) -> (KeyedCheckResult, CalleeEvidence) {
     let ProbeOptions { root, checker, include_callees, include_error_origins, dependencies } = options;
-    let mut verified = Verified { discovery: FactorySourceDiscovery { candidates: BTreeMap::new(), limitations: Vec::new() }, components: BTreeMap::new(), callees: BTreeMap::new() };
+    let mut verified = Verified { discovery: FactorySourceDiscovery { spans: BTreeMap::new(), candidates: BTreeMap::new(), limitations: Vec::new() }, components: BTreeMap::new(), callees: BTreeMap::new() };
     let groups = collect_groups(units, sources, root, &mut verified.discovery.limitations);
     for (index, (dir, group)) in groups.into_iter().filter(|(_, group)| !group.calls.is_empty()).enumerate() {
         if index >= PACKAGE_LIMIT || group.calls.len() > CALL_LIMIT {

@@ -57,7 +57,7 @@ fn nested_function(node: Node<'_>) -> bool {
 fn receiver<'tree>(node: Node<'tree>, source: &[u8], plan: &Plan<'_, '_>) -> Option<(Node<'tree>, bool)> {
     if !matches!(node.kind(), "call_expression" | "method_invocation" | "new_expression") || plan.result_components.contains_key(&node.start_byte()) { return None; }
     let name = site::name(node, source)?;
-    plan.source_mode_at(&name, node.start_byte())?;
+    plan.source_mode_at(&name, node.start_byte(), node.end_byte())?;
     let mut argument = node;
     let mut wrapped = false;
     while let Some(parent) = argument.parent().filter(|parent| matches!(parent.kind(),
