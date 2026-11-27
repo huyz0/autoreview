@@ -287,13 +287,15 @@ the MIT-licensed actions/checkout fix documented in `docs/benchmark-candidates.m
 The normal replay currently exits nonzero and marks both cases incomplete due
 to unresolved call types; they are not included in accuracy scores.
 The checker identifies call sites by their starting byte offset. Nested calls
-such as `factory()()` can share that offset, so they remain unresolved rather
-than being classified from one call's type. Distinguishing and tracking both
-calls requires a call-site identity that also includes their ending offset.
-With this conservative check enabled, the same Windows setup reported 14 and
-63 unresolved locations in the respective before revisions, compared with 13
-and 58 before it. These are coverage warnings, not additional confirmed bugs;
-both cases remain unscored.
+such as `factory()()` can share that offset. The checker clears the limitation
+only when every call sharing it is independently proved non-promise or
+observed; other combinations remain unresolved. Distinguishing and tracking
+promise sources in both calls requires a call-site identity that also includes
+their ending offset.
+With shared offsets handled conservatively, the same Windows setup reported 13
+and 60 unresolved locations in the respective before revisions, down from 14
+and 63 when all shared offsets were left unresolved. These are coverage
+warnings, not confirmed bugs; both cases remain unscored.
 
 On main at `8af2697` with TypeScript 5.6.3 and the setup below, the before
 revision reported three unresolved call locations for the deletion case and 21

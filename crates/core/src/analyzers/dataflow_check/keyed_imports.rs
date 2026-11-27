@@ -426,12 +426,13 @@ mod budget_tests {
     }
 
     fn assert_nested_call_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
-        let source = "declare function factory(): string & (() => Promise<void>);\nexport function run() { factory()(); }\n";
+        let source = "declare function factory(): string & (() => Promise<void>);\ndeclare function text(): string;\nexport function run() { factory()();\n text().trim(); }\n";
         for path in ["nested.ts", "nested.tsx"] {
             std::fs::write(dir.join(path), source).unwrap();
             let paths = [path.to_owned()];
             let (_, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
-            assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(2)), "{path}: {coverage:?}");
+            assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(3)), "{path}: {coverage:?}");
+            assert!(!coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(4)), "{path}: {coverage:?}");
             std::fs::remove_file(dir.join(path)).unwrap();
         }
     }
