@@ -167,8 +167,7 @@ fn follow_local<'a>(declaration: Node<'_>, mut name: &'a str, source: &'a str, n
         let Some(statement) = next else { return false };
         match local_step(statement, name, source) {
             LocalStep::Invoke => return true,
-            LocalStep::BareInvoke if no_parameters => return unique_local_name(declaration, name, source, remaining_nodes),
-            LocalStep::BareInvoke => return false,
+            LocalStep::BareInvoke => return no_parameters && unique_local_name(declaration, name, source, remaining_nodes),
             LocalStep::Alias(alias) => name = alias,
             LocalStep::Comment => {}
             LocalStep::Unknown => return false,
