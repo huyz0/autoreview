@@ -147,7 +147,9 @@ these call sites are reported as incomplete instead of being counted as clean.
 An experimental custom call-sequence rule may also set `source: typed-promise`
 on a TypeScript or TSX `must-use` contract. It sends call sites to the trusted
 compiler and tracks only confirmed promise-like returns. Known primitive
-non-promises are excluded; unknown types remain coverage limitations unless
+non-promises are excluded; `void` is not sufficient evidence because an async
+function can be assigned to a void-returning callback. Such calls and other
+unknown types remain coverage limitations unless
 the call's value is awaited or returned from a supported async function,
 including through parentheses, conditional arms, right operands of `&&`,
 `||`, and `??`, and ordinary blocks, `if` branches, or `switch` cases. Calls

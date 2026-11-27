@@ -534,6 +534,15 @@ mod budget_tests {
         assert!(unsupported.iter().all(|issue| issue.path.as_deref() == Some("main.ts") && issue.rule.as_deref() == Some("test-typed")));
     }
 
+    fn assert_void_callback_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
+        std::fs::write(dir.join("main.ts"), "const callback: () => void = async () => {};\nexport async function run() {\n callback();\n await callback();\n}\n").unwrap();
+        let paths = ["main.ts".to_owned()];
+        let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+        assert!(findings.is_empty(), "{findings:#?}");
+        assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(3)), "{coverage:?}");
+        assert!(!coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(4)), "{coverage:?}");
+    }
+
     #[test]
     fn general_typed_promise_sources_follow_calls_and_ignore_synchronous_results() {
         use autoreview_dataflow::call_order::{CallOrderSpec, ContractLanguage, ContractMode, ResultContract};
@@ -553,6 +562,8 @@ mod budget_tests {
         let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));
         assert_eq!(findings.iter().map(|finding| finding.location.range.start_line).collect::<BTreeSet<_>>(), BTreeSet::from([4, 5]), "{findings:#?}");
         assert!(coverage.is_empty(), "{coverage:?}");
+
+        assert_void_callback_coverage(dir.path(), &checker, &rules);
 
         let tsx = "declare function pending(): Promise<void>;\ndeclare function uncertain(): unknown;\nexport function run() { pending(); uncertain(); }\n";
         std::fs::write(dir.path().join("view.tsx"), tsx).unwrap();

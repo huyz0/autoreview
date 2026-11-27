@@ -51,8 +51,10 @@ function run(request) {
   }
   function definitelyNotPromise(type) {
     if (type.isUnion()) return type.types.every(definitelyNotPromise);
+    // A function typed as returning void may actually return a promise:
+    // TypeScript permits async functions in void-returning callback positions.
     const primitive = ts.TypeFlags.StringLike | ts.TypeFlags.NumberLike | ts.TypeFlags.BooleanLike |
-      ts.TypeFlags.BigIntLike | ts.TypeFlags.Void | ts.TypeFlags.Null | ts.TypeFlags.Undefined |
+      ts.TypeFlags.BigIntLike | ts.TypeFlags.Null | ts.TypeFlags.Undefined |
       ts.TypeFlags.ESSymbolLike;
     return !!(type.flags & primitive) && !checker.getPropertyOfType(type, 'then');
   }

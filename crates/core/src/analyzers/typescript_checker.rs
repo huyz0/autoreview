@@ -175,6 +175,27 @@ mod tests {
     }
 
     #[test]
+    fn void_callback_results_are_not_assumed_synchronous() {
+        let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("tsconfig.json");
+        let file = dir.path().join("sample.ts");
+        let source = "const callback: () => void = async () => {};\nasync function run() { callback(); await callback(); }\n";
+        std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true},"files":["sample.ts"]}"#).unwrap();
+        std::fs::write(&file, source).unwrap();
+        let digest = format!("{:x}", Sha256::digest(source.as_bytes()));
+        let calls: Vec<_> = source.match_indices("callback()").map(|(start, _)| TypeScriptCall {
+            path: file.to_string_lossy().into_owned(), start, source_sha256: digest.clone(),
+        }).collect();
+        let config = config.to_string_lossy();
+        let request = TypeScriptRequest { typescript_module: &compiler, config: &config, calls: &calls };
+        let result = check("node", &request, Duration::from_secs(20)).unwrap();
+        assert_eq!(result.status, "ok");
+        let statuses: Vec<_> = result.calls.unwrap().into_iter().map(|call| call.status).collect();
+        assert_eq!(statuses, ["not_proven", "observed"]);
+    }
+
+    #[test]
     fn verifies_large_candidate_sets_in_bounded_batches() {
         let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
         let dir = tempfile::tempdir().unwrap();
