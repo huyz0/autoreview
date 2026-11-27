@@ -1,11 +1,11 @@
 use std::path::Path;
 
 use autoreview_langsupport::{language_for_path, parser_for, Language};
-use tree_sitter::Tree;
+use tree_sitter::Node;
 
 use super::cache::JvmPackageIndex;
 
-enum Package {
+pub(super) enum Package {
     Named(String),
     Default,
     Unknown,
@@ -25,7 +25,7 @@ pub(super) fn build(root: &Path) -> JvmPackageIndex {
         };
         let parsed = std::fs::read_to_string(&path).ok().and_then(|source| {
             let tree = parser?.parse(&source, None)?;
-            Some(package(&tree, &source))
+            Some(package(tree.root_node(), &source))
         });
         match parsed {
             Some(Package::Named(name)) => index.packages.entry(name).or_default().push(path),
@@ -45,8 +45,7 @@ pub(super) fn build(root: &Path) -> JvmPackageIndex {
     index
 }
 
-fn package(tree: &Tree, source: &str) -> Package {
-    let root = tree.root_node();
+pub(super) fn package(root: Node<'_>, source: &str) -> Package {
     let mut cursor = root.walk();
     let declarations: Vec<_> = root.named_children(&mut cursor)
         .filter(|node| matches!(node.kind(), "package_declaration" | "package_header"))

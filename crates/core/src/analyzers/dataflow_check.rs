@@ -236,7 +236,7 @@ fn summary_candidate(path: &Path, adapter: &LanguageAdapter, package: Option<&st
     };
     let malformed = parsed.1.root_node().has_error();
     if let Some(want) = package {
-        let declared = autoreview_archgraph::declared_package(&parsed.0);
+        let declared = summary_package(&parsed, adapter.language, path, rule, caches)?;
         if declared.as_deref() != Some(want) {
             if declared.is_none() && malformed { report_summary_syntax(caches, path, rule); }
             return None;
@@ -244,6 +244,21 @@ fn summary_candidate(path: &Path, adapter: &LanguageAdapter, package: Option<&st
     }
     if malformed { report_summary_syntax(caches, path, rule); }
     Some(parsed)
+}
+
+fn summary_package(parsed: &ParsedFile, language: autoreview_langsupport::Language, path: &Path, rule: &str, caches: &SummaryCaches) -> Option<Option<String>> {
+    if !matches!(language, autoreview_langsupport::Language::Java | autoreview_langsupport::Language::Kotlin) {
+        return Some(autoreview_archgraph::declared_package(&parsed.0));
+    }
+    match jvm_index::package(parsed.1.root_node(), &parsed.0) {
+        jvm_index::Package::Named(name) => Some(Some(name)),
+        jvm_index::Package::Default => Some(None),
+        jvm_index::Package::Unknown => { report_summary_syntax(caches, path, rule); None }
+        jvm_index::Package::Unresolved => {
+            caches.report_summary_issue(path, rule, "summary_dependency_package_unresolved", "A candidate helper's package could not be resolved safely; interprocedural summaries may be incomplete.");
+            None
+        }
+    }
 }
 
 /// Package-wide (same-directory) summaries for every function
@@ -609,6 +624,22 @@ mod tests {
         std::fs::remove_file(dir.path().join("unknown/Escaped.kt")).unwrap();
         let clean = run_dataflow_check_with_coverage(dir.path(), dir.path(), &paths, &packs);
         assert!(!clean.coverage.iter().any(|issue| issue.reason.starts_with("package_index_")), "{:?}", clean.coverage);
+        std::fs::write(dir.path().join("Main.kt"), "package `when`\nfun run() {}\n").unwrap();
+        let unresolved = run_dataflow_check_with_coverage(dir.path(), dir.path(), &paths, &packs);
+        for rule in ["npe-risk-from-helper-return", "kotlin-resource-test"] {
+            assert!(unresolved.coverage.iter().any(|issue| issue.reason == "entry_package_unresolved" && issue.rule.as_deref() == Some(rule) && issue.path.as_deref() == Some("Main.kt")), "{rule}: {:?}", unresolved.coverage);
+        }
+        assert!(!unresolved.coverage.iter().any(|issue| issue.reason == "entry_package_unresolved" && issue.rule.as_deref() == Some("typed-nil-interface-return")), "{:?}", unresolved.coverage);
+    }
+
+    #[test]
+    fn same_package_summaries_ignore_package_text_in_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Caller.kt"), "/*\npackage misleading\n*/\npackage actual\nfun run() {\n val value = risky()\n value.hashCode()\n}\n").unwrap();
+        std::fs::write(dir.path().join("Helper.kt"), "/*\npackage another\n*/\npackage actual\nfun risky(): String? {\n val value: String? = null\n return value\n}\n").unwrap();
+        let result = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["Caller.kt".into()], &[]);
+        assert!(result.findings.iter().any(|finding| finding.source.rule_id.as_deref() == Some("npe-risk-from-helper-return")), "{:?}", result.findings);
+        assert!(!result.coverage.iter().any(|issue| issue.reason == "entry_package_unresolved" || issue.reason == "summary_dependency_package_unresolved"), "{:?}", result.coverage);
     }
 
     #[test]

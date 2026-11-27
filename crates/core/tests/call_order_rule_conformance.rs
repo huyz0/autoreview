@@ -1183,6 +1183,7 @@ public class Checks {
     public static boolean forward(boolean value) { return value; }
     public static boolean compare(Object a, Object b) { return Objects.equals(a, b); }
 }
+
 "#,
             r#"package app;
 import java.util.Objects;
@@ -1239,6 +1240,16 @@ fun dropped(text: String) { parse(text) }
         }
         assert_helper_locations(root.path(), caller, rule, &[(caller, caller_line), (helper, helper_line)]);
     }
+}
+
+#[test]
+fn same_package_kotlin_helpers_ignore_commented_package_text() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("app")).unwrap();
+    std::fs::create_dir_all(root.path().join("lib")).unwrap();
+    std::fs::write(root.path().join("lib/Helper.kt"), "/*\npackage wrong\n*/\npackage shared\nfun discard(value: Result<Int>) {}\n").unwrap();
+    std::fs::write(root.path().join("app/Worker.kt"), "/*\npackage misleading\n*/\npackage shared\nimport kotlin.runCatching\nfun run(text: String) {\n val result = runCatching { text.toInt() }\n discard(result)\n}\n").unwrap();
+    assert_helper_locations(root.path(), "app/Worker.kt", "kotlin-discarded-run-catching-result", &[("app/Worker.kt", 7)]);
 }
 
 const RUST_RESULT_HELPERS: &str = r#"use std::fs::remove_file;

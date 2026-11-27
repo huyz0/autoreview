@@ -1,27 +1,23 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use autoreview_archgraph::declared_package;
 use autoreview_dataflow::call_order::KeyedImport;
 use autoreview_langsupport::{language_for_path, Language};
 use autoreview_schema::AnalysisCoverageIssue;
 
-use super::{children, issue, text, CallOrderRuleDef, Resolver, Source};
-use tree_sitter::Node;
+use super::{children, issue, text, CallOrderRuleDef, ImportSource, Resolver, Source};
 
-pub(super) fn imports(
-    resolver: &Resolver<'_>,
-    path: &Path,
-    language: Language,
-    root: Node<'_>,
-    source: &str,
-) -> Vec<KeyedImport> {
-    let mut bindings = siblings(
-        resolver,
-        path,
-        language,
-        declared_package(source).as_deref(),
-    );
+pub(super) fn imports(input: &ImportSource<'_>, language: Language, coverage: &mut Vec<AnalysisCoverageIssue>) -> Vec<KeyedImport> {
+    let (resolver, path, root, source) = (input.resolver, input.path, input.node, input.source);
+    let mut bindings = match super::super::jvm_index::package(root, source) {
+        super::super::jvm_index::Package::Named(package) => siblings(resolver, path, language, Some(&package)),
+        super::super::jvm_index::Package::Default => siblings(resolver, path, language, None),
+        _ => {
+            let relative = resolver.relative(path);
+            coverage.push(issue(relative.as_deref(), "entry_package_unresolved", "file", "The source package could not be resolved safely; same-package call-sequence analysis may be incomplete."));
+            Vec::new()
+        }
+    };
     let declarations = children(root)
         .into_iter()
         .filter(|node| matches!(node.kind(), "import_declaration" | "import"))
@@ -142,7 +138,7 @@ pub(super) fn record_index_coverage(
     rules: &[(&CallOrderRuleDef, Language)], coverage: &mut Vec<AnalysisCoverageIssue>,
 ) {
     let uses_index = sources.values().any(|file| matches!(file.language, Language::Java | Language::Kotlin)
-        && (autoreview_archgraph::declared_package(&file.parsed.0).is_some()
+        && (matches!(super::super::jvm_index::package(file.parsed.1.root_node(), &file.parsed.0), super::super::jvm_index::Package::Named(_))
             || !autoreview_archgraph::extract_java_kotlin_imports(&file.parsed.0).is_empty()));
     let Some(index) = resolver.packages.java_kotlin_packages.get().filter(|_| uses_index) else { return };
     let unavailable = index.unavailable.iter().map(|path| (path, "package_index_unavailable", "A source or directory could not be inspected during Java/Kotlin package discovery; cross-file call-sequence analysis may be incomplete."));

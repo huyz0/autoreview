@@ -127,9 +127,13 @@ pub(super) fn scope_coverage(
     let applicable: Vec<_> = rules.iter().filter(|(_, declared)| {
         entries.iter().any(|path| language_for_path(Path::new(path)).is_some_and(|language| language.matches_rule_language(*declared)))
     }).map(|(rule, _)| rule.id.as_str()).collect();
+    let jvm_applicable: Vec<_> = rules.iter().filter(|(_, declared)| matches!(declared, Language::Java | Language::Kotlin)
+        && entries.iter().any(|path| language_for_path(Path::new(path)).is_some_and(|language| language.matches_rule_language(*declared))))
+        .map(|(rule, _)| rule.id.as_str()).collect();
     coverage.into_iter().flat_map(|issue| {
-        if issue.rule.is_some() || issue.reason != "dependency_limit" { return vec![issue]; }
-        applicable.iter().map(|rule| {
+        if issue.rule.is_some() || !matches!(issue.reason.as_str(), "dependency_limit" | "entry_package_unresolved") { return vec![issue]; }
+        let relevant = if issue.reason == "entry_package_unresolved" { &jvm_applicable } else { &applicable };
+        relevant.iter().map(|rule| {
             let mut scoped = issue.clone();
             scoped.rule = Some((*rule).to_owned());
             scoped

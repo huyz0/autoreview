@@ -271,7 +271,7 @@ impl Resolver<'_> {
         };
         let imports = match language {
             Language::Go => input.go(coverage),
-            Language::Java | Language::Kotlin => jvm::imports(self, path, language, node, source),
+            Language::Java | Language::Kotlin => jvm::imports(&input, language, coverage),
             Language::Rust => input.rust(coverage),
             Language::JavaScript | Language::TypeScript | Language::Tsx => input.web(coverage),
         };
