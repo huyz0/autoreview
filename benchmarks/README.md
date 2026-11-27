@@ -286,18 +286,12 @@ snapshot's nested configuration without a configuration adapter.
 the MIT-licensed actions/checkout fix documented in `docs/benchmark-candidates.md`.
 The normal replay currently exits nonzero and marks both cases incomplete due
 to unresolved call types; they are not included in accuracy scores.
-The checker identifies call sites by their starting byte offset. Nested calls
-such as `factory()()` can share that offset. The checker clears the limitation
-only when every call sharing it is independently proved non-promise or
-observed; other combinations remain unresolved. Distinguishing and tracking
-promise sources in both calls requires a call-site identity that also includes
-their ending offset. The TypeScript probe accepts an optional ending byte
-offset and validates an exact call, but review and replay still pass only
-starting offsets; the probe support alone does not resolve these cases.
-The result-use engine keeps temporary call results and origins distinct by
-their full spans. Source discovery, helper resolution, and reporting still need
-to carry those identities before nested promise sources can be analyzed
-independently end to end.
+Nested calls such as `factory()()` can share a starting offset. General
+TypeScript promise sources now carry full spans through the checker and
+result-use engine, allowing an outer call to be reported while an unresolved
+inner call retains its coverage warning. Helper resolution still uses starting
+offsets; if a helper shares a source's start, analysis reports a separate
+limitation rather than applying effects to the wrong call.
 With shared offsets handled conservatively, the same Windows setup reported 13
 and 60 unresolved locations in the respective before revisions, down from 14
 and 63 when all shared offsets were left unresolved. These are coverage

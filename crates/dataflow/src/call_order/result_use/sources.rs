@@ -5,6 +5,7 @@ use super::super::keyed::KeyedLimitation;
 /// Candidate call sites and limitations discovered while inspecting them.
 pub struct FactorySourceDiscovery {
     pub candidates: BTreeMap<usize, BTreeSet<usize>>,
+    pub spans: BTreeMap<usize, BTreeSet<(usize, usize)>>,
     pub limitations: Vec<KeyedLimitation>,
 }
 
@@ -20,14 +21,14 @@ pub fn discover_factory_sources(
 ) -> FactorySourceDiscovery {
     if modules.len() != units.len() || modules.iter().zip(units).any(|(module, unit)| module.path != unit.path || module.source != unit.source) {
         return FactorySourceDiscovery {
-            candidates: BTreeMap::new(),
+            spans: BTreeMap::new(), candidates: BTreeMap::new(),
             limitations: vec![KeyedLimitation { reason: "factory_module_graph_incomplete", path: None, line: None }],
         };
     }
     let program = Program::new(spec, units);
     let functions: Vec<_> = units.iter().flat_map(|unit| unit.functions.iter()).collect();
     let reachable = reachable_frames(&program, units, &functions);
-    let mut scan = CandidateScan { modules, units, cache: BTreeMap::new(), unsupported_factories: BTreeMap::new(), unsupported: BTreeSet::new(), discovery: FactorySourceDiscovery { candidates: BTreeMap::new(), limitations: inventory_limitations(modules) } };
+    let mut scan = CandidateScan { modules, units, cache: BTreeMap::new(), unsupported_factories: BTreeMap::new(), unsupported: BTreeSet::new(), discovery: FactorySourceDiscovery { spans: BTreeMap::new(), candidates: BTreeMap::new(), limitations: inventory_limitations(modules) } };
     for (index, (function, frame)) in functions.iter().zip(&program.frames).enumerate() {
         if !reachable.contains(&index) { continue; }
         if let Some(plan) = &frame.plan {

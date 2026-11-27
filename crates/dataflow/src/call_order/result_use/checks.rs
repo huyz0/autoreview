@@ -23,18 +23,25 @@ pub(in crate::call_order) fn check_units_with_components(
     spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<usize, BTreeSet<usize>>,
     components: &BTreeMap<usize, BTreeMap<usize, super::super::ResultComponents>>,
 ) -> (Vec<CallOrderHit>, bool, Vec<super::super::keyed::KeyedLimitation>) {
+    check_units_with_spans(spec, units, sources, components, &BTreeMap::new())
+}
+
+pub(in crate::call_order) fn check_units_with_spans(
+    spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<usize, BTreeSet<usize>>,
+    components: &BTreeMap<usize, BTreeMap<usize, super::super::ResultComponents>>,
+    spans: &BTreeMap<usize, BTreeSet<(usize, usize)>>,
+) -> (Vec<CallOrderHit>, bool, Vec<super::super::keyed::KeyedLimitation>) {
+    let call_index: Vec<_> = units.iter().enumerate().map(|(index, unit)| {
+        if spans.contains_key(&index) { index_calls(unit) } else { BTreeMap::new() }
+    }).collect();
+    let forwarding_sources = forwarding_candidates(sources, spans, &call_index);
     let forwarded = if spec.contract.as_ref().is_some_and(|contract| contract.typed_promise) {
-        forwarding::forwarded_calls(&Program::new(spec, units), units, sources)
+        forwarding::forwarded_calls(&Program::new(spec, units), units, &forwarding_sources)
     } else { BTreeMap::new() };
     let mut program = Program::new(spec, units);
-    for frame in &mut program.frames {
-        if let Some(plan) = &mut frame.plan {
-            if let Some(offsets) = sources.get(&frame.unit) { plan.extra_sources.clone_from(offsets); }
-            if let Some(offsets) = forwarded.get(&frame.unit) { plan.extra_sources.retain(|offset| !offsets.contains(offset)); }
-            if let Some(shapes) = components.get(&frame.unit) { plan.result_components.clone_from(shapes); }
-        }
-    }
+    install_sources(&mut program, sources, spans, &forwarded, components);
     let mut limitations = unmodeled_sources(&program, units, sources, components);
+    limitations.extend(unmodeled_spans(&program, units, spans, &call_index));
     if !program.has_registration() {
         limitations.extend(program.resolution_limitations());
         return (Vec::new(), false, limitations);
@@ -56,6 +63,55 @@ pub(in crate::call_order) fn check_units_with_components(
     }
     limitations.extend(program.resolution_limitations());
     (combined.into_values().collect(), summary_limit, limitations)
+}
+
+fn forwarding_candidates(
+    sources: &BTreeMap<usize, BTreeSet<usize>>, spans: &BTreeMap<usize, BTreeSet<(usize, usize)>>,
+    call_index: &[BTreeMap<usize, BTreeSet<usize>>],
+) -> BTreeMap<usize, BTreeSet<usize>> {
+    let mut result = sources.clone();
+    for (&unit, sites) in spans {
+        let Some(index) = call_index.get(unit) else { continue };
+        for &(start, end) in sites {
+            if unique_call_at(index, start, end) { result.entry(unit).or_default().insert(start); }
+        }
+    }
+    result
+}
+
+fn install_sources(
+    program: &mut Program<'_, '_, '_>, sources: &BTreeMap<usize, BTreeSet<usize>>,
+    spans: &BTreeMap<usize, BTreeSet<(usize, usize)>>, forwarded: &BTreeMap<usize, BTreeSet<usize>>,
+    components: &BTreeMap<usize, BTreeMap<usize, super::super::ResultComponents>>,
+) {
+    for frame in &mut program.frames {
+        let Some(plan) = &mut frame.plan else { continue };
+        if let Some(offsets) = sources.get(&frame.unit) { plan.extra_sources.clone_from(offsets); }
+        if let Some(sites) = spans.get(&frame.unit) { plan.extra_spans.clone_from(sites); }
+        if let Some(offsets) = forwarded.get(&frame.unit) {
+            plan.extra_sources.retain(|offset| !offsets.contains(offset));
+            plan.extra_spans.retain(|(start, _)| !offsets.contains(start));
+        }
+        if let Some(shapes) = components.get(&frame.unit) { plan.result_components.clone_from(shapes); }
+    }
+}
+
+fn index_calls(unit: &KeyedUnit<'_, '_, '_>) -> BTreeMap<usize, BTreeSet<usize>> {
+    let mut calls = BTreeMap::<usize, BTreeSet<usize>>::new();
+    for function in unit.functions {
+        let mut pending = vec![function.node];
+        while let Some(node) = pending.pop() {
+            if matches!(node.kind(), "call_expression" | "method_invocation" | "new_expression") {
+                calls.entry(node.start_byte()).or_default().insert(node.end_byte());
+            }
+            pending.extend(node.named_children(&mut node.walk()));
+        }
+    }
+    calls
+}
+
+fn unique_call_at(index: &BTreeMap<usize, BTreeSet<usize>>, start: usize, end: usize) -> bool {
+    index.get(&start).is_some_and(|ends| ends.len() == 1 && ends.contains(&end))
 }
 
 fn unmodeled_sources(
@@ -83,6 +139,45 @@ fn unmodeled_sources(
             }
         }
         base += unit.functions.len();
+    }
+    limitations
+}
+
+fn unmodeled_spans(
+    program: &Program<'_, '_, '_>, units: &[KeyedUnit<'_, '_, '_>], spans: &BTreeMap<usize, BTreeSet<(usize, usize)>>,
+    call_index: &[BTreeMap<usize, BTreeSet<usize>>],
+) -> Vec<super::super::keyed::KeyedLimitation> {
+    let functions: Vec<_> = units.iter().flat_map(|unit| unit.functions.iter()).collect();
+    let reachable = super::sources::reachable_frames(program, units, &functions);
+    let mut limitations = Vec::new();
+    let mut base = 0;
+    for (unit_index, unit) in units.iter().enumerate() {
+        for &(start, end) in spans.get(&unit_index).into_iter().flatten() {
+            if start >= end || end > unit.source.len() {
+                limitations.push(source_limitation(unit, start, "verified_source_unmodeled"));
+                continue;
+            }
+            let owner = unit.functions.iter().enumerate().filter(|(_, function)| function.node.start_byte() <= start && end <= function.node.end_byte())
+                .min_by_key(|(_, function)| function.node.end_byte() - function.node.start_byte());
+            if owner.is_some_and(|(index, _)| !reachable.contains(&(base + index))) || (owner.is_none() && !unit.entry) { continue; }
+            let modeled = owner.is_some_and(|(index, function)| {
+                let frame = &program.frames[base + index];
+                if !unique_call_at(&call_index[unit_index], start, end) && frame.plan.as_ref().is_some_and(|plan| program.resolved_calls(base + index, frame.graph, plan).iter().any(|(position, _)| *position == start)) {
+                    limitations.push(source_limitation(unit, start, "nested_helper_resolution_unmodeled"));
+                }
+                let call = function.node.named_descendant_for_byte_range(start, end).and_then(|node| {
+                    std::iter::successors(Some(node), |node| node.parent()).find(|node| node.start_byte() == start && node.end_byte() == end
+                        && matches!(node.kind(), "call_expression" | "method_invocation" | "new_expression"))
+                });
+                frame.plan.is_some() && call.is_some_and(|node| crate::lower::site::name(node, unit.source).is_some())
+                    && frame.graph.nodes.iter().flat_map(|node| &node.evaluations).any(|item| item.span.start <= start && end <= item.span.end)
+            });
+            if !modeled { limitations.push(source_limitation(unit, start, "verified_source_unmodeled")); }
+        }
+        base += unit.functions.len();
+    }
+    if spans.keys().any(|index| *index >= units.len()) {
+        limitations.push(super::super::keyed::KeyedLimitation { reason: "verified_source_unmodeled", path: None, line: None });
     }
     limitations
 }

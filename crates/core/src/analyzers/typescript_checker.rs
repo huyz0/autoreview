@@ -119,7 +119,7 @@ mod tests {
         let config = dir.path().join("tsconfig.json");
         std::fs::write(&config, "{}").unwrap();
         let units = [KeyedUnit { path: "sample.ts", source: source.as_bytes(), functions: &[], imports: &[], exports: &[], entry: true }];
-        let discovery = FactorySourceDiscovery { candidates: BTreeMap::from([(0, BTreeSet::from([0]))]),
+        let discovery = FactorySourceDiscovery { spans: BTreeMap::new(), candidates: BTreeMap::from([(0, BTreeSet::from([0]))]),
             limitations: vec![KeyedLimitation { reason: "promise_type_unresolved", path: Some("sample.ts".into()), line: Some(1) }] };
         let options = CheckerConfig { node: "node", compiler: package.to_str().unwrap(), config: config.to_str().unwrap(), root: dir.path(), timeout: Duration::from_secs(10) };
         let result = verify_candidates(&options, &units, discovery);
@@ -250,7 +250,7 @@ mod tests {
         assert!(serde_json::to_vec(&request).unwrap().len() > MAX_BYTES);
         let units = [KeyedUnit { path: &name, source: source.as_bytes(), functions: &[], imports: &[], exports: &[], entry: true }];
         let limitations = offsets.iter().map(|&start| KeyedLimitation { reason: "promise_type_unresolved", path: Some(name.clone()), line: Some(source[..start].bytes().filter(|byte| *byte == b'\n').count() as u32 + 1) }).collect();
-        let discovery = FactorySourceDiscovery { candidates: BTreeMap::from([(0, offsets)]), limitations };
+        let discovery = FactorySourceDiscovery { spans: BTreeMap::new(), candidates: BTreeMap::from([(0, offsets)]), limitations };
         let options = CheckerConfig { node: "node", compiler: &compiler, config: config_path, root: dir.path(), timeout: Duration::from_secs(60) };
         let verified = verify_candidates(&options, &units, discovery);
         assert_eq!(verified.candidates[&0].len(), 2000);
@@ -271,7 +271,7 @@ mod tests {
         let sync = source.rfind("sync()").unwrap();
         let uncertain = source.rfind("uncertain()").unwrap();
         let discovery = || FactorySourceDiscovery {
-            candidates: BTreeMap::from([(0, BTreeSet::from([pending, sync, uncertain]))]),
+            spans: BTreeMap::new(), candidates: BTreeMap::from([(0, BTreeSet::from([pending, sync, uncertain]))]),
             limitations: vec![
                 KeyedLimitation { reason: "promise_type_unresolved", path: Some("sample.ts".into()), line: Some(4) },
                 KeyedLimitation { reason: "promise_type_unresolved", path: Some("sample.ts".into()), line: Some(5) },

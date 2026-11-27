@@ -66,6 +66,7 @@ fn verified_detail(reason: &str) -> Option<&'static str> {
             "unmodeled_contract_handle" => "A matching resource or task acquisition occurs in a function with unsupported handle storage or transfer; this rule skipped the function.",
             "unmodeled_conditional_result" => "A result-producing call occurs in a conditional expression whose branches could not be modeled; result-use analysis may be incomplete.",
             "verified_source_unmodeled" => "A verified result source is outside modeled function flow; result-use analysis skipped this call.",
+            "nested_helper_resolution_unmodeled" => "A result source shares its start with a helper call; helper effects could not be distinguished safely.",
             "invalid_result_components" => "Verified result component information was invalid; analysis skipped the affected call.",
             _ => return None,
     }))

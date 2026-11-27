@@ -24,7 +24,7 @@ fn scan(program: &Program<'_, '_, '_>, unit: &KeyedUnit<'_, '_, '_>, function: &
     let mut pending = vec![function.node];
     while let Some(node) = pending.pop() {
         if let Some(arm) = conditional_arm(node) {
-            let source = site::name(node, unit.source).is_some_and(|name| plan.source_mode_at(&name, node.start_byte()).is_some());
+            let source = site::name(node, unit.source).is_some_and(|name| plan.source_mode_at(&name, node.start_byte(), node.end_byte()).is_some());
             let modeled = function.graph.nodes.iter().flat_map(|block| &block.evaluations).any(|evaluation|
                 arm.start_byte() <= evaluation.span.start && evaluation.span.end <= arm.end_byte()
                     && evaluation.span.start <= node.start_byte() && node.end_byte() <= evaluation.span.end);

@@ -430,9 +430,23 @@ mod budget_tests {
         for path in ["nested.ts", "nested.tsx"] {
             std::fs::write(dir.join(path), source).unwrap();
             let paths = [path.to_owned()];
-            let (_, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            assert!(findings.iter().any(|finding| finding.location.range.start_line == 3), "{path}: {findings:?} {coverage:?}");
             assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(3)), "{path}: {coverage:?}");
             assert!(!coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(4)), "{path}: {coverage:?}");
+            std::fs::write(dir.join(path), source.replace("function run() { factory()();", "async function run() { await factory()();")).unwrap();
+            let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            assert!(findings.is_empty(), "{path}: {findings:?} {coverage:?}");
+            assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(3)), "{path}: {coverage:?}");
+            let helper = "function factory() { return () => Promise.resolve(); }\nexport function run() { factory()(); }\n";
+            std::fs::write(dir.join(path), helper).unwrap();
+            let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            assert!(findings.iter().any(|finding| finding.location.range.start_line == 2), "{path}: {findings:?} {coverage:?}");
+            assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(2)), "{path}: {coverage:?}");
+            let inner = "declare function factory(): Promise<void> & (() => number);\nexport function run() { factory()(); }\n";
+            std::fs::write(dir.join(path), inner).unwrap();
+            let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            assert!(findings.iter().any(|finding| finding.location.range.start_line == 2) || coverage.iter().any(|issue| issue.line == Some(2) && matches!(issue.reason.as_str(), "promise_type_unresolved" | "verified_source_unmodeled" | "unresolved_result_receiver")), "{path}: {findings:?} {coverage:?}");
             std::fs::remove_file(dir.join(path)).unwrap();
         }
     }
