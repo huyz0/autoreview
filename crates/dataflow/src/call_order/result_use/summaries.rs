@@ -73,7 +73,7 @@ fn build_with_budget(
 
 struct SummaryGraph {
     summaries: BTreeMap<usize, HelperSummary>,
-    calls: Vec<BTreeSet<(usize, usize)>>,
+    calls: Vec<BTreeSet<((usize, usize), usize)>>,
     callers: Vec<Vec<usize>>,
 }
 
@@ -118,7 +118,7 @@ fn summarize(
     function: &KeyedFunction<'_, '_>,
     unit: &KeyedUnit<'_, '_, '_>,
     params: &[String],
-    calls: &BTreeMap<usize, HelperSummary>,
+    calls: &BTreeMap<(usize, usize), HelperSummary>,
 ) -> HelperSummary {
     let body_start = function
         .node
@@ -178,14 +178,14 @@ pub(super) fn resolved_helpers(
     graph: &Cfg<Stmt>,
     plan: &Plan<'_, '_>,
     summaries: &BTreeMap<usize, HelperSummary>,
-) -> BTreeMap<usize, HelperSummary> {
+) -> BTreeMap<(usize, usize), HelperSummary> {
     select_summaries(&program.resolved_calls(index, graph, plan), summaries)
 }
 
 fn select_summaries(
-    calls: &BTreeSet<(usize, usize)>,
+    calls: &BTreeSet<((usize, usize), usize)>,
     summaries: &BTreeMap<usize, HelperSummary>,
-) -> BTreeMap<usize, HelperSummary> {
+) -> BTreeMap<(usize, usize), HelperSummary> {
     calls
         .iter()
         .filter_map(|(site, target)| {
@@ -202,6 +202,18 @@ mod tests {
     use super::*;
     use crate::call_order::ContractLanguage;
     use autoreview_langsupport::Language;
+
+    #[test]
+    fn helper_summaries_with_shared_start_keep_independent_effects() {
+        let mut inner = empty_summary(1);
+        inner.when_observed.parameters[0] = true;
+        let outer = empty_summary(1);
+        let calls = BTreeSet::from([((10, 15), 0), ((10, 17), 1)]);
+        let summaries = BTreeMap::from([(0, inner), (1, outer)]);
+        let selected = select_summaries(&calls, &summaries);
+        assert!(selected[&(10, 15)].when_observed.parameters[0]);
+        assert!(!selected[&(10, 17)].when_observed.parameters[0]);
+    }
 
     #[test]
     fn helper_parameter_paths_distinguish_partial_and_complete_returns() {

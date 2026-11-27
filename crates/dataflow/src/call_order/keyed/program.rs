@@ -243,7 +243,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         from: usize,
         cfg: &Cfg<Stmt>,
         plan: &Plan<'_, '_>,
-    ) -> BTreeSet<(usize, usize)> {
+    ) -> BTreeSet<((usize, usize), usize)> {
         let mut resolved = BTreeSet::new();
         let nodes = reachable_nodes(cfg);
         for call in nodes.iter().filter_map(|node| node.throwing_call.as_ref()) {
@@ -279,14 +279,14 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         name: &str,
         site: &CallSite,
         plan: &Plan<'_, '_>,
-        resolved: &mut BTreeSet<(usize, usize)>,
+        resolved: &mut BTreeSet<((usize, usize), usize)>,
     ) {
         // A verified result source is modeled at its call site, not as an
         // unresolved helper body. Its exception paths remain in the CFG.
         if plan.extra_sources.contains(&site.start) || plan.extra_spans.contains(&(site.start, site.end)) { return; }
         if plan.may_throw(name, site.start, &Values::new()) {
             if let Some(callee) = self.target(from, name, site) {
-                resolved.insert((site.start, callee));
+                resolved.insert(((site.start, site.end), callee));
             }
         }
     }

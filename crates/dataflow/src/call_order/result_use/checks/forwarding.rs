@@ -15,7 +15,7 @@ pub(super) fn forwarded_calls(
     let mut edges = BTreeMap::<Position, Vec<Position>>::new();
     for (index, frame) in program.frames.iter().enumerate() {
         let Some(plan) = &frame.plan else { continue };
-        for (start, target) in program.resolved_calls(index, frame.graph, plan) {
+        for ((start, _), target) in program.resolved_calls(index, frame.graph, plan) {
             if !contains(sources, frame.unit, start) { continue; }
             if let Some(inner) = forwarded_target(program, units, &functions, sources, target) {
                 edges.insert((frame.unit, start), inner);

@@ -21,7 +21,7 @@ pub(super) fn lower<'src>(
     function: &KeyedFunction<'_, '_>,
     source: &'src [u8],
     returns_to_caller: bool,
-    helpers: &BTreeMap<usize, HelperSummary>,
+    helpers: &BTreeMap<(usize, usize), HelperSummary>,
 ) -> Analysis {
     let language = plan.spec.contract.as_ref().unwrap().language;
     let mut places = Places::new(plan, function.node, source);
@@ -83,7 +83,7 @@ struct Lower<'plan, 'src, 'tree> {
     inside: Option<&'plan Closure<'tree>>,
     returns_to_caller: bool,
     return_tail: Option<Node<'tree>>,
-    helpers: &'plan BTreeMap<usize, HelperSummary>,
+    helpers: &'plan BTreeMap<(usize, usize), HelperSummary>,
 }
 
 impl Lower<'_, '_, '_> {

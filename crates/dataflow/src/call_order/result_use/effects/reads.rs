@@ -49,10 +49,7 @@ impl Lower<'_, '_, '_> {
     }
 
     pub(super) fn helper_call<'tree>(&self, node: Node<'tree>) -> Option<(Vec<Node<'tree>>, &super::HelperSummary)> {
-        // Helper summaries still use start-only identities. Do not apply one
-        // to either of two calls when a verified source shares that start.
-        if self.plan.extra_spans.range((node.start_byte(), 0)..=(node.start_byte(), usize::MAX)).next().is_some() { return None; }
-        let summary = self.helpers.get(&node.start_byte())?;
+        let summary = self.helpers.get(&(node.start_byte(), node.end_byte()))?;
         let arguments = site::arguments(node)?;
         let arguments: Option<Vec<_>> = site::children(arguments).map(site::argument).collect();
         let arguments = arguments?;
@@ -127,7 +124,7 @@ impl Lower<'_, '_, '_> {
                 .iter()
                 .cloned()
                 .map(|(mut origin, used)| {
-                    let call = (self.plan.syntax.unit, node.start_byte());
+                    let call = (self.plan.syntax.unit, node.start_byte(), node.end_byte());
                     if !origin.calls.contains(&call) {
                         origin.calls.push(call);
                         origin.calls.sort_unstable();
@@ -138,7 +135,7 @@ impl Lower<'_, '_, '_> {
         };
         let opaque_origins = |values: &[super::Origin]| {
             values.iter().cloned().map(|mut origin| {
-                let call = (self.plan.syntax.unit, node.start_byte());
+                let call = (self.plan.syntax.unit, node.start_byte(), node.end_byte());
                 if !origin.calls.contains(&call) { origin.calls.push(call); origin.calls.sort_unstable(); }
                 origin
             }).collect()
