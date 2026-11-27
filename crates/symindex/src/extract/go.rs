@@ -108,7 +108,7 @@ fn extract_struct(spec: Node, source: &[u8], file: &Path) -> Option<TypeDecl> {
         }
     }
 
-    Some(TypeDecl { name, file: file.to_path_buf(), start_line: line_of(spec), fields, methods: Vec::new(), superclass: None })
+    Some(TypeDecl { name, file: file.to_path_buf(), start_line: line_of(spec), fields, methods: Vec::new(), superclass: None, java: None })
 }
 
 fn extract_method(node: Node, source: &[u8], file: &Path) -> Option<MethodDecl> {

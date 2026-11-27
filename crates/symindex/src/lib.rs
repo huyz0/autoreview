@@ -27,6 +27,7 @@ pub mod tier4;
 use std::path::{Path, PathBuf};
 
 pub use model::{AccessRef, CallChain, ForeignAccessRef, HelperAccess, HelperLocation, MethodDecl, NamedSlot, SymbolIndex, TypeDecl};
+pub use extract::java::JavaClass;
 pub use queries::{find_data_clumps, find_feature_envy, find_message_chains, find_refused_bequest, ChainFinding, ClumpMember, ClumpScope, DataClumpFinding, FeatureEnvyFinding, RefusedBequestFinding};
 pub use tier4::{confirm_feature_envy, run_tier4_go, Tier4Access, Tier4Verdict};
 

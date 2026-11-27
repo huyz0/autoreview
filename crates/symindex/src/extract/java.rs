@@ -17,10 +17,15 @@
 //! false-positive/false-negative rates are observed.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use tree_sitter::Node;
 
 use crate::model::{AccessRef, CallChain, ForeignAccessRef, MethodDecl, NamedSlot, TypeDecl};
+
+pub(crate) mod bequest;
+pub use bequest::JavaClass;
+use bequest::JavaScope;
 
 fn text<'a>(node: Node, source: &'a [u8]) -> &'a str {
     node.utf8_text(source).unwrap_or("")
@@ -36,19 +41,20 @@ fn line_of(node: Node) -> u32 {
 /// own immediate `class_body` children are inspected for fields/methods.
 pub fn extract_types(tree: &tree_sitter::Tree, source: &[u8], file: &Path) -> Vec<TypeDecl> {
     let mut types = Vec::new();
-    collect_classes(tree.root_node(), source, file, &mut types);
+    let scope = Arc::new(JavaScope::extract(tree.root_node(), source));
+    collect_classes(tree.root_node(), source, file, &scope, &mut types);
     types
 }
 
-fn collect_classes(node: Node, source: &[u8], file: &Path, out: &mut Vec<TypeDecl>) {
+fn collect_classes(node: Node, source: &[u8], file: &Path, scope: &Arc<JavaScope>, out: &mut Vec<TypeDecl>) {
     if node.kind() == "class_declaration" {
-        if let Some(type_decl) = extract_class(node, source, file) {
+        if let Some(type_decl) = extract_class(node, source, file, scope) {
             out.push(type_decl);
         }
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_classes(child, source, file, out);
+        collect_classes(child, source, file, scope, out);
     }
 }
 
@@ -81,11 +87,12 @@ fn is_trivial_body(body: Node, source: &[u8]) -> bool {
     }
 }
 
-fn extract_class(node: Node, source: &[u8], file: &Path) -> Option<TypeDecl> {
+fn extract_class(node: Node, source: &[u8], file: &Path, scope: &Arc<JavaScope>) -> Option<TypeDecl> {
     let name_node = node.child_by_field_name("name")?;
     let name = text(name_node, source).to_string();
     let superclass = extract_superclass(node, source);
     let body = node.child_by_field_name("body")?;
+    let mut java = JavaClass::extract(node, source, scope);
 
     // Fields first, in a separate pass, so a method declared before a field
     // in source order (legal in Java) still sees the complete field list
@@ -112,13 +119,16 @@ fn extract_class(node: Node, source: &[u8], file: &Path) -> Option<TypeDecl> {
         for child in body.named_children(&mut cursor) {
             if child.kind() == "method_declaration" {
                 if let Some(m) = extract_method(child, source, file, &name, &fields) {
+                    if let Some(java) = &mut java {
+                        java.add_method(child, source);
+                    }
                     methods.push(m);
                 }
             }
         }
     }
 
-    Some(TypeDecl { name, file: file.to_path_buf(), start_line: line_of(node), fields, methods, superclass })
+    Some(TypeDecl { name, file: file.to_path_buf(), start_line: line_of(node), fields, methods, superclass, java })
 }
 
 fn extract_method(node: Node, source: &[u8], file: &Path, owner_type: &str, fields: &[NamedSlot]) -> Option<MethodDecl> {
