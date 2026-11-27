@@ -149,10 +149,8 @@ const KOTLIN_ADAPTER: LanguageAdapter = LanguageAdapter {
 /// every function, if `None` — Java/Kotlin's NPE-risk rule has no
 /// declared-return-type gate the way Go's pointer-only one does),
 /// `compute_summary` produces the value it's keyed by bare function name
-/// under. Best-effort: a file that fails to read or parse is silently
-/// skipped rather than failing the whole scan, since the current file's
-/// own findings still matter even if a sibling or an imported package's
-/// file can't be read.
+/// under. Unavailable or malformed candidate files produce rule-scoped
+/// coverage limitations while findings from readable files remain available.
 /// `package_filter`, when `Some`, skips any candidate file whose own
 /// `declared_package` (works for Go's `package main` no less than Java/
 /// Kotlin's dotted form — see `autoreview_archgraph::declared_package`'s
@@ -185,20 +183,10 @@ fn scan_dir_for_summaries(
     caches: &SummaryCaches,
 ) -> HashMap<String, bool> {
     let mut summaries = HashMap::new();
-    let Ok(entries) = std::fs::read_dir(dir) else { return summaries };
-    for entry in entries.filter_map(Result::ok) {
-        let candidate_path = entry.path();
-        let Some(ext) = candidate_path.extension().and_then(|e| e.to_str()) else { continue };
-        if !adapter.extensions.contains(&ext) {
-            continue;
-        }
-        let Some(cached) = caches.parse.get(&candidate_path, adapter.language) else { continue };
+    let Some(entries) = summary_directory(dir, rule_id, caches) else { return summaries };
+    for candidate_path in entries.filter_map(|entry| summary_entry(entry, dir, rule_id, caches)) {
+        let Some(cached) = summary_candidate(&candidate_path, adapter, package_filter, rule_id, caches) else { continue };
         let (content, tree) = cached.as_ref();
-        if let Some(want) = package_filter {
-            if autoreview_archgraph::declared_package(content).as_deref() != Some(want) {
-                continue;
-            }
-        }
         let hash = content_hash(content);
         if let Some(cached_summaries) = caches.persistent.get(rule_id, &candidate_path, &hash) {
             summaries.extend(cached_summaries);
@@ -219,6 +207,42 @@ fn scan_dir_for_summaries(
         summaries.extend(file_summaries);
     }
     summaries
+}
+
+fn summary_entry(entry: std::io::Result<std::fs::DirEntry>, dir: &Path, rule: &str, caches: &SummaryCaches) -> Option<std::path::PathBuf> {
+    match entry {
+        Ok(entry) => Some(entry.path()),
+        Err(_) => { report_summary_unavailable(caches, dir, rule); None }
+    }
+}
+
+fn summary_directory(dir: &Path, rule: &str, caches: &SummaryCaches) -> Option<std::fs::ReadDir> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Some(entries),
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound { report_summary_unavailable(caches, dir, rule); }
+            None
+        }
+    }
+}
+
+fn summary_candidate(path: &Path, adapter: &LanguageAdapter, package: Option<&str>, rule: &str, caches: &SummaryCaches) -> Option<ParsedFile> {
+    let ext = path.extension().and_then(|ext| ext.to_str())?;
+    if !adapter.extensions.contains(&ext) || path.is_dir() { return None; }
+    let Some(parsed) = caches.parse.get(path, adapter.language) else {
+        report_summary_unavailable(caches, path, rule);
+        return None;
+    };
+    let malformed = parsed.1.root_node().has_error();
+    if let Some(want) = package {
+        let declared = autoreview_archgraph::declared_package(&parsed.0);
+        if declared.as_deref() != Some(want) {
+            if declared.is_none() && malformed { report_summary_syntax(caches, path, rule); }
+            return None;
+        }
+    }
+    if malformed { report_summary_syntax(caches, path, rule); }
+    Some(parsed)
 }
 
 /// Package-wide (same-directory) summaries for every function
@@ -340,8 +364,12 @@ fn add_java_kotlin_summaries_from_file(path: &Path, summaries: &mut HashMap<Stri
         Some("kt") | Some("kts") => &KOTLIN_ADAPTER,
         _ => return,
     };
-    let Some(cached) = caches.parse.get(path, adapter.language) else { return };
+    let Some(cached) = caches.parse.get(path, adapter.language) else {
+        report_summary_unavailable(caches, path, rule_id);
+        return;
+    };
     let (content, tree) = cached.as_ref();
+    if tree.root_node().has_error() { report_summary_syntax(caches, path, rule_id); }
     let hash = content_hash(content);
     if let Some(cached_summaries) = caches.persistent.get(rule_id, path, &hash) {
         summaries.extend(cached_summaries);
@@ -357,6 +385,16 @@ fn add_java_kotlin_summaries_from_file(path: &Path, summaries: &mut HashMap<Stri
     }
     caches.persistent.put(rule_id, path, hash, file_summaries.clone());
     summaries.extend(file_summaries);
+}
+
+fn report_summary_unavailable(caches: &SummaryCaches, path: &Path, rule: &str) {
+    caches.report_summary_issue(path, rule, "summary_dependency_unavailable",
+        "A candidate helper source could not be read or parsed; interprocedural summaries may be incomplete.");
+}
+
+fn report_summary_syntax(caches: &SummaryCaches, path: &Path, rule: &str) {
+    caches.report_summary_issue(path, rule, "summary_dependency_syntax_errors",
+        "A candidate helper source has syntax errors; interprocedural summaries may be incomplete.");
 }
 
 /// Same-package summaries for `file_path`, feeding pass 1 of both
@@ -502,6 +540,34 @@ mod tests {
         std::fs::write(dir.path().join("dep.ts"), "export function helper( {\n").unwrap();
         let imported = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["main.ts".into()], &[]);
         assert!(imported.coverage.iter().any(|item| item.reason == "dependency_syntax_errors" && item.path.as_deref() == Some("dep.ts")), "{:?}", imported.coverage);
+    }
+
+    #[test]
+    fn helper_summary_failures_report_rule_scoped_coverage() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.go"), "package example\nfunc main() {}\n").unwrap();
+        std::fs::write(dir.path().join("second.go"), "package example\nfunc second() {}\n").unwrap();
+        std::fs::write(dir.path().join("unreadable.go"), [0xff, 0xfe]).unwrap();
+        std::fs::write(dir.path().join("broken.go"), "package example\nfunc broken( {\n").unwrap();
+        std::fs::write(dir.path().join("other.go"), "package other\nfunc broken( {\n").unwrap();
+        let result = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["main.go".into(), "second.go".into()], &[]);
+        let issues: Vec<_> = result.coverage.iter().filter(|issue| issue.rule.as_deref() == Some("typed-nil-interface-return")).collect();
+        for (path, reason) in [("unreadable.go", "summary_dependency_unavailable"), ("broken.go", "summary_dependency_syntax_errors")] {
+            assert_eq!(issues.iter().filter(|issue| issue.path.as_deref() == Some(path) && issue.reason == reason && issue.scope == "dependency").count(), 1, "{issues:?}");
+        }
+        assert!(!issues.iter().any(|issue| issue.path.as_deref() == Some("other.go")), "{issues:?}");
+        std::fs::write(dir.path().join("Main.java"), "package sample;\nclass Main { void run() {} }\n").unwrap();
+        std::fs::write(dir.path().join("Bad.java"), "package sample;\nclass Bad { void run( {\n").unwrap();
+        let java = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["Main.java".into()], &[]);
+        assert!(java.coverage.iter().any(|issue| issue.rule.as_deref() == Some("npe-risk-from-helper-return") && issue.path.as_deref() == Some("Bad.java") && issue.reason == "summary_dependency_syntax_errors"), "{:?}", java.coverage);
+        std::fs::write(dir.path().join("Main.kt"), "package sample\nfun main() {}\n").unwrap();
+        std::fs::write(dir.path().join("Bad.kt"), "package sample\nfun bad( {\n").unwrap();
+        let kotlin = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["Main.kt".into()], &[]);
+        assert!(kotlin.coverage.iter().any(|issue| issue.rule.as_deref() == Some("npe-risk-from-helper-return") && issue.path.as_deref() == Some("Bad.kt") && issue.reason == "summary_dependency_syntax_errors"), "{:?}", kotlin.coverage);
+        std::fs::remove_file(dir.path().join("unreadable.go")).unwrap();
+        std::fs::remove_file(dir.path().join("broken.go")).unwrap();
+        let clean = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["main.go".into()], &[]);
+        assert!(!clean.coverage.iter().any(|issue| issue.reason.starts_with("summary_dependency_")), "{:?}", clean.coverage);
     }
 
     #[test]
@@ -935,7 +1001,7 @@ export function run() { helper(); missing(); absent(); external(); }
         std::fs::write(dir.path().join("KotlinHelper.kt"), "package com.example\n\nfun riskyKt(): String? {\n    val e: String? = null\n    return e\n}\n").unwrap();
         let cache = ParseCache::new();
         let persistent = PersistentSummaryCache::load(dir.path(), dir.path());
-        let caches = SummaryCaches { parse: &cache, persistent: &persistent, java_kotlin_packages: Default::default() };
+        let caches = SummaryCaches { parse: &cache, persistent: &persistent, java_kotlin_packages: Default::default(), summary_issues: Default::default(), entries: Default::default() };
         let summaries = java_kotlin_package_summaries(dir.path(), "Caller.java", "com.example", &autoreview_dataflow::rules::java_kotlin_npe_risk::compute_summary, "npe-risk-from-helper-return", &caches);
         assert_eq!(summaries.get("risky"), Some(&true), "got: {summaries:#?}");
         assert_eq!(summaries.get("riskyKt"), Some(&true), "got: {summaries:#?}");

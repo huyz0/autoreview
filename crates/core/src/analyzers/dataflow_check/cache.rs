@@ -211,4 +211,18 @@ pub(super) struct SummaryCaches<'a> {
     pub(super) parse: &'a ParseCache,
     pub(super) persistent: &'a PersistentSummaryCache,
     pub(super) java_kotlin_packages: OnceCell<HashMap<String, Vec<PathBuf>>>,
+    pub(super) summary_issues: RefCell<std::collections::BTreeSet<autoreview_schema::AnalysisCoverageIssue>>,
+    pub(super) entries: std::collections::BTreeSet<PathBuf>,
+}
+
+impl SummaryCaches<'_> {
+    pub(super) fn report_summary_issue(&self, path: &Path, rule: &str, reason: &str, detail: &str) {
+        if self.entries.contains(path) { return; }
+        let relative = path.strip_prefix(&self.persistent.source_root).ok()
+            .map(|path| path.to_string_lossy().replace('\\', "/"));
+        self.summary_issues.borrow_mut().insert(autoreview_schema::AnalysisCoverageIssue {
+            analyzer: "dataflow".into(), reason: reason.into(), scope: "dependency".into(),
+            path: relative, line: None, rule: Some(rule.into()), detail: detail.into(),
+        });
+    }
 }

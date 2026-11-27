@@ -361,7 +361,7 @@ mod budget_tests {
         let root = dir.canonicalize().unwrap();
         let parse = ParseCache::new();
         let persistent = PersistentSummaryCache::load(&root, &root);
-        let caches = SummaryCaches { parse: &parse, persistent: &persistent, java_kotlin_packages: Default::default() };
+        let caches = SummaryCaches { parse: &parse, persistent: &persistent, java_kotlin_packages: Default::default(), summary_issues: Default::default(), entries: Default::default() };
         run(&Resolver { root, cache: &parse, packages: &caches })
     }
 
