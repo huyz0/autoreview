@@ -546,6 +546,44 @@ fn unresolved_kotlin_callback_reaches_review_and_blocks_replay() {
 }
 
 #[test]
+fn kotlin_snapshot_metadata_maps_into_diff_without_resolving_coverage() {
+    use sha2::{Digest, Sha256};
+    if !ast_grep_available() { return; }
+    let clean = "suspend fun run() { work() }\n";
+    let callback = "suspend fun run() {\n register { runBlocking { work() } }\n}\n";
+    let repo = init_repo(&[("Main.kt", clean)]);
+    let base = current_commit(repo.path());
+    repo.commit(&[("Main.kt", callback)], "register callback");
+    let head = current_commit(repo.path());
+    let path = repo.path().join("Main.kt").canonicalize().unwrap();
+    let hash = format!("{:x}", Sha256::digest(callback.as_bytes()));
+    let lambda = "{ runBlocking { work() } }";
+    let start = callback.find(lambda).unwrap();
+    let first = callback[..start].encode_utf16().count();
+    let evidence = serde_json::json!({"snapshotVersion":1,"sources":[{"path":path,"sha256":hash}],"evidence":{"version":2,"compiler":"2.2.20","records":[{"path":path,"sha256":hash,"lambdaStartUtf16":first,"lambdaEndUtf16":first + lambda.encode_utf16().count(),"callee":"example.register","parameter":0,"samType":"example.Callback","modality":"OPEN"}]}});
+    let evidence_path = repo.path().join("evidence.json");
+    std::fs::write(&evidence_path, evidence.to_string()).unwrap();
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .env("AUTOREVIEW_KOTLIN_CALLBACK_ROOT", repo.path()).env("AUTOREVIEW_KOTLIN_CALLBACK_EVIDENCE", &evidence_path)
+        .args(["diff", "--base", &base, "--head", &head, "--static-only"]).assert().success();
+    let report = report_path_from_stdout(&String::from_utf8_lossy(&output.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    let finding = report["findings"].as_array().unwrap().iter().find(|item| item["source"]["ruleId"] == "kotlin-runblocking-in-suspend-function").unwrap();
+    assert_eq!(finding["meta"]["experimentalCallbackEvidence"]["status"], "unverified", "{report}");
+    assert_eq!(finding["meta"]["experimentalCallbackEvidence"]["callee"], "example.register", "{report}");
+    assert!(report["analysisCoverage"].as_array().unwrap().iter().any(|issue| issue["reason"] == "callback_execution_unresolved"), "{report}");
+    repo.commit(&[("Main.kt", clean)], "remove callback");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"unresolved callback", "rule":{"tool":"ast-grep","id":"kotlin-runblocking-in-suspend-function"}, "before":{"commit":head,"path":"Main.kt","lines":[]}, "after":{"commit":after,"path":"Main.kt","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .env("AUTOREVIEW_KOTLIN_CALLBACK_ROOT", repo.path()).env("AUTOREVIEW_KOTLIN_CALLBACK_EVIDENCE", &evidence_path)
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
+    let replay: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_incomplete_replay(&replay, "callback_execution_unresolved", "Main.kt", 2);
+}
+
+#[test]
 fn directly_invoked_kotlin_lambda_replays_without_hiding_outer_uncertainty() {
     if !ast_grep_available() { return; }
     let direct = "suspend fun run() {\n ({ runBlocking { work() } })()\n}\n";

@@ -2,8 +2,9 @@
 
 This standalone Kotlin 2.2.20 compiler plugin explores how to identify a
 resolved call receiving a directly written functional-interface conversion.
-It is not integrated into Autoreview and does not alter findings. It does not
-classify callbacks as immediate or deferred.
+It does not classify callbacks as immediate or deferred or change finding
+decisions. Autoreview can optionally attach matching snapshot records as
+unverified diagnostic metadata, as described below.
 
 Build with Python 3.10 or newer and an explicitly selected, trusted Kotlin
 2.2.20 distribution and JDK:
@@ -49,7 +50,21 @@ classpath configuration. Trusted compiler and plugin executables are still
 required. The JDK and compiler installation are not snapshotted; before/after
 hashes do not defend against adversarial mutation and restoration; and the
 timeout does not guarantee termination of descendant processes. The snapshot
-report is experimental and is not consumed by review or replay.
+report is experimental.
+
+To attach matching records to unresolved Kotlin callback findings, set
+`AUTOREVIEW_KOTLIN_CALLBACK_EVIDENCE` to the absolute path of a snapshot
+report and `AUTOREVIEW_KOTLIN_CALLBACK_ROOT` to the absolute source checkout
+root before running review. Report sources must be under that checkout root;
+Autoreview maps their relative paths into the analyzed Git snapshot. It checks
+the analyzed source hash and lambda span and records
+the supplied callee and SAM type under `experimentalCallbackEvidence` in
+finding metadata, marked `unverified`. It does not authenticate the report,
+verify dependencies or runtime dispatch, or use the metadata to suppress a
+finding. Missing, invalid, oversized or out-of-root reports produce a coverage
+issue. A stale or unmatched record is not attached. In replay, a record can
+only match a revision whose source bytes match; the metadata still does not
+establish execution evidence or make an incomplete case scorable.
 
 The JSON records the compiler version, source path and SHA-256, call and
 lambda spans in UTF-16 code units, statically resolved callee name, regular
