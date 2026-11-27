@@ -289,9 +289,9 @@ to unresolved call types; they are not included in accuracy scores.
 Nested calls such as `factory()()` can share a starting offset. General
 TypeScript promise sources now carry full spans through the checker and
 result-use engine, allowing an outer call to be reported while an unresolved
-inner call retains its coverage warning. Helper resolution still uses starting
-offsets; if a helper shares a source's start, analysis reports a separate
-limitation rather than applying effects to the wrong call.
+inner call retains its coverage warning. Lowered helper calls are also keyed
+by their full spans; helper calls that the control-flow graph cannot lower
+remain subject to the existing coverage limitations.
 With shared offsets handled conservatively, the same Windows setup reported 13
 and 60 unresolved locations in the respective before revisions, down from 14
 and 63 when all shared offsets were left unresolved. These are coverage

@@ -3,6 +3,7 @@ mod forwarding;
 mod receivers;
 mod conditionals;
 use super::{effects, summaries, CallOrderHit, CallOrderSpec, HelperSummary, KeyedUnit, Origin, Program};
+type ResolvedCalls = BTreeSet<((usize, usize), usize)>;
 
 pub(in crate::call_order) fn check_units(
     spec: &CallOrderSpec,
@@ -41,7 +42,7 @@ pub(in crate::call_order) fn check_units_with_spans(
     let mut program = Program::new(spec, units);
     install_sources(&mut program, sources, spans, &forwarded, components);
     let mut limitations = unmodeled_sources(&program, units, sources, components);
-    limitations.extend(unmodeled_spans(&program, units, spans, &call_index));
+    limitations.extend(unmodeled_spans(&program, units, spans));
     if !program.has_registration() {
         limitations.extend(program.resolution_limitations());
         return (Vec::new(), false, limitations);
@@ -145,7 +146,6 @@ fn unmodeled_sources(
 
 fn unmodeled_spans(
     program: &Program<'_, '_, '_>, units: &[KeyedUnit<'_, '_, '_>], spans: &BTreeMap<usize, BTreeSet<(usize, usize)>>,
-    call_index: &[BTreeMap<usize, BTreeSet<usize>>],
 ) -> Vec<super::super::keyed::KeyedLimitation> {
     let functions: Vec<_> = units.iter().flat_map(|unit| unit.functions.iter()).collect();
     let reachable = super::sources::reachable_frames(program, units, &functions);
@@ -162,9 +162,6 @@ fn unmodeled_spans(
             if owner.is_some_and(|(index, _)| !reachable.contains(&(base + index))) || (owner.is_none() && !unit.entry) { continue; }
             let modeled = owner.is_some_and(|(index, function)| {
                 let frame = &program.frames[base + index];
-                if !unique_call_at(&call_index[unit_index], start, end) && frame.plan.as_ref().is_some_and(|plan| program.resolved_calls(base + index, frame.graph, plan).iter().any(|(position, _)| *position == start)) {
-                    limitations.push(source_limitation(unit, start, "nested_helper_resolution_unmodeled"));
-                }
                 let call = function.node.named_descendant_for_byte_range(start, end).and_then(|node| {
                     std::iter::successors(Some(node), |node| node.parent()).find(|node| node.start_byte() == start && node.end_byte() == end
                         && matches!(node.kind(), "call_expression" | "method_invocation" | "new_expression"))
@@ -204,7 +201,7 @@ fn source_modeled(
 // Multi-result arguments need a uniquely resolved, modeled receiving helper.
 fn component_helper_unmodeled(
     program: &Program<'_, '_, '_>, context: (&KeyedUnit<'_, '_, '_>, usize), start: usize,
-    reachable: &BTreeSet<usize>, calls: &mut BTreeMap<usize, BTreeSet<(usize, usize)>>,
+    reachable: &BTreeSet<usize>, calls: &mut BTreeMap<usize, ResolvedCalls>,
 ) -> bool {
     let (unit, base) = context;
     let owner = unit.functions.iter().enumerate()
@@ -220,7 +217,7 @@ fn component_helper_unmodeled(
     let frame = &program.frames[base + index];
     let calls = calls.entry(base + index).or_insert_with(|| frame.plan.as_ref()
         .map(|plan| program.resolved_calls(base + index, frame.graph, plan)).unwrap_or_default());
-    !calls.iter().any(|(position, target)| *position == outer.start_byte() && program.frames[*target].plan.is_some())
+    !calls.iter().any(|(position, target)| *position == (outer.start_byte(), outer.end_byte()) && program.frames[*target].plan.is_some())
 }
 
 fn source_limitation(unit: &KeyedUnit<'_, '_, '_>, start: usize, reason: &'static str) -> super::super::keyed::KeyedLimitation {
@@ -280,7 +277,7 @@ fn partial_reason(status: super::partial::Status, context: (&super::Body, &crate
 }
 
 fn make_hit(node: crate::cfg::NodeId, origin: Origin, unit: &KeyedUnit<'_, '_, '_>, units: &[KeyedUnit<'_, '_, '_>]) -> CallOrderHit {
-    let related_calls = origin.calls.iter().filter_map(|&(index, offset)| {
+    let related_calls = origin.calls.iter().filter_map(|&(index, offset, _)| {
         let unit = units.get(index)?;
         let before = unit.source.get(..offset)?;
         let line = before.iter().filter(|byte| **byte == b'\n').count() as u32 + 1;

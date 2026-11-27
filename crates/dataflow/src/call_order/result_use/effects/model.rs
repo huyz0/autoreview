@@ -8,7 +8,7 @@ pub(in crate::call_order::result_use) struct Origin {
     pub(in crate::call_order::result_use) component: Option<usize>,
     pub(in crate::call_order::result_use) line: u32,
     pub(in crate::call_order::result_use) path: Option<String>,
-    pub(in crate::call_order::result_use) calls: Vec<(usize, usize)>,
+    pub(in crate::call_order::result_use) calls: Vec<(usize, usize, usize)>,
 }
 
 pub(in crate::call_order::result_use) enum Value {
