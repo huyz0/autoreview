@@ -157,6 +157,11 @@ used as conditions or left operands are not assumed observed. Async generators,
 returns inside loops or `try` statements,
 and functions with `using` declarations remain unclassified because cleanup
 can replace a return before its value is adopted.
+An exception is a direct call to an immutable, same-file synchronous function
+literal whose body only returns without a value (or explicitly returns a
+`void` expression). The probe examines the body with a bounded syntax walk;
+mutable bindings, async functions, returned values, and exhausted walks remain
+unresolved. Nested function returns do not describe the outer function.
 This
 observation does not classify the return type, and an unresolved call on the
 same line still retains its warning. Unavailable sources, project errors,

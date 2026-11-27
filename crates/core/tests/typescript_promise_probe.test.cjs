@@ -37,6 +37,36 @@ test('distinguishes an unsupported compiler API from a missing module', () => {
   }
 });
 
+test('proves return values only for immutable local synchronous function literals', { skip: !compiler }, t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'autoreview-ts-probe-'));
+  t.after(() => removeTemporaryDirectory(directory));
+  const file = path.join(directory, 'sample.ts');
+  const config = path.join(directory, 'tsconfig.json');
+  fs.writeFileSync(config, JSON.stringify({ compilerOptions: { target: 'ES2020', strict: true }, files: ['sample.ts'] }));
+  const source = [
+    'const sync: () => void = () => { if (Math.random()) return; const nested = async () => 1; };',
+    'const explicit: () => void = () => { try { return; } finally { return void 1; } };',
+    'const expression: () => void = () => void 1;',
+    'const asynchronous: () => void = async () => {};',
+    'const hidden: () => void = () => Promise.resolve();',
+    'const guarded: () => void = () => { try { return; } finally { return Promise.resolve(); } };',
+    'let mutable: () => void = () => {}; mutable = async () => {};',
+    `const large: () => void = () => { ${'void 0;'.repeat(10001)} };`,
+    'function shadow(sync: () => void) { sync(); }',
+    'sync(); explicit(); expression(); asynchronous(); hidden(); guarded(); mutable(); large();',
+  ].join('\n');
+  fs.writeFileSync(file, source);
+  const names = ['sync()', 'explicit()', 'expression()', 'asynchronous()', 'hidden()', 'guarded()', 'mutable()', 'large()'];
+  const digest = createHash('sha256').update(source, 'utf8').digest('hex');
+  const calls = names.map(name => ({ path: file, start: Buffer.byteLength(source.slice(0, source.lastIndexOf(name))), source_sha256: digest }));
+  calls.push({ path: file, start: Buffer.byteLength(source.slice(0, source.indexOf('sync();'))), source_sha256: digest });
+  const child = spawnSync(process.execPath, [probe], { input: JSON.stringify({ typescriptModule: compiler, config, calls }), encoding: 'utf8' });
+  assert.equal(child.status, 0, child.stderr);
+  const result = JSON.parse(child.stdout);
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.calls.map(call => call.status), ['not_promise', 'not_promise', 'not_promise', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven']);
+});
+
 test('checks concrete call types and fails closed on project errors', { skip: !compiler }, () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'autoreview-ts-probe-'));
   try {

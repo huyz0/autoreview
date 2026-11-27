@@ -24,6 +24,7 @@ function run(request) {
       typeof ts.isCallExpression !== 'function' || typeof ts.isAwaitExpression !== 'function' ||
       typeof ts.isParenthesizedExpression !== 'function' || typeof ts.isFunctionLike !== 'function' ||
       typeof ts.isReturnStatement !== 'function' || typeof ts.isArrowFunction !== 'function' ||
+      typeof ts.isFunctionExpression !== 'function' || typeof ts.isVoidExpression !== 'function' ||
       typeof ts.isBlock !== 'function' || typeof ts.isVariableDeclarationList !== 'function' ||
       typeof ts.isVariableDeclaration !== 'function' || typeof ts.isVariableStatement !== 'function' ||
       typeof ts.isExpressionStatement !== 'function' || typeof ts.isIdentifier !== 'function' || typeof ts.forEachChild !== 'function') {
@@ -114,6 +115,35 @@ function run(request) {
   function ordinaryConst(list) {
     return !!(list.flags & ts.NodeFlags.Const) && !(list.flags & (ts.NodeFlags.Using || 0)) && list.declarations.length === 1;
   }
+  // Only a directly called, immutable local function literal can prove its
+  // actual return here. A void signature alone permits async implementations.
+  const localReturnCache = new WeakMap();
+  function localReturnsNoValue(call) {
+    if (!ts.isIdentifier(call.expression) || call.questionDotToken) return false;
+    const symbol = checker.getSymbolAtLocation(call.expression);
+    if (!symbol || symbol.declarations?.length !== 1) return false;
+    const declaration = symbol.declarations[0];
+    if (!ts.isVariableDeclaration(declaration) || declaration.getSourceFile() !== call.getSourceFile() ||
+        !ts.isVariableDeclarationList(declaration.parent) || !ordinaryConst(declaration.parent)) return false;
+    const fn = declaration.initializer;
+    if (!fn || !(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) || !fn.body ||
+        fn.asteriskToken || asyncFunction(fn)) return false;
+    if (localReturnCache.has(fn)) return localReturnCache.get(fn);
+    if (!ts.isBlock(fn.body)) return ts.isVoidExpression(fn.body);
+    const pending = [fn.body];
+    let remaining = 10000;
+    let safe = true;
+    while (pending.length && safe) {
+      if (--remaining < 0) { safe = false; break; }
+      const node = pending.pop();
+      if (node !== fn.body && ts.isFunctionLike(node)) continue;
+      if (ts.isReturnStatement(node) && node.expression && !ts.isVoidExpression(node.expression)) {
+        safe = false;
+      } else ts.forEachChild(node, child => { pending.push(child); });
+    }
+    localReturnCache.set(fn, safe);
+    return safe;
+  }
   // Only traverse ordinary blocks, ifs and switch cases: finally blocks,
   // iterator cleanup and resource disposal can replace a pending return.
   function returnedFromAsync(node) {
@@ -183,7 +213,7 @@ function run(request) {
     const selected = cached.calls.get(call.start);
     if (!selected) return { ...call, status: 'unavailable' };
     const type = checker.getTypeAtLocation(selected);
-    return { ...call, status: promiseLike(type) ? 'promise_like' : definitelyNotPromise(type) ? 'not_promise' : directlyAwaited(selected) || immediatelyAwaitedBinding(selected) || returnedFromAsync(selected) ? 'observed' : 'not_proven' };
+    return { ...call, status: promiseLike(type) ? 'promise_like' : definitelyNotPromise(type) || localReturnsNoValue(selected) ? 'not_promise' : directlyAwaited(selected) || immediatelyAwaitedBinding(selected) || returnedFromAsync(selected) ? 'observed' : 'not_proven' };
   });
   return { status: 'ok', calls };
 }
