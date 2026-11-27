@@ -126,6 +126,11 @@ not prove execution timing, complete resolution, overload identity, or that
 source and dependency snapshots are unchanged. Simple parameter classifiers can
 distinguish some overloads, but are not complete signatures. The README records its limits
 and the additional verification required before using it as rule evidence.
+An optional snapshot runner copies explicitly listed sources, JARs and the
+plugin, checks them after successful compilation, and maps spans back to
+source paths. It is not integrated into the rule engine, does not discover a
+project's full classpath, and does not establish immutable compiler or JDK
+identity, process containment, overload identity, or execution behavior.
 
 The repository currently has no Kotlin classpath-backed resolver. Before
 claiming a third-party interface is resolved, choose and test a trusted source
