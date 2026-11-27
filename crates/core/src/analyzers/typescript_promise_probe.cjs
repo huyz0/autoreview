@@ -24,7 +24,9 @@ function run(request) {
       typeof ts.isCallExpression !== 'function' || typeof ts.isAwaitExpression !== 'function' ||
       typeof ts.isParenthesizedExpression !== 'function' || typeof ts.isFunctionLike !== 'function' ||
       typeof ts.isReturnStatement !== 'function' || typeof ts.isArrowFunction !== 'function' ||
-      typeof ts.isBlock !== 'function' || typeof ts.isVariableDeclarationList !== 'function' || typeof ts.forEachChild !== 'function') {
+      typeof ts.isBlock !== 'function' || typeof ts.isVariableDeclarationList !== 'function' ||
+      typeof ts.isVariableDeclaration !== 'function' || typeof ts.isVariableStatement !== 'function' ||
+      typeof ts.isExpressionStatement !== 'function' || typeof ts.isIdentifier !== 'function' || typeof ts.forEachChild !== 'function') {
     return { status: 'incomplete', reason: 'compiler_api_unsupported' };
   }
   const config = ts.readConfigFile(request.config, ts.sys.readFile);
@@ -36,7 +38,8 @@ function run(request) {
     return { status: 'incomplete', reason: 'project_type_errors' };
   }
   const checker = program.getTypeChecker();
-  if (typeof checker.getAwaitedType !== 'function' || typeof checker.getPropertyOfType !== 'function') {
+  if (typeof checker.getAwaitedType !== 'function' || typeof checker.getPropertyOfType !== 'function' ||
+      typeof checker.getSymbolAtLocation !== 'function') {
     return { status: 'incomplete', reason: 'compiler_api_unsupported' };
   }
   function promiseLike(type) {
@@ -72,6 +75,42 @@ function run(request) {
   function directlyAwaited(node) {
     const value = adoptedExpression(node);
     return !!value.parent && ts.isAwaitExpression(value.parent) && value.parent.expression === value;
+  }
+  // Follow only consecutive immutable aliases to an await, with no intervening
+  // operation that could prevent the returned value from being observed.
+  function immediatelyAwaitedBinding(node) {
+    let value = node;
+    while (value.parent && ts.isParenthesizedExpression(value.parent) && value.parent.expression === value) value = value.parent;
+    const declaration = value.parent;
+    if (!declaration || !ts.isVariableDeclaration(declaration) || declaration.initializer !== value || !ts.isIdentifier(declaration.name)) return false;
+    const list = declaration.parent;
+    if (!list || !ts.isVariableDeclarationList(list) || !ordinaryConst(list)) return false;
+    const statement = list.parent;
+    if (!statement || !ts.isVariableStatement(statement) || !statement.parent?.statements) return false;
+    const statements = statement.parent.statements;
+    const position = statements.indexOf(statement);
+    if (position < 0) return false;
+    let binding = checker.getSymbolAtLocation(declaration.name);
+    if (!binding) return false;
+    for (let index = position + 1, steps = 0; steps < 32 && index < statements.length; index++, steps++) {
+      const next = statements[index];
+      if (ts.isExpressionStatement(next) && ts.isAwaitExpression(next.expression)) {
+        return sameBinding(next.expression.expression, binding);
+      }
+      if (!ts.isVariableStatement(next) || !ordinaryConst(next.declarationList)) return false;
+      const alias = next.declarationList.declarations[0];
+      if (!ts.isIdentifier(alias.name) || !alias.initializer || !sameBinding(alias.initializer, binding)) return false;
+      binding = checker.getSymbolAtLocation(alias.name);
+      if (!binding) return false;
+    }
+    return false;
+  }
+  function sameBinding(node, binding) {
+    while (ts.isParenthesizedExpression(node)) node = node.expression;
+    return ts.isIdentifier(node) && checker.getSymbolAtLocation(node) === binding;
+  }
+  function ordinaryConst(list) {
+    return !!(list.flags & ts.NodeFlags.Const) && !(list.flags & (ts.NodeFlags.Using || 0)) && list.declarations.length === 1;
   }
   // Only traverse ordinary blocks, ifs and switch cases: finally blocks,
   // iterator cleanup and resource disposal can replace a pending return.
@@ -142,7 +181,7 @@ function run(request) {
     const selected = cached.calls.get(call.start);
     if (!selected) return { ...call, status: 'unavailable' };
     const type = checker.getTypeAtLocation(selected);
-    return { ...call, status: promiseLike(type) ? 'promise_like' : definitelyNotPromise(type) ? 'not_promise' : directlyAwaited(selected) || returnedFromAsync(selected) ? 'observed' : 'not_proven' };
+    return { ...call, status: promiseLike(type) ? 'promise_like' : definitelyNotPromise(type) ? 'not_promise' : directlyAwaited(selected) || immediatelyAwaitedBinding(selected) || returnedFromAsync(selected) ? 'observed' : 'not_proven' };
   });
   return { status: 'ok', calls };
 }

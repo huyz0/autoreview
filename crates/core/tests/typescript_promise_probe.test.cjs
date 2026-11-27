@@ -78,6 +78,28 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
     calls = [...awaiting.matchAll(/\b(?:unknownValue|knownPromise)\(\)/g)].slice(2)
       .map(match => ({ path: file, start: Buffer.byteLength(awaiting.slice(0, match.index)), source_sha256: hash(awaiting) }));
     assert.deepEqual(invoke().calls.map(call => call.status), ['observed', 'not_proven', 'promise_like', 'not_proven']);
+    const bindings = [
+      'declare function unknownValue(): any;',
+      'async function direct() { const value = unknownValue(); await value; }',
+      'async function wrapped() { const value = ((unknownValue())); await ((value)); }',
+      'async function aliases() { const value = unknownValue(); const alias = value; const other = (alias); await other; }',
+      'async function later() { const value = unknownValue(); log(); await value; }',
+      'async function conditional(flag: boolean) { const value = unknownValue(); if (flag) await value; }',
+      'async function reassigned() { let value = unknownValue(); value = 1; await value; }',
+      'async function multi() { const value = unknownValue(), other = 1; await value; }',
+      'async function property() { const value = unknownValue(); await value.item; }',
+      'async function different() { const value = unknownValue(); const other = 1; await other; }',
+      'async function embedded() { const value = [unknownValue()]; await value; }',
+      'async function mutableAlias() { const value = unknownValue(); let alias = value; await alias; }',
+      'async function unrelatedAlias() { const value = unknownValue(); const alias = 1; await alias; }',
+      `async function atLimit() { const v0 = unknownValue(); ${Array.from({ length: 31 }, (_, i) => `const v${i + 1} = v${i};`).join(' ')} await v31; }`,
+      `async function overLimit() { const v0 = unknownValue(); ${Array.from({ length: 32 }, (_, i) => `const v${i + 1} = v${i};`).join(' ')} await v32; }`,
+      'declare function log(): void;',
+    ].join('\n');
+    fs.writeFileSync(file, bindings);
+    calls = [...bindings.matchAll(/\bunknownValue\(\)/g)].slice(1)
+      .map(match => ({ path: file, start: Buffer.byteLength(bindings.slice(0, match.index)), source_sha256: hash(bindings) }));
+    assert.deepEqual(invoke().calls.map(call => call.status), ['observed', 'observed', 'observed', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'observed', 'not_proven']);
     const returns = [
       'declare function unknownValue(): any;',
       'async function direct() { return ((unknownValue())); }',
@@ -119,12 +141,14 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
         'declare const resource: { [Symbol.dispose](): void };',
         'async function work() { using item = resource; return unknownValue(); }',
         'async function outer() { function inner() { using item = resource; } return unknownValue(); }',
+        'async function awaitUsingSource() { await using value = unknownValue(); await value; }',
+        'async function awaitUsingAlias() { const value = unknownValue(); await using alias = value; await alias; }',
       ].join('\n');
       fs.writeFileSync(config, JSON.stringify({ compilerOptions: { target: 'ES2020', lib: ['ES2020', 'ESNext.Disposable'], strict: true }, files: ['sample.ts'] }));
       fs.writeFileSync(file, resources);
       calls = [...resources.matchAll(/\bunknownValue\(\)/g)].slice(1)
         .map(match => ({ path: file, start: Buffer.byteLength(resources.slice(0, match.index)), source_sha256: hash(resources) }));
-      assert.deepEqual(invoke().calls.map(call => call.status), ['not_proven', 'observed']);
+      assert.deepEqual(invoke().calls.map(call => call.status), ['not_proven', 'observed', 'not_proven', 'not_proven']);
       fs.writeFileSync(config, JSON.stringify({ compilerOptions: { target: 'ES2020', strict: true }, files: ['sample.ts'] }));
     }
     fs.writeFileSync(file, source);
