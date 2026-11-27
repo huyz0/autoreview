@@ -19,6 +19,34 @@ fn scan(sources: &[(&str, &str)], changed: &[&str]) -> Vec<autoreview_schema::Ag
 }
 
 #[test]
+fn node_tls_reports_only_direct_literal_assignments_to_the_ambient_process() {
+    let js = r#"process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '1';
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = configuredValue;
+process.env.NODE_TLS_REJECT_UNAUTHORIZED ||= '0';
+const settings = { NODE_TLS_REJECT_UNAUTHORIZED: '0' };
+const current = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+function update(process) { process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; }
+{ const process = fixture; process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; }
+const updateAgain = function process() { process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'; };
+"#;
+    let ts = r#"process["env"]["NODE_TLS_REJECT_UNAUTHORIZED"] = "0";
+process.env.OTHER_SETTING = '0';
+"#;
+    let tsx = "const view = <main />;\nprocess.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';";
+    let imported = "import { mock as process } from './mock';\nprocess.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';";
+    let found = scan(
+        &[("settings.js", js), ("settings.ts", ts), ("view.tsx", tsx), ("mocked.ts", imported)],
+        &["settings.js", "settings.ts", "view.tsx", "mocked.ts"],
+    );
+    let locations: Vec<_> = found.iter()
+        .filter(|finding| finding.source.rule_id.as_deref() == Some("node-tls-verification-disabled-by-environment"))
+        .map(|finding| (finding.location.path.as_str(), finding.location.range.start_line))
+        .collect();
+    assert_eq!(locations, [("settings.js", 1), ("settings.ts", 1), ("view.tsx", 2)]);
+}
+
+#[test]
 fn constructor_dispatch_reports_resolved_overridable_calls() {
     let source = r#"class Base {
     Base(String value) {

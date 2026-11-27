@@ -1,5 +1,8 @@
 # Antipattern coverage
 
+See the [security coverage inventory](security-coverage-inventory.md) for current
+detectors, candidate rules, and checks that need deployment or business context.
+
 Autoreview can report a concrete instance of a broad antipattern when it has enough evidence in the diff and the surrounding code. This inventory records the scope of those checks and the next testable case for each family. Rule IDs are representative. JavaScript and TypeScript are listed as web languages, and TypeScript patterns also run on TSX.
 
 A syntax rule can match a specific API sequence or local expression. Data flow is needed when a value or obligation crosses assignments and branches. Graph checks need resolved dependencies or an explicit architecture policy. Production behavior and design intent require evidence such as traces, query plans, or change history.
