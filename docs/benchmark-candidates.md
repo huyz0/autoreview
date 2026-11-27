@@ -104,6 +104,12 @@ unresolved locations for the deletion case instead of three: the return at
 still reported 21 locations. Both cases remain incomplete and unscored; the
 remaining calls and dependencies need sound result-use evidence.
 
+The checker also recognizes an unknown result assigned to a single `const`
+and immediately awaited through up to 31 consecutive immutable aliases.
+It checks binding identities and retains the unresolved warning when an
+intervening operation, mutable alias, conditional await, or longer chain
+prevents that proof. This does not resolve the checkout replay cases above.
+
 For a reproducible source-level observation, first follow the clone, checkout,
 and dependency installation steps for this case in [the benchmark README](../benchmarks/README.md).
 Then, from the `checkout` directory:

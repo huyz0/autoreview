@@ -382,6 +382,21 @@ mod budget_tests {
         std::fs::write(dir.join("view.tsx"), "declare function uncertain(): unknown;\nexport async function run() { await uncertain(); uncertain(); }\n").unwrap();
         let (_, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
         assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(2)), "{coverage:?}");
+        for path in ["assigned.ts", "assigned.tsx"] {
+            let assigned = "declare function uncertain(): unknown;\nexport async function run() { const value = uncertain(); await value; }\n";
+            std::fs::write(dir.join(path), assigned).unwrap();
+            let paths = [path.to_owned()];
+            let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            assert!(findings.is_empty(), "{path}: {findings:#?}");
+            assert!(!coverage.iter().any(|issue| issue.reason == "promise_type_unresolved"), "{path}: {coverage:?}");
+            std::fs::write(dir.join(path), assigned.replace("await value;", "const alias = value; await alias;")).unwrap();
+            let (_, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            assert!(!coverage.iter().any(|issue| issue.reason == "promise_type_unresolved"), "{path}: {coverage:?}");
+            std::fs::write(dir.join(path), assigned.replace("await value;", "if (Math.random()) await value;")).unwrap();
+            let (_, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved"), "{path}: {coverage:?}");
+            std::fs::remove_file(dir.join(path)).unwrap();
+        }
     }
 
     fn assert_conditional_typed_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
