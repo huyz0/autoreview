@@ -51,7 +51,7 @@ pub(super) fn from_environment(root: &Path) -> Result<Option<Evidence>, ()> {
 
 fn parse(root: &Path, checkout: &Path, bytes: &[u8]) -> Result<Evidence, ()> {
     let snapshot: Snapshot = serde_json::from_slice(bytes).map_err(|_| ())?;
-    if snapshot.snapshot_version != 1 || snapshot.evidence.version != 2 || snapshot.evidence.compiler != "2.2.20" || snapshot.sources.len() > 512 { return Err(()); }
+    if snapshot.snapshot_version != 1 || snapshot.evidence.version != 2 || !matches!(snapshot.evidence.compiler.as_str(), "2.2.20" | "2.3.21") || snapshot.sources.len() > 512 { return Err(()); }
     let root = root.canonicalize().map_err(|_| ())?;
     let checkout = checkout.canonicalize().map_err(|_| ())?;
     let sources = map_sources(&root, &checkout, snapshot.sources)?;
@@ -182,5 +182,18 @@ mod tests {
         super::super::annotate_with(analyzed.path(), &mut findings, Some(&evidence), &mut coverage);
         assert_eq!(findings[0].meta.as_ref().unwrap()["experimentalCallbackEvidence"]["status"], "unverified");
         assert!(coverage.iter().any(|issue| issue.reason == "callback_execution_unresolved"));
+    }
+
+    #[test]
+    fn supports_only_tested_compiler_versions() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("source.kt");
+        let source = "// 😀\nsuspend fun run() {\n register { runBlocking { work() } }\n}\n";
+        std::fs::write(&path, source).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&report(&path, source)).unwrap();
+        value["evidence"]["compiler"] = "2.3.21".into();
+        assert!(parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).is_ok());
+        value["evidence"]["compiler"] = "2.3.22".into();
+        assert!(parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).is_err());
     }
 }

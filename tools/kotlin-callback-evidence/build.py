@@ -8,16 +8,19 @@ import tempfile
 import zipfile
 
 
-def build(kotlinc: pathlib.Path, compiler_jar: pathlib.Path, output: pathlib.Path) -> None:
+def build(kotlinc: pathlib.Path, compiler_jar: pathlib.Path, output: pathlib.Path, version: str = "2.2.20") -> None:
     root = pathlib.Path(__file__).resolve().parent
     source = root / "src" / "EvidencePlugin.kt"
+    if version not in ("2.2.20", "2.3.21"):
+        raise ValueError("unsupported Kotlin compiler version")
+    registrar = root / "src" / f"Registrar-{version}.kt"
     service = root / "src" / "META-INF" / "services" / "org.jetbrains.kotlin.compiler.plugin.CompilerPluginRegistrar"
     if output.exists():
         raise FileExistsError(output)
     with tempfile.TemporaryDirectory(prefix="autoreview-kotlin-plugin-") as directory:
         classes = pathlib.Path(directory) / "classes"
         subprocess.run(
-            [str(kotlinc), str(source), "-cp", str(compiler_jar), "-d", str(classes)],
+            [str(kotlinc), str(source), str(registrar), "-cp", str(compiler_jar), "-d", str(classes)],
             check=True,
             timeout=120,
         )
@@ -33,8 +36,9 @@ def main() -> None:
     parser.add_argument("--kotlinc", type=pathlib.Path, required=True)
     parser.add_argument("--compiler-jar", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
+    parser.add_argument("--compiler-version", choices=("2.2.20", "2.3.21"), default="2.2.20")
     args = parser.parse_args()
-    build(args.kotlinc.resolve(strict=True), args.compiler_jar.resolve(strict=True), args.output.absolute())
+    build(args.kotlinc.resolve(strict=True), args.compiler_jar.resolve(strict=True), args.output.absolute(), args.compiler_version)
 
 
 if __name__ == "__main__":

@@ -1,20 +1,25 @@
 # Experimental Kotlin callback evidence
 
-This standalone Kotlin 2.2.20 compiler plugin explores how to identify a
+This standalone Kotlin compiler plugin explores how to identify a
 resolved call receiving a directly written functional-interface conversion.
 It does not classify callbacks as immediate or deferred or change finding
 decisions. Autoreview can optionally attach matching snapshot records as
 unverified diagnostic metadata, as described below.
 
 Build with Python 3.10 or newer and an explicitly selected, trusted Kotlin
-2.2.20 distribution and JDK:
+2.2.20 or 2.3.21 distribution and JDK. Build a separate plugin with the same
+compiler version that will run it; the compiler plugin API changed between
+these releases:
 
 ```sh
 python3 tools/kotlin-callback-evidence/build.py \
   --kotlinc /path/to/kotlinc/bin/kotlinc \
   --compiler-jar /path/to/kotlinc/lib/kotlin-compiler.jar \
+  --compiler-version 2.3.21 \
   --output /path/to/new-evidence-plugin.jar
 ```
+
+The version option defaults to 2.2.20. Other compiler versions are rejected.
 
 Choose a nonexistent output path for each invocation, then invoke that same
 compiler with the source files, their required classpath and the plugin:
@@ -95,7 +100,8 @@ See [the execution plan](../../docs/callback-execution-plan.md).
 
 To run the integration tests, set `AUTOREVIEW_TEST_KOTLINC`,
 `AUTOREVIEW_TEST_KOTLIN_COMPILER_JAR`, and `AUTOREVIEW_TEST_JAVAC` to absolute
-paths for trusted tools, then run:
+paths for trusted tools. Set `AUTOREVIEW_TEST_KOTLIN_VERSION` to `2.3.21`
+for that compiler; the default is `2.2.20`. Then run:
 
 ```sh
 python3 tools/kotlin-callback-evidence/test_evidence.py

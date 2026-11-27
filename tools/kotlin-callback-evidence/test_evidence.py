@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the plugin with a trusted Kotlin 2.2.20 compiler and JDK."""
+"""Exercise the plugin with a supported trusted Kotlin compiler and JDK."""
 
 import hashlib
 import json
@@ -25,11 +25,12 @@ class EvidenceTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.kotlinc = pathlib.Path(os.environ["AUTOREVIEW_TEST_KOTLINC"]).resolve(strict=True)
         cls.compiler_jar = pathlib.Path(os.environ["AUTOREVIEW_TEST_KOTLIN_COMPILER_JAR"]).resolve(strict=True)
+        cls.version = os.environ.get("AUTOREVIEW_TEST_KOTLIN_VERSION", "2.2.20")
         cls.javac = pathlib.Path(os.environ["AUTOREVIEW_TEST_JAVAC"]).resolve(strict=True)
         cls.directory = tempfile.TemporaryDirectory(prefix="autoreview-kotlin-test-")
         cls.root = pathlib.Path(cls.directory.name)
         cls.plugin = cls.root / "evidence.jar"
-        build(cls.kotlinc, cls.compiler_jar, cls.plugin)
+        build(cls.kotlinc, cls.compiler_jar, cls.plugin, cls.version)
         (cls.root / "Auth.java").write_text("package vendor; public interface Auth { boolean accept(String s); }", encoding="utf-8")
         (cls.root / "Server.java").write_text(
             "package vendor; public class Server { public Auth getAuthenticator() { return null; } "
@@ -59,7 +60,7 @@ class EvidenceTest(unittest.TestCase):
         result = self.compile("sample", source)
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads((self.root / "sample.json").read_text(encoding="utf-8"))
-        self.assertEqual((report["version"], report["compiler"]), (2, "2.2.20"))
+        self.assertEqual((report["version"], report["compiler"]), (2, self.version))
         self.assertEqual(len(report["records"]), 1, report)
         record = report["records"][0]
         self.assertEqual(record["sha256"], hashlib.sha256(source.encode()).hexdigest())
