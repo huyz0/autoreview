@@ -182,7 +182,7 @@ impl Lower<'_, '_, '_> {
                 if let Some(place) = self.place(argument, false) {
                     return Some(place);
                 }
-                let temporary = Place::CallResult(argument.start_byte());
+                let temporary = Place::CallResult(argument.start_byte(), argument.end_byte());
                 let value = self.value(argument, effects);
                 effects.push(Effect::Write(vec![Write { target: Some(temporary), value }]));
                 Some(temporary)
@@ -199,7 +199,7 @@ impl Lower<'_, '_, '_> {
             if let Some(place) = self.place(argument, false) {
                 effects.push(Effect::OpaqueRead(place));
             } else if self.helper_call(argument).is_some() {
-                let temporary = Place::CallResult(argument.start_byte());
+                let temporary = Place::CallResult(argument.start_byte(), argument.end_byte());
                 let mut nested = Vec::new();
                 self.reads_with(argument, &mut nested, Demand::Slot(temporary));
                 effects.push(Effect::OpaqueOnly(nested));

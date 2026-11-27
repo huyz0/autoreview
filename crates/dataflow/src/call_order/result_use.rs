@@ -470,7 +470,7 @@ func f(x string) { switch x { case "p\n", "q": return; default: return } }"#, tr
 
     #[test]
     fn helper_effect_propagates_only_the_arguments_required_by_the_caller() {
-        let output = Place::CallResult(50);
+        let output = Place::CallResult(50, 60);
         let effects = [Effect::ApplyHelper(Box::new(HelperCall {
             arguments: vec![Some(Place::Local(1)), Some(Place::Local(2))],
             demand: Demand::Slot(output),
@@ -497,6 +497,28 @@ func f(x string) { switch x { case "p\n", "q": return; default: return } }"#, tr
             assert!(live.contains(&Place::Local(1)));
             assert_eq!(live.contains(&Place::Local(2)), observed);
             assert!(!live.contains(&output));
+        }
+    }
+
+    #[test]
+    fn nested_helper_results_keep_separate_return_demand() {
+        let inner = Place::CallResult(50, 59);
+        let outer = Place::CallResult(50, 61);
+        let helper = |argument, output| Effect::ApplyHelper(Box::new(HelperCall {
+            arguments: vec![Some(argument)], demand: Demand::Slot(output),
+            when_discarded: vec![false], when_observed: vec![true],
+            unobserved_discarded: vec![None], unobserved_observed: vec![None],
+            guard: None, conditional_discarded: None, conditional_observed: None,
+            origins_discarded: vec![], origins_observed: vec![],
+            opaque_discarded: vec![false], opaque_observed: vec![false],
+            opaque_origins_discarded: vec![], opaque_origins_observed: vec![],
+        }));
+        let effects = [helper(Place::Local(1), inner), helper(Place::Local(2), outer)];
+        for (observed, expected, other) in [(inner, 1, 2), (outer, 2, 1)] {
+            let mut live = Live::from([observed]);
+            transfer(&effects, &mut live, &[], None);
+            assert!(live.contains(&Place::Local(expected)));
+            assert!(!live.contains(&Place::Local(other)));
         }
     }
 
