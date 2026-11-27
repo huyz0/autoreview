@@ -1,5 +1,48 @@
 # Windows historical replay baseline
 
+## Current run: main 340d331
+
+On Windows, the debug CLI built from main commit
+`340d3315518e605aa04f86f5ca73a5683ce4a4a0` replayed the pinned manifests
+below using Git 2.56.0.windows.1, Rust 1.99.1, ast-grep 0.51.3, Go 1.27.4,
+and Node 26.12.1. The Go probe was rebuilt from this commit. The SFTPresso
+case used TypeScript 5.9.3; the checkout cases used TypeScript 5.6.3 with
+the documented legacy-catch adapter and the benchmark rule pack.
+
+| Manifest | Completed / attempted | Incomplete | Failed | TP | FP | FN |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `azure-iot-matches.yaml` | 1 / 1 | 0 | 0 | 6 | 0 | 0 |
+| `iceberg-go.yaml` | 1 / 1 | 0 | 0 | 1 | 0 | 0 |
+| `jplag-trim.yaml` | 1 / 1 | 0 | 0 | 1 | 0 | 0 |
+| `go-tools.yaml` | 1 / 1 | 0 | 0 | 0 | 0 | 0 |
+| `uwas-rename.yaml` | 1 / 1 | 0 | 0 | 1 | 0 | 0 |
+| `niverwizard-msw-delay.yaml` | 3 / 3 | 0 | 0 | 4 | 0 | 0 |
+| `syzkaller-swallowed-error.yaml` | 1 / 1 | 0 | 0 | 1 | 0 | 0 |
+| `cilium-swallowed-error.yaml` | 2 / 2 | 0 | 0 | 1 | 2 | 0 |
+| `silphscope-digest.yaml` | 1 / 1 | 0 | 0 | 1 | 0 | 0 |
+| `yq-error.yaml` | 1 / 1 | 0 | 0 | 3 | 0 | 0 |
+| `yq-multi-error.yaml` | 0 / 1 | 1 | 0 | — | — | — |
+| `sftp-promise.yaml` | 1 / 1 | 0 | 0 | 2 | 0 | 0 |
+| `checkout-promise.yaml` | 0 / 2 | 2 | 0 | — | — | — |
+| `redicloud-coroutines.yaml` | 0 / 1 | 1 | 0 | — | — | — |
+| `sentry-async-executor.yaml` | 1 / 1 | 0 | 0 | 2 | 0 | 0 |
+
+The yq multi-result case, previously scored at `9db6cce`, now reports
+`result_use_path_unmodeled` for functions starting at lines 16 and 283 in the
+before revision. It is incomplete, not evidence that the five labeled calls
+were missed. The Kotlin case now reports `callback_execution_unresolved` at
+line 120 of the before revision; unlike the earlier scored replay, it is
+excluded from accuracy counts. The checkout cases still report unresolved
+promise types, at two and 21 locations respectively. Replay stopped each
+incomplete case at its before revision, so these observations say nothing
+about its after revision. The Cilium mismatches remain the same intentional
+cancellation handling reported in both snapshots, not independent defects.
+
+These selected cases cover a small set of rule families and fix pairs. Results
+are not a population-wide accuracy estimate; repeated findings within one fix
+or across both snapshots are not independent samples. Reproduction and
+dependency setup are documented in [the benchmark README](README.md).
+
 ## Additional Kotlin and TSX cases
 
 On Windows using the debug CLI from main `eac1f2ce5b59b07da0dad6b09741d239d9dd9d16`
@@ -15,7 +58,7 @@ revisions; replay exits unsuccessfully. The two Sentry positives share one fix
 pair. Neither case establishes general language or rule accuracy. See the
 [benchmark README](README.md) for labels and reproduction instructions.
 
-## Current run: main 9db6cce
+## Earlier run: main 9db6cce
 
 On Windows, the debug CLI built from main commit
 `9db6ccea09881a5290d61cbe1db7cc8d0ed527a0` replayed the following pinned
