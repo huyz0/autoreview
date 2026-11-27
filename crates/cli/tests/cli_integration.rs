@@ -607,15 +607,21 @@ fn directly_invoked_kotlin_lambda_replays_without_hiding_outer_uncertainty() {
 #[test]
 fn kotlin_literal_invoke_and_immutable_alias_replay() {
     if !ast_grep_available() { return; }
-    let bad = "suspend fun run() {\n ({ runBlocking { work() } }).invoke()\n val original = { runBlocking { work() } }\n val copy = original\n copy.invoke()\n}\n";
+    let bad = "suspend fun run() {\n ({ runBlocking { work() } }).invoke()\n val original = { runBlocking { work() } }\n val copy = original\n copy.invoke()\n val bare = { runBlocking { work() } }\n bare()\n}\n";
     let clean = "suspend fun run() { work() }\n";
     let repo = init_repo(&[("Main.kt", bad)]);
     let before = current_commit(repo.path());
     repo.commit(&[("Main.kt", clean)], "remove blocking");
     let after = current_commit(repo.path());
-    let suite = serde_json::json!({"cases": [{"name":"immediate invocation", "rule":{"tool":"ast-grep","id":"kotlin-runblocking-in-suspend-function"}, "before":{"commit":before,"path":"Main.kt","lines":[2,3]}, "after":{"commit":after,"path":"Main.kt","lines":[]}}]});
+    let suite = serde_json::json!({"cases": [{"name":"immediate invocation", "rule":{"tool":"ast-grep","id":"kotlin-runblocking-in-suspend-function"}, "before":{"commit":before,"path":"Main.kt","lines":[2,3,6]}, "after":{"commit":after,"path":"Main.kt","lines":[]}}]});
     let report = successful_replay_report(repo.path(), &suite);
-    assert_eq!(report["rules"][0]["truePositives"], 2, "{report}");
+    assert_eq!(report["rules"][0]["truePositives"], 3, "{report}");
+    let ambiguous = "suspend fun run() {\n fun callback() {}\n val callback = { runBlocking { work() } }\n callback()\n}\n";
+    repo.commit(&[("Main.kt", ambiguous)], "add conflicting local function");
+    let ambiguous_commit = current_commit(repo.path());
+    let uncertain = serde_json::json!({"cases": [{"name":"ambiguous invocation", "rule":{"tool":"ast-grep","id":"kotlin-runblocking-in-suspend-function"}, "before":{"commit":ambiguous_commit,"path":"Main.kt","lines":[]}, "after":{"commit":after,"path":"Main.kt","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), uncertain.to_string()).unwrap();
+    assert_incomplete_replay(&failed_replay_report(repo.path()), "callback_execution_unresolved", "Main.kt", 3);
 }
 
 #[test]

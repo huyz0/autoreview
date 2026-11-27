@@ -247,10 +247,11 @@ fn kotlin_direct_lambda_invocation_preserves_outer_uncertainty() {
         let lines: Vec<_> = findings.iter().map(|finding| finding.location.range.start_line).collect();
         assert_eq!(lines, [2, 3, 4, 5, 7], "{rule}");
         assert!(findings[..2].iter().all(|finding| finding.confidence == 1.0), "{rule}");
-        assert!(findings[2..4].iter().all(|finding| finding.confidence < 1.0), "{rule}");
+        assert!(findings[2].confidence < 1.0, "{rule}");
+        assert_eq!(findings[3].confidence, 1.0, "{rule}");
         assert_eq!(findings[4].confidence, 1.0, "{rule}");
         let incomplete: Vec<_> = result.coverage.iter().filter(|issue| issue.rule.as_deref() == Some(rule)).map(|issue| issue.line.unwrap()).collect();
-        assert_eq!(incomplete, [4, 5], "{rule}");
+        assert_eq!(incomplete, [4], "{rule}");
     }
 }
 
@@ -265,9 +266,11 @@ fn kotlin_local_callback_aliases_require_contiguous_immutable_execution() {
         let findings: Vec<_> = result.findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some(rule)).collect();
         assert_eq!(findings.iter().map(|finding| finding.location.range.start_line).collect::<Vec<_>>(), [2, 5, 8, 11, 12, 14, 16], "{rule}");
         assert_eq!(findings[0].confidence, 1.0, "{rule}");
-        assert!(findings[1..].iter().all(|finding| finding.confidence < 1.0), "{rule}");
+        assert!(findings[1..4].iter().all(|finding| finding.confidence < 1.0), "{rule}");
+        assert_eq!(findings[4].confidence, 1.0, "{rule}");
+        assert!(findings[5..].iter().all(|finding| finding.confidence < 1.0), "{rule}");
         let incomplete: Vec<_> = result.coverage.iter().filter(|issue| issue.rule.as_deref() == Some(rule)).map(|issue| issue.line.unwrap()).collect();
-        assert_eq!(incomplete, [5, 8, 11, 12, 14, 16], "{rule}");
+        assert_eq!(incomplete, [5, 8, 11, 14, 16], "{rule}");
     }
 }
 
@@ -290,14 +293,33 @@ fn kotlin_unused_local_callbacks_do_not_inherit_suspend_execution() {
 #[test]
 fn kotlin_callback_alias_budget_remains_incomplete() {
     if !ast_grep_available() { return; }
-    for count in [31, 32] {
-        let mut source = String::from("suspend fun run() {\n val a0 = { runBlocking { work() } }\n");
-        for index in 1..=count { source.push_str(&format!(" val a{index} = a{}\n", index - 1)); }
-        source.push_str(&format!(" a{count}.invoke()\n}}\n"));
-        let repo = kotlin_test_repo(&source);
-        let result = autoreview_core::run_ast_grep_with_coverage(repo.path(), &["example.kt".into()], &[]).unwrap();
-        let incomplete = result.coverage.iter().any(|issue| issue.rule.as_deref() == Some("kotlin-runblocking-in-suspend-function") && issue.reason == "callback_execution_unresolved");
-        assert_eq!(incomplete, count == 32, "{:?}", result.coverage);
+    for method in [".invoke()", "()"] {
+        for count in [31, 32] {
+            let mut source = String::from("suspend fun run() {\n val a0 = { runBlocking { work() } }\n");
+            for index in 1..=count { source.push_str(&format!(" val a{index} = a{}\n", index - 1)); }
+            source.push_str(&format!(" a{count}{method}\n}}\n"));
+            let repo = kotlin_test_repo(&source);
+            let result = autoreview_core::run_ast_grep_with_coverage(repo.path(), &["example.kt".into()], &[]).unwrap();
+            let incomplete = result.coverage.iter().any(|issue| issue.rule.as_deref() == Some("kotlin-runblocking-in-suspend-function") && issue.reason == "callback_execution_unresolved");
+            assert_eq!(incomplete, count == 32, "{:?}", result.coverage);
+        }
+    }
+}
+
+#[test]
+fn kotlin_bare_local_invocation_requires_unambiguous_zero_argument_lambda() {
+    if !ast_grep_available() { return; }
+    let checks = KOTLIN_COROUTINE_CHECKS;
+    let source = format!("fun parameter() {{}}\nfun fallback(n: Int) {{}}\nsuspend fun run() {{\n val direct = {{ {checks} }}\n direct()\n val original = {{ {checks} }}\n val alias = original\n alias()\n fun collision() {{}}\n val collision = {{ {checks} }}\n collision()\n val parameter = {{ n: Int -> {checks} }}\n parameter()\n val fallback = {{ {checks} }}\n fallback(1)\n register {{ val nested = {{ {checks} }}; nested() }}\n}}\n");
+    let repo = kotlin_test_repo(&source);
+    let result = autoreview_core::run_ast_grep_with_coverage(repo.path(), &["example.kt".into()], &[]).unwrap();
+    for &rule in KOTLIN_COROUTINE_RULES {
+        let findings: Vec<_> = result.findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some(rule)).collect();
+        assert_eq!(findings.iter().map(|finding| finding.location.range.start_line).collect::<Vec<_>>(), [4, 6, 10, 12, 14, 16], "{rule}");
+        assert!(findings[..2].iter().all(|finding| finding.confidence == 1.0), "{rule}");
+        assert!(findings[2..].iter().all(|finding| finding.confidence < 1.0), "{rule}");
+        let incomplete: Vec<_> = result.coverage.iter().filter(|issue| issue.rule.as_deref() == Some(rule)).map(|issue| issue.line.unwrap()).collect();
+        assert_eq!(incomplete, [10, 12, 14, 16], "{rule}");
     }
 }
 

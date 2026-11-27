@@ -58,10 +58,13 @@ shadowing must be tested before an identity is trusted.
 The Kotlin pattern coverage check recognizes directly invoked lambda literals
 such as `({ ... })()` and `({ ... }).invoke()`. It also follows contiguous
 immutable local aliases from a literal to an explicit `.invoke()` call, with a
-32-statement limit. It still reports an unresolved outer lambda, even when an
-inner lambda is directly invoked. Intervening statements, mutable bindings,
-bare-name calls, inline library methods, and functional-interface conversions
-remain unresolved.
+32-statement limit. A zero-argument bare call is also recognized when the
+lambda has no declared parameters and its final local name occurs only in its
+declaration and call within the enclosing function. Conflicting local names
+and exhausted syntax budgets remain unknown. An unresolved outer lambda is
+still reported when an inner lambda is directly invoked. Intervening
+statements, mutable bindings, other bare-name calls, inline library methods,
+and functional-interface conversions remain unresolved.
 An immutable local lambda with no other matching identifier in its enclosing
 function is also recognized as uninvoked, within a shared per-file syntax-node
 budget. Same-named shadowed identifiers conservatively prevent that proof.
