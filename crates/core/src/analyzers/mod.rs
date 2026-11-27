@@ -26,4 +26,5 @@ mod artifact_policy;
 pub mod locale_catalogs;
 pub mod postgres_migrations;
 pub mod protobuf_schema;
+pub mod spring_session_policy;
 pub mod workflow_policy;

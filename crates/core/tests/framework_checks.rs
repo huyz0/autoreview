@@ -136,6 +136,88 @@ func configure(cfg *secure.Config) { cfg.InsecureSkipVerify = true }
 }
 
 #[test]
+fn node_security_flags_require_static_module_and_final_literal_options() {
+    let js = r#"const jwt = require('jsonwebtoken');
+const session = require('express-session');
+const { createCipheriv: encrypt, createDecipheriv } = require('node:crypto');
+jwt.verify(token, key, { ignoreExpiration: true, 'ignoreNotBefore': true });
+jwt.verify(token, key, { ignoreExpiration: true, ...dynamicOptions });
+jwt.verify(token, key, { ignoreExpiration: true, ignoreExpiration: false });
+jwt.verify(...values, key, { ignoreExpiration: true });
+jwt.decode(token, { ignoreExpiration: true });
+session({ cookie: { secure: false, httpOnly: false } });
+session({ cookie: { secure: false }, cookie: { secure: true } });
+session({ cookie: { secure: 'auto', httpOnly: true } });
+encrypt('AES-128-ECB', key, null);
+createDecipheriv('aes-128-ecb', key, null);
+encrypt('aes-128-gcm', key, iv);
+encrypt(algorithm, key, iv);
+function fixture(jwt, encrypt) {
+    jwt.verify(token, key, { ignoreExpiration: true });
+    encrypt('aes-256-ecb', key, null);
+}
+"#;
+    let ts = r#"import sessions from 'cookie-session';
+import { verify as verifyToken } from 'jsonwebtoken';
+import { createCipheriv } from 'node:crypto';
+import { verify as custom } from './fixture';
+const options = { 'ignoreNotBefore': true };
+verifyToken(token, key, options);
+sessions({ 'httpOnly': false, secure: true });
+require('express-session')({ cookie: { secure: false } });
+custom(token, key, { ignoreExpiration: true });
+for (const createCipheriv of factories) { createCipheriv('aes-256-ecb', key, null); }
+const view = <main />;
+createCipheriv('aes-256-ecb', key, null);
+"#;
+    let sources = [("settings.js", js), ("settings.tsx", ts)];
+    let findings = scan(&sources, &["settings.js", "settings.tsx"]);
+    let mut actual: Vec<_> = findings.iter().filter(|finding| finding.category == "security")
+        .map(|finding| {
+            let id = finding.source.rule_id.as_deref().unwrap();
+            let site = &finding.location;
+            (site.path.as_str(), site.range.start_line, id)
+        }).collect();
+    actual.sort_unstable();
+    assert_eq!(actual, [
+        ("settings.js", 4, "node-jwt-ignores-expiration"),
+        ("settings.js", 4, "node-jwt-ignores-not-before"),
+        ("settings.js", 9, "express-session-cookie-without-http-only"),
+        ("settings.js", 9, "express-session-cookie-without-secure"),
+        ("settings.js", 12, "node-aes-ecb-encryption"),
+        ("settings.tsx", 5, "node-jwt-ignores-not-before"),
+        ("settings.tsx", 7, "express-session-cookie-without-http-only"),
+        ("settings.tsx", 8, "express-session-cookie-without-secure"),
+        ("settings.tsx", 12, "node-aes-ecb-encryption"),
+    ], "{findings:#?}");
+}
+
+#[test]
+fn go_jwt_v5_reports_direct_parser_options_only() {
+    let src = r#"package fixture
+import tokens "github.com/golang-jwt/jwt/v5"
+func parse() {
+    tokens.NewParser(tokens.WithoutClaimsValidation())
+    tokens.Parse(value, key, tokens.WithoutClaimsValidation())
+    tokens.ParseWithClaims(value, claims, key, tokens.WithoutClaimsValidation())
+    tokens.NewParser(tokens.WithExpirationRequired())
+    takeOption(tokens.WithoutClaimsValidation())
+}
+func unrelated(tokens TestParser) { tokens.NewParser(tokens.WithoutClaimsValidation()) }
+var parser = tokens.NewParser(tokens.WithoutClaimsValidation())
+"#;
+    let old = r#"package fixture
+import tokens "github.com/golang-jwt/jwt/v4"
+func parseOld() { tokens.NewParser(tokens.WithoutClaimsValidation()) }
+"#;
+    let findings = scan(&[("client.go", src), ("old/client.go", old)], &["client.go", "old/client.go"]);
+    let actual: Vec<_> = findings.iter().filter(|finding| {
+        finding.source.rule_id.as_deref() == Some("go-jwt-v5-claims-validation-disabled")
+    }).map(|finding| (finding.location.path.as_str(), finding.location.range.start_line)).collect();
+    assert_eq!(actual, [("client.go", 4), ("client.go", 5), ("client.go", 6), ("client.go", 11)], "{findings:#?}");
+}
+
+#[test]
 fn constructor_dispatch_reports_resolved_overridable_calls() {
     let source = r#"class Base {
     Base(String value) {

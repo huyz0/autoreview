@@ -90,8 +90,11 @@ fn artifact_findings(
     let checks = input.artifact_checks;
     let root = input.source_root;
     let mut findings = Vec::new();
-    if checks.immutable_github_action_refs && input.wants("security") {
-        findings.extend(autoreview_core::run_workflow_policy(root, paths));
+    if input.wants("security") {
+        findings.extend(autoreview_core::run_spring_session_policy(root, paths));
+        if checks.immutable_github_action_refs {
+            findings.extend(autoreview_core::run_workflow_policy(root, paths));
+        }
     }
     if !input.wants("correctness") {
         return findings;

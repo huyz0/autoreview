@@ -1,5 +1,6 @@
 mod flow;
 mod http;
+mod jwt;
 mod package;
 mod range_assert;
 mod span;
@@ -14,6 +15,7 @@ use tree_sitter::Node;
 
 use super::{location, Rule};
 pub(super) use http::RULE as HTTP_RULE;
+pub(super) use jwt::RULE as JWT_RULE;
 pub(super) use range_assert::RULE as RANGE_ASSERT_RULE;
 pub(super) use span::RULE as SPAN_RULE;
 pub(super) use span::TRACE_PARENT_RULE;
@@ -57,6 +59,7 @@ fn package_findings(peers: &[&package::File], paths: &[String]) -> Vec<AgentFind
         if paths.contains(&file.path) {
             findings.extend(span::findings(file));
             findings.extend(http::findings(file));
+            findings.extend(jwt::findings(file));
             findings.extend(tls::findings(file, peers));
             findings.extend(transactions::findings(file));
             findings.extend(range_assert::findings(file, peers));

@@ -3,6 +3,7 @@ mod fetch;
 mod go_cancel;
 mod java;
 mod jest;
+mod node_security;
 mod node_tls;
 pub(super) mod outbox;
 mod prisma;
@@ -46,7 +47,9 @@ fn rules() -> impl Iterator<Item = &'static Rule> {
         &react::INTERVAL_RULE,
         &prisma::RULE,
         &rabbitmq::RULE,
-    ].into_iter().chain(fetch::RULES).chain(discarded_strings::RULES).chain(promise_value::RULES)
+        &go_cancel::JWT_RULE,
+    ].into_iter().chain(fetch::RULES).chain(discarded_strings::RULES)
+        .chain(promise_value::RULES).chain(node_security::RULES.iter().copied())
 }
 
 pub(super) fn semantic_ids() -> impl Iterator<Item = String> {
@@ -88,6 +91,7 @@ pub fn run_framework_checks(root: &Path, changed: &[String]) -> Vec<AgentFinding
         web_findings.extend(prisma::inspect(path, source, file));
         web_findings.extend(rabbitmq::inspect(path, source, file));
         web_findings.extend(jest::inspect(root, path, source, file));
+        web_findings.extend(node_security::inspect(path, source, file));
         web_findings.extend(node_tls::inspect(path, source, file));
         web_findings.extend(fetch::inspect(path, source, file));
         web_findings.extend(promise_value::inspect(path, source, file));
@@ -182,7 +186,7 @@ fn parse_source(parser: &mut Parser, path: &Path) -> Option<(String, Tree)> {
     (!tree.root_node().has_error()).then_some((source, tree))
 }
 
-fn children(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
+fn children(node: Node<'_>) -> impl DoubleEndedIterator<Item = Node<'_>> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor)
         .collect::<Vec<_>>()

@@ -1,4 +1,5 @@
 mod bindings;
+pub(super) mod node_calls;
 
 pub(super) use bindings::BindingScopes;
 
