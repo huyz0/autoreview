@@ -570,6 +570,14 @@ fn unreadable_package_index_source_reaches_review_and_blocks_replay() {
 }
 
 #[test]
+fn malformed_unknown_package_source_reaches_review_and_blocks_replay() {
+    let initial = "package caller;\nimport target.Helper;\nclass Main { void run() {} }\n";
+    let changed = "package caller;\nimport target.Helper;\nclass Main { void run() { int n = 1; } }\n";
+    let repo = init_repo(&[("Main.java", initial), ("unknown/Broken.kt", "fun broken( {\n")]);
+    assert_jvm_dependency_coverage(&repo, changed, "package_index_syntax_errors", "unknown/Broken.kt");
+}
+
+#[test]
 fn unresolved_kotlin_callback_reaches_review_and_blocks_replay() {
     if !ast_grep_available() { return; }
     let clean = "suspend fun run() {\n work()\n}\n";
