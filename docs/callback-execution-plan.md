@@ -57,6 +57,12 @@ initializer, and no other observed direct field writes or accessor references
 in either compiled snapshot. The supplied source subset and external report
 are not independently authenticated by the review engine, so these facts
 still do not justify suppressing the finding.
+The pinned RediCloud compiler snapshots also resolve the setter argument to a
+zero-parameter external Java declaration returning `SshServer`, with no
+dispatch receiver or type parameters; the receiver property belongs to the
+same compiled source as the callback. These are still diagnostic facts until
+the review process verifies the compiler, inputs, classpath identity and
+execution contract itself.
 The project also pins Kotlin 2.3.21. The experimental probe supports that
 version and 2.2.20 using separately built version-specific registrars; this
 does not by itself provide the project's complete source or classpath.

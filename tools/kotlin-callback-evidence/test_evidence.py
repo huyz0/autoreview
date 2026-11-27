@@ -20,6 +20,33 @@ def utf16_slice(source: str, start: int, end: int) -> str:
     return source.encode("utf-16-le")[start * 2 : end * 2].decode("utf-16-le")
 
 
+class ClassIdentityTest(unittest.TestCase):
+    def test_unique_class_and_ambiguous_archives(self) -> None:
+        name = "org/example/Server.class"
+        with tempfile.TemporaryDirectory() as directory:
+            jar = pathlib.Path(directory) / "input.jar"
+            def write(entries):
+                with zipfile.ZipFile(jar, "w") as archive:
+                    for path, contents in entries:
+                        archive.writestr(path, contents)
+                return [{"snapshot": jar, "sha256": snapshot.digest(jar.read_bytes())}]
+            jars = write([(name, b"class bytes")])
+            self.assertEqual(snapshot.resolve_unique_classes(jars, [name]), [{
+                "name": name, "jarSha256": jars[0]["sha256"],
+                "classSha256": snapshot.digest(b"class bytes"),
+            }])
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                snapshot.resolve_unique_classes(jars + jars, [name])
+            with self.assertRaisesRegex(ValueError, "multi-release"):
+                snapshot.resolve_unique_classes(write([(name, b"a"), ("META-INF/versions/21/" + name, b"b")]), [name])
+            with self.assertRaisesRegex(ValueError, "oversized"):
+                snapshot.resolve_unique_classes(write([(name, b"a" * (snapshot.CLASS_LIMIT + 1))]), [name])
+            with self.assertRaisesRegex(ValueError, "missing"):
+                snapshot.resolve_unique_classes(jars, ["missing/Other.class"])
+            with self.assertRaisesRegex(ValueError, "invalid"):
+                snapshot.resolve_unique_classes(jars, ["../Server.class"])
+
+
 class EvidenceTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -94,10 +121,10 @@ class EvidenceTest(unittest.TestCase):
     def test_receiver_property_setter_observations_include_unknown_values(self) -> None:
         source = (
             "package demo\nimport vendor.Auth\nimport vendor.Server\n"
-            "fun create(): Server = Server()\n"
+            "fun create(n: Int): Server = Server()\n"
             "class Holder(private var server: Server) { "
             "fun install() { server.authenticator = Auth { true } }; "
-            "fun change(s: Server) { server = s }; fun reset() { server = create() } }\n"
+            "fun change(s: Server) { server = s }; fun reset() { server = create(1) } }\n"
         )
         result = self.compile("property_writes", source)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -105,6 +132,8 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["receiverProperty"], "demo.Holder.server")
         self.assertEqual(records[0]["observedSetterCallees"], [None, "demo.create"])
+        self.assertIsNone(records[0]["observedSetterDetails"][0])
+        self.assertEqual(records[0]["observedSetterDetails"][1]["parameterTypes"], ["kotlin.Int"])
 
     def test_receiver_property_custom_setter_and_reference_are_observed(self) -> None:
         source = (
@@ -163,16 +192,26 @@ class EvidenceTest(unittest.TestCase):
                 if path != target:
                     self.assertEqual((before / path).read_bytes(), (root / path).read_bytes())
             output = self.root / f"redicloud-{index}.json"
-            snapshot.run(self.kotlinc, self.plugin, files, jars, output, jvm_target="21")
+            required = ["org/apache/sshd/server/SshServer.class", "org/apache/sshd/server/ServerBuilder.class",
+                        "org/apache/sshd/common/BaseBuilder.class", "org/apache/sshd/server/auth/password/PasswordAuthenticator.class"]
+            snapshot.run(self.kotlinc, self.plugin, files, jars, output, jvm_target="21", required_classes=required)
             reports.append(json.loads(output.read_text(encoding="utf-8")))
         self.assertEqual(reports[0]["dependencies"], reports[1]["dependencies"])
-        for report in reports:
+        self.assertEqual(reports[0]["resolvedClasses"], reports[1]["resolvedClasses"])
+        self.assertEqual([item["name"] for item in reports[0]["resolvedClasses"]], required)
+        for index, report in enumerate(reports):
             records = [record for record in report["evidence"]["records"] if record["callee"] == "org.apache.sshd.server.SshServer.setPasswordAuthenticator"]
             self.assertEqual(len(records), 1)
             self.assertEqual((records[0]["samType"], records[0]["parameter"], records[0]["modality"]), ("org.apache.sshd.server.auth.password.PasswordAuthenticator", 0, "OPEN"))
             self.assertEqual(records[0]["receiverStaticType"], "org.apache.sshd.server.SshServer")
             self.assertEqual(records[0]["receiverProperty"], "dev.redicloud.cluster.file.FileCluster.sshd")
             self.assertEqual(records[0]["observedSetterCallees"], ["org.apache.sshd.server.SshServer.setUpDefaultServer"])
+            self.assertEqual(records[0]["propertySourceSha256"], hashes[index])
+            self.assertEqual(records[0]["observedSetterDetails"], [{
+                "callee": "org.apache.sshd.server.SshServer.setUpDefaultServer",
+                "origin": "IR_EXTERNAL_JAVA_DECLARATION_STUB", "dispatchReceiver": False,
+                "parameterTypes": [], "returnType": "org.apache.sshd.server.SshServer", "typeParameters": 0,
+            }])
             self.assertEqual(records[0]["propertyEvidence"], {
                 "visibility": "private", "defaultGetter": True, "defaultSetter": True,
                 "nullInitializer": True, "directFieldWrites": 0, "accessorReferences": 0,

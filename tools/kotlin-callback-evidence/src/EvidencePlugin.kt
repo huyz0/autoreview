@@ -27,6 +27,7 @@ import org.jetbrains.kotlin.ir.symbols.IrPropertySymbol
 import org.jetbrains.kotlin.ir.types.classFqName
 import org.jetbrains.kotlin.ir.types.IrSimpleType
 import org.jetbrains.kotlin.ir.util.fqNameWhenAvailable
+import org.jetbrains.kotlin.ir.util.fileOrNull
 import org.jetbrains.kotlin.ir.visitors.IrVisitorVoid
 import org.jetbrains.kotlin.ir.visitors.acceptChildrenVoid
 
@@ -53,6 +54,8 @@ private data class Record(
     val receiverStaticType: String?,
     val receiverProperty: String?,
     val observedSetterCallees: List<String?>?,
+    val observedSetterDetails: List<SetterDetail?>?,
+    val propertySourceSha256: String?,
     val propertyEvidence: PropertyEvidence?,
 )
 
@@ -66,9 +69,19 @@ private data class PropertyEvidence(
 )
 
 private data class PropertyObservations(
-    val setters: Map<IrPropertySymbol, List<String?>>,
+    val setters: Map<IrPropertySymbol, List<SetterDetail?>>,
     val directWrites: Map<IrPropertySymbol, Int>,
     val references: Map<IrPropertySymbol, Int>,
+    val sourceHashes: Map<String, String>,
+)
+
+private data class SetterDetail(
+    val callee: String,
+    val origin: String,
+    val dispatchReceiver: Boolean,
+    val parameterTypes: List<String?>,
+    val returnType: String?,
+    val typeParameters: Int,
 )
 
 @OptIn(UnsafeDuringIrConstructionAPI::class)
@@ -90,7 +103,7 @@ internal class EvidenceExtension : IrGenerationExtension {
                 element.acceptChildrenVoid(this)
             }
         })
-        val setters = mutableMapOf<IrPropertySymbol, MutableList<String?>>()
+        val setters = mutableMapOf<IrPropertySymbol, MutableList<SetterDetail?>>()
         val fields = properties.mapNotNull { property -> property.owner.backingField?.symbol?.let { it to property } }.toMap()
         val directWrites = mutableMapOf<IrPropertySymbol, Int>()
         val references = mutableMapOf<IrPropertySymbol, Int>()
@@ -124,16 +137,21 @@ internal class EvidenceExtension : IrGenerationExtension {
                 element.acceptChildrenVoid(this)
             }
         })
-        val observations = PropertyObservations(setters = setters, directWrites = directWrites, references = references)
         var totalSourceBytes = 0
         val digest = MessageDigest.getInstance("SHA-256")
-        for (file in moduleFragment.files) {
+        val sourceHashes = moduleFragment.files.associate { file ->
             val path = Path.of(file.fileEntry.name).toAbsolutePath().normalize()
             val bytes = Files.newInputStream(path).use { it.readNBytes(MAX_SOURCE_BYTES + 1) }
             require(bytes.size <= MAX_SOURCE_BYTES) { "source exceeds evidence limit" }
             totalSourceBytes += bytes.size
             require(totalSourceBytes <= MAX_TOTAL_SOURCE_BYTES) { "total source exceeds evidence limit" }
             val hash = digest.digest(bytes).joinToString("") { "%02x".format(it) }
+            path.toString() to hash
+        }
+        val observations = PropertyObservations(setters = setters, directWrites = directWrites, references = references, sourceHashes = sourceHashes)
+        for (file in moduleFragment.files) {
+            val path = Path.of(file.fileEntry.name).toAbsolutePath().normalize()
+            val hash = sourceHashes.getValue(path.toString())
             file.acceptChildrenVoid(object : IrVisitorVoid() {
                 override fun visitElement(element: IrElement) {
                     if (element is IrCall) collect(call = element, path = path.toString(), hash = hash, records = records, observations = observations)
@@ -178,7 +196,11 @@ private fun collect(call: IrCall, path: String, hash: String, records: MutableLi
             },
             receiverStaticType = receiverStaticType,
             receiverProperty = property?.owner?.fqNameWhenAvailable?.asString(),
-            observedSetterCallees = property?.let { observations.setters[it]?.toList() ?: emptyList() },
+            observedSetterCallees = property?.let { observations.setters[it]?.map { detail -> detail?.callee } ?: emptyList() },
+            observedSetterDetails = property?.let { observations.setters[it]?.toList() ?: emptyList() },
+            propertySourceSha256 = property?.owner?.fileOrNull?.fileEntry?.name?.let {
+                observations.sourceHashes[Path.of(it).toAbsolutePath().normalize().toString()]
+            },
             propertyEvidence = property?.let { propertyEvidence(it, observations) },
         ))
     }
@@ -209,7 +231,7 @@ private fun receiverProperty(call: IrCall?): IrPropertySymbol? {
 }
 
 @OptIn(UnsafeDuringIrConstructionAPI::class)
-private fun collectSetter(call: IrCall, properties: Set<IrPropertySymbol>, setters: MutableMap<IrPropertySymbol, MutableList<String?>>): Boolean {
+private fun collectSetter(call: IrCall, properties: Set<IrPropertySymbol>, setters: MutableMap<IrPropertySymbol, MutableList<SetterDetail?>>): Boolean {
     val function = call.symbol.owner
     val property = function.correspondingPropertySymbol ?: return false
     if (property !in properties) return false
@@ -219,8 +241,21 @@ private fun collectSetter(call: IrCall, properties: Set<IrPropertySymbol>, sette
     val value = arguments.single().second as? IrCall
     val calls = setters.getOrPut(property) { mutableListOf() }
     check(calls.size < MAX_PROPERTY_SETTERS) { "too many calls to one property setter" }
-    calls.add(value?.symbol?.owner?.fqNameWhenAvailable?.asString())
+    calls.add(value?.let(::setterDetail))
     return true
+}
+
+@OptIn(UnsafeDuringIrConstructionAPI::class)
+private fun setterDetail(call: IrCall): SetterDetail? {
+    val function = call.symbol.owner
+    val name = function.fqNameWhenAvailable?.asString() ?: return null
+    if (call.arguments.size != function.parameters.size) return null
+    return SetterDetail(
+        callee = name, origin = function.origin.toString(),
+        dispatchReceiver = function.parameters.any { it.kind == IrParameterKind.DispatchReceiver || it.kind == IrParameterKind.ExtensionReceiver },
+        parameterTypes = function.parameters.filter { it.kind == IrParameterKind.Regular }.map { it.type.classFqName?.asString() },
+        returnType = function.returnType.classFqName?.asString(), typeParameters = function.typeParameters.size,
+    )
 }
 
 private fun encode(records: List<Record>): String = buildString {
@@ -248,6 +283,16 @@ private fun encode(records: List<Record>): String = buildString {
             }
             append(']')
         }
+        append(",\"propertySourceSha256\":").append(record.propertySourceSha256?.let(::quote) ?: JSON_NULL)
+        append(",\"observedSetterDetails\":")
+        if (record.observedSetterDetails == null) append(JSON_NULL) else {
+            append('[')
+            record.observedSetterDetails.forEachIndexed { detailIndex, detail ->
+                if (detailIndex != 0) append(',')
+                if (detail == null) append(JSON_NULL) else appendSetterDetail(detail)
+            }
+            append(']')
+        }
         append(",\"propertyEvidence\":")
         val property = record.propertyEvidence
         if (property == null) append(JSON_NULL) else {
@@ -266,6 +311,19 @@ private fun encode(records: List<Record>): String = buildString {
         append("]}")
     }
     append("]}")
+}
+
+private fun StringBuilder.appendSetterDetail(detail: SetterDetail) {
+    append("{\"callee\":").append(quote(detail.callee))
+    append(",\"origin\":").append(quote(detail.origin))
+    append(",\"dispatchReceiver\":").append(detail.dispatchReceiver)
+    append(",\"parameterTypes\":[")
+    detail.parameterTypes.forEachIndexed { index, type ->
+        if (index != 0) append(',')
+        append(type?.let(::quote) ?: JSON_NULL)
+    }
+    append("],\"returnType\":").append(detail.returnType?.let(::quote) ?: JSON_NULL)
+    append(",\"typeParameters\":").append(detail.typeParameters).append('}')
 }
 
 private fun quote(value: String): String = buildString {

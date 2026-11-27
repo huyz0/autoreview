@@ -35,6 +35,8 @@ struct Record {
     receiver_static_type: Option<String>,
     receiver_property: Option<String>,
     observed_setter_callees: Option<Vec<Option<String>>>,
+    observed_setter_details: Option<Vec<Option<SetterDetail>>>,
+    property_source_sha256: Option<String>,
     property_evidence: Option<PropertyEvidence>,
 }
 
@@ -47,6 +49,17 @@ struct PropertyEvidence {
     null_initializer: bool,
     direct_field_writes: u32,
     accessor_references: u32,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetterDetail {
+    callee: String,
+    origin: String,
+    dispatch_receiver: bool,
+    parameter_types: Vec<Option<String>>,
+    return_type: Option<String>,
+    type_parameters: usize,
 }
 
 pub(super) struct Evidence { by_file: HashMap<PathBuf, Vec<Record>> }
@@ -89,7 +102,8 @@ fn index_records(sources: &HashMap<PathBuf, (PathBuf, String)>, input: Vec<Recor
     for record in input {
         let path = record.path.canonicalize().map_err(|_| ())?;
         let (target, hash) = sources.get(&path).ok_or(())?;
-        if hash != &record.sha256 || !valid_record(&record) { return Err(()); }
+        if hash != &record.sha256 || !valid_record(&record)
+            || record.property_source_sha256.as_ref().is_some_and(|hash| !sources.values().any(|(_, source_hash)| source_hash == hash)) { return Err(()); }
         let records = by_file.entry(target.clone()).or_default();
         if records.len() >= MAX_RECORDS_PER_FILE { return Err(()); }
         records.push(record);
@@ -102,7 +116,24 @@ fn valid_record(record: &Record) -> bool {
         && record.receiver_static_type.as_ref().is_none_or(|name| name.len() <= 1024)
         && record.receiver_property.as_ref().is_none_or(|name| name.len() <= 1024)
         && record.property_evidence.as_ref().is_none_or(|item| item.visibility.len() <= 32)
+        && record.property_source_sha256.as_ref().is_none_or(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        && record.observed_setter_details.as_ref().is_none_or(|items| items.len() <= 512 && items.iter().flatten().all(valid_setter_detail))
         && record.observed_setter_callees.as_ref().is_none_or(|names| names.len() <= 512 && names.iter().flatten().all(|name| name.len() <= 1024))
+        && setter_lists_agree(record)
+}
+
+fn setter_lists_agree(record: &Record) -> bool {
+    match (&record.observed_setter_callees, &record.observed_setter_details) {
+        (Some(names), Some(details)) => names.len() == details.len() && names.iter().zip(details).all(|(name, detail)| name.as_deref() == detail.as_ref().map(|item| item.callee.as_str())),
+        (_, None) => true,
+        (None, Some(_)) => false,
+    }
+}
+
+fn valid_setter_detail(detail: &SetterDetail) -> bool {
+    detail.callee.len() <= 1024 && detail.origin.len() <= 128 && detail.type_parameters <= 512
+        && detail.parameter_types.len() <= 512 && detail.parameter_types.iter().flatten().all(|name| name.len() <= 1024)
+        && detail.return_type.as_ref().is_none_or(|name| name.len() <= 1024)
 }
 
 impl Evidence {
@@ -120,7 +151,8 @@ impl Evidence {
         Some(serde_json::json!({ "status": "unverified", "callee": record.callee,
             "parameter": record.parameter, "samType": record.sam_type, "modality": record.modality,
             "receiverStaticType": record.receiver_static_type, "receiverProperty": record.receiver_property,
-            "observedSetterCallees": record.observed_setter_callees, "propertyEvidence": record.property_evidence }))
+            "observedSetterCallees": record.observed_setter_callees, "propertyEvidence": record.property_evidence,
+            "observedSetterDetails": record.observed_setter_details, "propertySourceSha256": record.property_source_sha256 }))
     }
 }
 
@@ -199,6 +231,8 @@ mod tests {
         value["evidence"]["records"][0]["receiverStaticType"] = "example.Server".into();
         value["evidence"]["records"][0]["receiverProperty"] = "example.Owner.server".into();
         value["evidence"]["records"][0]["observedSetterCallees"] = serde_json::json!(["example.create", null]);
+        value["evidence"]["records"][0]["observedSetterDetails"] = serde_json::json!([{"callee":"example.create","origin":"DEFINED","dispatchReceiver":false,"parameterTypes":[],"returnType":"example.Server","typeParameters":0}, null]);
+        value["evidence"]["records"][0]["propertySourceSha256"] = value["sources"][0]["sha256"].clone();
         value["evidence"]["records"][0]["propertyEvidence"] = serde_json::json!({"visibility":"private", "defaultGetter":true, "defaultSetter":true, "nullInitializer":true, "directFieldWrites":0, "accessorReferences":0});
         let evidence = parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).unwrap();
         let mut findings = vec![finding()];
@@ -208,9 +242,16 @@ mod tests {
         assert_eq!(metadata["receiverStaticType"], "example.Server");
         assert_eq!(metadata["receiverProperty"], "example.Owner.server");
         assert_eq!(metadata["observedSetterCallees"], serde_json::json!(["example.create", null]));
+        assert_eq!(metadata["observedSetterDetails"][0]["returnType"], "example.Server");
         assert_eq!(metadata["propertyEvidence"]["defaultGetter"], true);
         assert_eq!(metadata["status"], "unverified");
         assert!(coverage.iter().any(|issue| issue.reason == "callback_execution_unresolved"));
+        value["evidence"]["records"][0]["observedSetterDetails"][0]["callee"] = "example.other".into();
+        assert!(parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).is_err());
+        value["evidence"]["records"][0]["observedSetterDetails"][0]["callee"] = "example.create".into();
+        value["evidence"]["records"][0]["propertySourceSha256"] = "0".repeat(64).into();
+        assert!(parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).is_err());
+        value["evidence"]["records"][0]["propertySourceSha256"] = serde_json::Value::Null;
         value["evidence"]["records"][0]["receiverStaticType"] = "x".repeat(1025).into();
         assert!(parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).is_err());
         value["evidence"]["records"][0]["receiverStaticType"] = serde_json::Value::Null;

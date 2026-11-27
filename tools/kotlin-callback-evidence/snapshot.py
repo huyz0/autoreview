@@ -6,14 +6,50 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
+import zipfile
 
 SOURCE_LIMIT = 4 * 1024 * 1024
 TOTAL_SOURCE_LIMIT = 16 * 1024 * 1024
 JAR_LIMIT = 64 * 1024 * 1024
 TOTAL_JAR_LIMIT = 256 * 1024 * 1024
 OUTPUT_LIMIT = 1024 * 1024
+CLASS_LIMIT = 4 * 1024 * 1024
+JAR_ENTRIES_LIMIT = 200_000
+
+
+def resolve_unique_classes(jars: list[dict], classes: list[str]) -> list[dict]:
+    if len(classes) > 128 or len(set(classes)) != len(classes):
+        raise ValueError("invalid required class list")
+    pattern = re.compile(r"(?:[A-Za-z_$][A-Za-z0-9_$]*/)*[A-Za-z_$][A-Za-z0-9_$]*\.class\Z")
+    if any(not pattern.fullmatch(name) for name in classes):
+        raise ValueError("invalid required class name")
+    required = set(classes)
+    found = {}
+    for jar in jars:
+        with zipfile.ZipFile(jar["snapshot"]) as archive:
+            entries = archive.infolist()
+            if len(entries) > JAR_ENTRIES_LIMIT:
+                raise ValueError("too many JAR entries")
+            for entry in entries:
+                if entry.filename.startswith("META-INF/versions/"):
+                    versioned = entry.filename[len("META-INF/versions/"):].partition("/")[2]
+                    if versioned in required:
+                        raise ValueError(f"multi-release class is ambiguous: {versioned}")
+                if entry.filename not in required:
+                    continue
+                if entry.filename in found or entry.file_size > CLASS_LIMIT:
+                    raise ValueError(f"duplicate or oversized class: {entry.filename}")
+                with archive.open(entry) as stream:
+                    data = stream.read(CLASS_LIMIT + 1)
+                if len(data) > CLASS_LIMIT:
+                    raise ValueError(f"oversized class: {entry.filename}")
+                found[entry.filename] = {"name": entry.filename, "jarSha256": jar["sha256"], "classSha256": digest(data)}
+    if len(found) != len(classes):
+        raise ValueError("required class missing")
+    return [found[name] for name in classes]
 
 
 def read_limited(path: pathlib.Path, limit: int) -> bytes:
@@ -89,7 +125,7 @@ def verified_report(report_path: pathlib.Path, sources: list[dict], inputs: list
     return report
 
 
-def run(kotlinc: pathlib.Path, plugin: pathlib.Path, sources: list[pathlib.Path], jars: list[pathlib.Path], output: pathlib.Path, jvm_target: str = "1.8") -> None:
+def run(kotlinc: pathlib.Path, plugin: pathlib.Path, sources: list[pathlib.Path], jars: list[pathlib.Path], output: pathlib.Path, jvm_target: str = "1.8", required_classes: list[str] | None = None) -> None:
     if jvm_target not in ("1.8", *(str(version) for version in range(9, 26))):
         raise ValueError("unsupported JVM target")
     kotlinc = resolve_input(kotlinc)
@@ -99,6 +135,7 @@ def run(kotlinc: pathlib.Path, plugin: pathlib.Path, sources: list[pathlib.Path]
         root = pathlib.Path(temporary)
         copied_sources = snapshot_inputs(sources, root / "sources", ".kt", SOURCE_LIMIT, TOTAL_SOURCE_LIMIT)
         dependencies = snapshot_inputs(jars, root / "jars", ".jar", JAR_LIMIT, TOTAL_JAR_LIMIT)
+        resolved_classes = resolve_unique_classes(dependencies, required_classes or []) if required_classes else []
         copied_plugin = snapshot_inputs([plugin], root / "plugin", ".jar", JAR_LIMIT, JAR_LIMIT)
         for item in copied_sources:
             item["limit"] = SOURCE_LIMIT
@@ -115,7 +152,7 @@ def run(kotlinc: pathlib.Path, plugin: pathlib.Path, sources: list[pathlib.Path]
         report = verified_report(report_path, copied_sources, copied_sources + dependencies + copied_plugin)
         manifest = lambda items: [{"path": str(item["original"]), "sha256": item["sha256"]} for item in items]
         result = {"snapshotVersion": 1, "jvmTarget": jvm_target, "sources": manifest(copied_sources), "dependencies": manifest(dependencies),
-                  "plugin": manifest(copied_plugin)[0], "evidence": report}
+                  "plugin": manifest(copied_plugin)[0], "evidence": report, "resolvedClasses": resolved_classes}
         encoded = json.dumps(result, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         if len(encoded) > OUTPUT_LIMIT:
             raise ValueError("output exceeds limit")
@@ -131,8 +168,9 @@ def main() -> None:
     parser.add_argument("--jar", type=pathlib.Path, action="append", required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
     parser.add_argument("--jvm-target", default="1.8")
+    parser.add_argument("--require-class", action="append", default=[])
     args = parser.parse_args()
-    run(args.kotlinc, args.plugin, args.source, args.jar, args.output, args.jvm_target)
+    run(args.kotlinc, args.plugin, args.source, args.jar, args.output, args.jvm_target, args.require_class)
 
 
 if __name__ == "__main__":
