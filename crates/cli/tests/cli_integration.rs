@@ -415,7 +415,8 @@ fn replay_keeps_typed_benchmark_incomplete_with_compatibility_adapter() {
     let config = r#"{"compilerOptions":{"target":"ES2022","strict":true},"files":["main.ts"]}"#;
     let repo = init_repo(&[("main.ts", source), ("tsconfig.json", config)]);
     let before = current_commit(repo.path());
-    repo.commit(&[("main.ts", &format!("{source}// fixed snapshot\n"))], "second revision");
+    let nested = format!("{source}declare function factory(): string & (() => Promise<void>);\nexport function nested() {{ factory()(); }}\n");
+    repo.commit(&[("main.ts", &nested)], "add nested call");
     let after = current_commit(repo.path());
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
     let pack = root.join("benchmarks/packs/checkout-promise");
@@ -426,13 +427,31 @@ fn replay_keeps_typed_benchmark_incomplete_with_compatibility_adapter() {
     let suite = serde_json::json!({"cases":[{"name":"typed","rule":{"tool":"autoreview-dataflow","id":"benchmark-typescript-unobserved-promise"},"before":{"commit":before,"path":"main.ts","lines":[]},"after":{"commit":after,"path":"main.ts","lines":[]}}]});
     std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
     let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
-        .env("AUTOREVIEW_TYPESCRIPT_MODULE", adapter).env("AUTOREVIEW_BENCHMARK_TYPESCRIPT_MODULE", compiler)
+        .env("AUTOREVIEW_TYPESCRIPT_MODULE", &adapter).env("AUTOREVIEW_BENCHMARK_TYPESCRIPT_MODULE", &compiler)
         .args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
     let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
     assert_eq!(report["coverage"][0]["incomplete"], 1);
     assert_eq!(report["failures"][0]["kind"], "incomplete-analysis");
     assert!(report["failures"][0]["error"].as_str().unwrap().contains("promise type could not be verified"));
     assert!(report["rules"].as_array().unwrap().is_empty());
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .env("AUTOREVIEW_TYPESCRIPT_MODULE", &adapter).env("AUTOREVIEW_BENCHMARK_TYPESCRIPT_MODULE", &compiler)
+        .args(["diff", "--base", &before, "--head", &after, "--static-only"]).assert().success();
+    let path = report_path_from_stdout(&String::from_utf8_lossy(&result.get_output().stdout));
+    let review: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert!(review["findings"].as_array().unwrap().iter().any(|finding|
+        finding["source"]["ruleId"] == "benchmark-typescript-unobserved-promise" && finding["location"]["range"]["startLine"] == 5), "{review}");
+    assert!(review["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "promise_type_unresolved" && issue["line"] == 5), "{review}");
+    let nested_suite = serde_json::json!({"cases":[{"name":"nested", "rule":{"tool":"autoreview-dataflow","id":"benchmark-typescript-unobserved-promise"},"before":{"commit":after,"path":"main.ts","lines":[5]},"after":{"commit":after,"path":"main.ts","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), nested_suite.to_string()).unwrap();
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .env("AUTOREVIEW_TYPESCRIPT_MODULE", &adapter).env("AUTOREVIEW_BENCHMARK_TYPESCRIPT_MODULE", &compiler)
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
+    let replay: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(replay["coverage"][0]["incomplete"], 1, "{replay}");
+    assert!(replay["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "promise_type_unresolved" && issue["line"] == 5), "{replay}");
 }
 
 #[test]
