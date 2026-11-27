@@ -20,6 +20,7 @@ import org.jetbrains.kotlin.ir.expressions.IrFunctionReference
 import org.jetbrains.kotlin.ir.expressions.IrPropertyReference
 import org.jetbrains.kotlin.ir.expressions.IrSetField
 import org.jetbrains.kotlin.ir.expressions.IrConst
+import org.jetbrains.kotlin.ir.declarations.IrClass
 import org.jetbrains.kotlin.ir.expressions.IrTypeOperator
 import org.jetbrains.kotlin.ir.expressions.IrTypeOperatorCall
 import org.jetbrains.kotlin.ir.symbols.UnsafeDuringIrConstructionAPI
@@ -93,8 +94,13 @@ internal class EvidenceExtension : IrGenerationExtension {
         val records = mutableListOf<Record>()
         require(moduleFragment.files.size <= MAX_FILES) { "too many source files" }
         val properties = mutableSetOf<IrPropertySymbol>()
+        val sourceClasses = mutableSetOf<String>()
         moduleFragment.acceptChildrenVoid(object : IrVisitorVoid() {
             override fun visitElement(element: IrElement) {
+                if (element is IrClass) {
+                    element.fqNameWhenAvailable?.asString()?.let { sourceClasses.add(it) }
+                    require(sourceClasses.size <= MAX_RECORDS) { "too many source classes" }
+                }
                 if (element is IrCall && element.arguments.any { it is IrTypeOperatorCall && it.operator == IrTypeOperator.SAM_CONVERSION }) {
                     val receiverIndex = element.symbol.owner.parameters.indexOfFirst { it.kind == IrParameterKind.DispatchReceiver }
                     receiverProperty(element.arguments.getOrNull(receiverIndex) as? IrCall)?.let { properties.add(it) }
@@ -159,7 +165,7 @@ internal class EvidenceExtension : IrGenerationExtension {
                 }
             })
         }
-        val json = encode(records)
+        val json = encode(records, sourceClasses.sorted())
         val bytes = json.toByteArray(StandardCharsets.UTF_8)
         require(bytes.size <= MAX_OUTPUT_BYTES) { "evidence output exceeds limit" }
         Files.write(Path.of(output), bytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
@@ -258,8 +264,13 @@ private fun setterDetail(call: IrCall): SetterDetail? {
     )
 }
 
-private fun encode(records: List<Record>): String = buildString {
-    append("{\"version\":2,\"compiler\":").append(quote(KotlinCompilerVersion.VERSION)).append(",\"records\":[")
+private fun encode(records: List<Record>, sourceClasses: List<String>): String = buildString {
+    append("{\"version\":2,\"compiler\":").append(quote(KotlinCompilerVersion.VERSION)).append(",\"sourceClasses\":[")
+    sourceClasses.forEachIndexed { index, name ->
+        if (index != 0) append(',')
+        append(quote(name))
+    }
+    append("],\"records\":[")
     records.forEachIndexed { index, record ->
         if (index != 0) append(',')
         append("{\"path\":").append(quote(record.path))

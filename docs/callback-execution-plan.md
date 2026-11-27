@@ -67,6 +67,28 @@ The project also pins Kotlin 2.3.21. The experimental probe supports that
 version and 2.2.20 using separately built version-specific registrars; this
 does not by itself provide the project's complete source or classpath.
 
+An explicitly configured review can run the snapshot probe itself by setting
+`AUTOREVIEW_KOTLIN_CALLBACK_PROBE_CONFIG` to an absolute JSON file. The file
+specifies absolute `python`, `kotlinc`, and `plugin` paths, a `jvmTarget`,
+snapshot-relative `sources`, compile `jars`, and `runtimeJars`. These programs and the
+plugin execute with the user's privileges and must be trusted. The same
+relative source list is resolved separately in each replay snapshot. Invalid
+configuration or probe failure remains incomplete coverage. The configuration
+may also specify `requiredClasses` to hash uniquely present JAR entries; it
+cannot be combined with `AUTOREVIEW_KOTLIN_CALLBACK_EVIDENCE`. The runner
+can check `sourceRoots` against the source list before and after compilation,
+and independently rehashes the sources, dependencies and plugin. Declaring roots does not
+prove that they cover the build's actual source sets. Only when the user explicitly sets
+`trustDeclaredBuildInputs` to `true`, certifying that the configured source roots and
+compile and runtime classpaths describe the actual build, can a narrowly scoped
+Apache SSHD 2.17.1 contract suppress a callback finding. It requires the audited
+class hashes on both classpaths, no conflicting source or compiled classes, and a private
+receiver whose only observed non-null assignment is the audited default factory.
+Unverified caller-supplied reports and all other cases remain incomplete. This
+opt-in assumes the trusted compiler, plugin and Python runner are authentic,
+the declared build inputs are complete, and runtime instrumentation or reflective
+mutation does not change those inputs. The runner does not contain descendants.
+
 Initially target Kotlin coroutine checks, but make contracts independent of
 the individual rule and language. The model must distinguish a functional
 interface value from its later invocation, including immediate invocation of
@@ -146,30 +168,17 @@ budget. Same-named shadowed identifiers conservatively prevent that proof.
 ## Open design decisions
 
 An experimental standalone compiler-IR probe lives in
-`tools/kotlin-callback-evidence`. It records some resolved SAM conversions,
-and can optionally add unverified metadata to unresolved review findings. It
-does not change review or replay decisions. Its output does
-not prove execution timing, complete resolution, overload identity, or that
-source and dependency snapshots are unchanged. Simple parameter classifiers can
-distinguish some overloads, but are not complete signatures. The README records its limits
-and the additional verification required before using it as rule evidence.
-An optional snapshot runner copies explicitly listed sources, JARs and the
-plugin, checks them after successful compilation, and maps spans back to
-source paths. Its optional diagnostic metadata is not execution evidence and
-cannot suppress a finding. The runner does not discover a
-project's full classpath, and does not establish immutable compiler or JDK
-identity, process containment, overload identity, or execution behavior.
+`tools/kotlin-callback-evidence`. Its caller-supplied reports remain unverified
+diagnostics. The review-owned runner and narrowly scoped opt-in SSHD contract
+are described above. General dependency discovery, compiler and JDK identity,
+process containment, overload identity, and additional execution contracts
+remain open.
 
-The repository currently has no Kotlin classpath-backed resolver. Before
-claiming a third-party interface is resolved, choose and test a trusted source
-of declaration identity, such as an optional compiler-backed probe or a
-verified, versioned dependency index. A syntactic import alone is insufficient
+The repository has no general Kotlin classpath-backed resolver. A syntactic import alone is insufficient
 when local or dependency declarations can shadow it. Establish how such a
 probe behaves on unavailable dependencies and snapshots, including whether it
 executes project tooling, before making it a default.
 
-The existing ast-grep pipeline does not carry structured coverage for an
-individual uncertain match. Adding this condition therefore requires either a
-new semantic rule backend or an explicit post-processing contract with shared
-review, replay, and gate behavior. Do not implement a CLI-only filter that
-silently drops findings or makes replay score an unresolved callback as clean.
+The ast-grep post-processing path attaches structured coverage to uncertain
+matches, and review, replay, and gates share it. Additional contracts must use
+the same path; a CLI-only filter must not silently score unresolved callbacks.

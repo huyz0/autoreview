@@ -125,7 +125,7 @@ def verified_report(report_path: pathlib.Path, sources: list[dict], inputs: list
     return report
 
 
-def run(kotlinc: pathlib.Path, plugin: pathlib.Path, sources: list[pathlib.Path], jars: list[pathlib.Path], output: pathlib.Path, jvm_target: str = "1.8", required_classes: list[str] | None = None) -> None:
+def run(kotlinc: pathlib.Path, plugin: pathlib.Path, sources: list[pathlib.Path], jars: list[pathlib.Path], output: pathlib.Path, jvm_target: str = "1.8", required_classes: list[str] | None = None, runtime_jars: list[pathlib.Path] | None = None) -> None:
     if jvm_target not in ("1.8", *(str(version) for version in range(9, 26))):
         raise ValueError("unsupported JVM target")
     kotlinc = resolve_input(kotlinc)
@@ -135,11 +135,13 @@ def run(kotlinc: pathlib.Path, plugin: pathlib.Path, sources: list[pathlib.Path]
         root = pathlib.Path(temporary)
         copied_sources = snapshot_inputs(sources, root / "sources", ".kt", SOURCE_LIMIT, TOTAL_SOURCE_LIMIT)
         dependencies = snapshot_inputs(jars, root / "jars", ".jar", JAR_LIMIT, TOTAL_JAR_LIMIT)
+        runtime = snapshot_inputs(runtime_jars, root / "runtime", ".jar", JAR_LIMIT, TOTAL_JAR_LIMIT) if runtime_jars else []
         resolved_classes = resolve_unique_classes(dependencies, required_classes or []) if required_classes else []
+        runtime_classes = resolve_unique_classes(runtime, required_classes or []) if runtime and required_classes else []
         copied_plugin = snapshot_inputs([plugin], root / "plugin", ".jar", JAR_LIMIT, JAR_LIMIT)
         for item in copied_sources:
             item["limit"] = SOURCE_LIMIT
-        for item in dependencies + copied_plugin:
+        for item in dependencies + runtime + copied_plugin:
             item["limit"] = JAR_LIMIT
         report_path = root / "evidence.json"
         args = ["-no-stdlib", "-no-reflect", "-jvm-target", jvm_target, "-cp", os.pathsep.join(str(item["snapshot"]) for item in dependencies),
@@ -149,10 +151,12 @@ def run(kotlinc: pathlib.Path, plugin: pathlib.Path, sources: list[pathlib.Path]
         env = os.environ.copy()
         env["AUTOREVIEW_CALLBACK_EVIDENCE_OUTPUT"] = str(report_path)
         subprocess.run([str(kotlinc), f"@{args_path}"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=120)
-        report = verified_report(report_path, copied_sources, copied_sources + dependencies + copied_plugin)
+        conflicts = [name for name in required_classes or [] if (root / "classes" / name).exists()]
+        report = verified_report(report_path, copied_sources, copied_sources + dependencies + runtime + copied_plugin)
         manifest = lambda items: [{"path": str(item["original"]), "sha256": item["sha256"]} for item in items]
         result = {"snapshotVersion": 1, "jvmTarget": jvm_target, "sources": manifest(copied_sources), "dependencies": manifest(dependencies),
-                  "plugin": manifest(copied_plugin)[0], "evidence": report, "resolvedClasses": resolved_classes}
+                  "plugin": manifest(copied_plugin)[0], "evidence": report, "resolvedClasses": resolved_classes,
+                  "runtimeDependencies": manifest(runtime), "runtimeResolvedClasses": runtime_classes, "compiledClassConflicts": conflicts}
         encoded = json.dumps(result, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         if len(encoded) > OUTPUT_LIMIT:
             raise ValueError("output exceeds limit")
@@ -169,8 +173,9 @@ def main() -> None:
     parser.add_argument("--output", type=pathlib.Path, required=True)
     parser.add_argument("--jvm-target", default="1.8")
     parser.add_argument("--require-class", action="append", default=[])
+    parser.add_argument("--runtime-jar", type=pathlib.Path, action="append", default=[])
     args = parser.parse_args()
-    run(args.kotlinc, args.plugin, args.source, args.jar, args.output, args.jvm_target, args.require_class)
+    run(args.kotlinc, args.plugin, args.source, args.jar, args.output, args.jvm_target, args.require_class, args.runtime_jar)
 
 
 if __name__ == "__main__":
