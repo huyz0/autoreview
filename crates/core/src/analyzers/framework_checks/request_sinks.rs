@@ -1,7 +1,7 @@
 use autoreview_schema::AgentFinding;
 use tree_sitter::Node;
 
-use super::web::node_calls::{string_literal, NodeCalls};
+use super::web::node_calls::{property, string_literal, NodeCalls};
 use super::web::{first_argument, is_function, string_flow};
 use super::{descendants, location, text, Rule};
 
@@ -105,7 +105,7 @@ impl<'t> Review<'t, '_> {
             return None;
         }
         let (rule, cwe) = self.sink(sink)?;
-        let argument = first_argument(sink)?;
+        let argument = self.sink_argument(rule, sink)?;
         if rule.id == URL.id && self.has_fixed_url_guard(sink, argument) {
             return None;
         }
@@ -121,6 +121,16 @@ impl<'t> Review<'t, '_> {
             .get_or_insert_with(Default::default)
             .insert("cwe".into(), serde_json::json!([cwe]));
         Some(finding)
+    }
+
+    fn sink_argument(&self, rule: &Rule, call: Node<'t>) -> Option<Node<'t>> {
+        let first = first_argument(call)?;
+        if rule.id == SQL.id {
+            if let Some(config) = self.calls.options_object(first, call) {
+                return property(config, "text", self.source).map(|(_, value)| value);
+            }
+        }
+        Some(first)
     }
 
     fn sink(&self, call: Node<'t>) -> Option<(&'static Rule, &'static str)> {

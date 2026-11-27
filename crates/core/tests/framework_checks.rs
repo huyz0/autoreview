@@ -328,6 +328,10 @@ app.get('/overwrite', (req, res) => {
     axios.get(req.query.destination);
 });
 another.get('/fake', (req, res) => { axios.get(req.query.destination); });
+app.get('/config', (req, res) => {
+    pool.query({ text: req.query.statement, values: [] });
+    pool.query({ text: 'SELECT name FROM item WHERE id = $1', values: [req.query.id] });
+});
 "#;
     let findings = scan(&[("routes.js", js)], &["routes.js"]);
     let actual: Vec<_> = findings.iter().filter_map(|finding| {
@@ -339,6 +343,7 @@ another.get('/fake', (req, res) => { axios.get(req.query.destination); });
         (11, "express-request-to-node-exec"),
         (13, "express-request-to-axios-destination"),
         (25, "express-request-to-axios-destination"),
+        (33, "express-request-to-pg-query-text"),
     ], "{findings:#?}");
 }
 
