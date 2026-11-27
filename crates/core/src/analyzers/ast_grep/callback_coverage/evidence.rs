@@ -54,15 +54,24 @@ fn parse(root: &Path, checkout: &Path, bytes: &[u8]) -> Result<Evidence, ()> {
     if snapshot.snapshot_version != 1 || snapshot.evidence.version != 2 || snapshot.evidence.compiler != "2.2.20" || snapshot.sources.len() > 512 { return Err(()); }
     let root = root.canonicalize().map_err(|_| ())?;
     let checkout = checkout.canonicalize().map_err(|_| ())?;
+    let sources = map_sources(&root, &checkout, snapshot.sources)?;
+    Ok(Evidence { by_file: index_records(&sources, snapshot.evidence.records)? })
+}
+
+fn map_sources(root: &Path, checkout: &Path, input: Vec<Source>) -> Result<HashMap<PathBuf, (PathBuf, String)>, ()> {
     let mut sources = HashMap::new();
-    for source in snapshot.sources {
+    for source in input {
         let path = source.path.canonicalize().map_err(|_| ())?;
-        let relative = path.strip_prefix(&checkout).map_err(|_| ())?;
+        let relative = path.strip_prefix(checkout).map_err(|_| ())?;
         let target = root.join(relative).canonicalize().map_err(|_| ())?;
-        if !target.starts_with(&root) || source.sha256.len() != 64 || sources.insert(path, (target, source.sha256)).is_some() { return Err(()); }
+        if !target.starts_with(root) || source.sha256.len() != 64 || sources.insert(path, (target, source.sha256)).is_some() { return Err(()); }
     }
+    Ok(sources)
+}
+
+fn index_records(sources: &HashMap<PathBuf, (PathBuf, String)>, input: Vec<Record>) -> Result<HashMap<PathBuf, Vec<Record>>, ()> {
     let mut by_file: HashMap<PathBuf, Vec<Record>> = HashMap::new();
-    for record in snapshot.evidence.records {
+    for record in input {
         let path = record.path.canonicalize().map_err(|_| ())?;
         let (target, hash) = sources.get(&path).ok_or(())?;
         if hash != &record.sha256 || record.callee.len() > 1024 || record.sam_type.len() > 1024 || record.modality.len() > 32 { return Err(()); }
@@ -70,7 +79,7 @@ fn parse(root: &Path, checkout: &Path, bytes: &[u8]) -> Result<Evidence, ()> {
         if records.len() >= MAX_RECORDS_PER_FILE { return Err(()); }
         records.push(record);
     }
-    Ok(Evidence { by_file })
+    Ok(by_file)
 }
 
 impl Evidence {
