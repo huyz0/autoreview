@@ -171,6 +171,36 @@ rather than executed at the registration site. Inline lambdas such as
 `map` can execute immediately, so excluding all nested lambdas would miss real
 blocking calls. This case does not measure general Kotlin rule accuracy.
 
+An exploratory Windows run compiled the actual before-revision file-cluster
+sources with Kotlin 2.3.21 and JVM target 21, using seven exact Git-blob source
+files and 50 classpath JARs. The probe reported the `PasswordAuthenticator`
+argument of `org.apache.sshd.server.SshServer.setPasswordAuthenticator`, whose
+declaration is open. The `FileCluster.kt` input hash was
+`e731be100e841140a07e0830bd28fca14c804d76bd6a008c14ad7285ec267a7c`.
+
+The classpath came from an isolated Gradle 9.5.1 compile using public
+`libloader` and `libloader-bootstrap` 1.8.1 release JARs. Their GitHub Packages
+repository required credentials, so local Maven POMs were reconstructed from
+the plugin's published source and dependency versions. The build environment
+was scrubbed of credentials. This setup is useful evidence about the compiler
+probe, but is not a verified reproduction of the original dependency metadata
+or a scored replay. The probe does not establish the runtime receiver or
+callback execution context. The initial Windows archive used CRLF conversion;
+the successful probe used source bytes restored from the pinned Git blobs.
+For reproduction, the Gradle distribution SHA-256 was
+`bafc141b619ad6350fd975fc903156dd5c151998cc8b058e8c1044ab5f7b031f`;
+the [v1.8.1 plugin release](https://github.com/RediCloud/gradle-plugins/releases/tag/v1.8.1)
+JAR hashes were `54cfdf68c8532ad0cf53d248ee8c4e97f31a21a95909bef1d6da2eeb9f24152d`
+for `libloader` and `0263369396ac3f8f1f9c42e65a4a2344c5c295f9e896bbfcbe118b98e631f48d`
+for `libloader-bootstrap`. The reconstructed POMs listed Kotlin stdlib 2.3.20
+for the plugin and Gson 2.14.0 and jsoup 1.22.2 for the bootstrap JAR. An init
+script placed that local Maven repository first for buildscript and project
+dependencies, then `:file-cluster:compileKotlin` ran with a separate Gradle
+home. A temporary task printed `compileClasspath.files` and all `.kt` files
+under `file-cluster/src/main/kotlin`; these were passed explicitly to the
+snapshot runner. Verify the source hashes and compiler options for each run;
+the unverified reconstructed metadata must not become a trusted rule contract.
+
 `sentry-async-executor.yaml` records two async Promise executors in a TSX file
 from Sentry, licensed at the pinned revision under FSL-1.1-Apache-2.0. Replay
 detects both before the fix and no findings afterward. The two findings are
