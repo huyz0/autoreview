@@ -1334,7 +1334,7 @@ fn unresolved_imported_associated_methods_report_coverage() {
 fn imported_associated_call_in_skipped_function_reports_coverage() {
     let root = associated_coverage_fixture();
     let src = root.path().join("src");
-    for body in ["Store::unknown(); match 1 { _ => {} }", "Store::known(); let (a, b) = (1, 2);"] {
+    for body in ["Store::unknown(); match 1 { value => {} }", "Store::known(); let (a, b) = (1, 2);"] {
         std::fs::write(src.join("worker.rs"), format!("use crate::support::Files as Store;\nfn run() {{ {body} }}\n")).unwrap();
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("src/worker.rs") && issue.line == Some(2) && issue.rule.as_deref() == Some("rust-discarded-remove-file-result")), "{body}: {:?}", result.coverage);
@@ -1348,7 +1348,7 @@ fn imported_associated_call_in_skipped_function_reports_coverage() {
 fn skipped_rust_helper_coverage_follows_reachable_calls() {
     let root = associated_coverage_fixture();
     let src = root.path().join("src");
-    std::fs::write(src.join("support.rs"), "pub(crate) struct Files;\nimpl Files {\n pub(crate) fn known() { match 1 { _ => {} } }\n pub(crate) fn spare() { match 1 { _ => {} } }\n}\n").unwrap();
+    std::fs::write(src.join("support.rs"), "pub(crate) struct Files;\nimpl Files {\n pub(crate) fn known() { match 1 { value => {} } }\n pub(crate) fn spare() { match 1 { value => {} } }\n}\n").unwrap();
     std::fs::write(src.join("worker.rs"), "use crate::support::Files as Store;\nfn run() { Store::known(); }\n").unwrap();
     let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
     let lines: std::collections::BTreeSet<_> = result.coverage.iter().filter(|issue| issue.reason == "unsupported_rust_control_flow"
@@ -1375,10 +1375,24 @@ fn rust_literal_match_tracks_results_across_arms() {
 
 #[test]
 fn rust_unmodeled_matches_remain_incomplete() {
-    for body in ["match x { 0 if check() && other() => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { Some(ref value) => {}, _ => {} };", "match x { 0 => {} };", "match check(risky() + 1) { _ => {} };", "match x { _ => { let y = risky() + 1; } };", "match x { _ => {} }"] {
+    for body in ["match x { 0 if check() && other() == true => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { Some(ref value) => {}, _ => {} };", "match x { 0 => {} };", "match check(risky() + 1) { _ => {} };", "match x { _ => { let y = risky() + 1; } };", "let y = match x { _ => {} };"] {
         let root = write_single_file("lib.rs", &format!("fn run(x: u8) {{ {body} }}\n"));
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("lib.rs")), "{body}: {:?}", result.coverage);
+    }
+}
+
+#[test]
+fn rust_returned_matches_preserve_results_through_helpers() {
+    let source = "use std::fs::remove_file;\nfn remove(path: &str, flag: bool) -> std::io::Result<()> {\n    match flag { true => remove_file(path), _ => { let result = remove_file(path); result } }\n}\nfn run(path: &str, flag: bool) {\n    remove(path, flag);\n}\n";
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 3)]);
+    let clean = source.replace("    remove(path, flag);", "    assert!(remove(path, flag).is_ok());");
+    for form in [clean.clone(), clean.replace("    match flag", "    return match flag").replace("result } }\n", "result } };\n")] {
+        std::fs::write(root.path().join("lib.rs"), form).unwrap();
+        assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[]);
+        let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+        assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", report.coverage);
     }
 }
 
@@ -1439,6 +1453,16 @@ fn rust_literal_match_checks_cleanup_on_each_arm() {
 fn rust_match_guard_side_effects_reach_later_arms() {
     let source = "fn partial(flag: u8) {\n match flag { 0 if begin() => { finish(); }, _ => {} };\n}\nfn clean(flag: u8) {\n match flag { 0 if begin() => { finish(); }, _ => { finish(); } };\n}\n";
     assert_rust_match_cleanup("rust-guard-cleanup", source);
+}
+
+#[test]
+fn rust_match_guards_short_circuit_before_running_the_right_operand() {
+    let source = concat!(
+        "fn partial(flag: u8) {\n match flag { 0 if gate() || begin() => {}, _ => {} };\n}\n",
+        "fn clean(flag: u8) {\n match flag { 0 if gate() && begin() => { finish(); }, _ => { finish(); } };\n}\n",
+        "fn skipped(flag: u8) {\n match flag { 0 if false && begin() => {}, 1 if true || begin() => {}, _ => {} };\n}\n",
+    );
+    assert_rust_match_cleanup("rust-short-circuit-cleanup", source);
 }
 
 #[test]

@@ -88,6 +88,9 @@ impl Lower<'_> {
                 return self.statement(stmt.named_child(0)?, at, names);
             }
             "return_expression" => {
+                if let Some(value) = stmt.named_child(0).filter(|node| node.kind() == "match_expression") {
+                    return self.match_expression(value, at, names);
+                }
                 let at = self.value(stmt.named_child(0), at, names, None);
                 super::record_evaluation(&mut self.cfg, at, stmt);
                 if self.cfg.keyed_flow.is_some() {
@@ -309,6 +312,10 @@ fn supported(node: Node<'_>) -> bool {
 /// Whether this match can be represented without pattern binding or guards.
 pub fn supports_match(node: Node<'_>) -> bool {
     match_flow::supports(node)
+}
+
+pub(crate) fn discards_match(node: Node<'_>) -> bool {
+    supports_match(node) && !match_flow::returns_match(node)
 }
 
 /// Simple arm-local bindings in a supported Rust match pattern.

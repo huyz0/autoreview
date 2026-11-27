@@ -1162,7 +1162,7 @@ fn rust_unknown_associated_method_blocks_replay_scoring() {
 fn skipped_rust_function_blocks_replay_and_reaches_review() {
     let support = "pub(crate) struct Files;\nimpl Files { pub(crate) fn known() {} }\n";
     let clean = "use crate::support::Files;\nfn run() { Files::known(); }\n";
-    let skipped = "use crate::support::Files;\nfn run() { Files::known(); match 1 { _ => {} } }\n";
+    let skipped = "use crate::support::Files;\nfn run() { Files::known(); match 1 { value => {} } }\n";
     let repo = init_repo(&[("src/lib.rs", "mod support; mod worker;\n"), ("src/support.rs", support), ("src/worker.rs", skipped)]);
     let before = current_commit(repo.path());
     repo.commit(&[("src/worker.rs", clean)], "use supported control flow");
@@ -1182,10 +1182,10 @@ fn skipped_rust_function_blocks_replay_and_reaches_review() {
 
 #[test]
 fn rust_literal_match_result_reaches_review_and_replay() {
-    let prefix = "use std::fs::remove_file;\nfn run(path: &str, flag: Option<u8>) -> std::io::Result<()> {\n";
-    let suffix = "    Ok(())\n}\nfn normalize(value: Option<u8>) -> Option<u8> { value }\nfn allowed() -> bool { true }\n";
-    let before = format!("{prefix}    match normalize(flag) {{ Some(_) if allowed() => {{ remove_file(path); }}, _ => {{}} }};\n{suffix}");
-    let after = format!("{prefix}    match normalize(flag) {{ Some(_) if allowed() => {{ return remove_file(path); }}, _ => {{}} }};\n{suffix}");
+    let prefix = "use std::fs::remove_file; struct Flag { mode: Option<u8> }\nfn run(path: &str, flag: Flag) -> std::io::Result<()> {\n";
+    let suffix = "}\nfn allowed() -> bool { true }\n";
+    let before = format!("{prefix}    match flag.mode {{ Some(_) if allowed() && allowed() => {{ remove_file(path); Ok(()) }}, _ => Ok(()) }}\n{suffix}");
+    let after = format!("{prefix}    match flag.mode {{ Some(_) if allowed() && allowed() => remove_file(path), _ => Ok(()) }}\n{suffix}");
     let repo = init_repo(&[("lib.rs", &before)]);
     let old = current_commit(repo.path());
     repo.commit(&[("lib.rs", &after)], "observe result inside match");
