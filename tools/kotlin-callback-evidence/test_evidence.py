@@ -36,8 +36,12 @@ class EvidenceTest(unittest.TestCase):
             "package vendor; public class Server { public Auth getAuthenticator() { return null; } "
             "public void setAuthenticator(Auth value) {} }", encoding="utf-8"
         )
+        (cls.root / "EagerServer.java").write_text(
+            "package vendor; public class EagerServer extends Server { "
+            "@Override public void setAuthenticator(Auth value) { value.accept(\"now\"); } }", encoding="utf-8"
+        )
         cls.classes = cls.root / "classes"
-        subprocess.run([str(cls.javac), "-d", str(cls.classes), str(cls.root / "Auth.java"), str(cls.root / "Server.java")], check=True, timeout=60)
+        subprocess.run([str(cls.javac), "-d", str(cls.classes), str(cls.root / "Auth.java"), str(cls.root / "Server.java"), str(cls.root / "EagerServer.java")], check=True, timeout=60)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -66,6 +70,7 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual(record["sha256"], hashlib.sha256(source.encode()).hexdigest())
         self.assertEqual((record["callee"], record["parameter"], record["samType"]), ("vendor.Server.setAuthenticator", 0, "vendor.Auth"))
         self.assertEqual(record["parameterTypes"], ["vendor.Auth"])
+        self.assertEqual(record["receiverStaticType"], "vendor.Server")
         self.assertEqual(utf16_slice(source, record["lambdaStartUtf16"], record["lambdaEndUtf16"]), "{ value -> value.isNotEmpty() }")
         self.assertIn("authenticator =", utf16_slice(source, record["callStartUtf16"], record["callEndUtf16"]))
 
@@ -77,6 +82,14 @@ class EvidenceTest(unittest.TestCase):
         # The function body legitimately constructs a SAM; the outer call must
         # not be mistaken for a SAM conversion at the setter.
         self.assertFalse(any(record["callee"] == "vendor.Server.setAuthenticator" for record in report["records"]))
+
+    def test_static_receiver_type_does_not_prove_runtime_dispatch(self) -> None:
+        source = "import vendor.Auth\nimport vendor.Server\nimport vendor.EagerServer\nfun install() { val s: Server = EagerServer(); s.authenticator = Auth { true } }\n"
+        result = self.compile("receiver", source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        records = json.loads((self.root / "receiver.json").read_text(encoding="utf-8"))["records"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual((records[0]["callee"], records[0]["modality"], records[0]["receiverStaticType"]), ("vendor.Server.setAuthenticator", "OPEN", "vendor.Server"))
 
     def test_kotlin_local_call_resolution(self) -> None:
         source = self.root / "resolution.kt"
@@ -125,6 +138,7 @@ class EvidenceTest(unittest.TestCase):
             records = [record for record in report["evidence"]["records"] if record["callee"] == "org.apache.sshd.server.SshServer.setPasswordAuthenticator"]
             self.assertEqual(len(records), 1)
             self.assertEqual((records[0]["samType"], records[0]["parameter"], records[0]["modality"]), ("org.apache.sshd.server.auth.password.PasswordAuthenticator", 0, "OPEN"))
+            self.assertEqual(records[0]["receiverStaticType"], "org.apache.sshd.server.SshServer")
 
     def test_callback_parameter_index(self) -> None:
         source = "package demo\nimport vendor.Auth\nfun register(n: Int, callback: Auth) {}\nfun install() { register(1, Auth { true }) }\n"
@@ -133,6 +147,7 @@ class EvidenceTest(unittest.TestCase):
         report = json.loads((self.root / "parameter.json").read_text(encoding="utf-8"))
         self.assertEqual([(record["callee"], record["parameter"], record["samType"]) for record in report["records"]], [("demo.register", 1, "vendor.Auth")])
         self.assertEqual(report["records"][0]["parameterTypes"], ["kotlin.Int", "vendor.Auth"])
+        self.assertIsNone(report["records"][0]["receiverStaticType"])
 
     def test_overloaded_calls_have_distinct_parameter_types(self) -> None:
         source = "package demo\nimport vendor.Auth\nfun register(n: Int, callback: Auth) {}\nfun register(n: String, callback: Auth) {}\nfun install() { register(1, Auth { true }); register(\"a\", Auth { true }) }\n"
