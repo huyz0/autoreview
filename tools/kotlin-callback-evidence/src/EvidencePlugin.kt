@@ -16,6 +16,7 @@ import org.jetbrains.kotlin.ir.expressions.IrFunctionExpression
 import org.jetbrains.kotlin.ir.expressions.IrTypeOperator
 import org.jetbrains.kotlin.ir.expressions.IrTypeOperatorCall
 import org.jetbrains.kotlin.ir.symbols.UnsafeDuringIrConstructionAPI
+import org.jetbrains.kotlin.ir.symbols.IrPropertySymbol
 import org.jetbrains.kotlin.ir.types.classFqName
 import org.jetbrains.kotlin.ir.types.IrSimpleType
 import org.jetbrains.kotlin.ir.util.fqNameWhenAvailable
@@ -26,7 +27,9 @@ private const val MAX_SOURCE_BYTES = 4 * 1024 * 1024
 private const val MAX_TOTAL_SOURCE_BYTES = 16 * 1024 * 1024
 private const val MAX_FILES = 512
 private const val MAX_RECORDS = 20_000
+private const val MAX_PROPERTY_SETTERS = 512
 private const val MAX_OUTPUT_BYTES = 1024 * 1024
+private const val JSON_NULL = "null"
 
 private data class Record(
     val path: String,
@@ -41,6 +44,8 @@ private data class Record(
     val modality: String,
     val parameterTypes: List<String?>,
     val receiverStaticType: String?,
+    val receiverProperty: String?,
+    val observedSetterCallees: List<String?>?,
 )
 
 @OptIn(UnsafeDuringIrConstructionAPI::class)
@@ -51,6 +56,28 @@ internal class EvidenceExtension : IrGenerationExtension {
             ?: error("AUTOREVIEW_CALLBACK_EVIDENCE_OUTPUT is required")
         val records = mutableListOf<Record>()
         require(moduleFragment.files.size <= MAX_FILES) { "too many source files" }
+        val properties = mutableSetOf<IrPropertySymbol>()
+        moduleFragment.acceptChildrenVoid(object : IrVisitorVoid() {
+            override fun visitElement(element: IrElement) {
+                if (element is IrCall && element.arguments.any { it is IrTypeOperatorCall && it.operator == IrTypeOperator.SAM_CONVERSION }) {
+                    val receiverIndex = element.symbol.owner.parameters.indexOfFirst { it.kind == IrParameterKind.DispatchReceiver }
+                    receiverProperty(element.arguments.getOrNull(receiverIndex) as? IrCall)?.let { properties.add(it) }
+                    require(properties.size <= MAX_RECORDS) { "too many receiver properties" }
+                }
+                element.acceptChildrenVoid(this)
+            }
+        })
+        val setters = mutableMapOf<IrPropertySymbol, MutableList<String?>>()
+        var setterCount = 0
+        moduleFragment.acceptChildrenVoid(object : IrVisitorVoid() {
+            override fun visitElement(element: IrElement) {
+                if (element is IrCall && collectSetter(element, properties, setters)) {
+                    setterCount++
+                    require(setterCount <= MAX_RECORDS) { "too many property setter calls" }
+                }
+                element.acceptChildrenVoid(this)
+            }
+        })
         var totalSourceBytes = 0
         val digest = MessageDigest.getInstance("SHA-256")
         for (file in moduleFragment.files) {
@@ -62,7 +89,7 @@ internal class EvidenceExtension : IrGenerationExtension {
             val hash = digest.digest(bytes).joinToString("") { "%02x".format(it) }
             file.acceptChildrenVoid(object : IrVisitorVoid() {
                 override fun visitElement(element: IrElement) {
-                    if (element is IrCall) collect(call = element, path = path.toString(), hash = hash, records = records)
+                    if (element is IrCall) collect(call = element, path = path.toString(), hash = hash, records = records, setters = setters)
                     element.acceptChildrenVoid(this)
                 }
             })
@@ -75,13 +102,15 @@ internal class EvidenceExtension : IrGenerationExtension {
 }
 
 @OptIn(UnsafeDuringIrConstructionAPI::class)
-private fun collect(call: IrCall, path: String, hash: String, records: MutableList<Record>) {
+private fun collect(call: IrCall, path: String, hash: String, records: MutableList<Record>, setters: Map<IrPropertySymbol, List<String?>>) {
     val owner = call.symbol.owner
     val callee = owner.fqNameWhenAvailable?.asString() ?: return
     if (call.startOffset < 0 || call.endOffset < call.startOffset) return
     if (call.arguments.size != owner.parameters.size) return
     val receiverIndex = owner.parameters.indexOfFirst { it.kind == IrParameterKind.DispatchReceiver }
-    val receiverStaticType = call.arguments.getOrNull(receiverIndex)?.type?.classFqName?.asString()
+    val receiver = call.arguments.getOrNull(receiverIndex)
+    val receiverStaticType = receiver?.type?.classFqName?.asString()
+    val property = receiverProperty(receiver as? IrCall)
     var regularIndex = 0
     for ((parameter, argument) in owner.parameters.zip(call.arguments)) {
         if (parameter.kind != IrParameterKind.Regular) continue
@@ -101,8 +130,35 @@ private fun collect(call: IrCall, path: String, hash: String, records: MutableLi
                 if (type == null || type.arguments.isNotEmpty()) null else type.classFqName?.asString()
             },
             receiverStaticType = receiverStaticType,
+            receiverProperty = property?.owner?.fqNameWhenAvailable?.asString(),
+            observedSetterCallees = property?.let { setters[it]?.toList() ?: emptyList() },
         ))
     }
+}
+
+@OptIn(UnsafeDuringIrConstructionAPI::class)
+private fun receiverProperty(call: IrCall?): IrPropertySymbol? {
+    val actual = if (call?.symbol?.owner?.fqNameWhenAvailable?.asString() == "kotlin.internal.ir.CHECK_NOT_NULL") {
+        call.arguments.singleOrNull() as? IrCall
+    } else call
+    val function = actual?.symbol?.owner ?: return null
+    val property = function.correspondingPropertySymbol ?: return null
+    return property.takeIf { it.owner.getter?.symbol == function.symbol }
+}
+
+@OptIn(UnsafeDuringIrConstructionAPI::class)
+private fun collectSetter(call: IrCall, properties: Set<IrPropertySymbol>, setters: MutableMap<IrPropertySymbol, MutableList<String?>>): Boolean {
+    val function = call.symbol.owner
+    val property = function.correspondingPropertySymbol ?: return false
+    if (property !in properties) return false
+    if (property.owner.setter?.symbol != function.symbol || call.arguments.size != function.parameters.size) return false
+    val arguments = function.parameters.zip(call.arguments).filter { (parameter, _) -> parameter.kind == IrParameterKind.Regular }
+    if (arguments.size != 1) return false
+    val value = arguments.single().second as? IrCall
+    val calls = setters.getOrPut(property) { mutableListOf() }
+    check(calls.size < MAX_PROPERTY_SETTERS) { "too many calls to one property setter" }
+    calls.add(value?.symbol?.owner?.fqNameWhenAvailable?.asString())
+    return true
 }
 
 private fun encode(records: List<Record>): String = buildString {
@@ -119,11 +175,21 @@ private fun encode(records: List<Record>): String = buildString {
         append(",\"parameter\":").append(record.parameter)
         append(",\"samType\":").append(quote(record.samType))
         append(",\"modality\":").append(quote(record.modality))
-        append(",\"receiverStaticType\":").append(record.receiverStaticType?.let(::quote) ?: "null")
+        append(",\"receiverStaticType\":").append(record.receiverStaticType?.let(::quote) ?: JSON_NULL)
+        append(",\"receiverProperty\":").append(record.receiverProperty?.let(::quote) ?: JSON_NULL)
+        append(",\"observedSetterCallees\":")
+        if (record.observedSetterCallees == null) append(JSON_NULL) else {
+            append('[')
+            record.observedSetterCallees.forEachIndexed { setterIndex, callee ->
+                if (setterIndex != 0) append(',')
+                append(callee?.let(::quote) ?: JSON_NULL)
+            }
+            append(']')
+        }
         append(",\"parameterTypes\":[")
         record.parameterTypes.forEachIndexed { typeIndex, type ->
             if (typeIndex != 0) append(',')
-            append(type?.let(::quote) ?: "null")
+            append(type?.let(::quote) ?: JSON_NULL)
         }
         append("]}")
     }

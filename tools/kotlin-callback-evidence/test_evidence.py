@@ -91,6 +91,21 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual((records[0]["callee"], records[0]["modality"], records[0]["receiverStaticType"]), ("vendor.Server.setAuthenticator", "OPEN", "vendor.Server"))
 
+    def test_receiver_property_setter_observations_include_unknown_values(self) -> None:
+        source = (
+            "package demo\nimport vendor.Auth\nimport vendor.Server\n"
+            "fun create(): Server = Server()\n"
+            "class Holder(private var server: Server) { "
+            "fun install() { server.authenticator = Auth { true } }; "
+            "fun change(s: Server) { server = s }; fun reset() { server = create() } }\n"
+        )
+        result = self.compile("property_writes", source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        records = json.loads((self.root / "property_writes.json").read_text(encoding="utf-8"))["records"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["receiverProperty"], "demo.Holder.server")
+        self.assertEqual(records[0]["observedSetterCallees"], [None, "demo.create"])
+
     def test_kotlin_local_call_resolution(self) -> None:
         source = self.root / "resolution.kt"
         source.write_text(
@@ -139,6 +154,8 @@ class EvidenceTest(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertEqual((records[0]["samType"], records[0]["parameter"], records[0]["modality"]), ("org.apache.sshd.server.auth.password.PasswordAuthenticator", 0, "OPEN"))
             self.assertEqual(records[0]["receiverStaticType"], "org.apache.sshd.server.SshServer")
+            self.assertEqual(records[0]["receiverProperty"], "dev.redicloud.cluster.file.FileCluster.sshd")
+            self.assertEqual(records[0]["observedSetterCallees"], ["org.apache.sshd.server.SshServer.setUpDefaultServer"])
 
     def test_callback_parameter_index(self) -> None:
         source = "package demo\nimport vendor.Auth\nfun register(n: Int, callback: Auth) {}\nfun install() { register(1, Auth { true }) }\n"

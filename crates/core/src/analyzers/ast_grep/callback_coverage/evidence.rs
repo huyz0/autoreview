@@ -33,6 +33,8 @@ struct Record {
     sam_type: String,
     modality: String,
     receiver_static_type: Option<String>,
+    receiver_property: Option<String>,
+    observed_setter_callees: Option<Vec<Option<String>>>,
 }
 
 pub(super) struct Evidence { by_file: HashMap<PathBuf, Vec<Record>> }
@@ -76,7 +78,9 @@ fn index_records(sources: &HashMap<PathBuf, (PathBuf, String)>, input: Vec<Recor
         let path = record.path.canonicalize().map_err(|_| ())?;
         let (target, hash) = sources.get(&path).ok_or(())?;
         if hash != &record.sha256 || record.callee.len() > 1024 || record.sam_type.len() > 1024 || record.modality.len() > 32
-            || record.receiver_static_type.as_ref().is_some_and(|name| name.len() > 1024) { return Err(()); }
+            || record.receiver_static_type.as_ref().is_some_and(|name| name.len() > 1024)
+            || record.receiver_property.as_ref().is_some_and(|name| name.len() > 1024)
+            || record.observed_setter_callees.as_ref().is_some_and(|names| names.len() > 512 || names.iter().flatten().any(|name| name.len() > 1024)) { return Err(()); }
         let records = by_file.entry(target.clone()).or_default();
         if records.len() >= MAX_RECORDS_PER_FILE { return Err(()); }
         records.push(record);
@@ -98,7 +102,8 @@ impl Evidence {
         let [record] = matched.as_slice() else { return None; };
         Some(serde_json::json!({ "status": "unverified", "callee": record.callee,
             "parameter": record.parameter, "samType": record.sam_type, "modality": record.modality,
-            "receiverStaticType": record.receiver_static_type }))
+            "receiverStaticType": record.receiver_static_type, "receiverProperty": record.receiver_property,
+            "observedSetterCallees": record.observed_setter_callees }))
     }
 }
 
@@ -175,15 +180,22 @@ mod tests {
     fn receiver_type_is_unverified_and_bounded() {
         let (root, mut value) = report_fixture();
         value["evidence"]["records"][0]["receiverStaticType"] = "example.Server".into();
+        value["evidence"]["records"][0]["receiverProperty"] = "example.Owner.server".into();
+        value["evidence"]["records"][0]["observedSetterCallees"] = serde_json::json!(["example.create", null]);
         let evidence = parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).unwrap();
         let mut findings = vec![finding()];
         let mut coverage = Vec::new();
         super::super::annotate_with(root.path(), &mut findings, Some(&evidence), &mut coverage);
         let metadata = &findings[0].meta.as_ref().unwrap()["experimentalCallbackEvidence"];
         assert_eq!(metadata["receiverStaticType"], "example.Server");
+        assert_eq!(metadata["receiverProperty"], "example.Owner.server");
+        assert_eq!(metadata["observedSetterCallees"], serde_json::json!(["example.create", null]));
         assert_eq!(metadata["status"], "unverified");
         assert!(coverage.iter().any(|issue| issue.reason == "callback_execution_unresolved"));
         value["evidence"]["records"][0]["receiverStaticType"] = "x".repeat(1025).into();
+        assert!(parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).is_err());
+        value["evidence"]["records"][0]["receiverStaticType"] = serde_json::Value::Null;
+        value["evidence"]["records"][0]["observedSetterCallees"] = serde_json::json!(vec!["example.create"; 513]);
         assert!(parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).is_err());
     }
 
