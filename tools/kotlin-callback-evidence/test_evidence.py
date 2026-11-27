@@ -97,6 +97,35 @@ class EvidenceTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "invalid.json").exists())
 
+    @unittest.skipUnless(os.getenv("AUTOREVIEW_TEST_REDICLOUD_INPUTS") and os.getenv("AUTOREVIEW_TEST_REDICLOUD_BEFORE") and os.getenv("AUTOREVIEW_TEST_REDICLOUD_AFTER"), "RediCloud inputs not configured")
+    def test_redicloud_historical_callback_evidence(self) -> None:
+        self.assertEqual(self.version, "2.3.21")
+        before = pathlib.Path(os.environ["AUTOREVIEW_TEST_REDICLOUD_BEFORE"]).resolve(strict=True)
+        after = pathlib.Path(os.environ["AUTOREVIEW_TEST_REDICLOUD_AFTER"]).resolve(strict=True)
+        lines = pathlib.Path(os.environ["AUTOREVIEW_TEST_REDICLOUD_INPUTS"]).read_text(encoding="utf-8").splitlines()
+        sources = [pathlib.Path(line[13:]).resolve(strict=True) for line in lines if line.startswith("PROBE_SOURCE ")]
+        jars = [snapshot.resolve_input(pathlib.Path(line[10:])) for line in lines if line.startswith("PROBE_JAR ")]
+        self.assertEqual((len(sources), len(jars)), (7, 50))
+        relative = [source.relative_to(before) for source in sources]
+        target = pathlib.Path("file-cluster/src/main/kotlin/dev/redicloud/cluster/file/FileCluster.kt")
+        self.assertIn(target, relative)
+        hashes = ["e731be100e841140a07e0830bd28fca14c804d76bd6a008c14ad7285ec267a7c", "e5c2238317c40c8a9c823d6c2a09714ce1b3081234e40ae17713a6e5536fc7e7"]
+        reports = []
+        for index, root in enumerate((before, after)):
+            files = [root / path for path in relative]
+            self.assertEqual(hashlib.sha256((root / target).read_bytes()).hexdigest(), hashes[index])
+            for path in relative:
+                if path != target:
+                    self.assertEqual((before / path).read_bytes(), (root / path).read_bytes())
+            output = self.root / f"redicloud-{index}.json"
+            snapshot.run(self.kotlinc, self.plugin, files, jars, output, jvm_target="21")
+            reports.append(json.loads(output.read_text(encoding="utf-8")))
+        self.assertEqual(reports[0]["dependencies"], reports[1]["dependencies"])
+        for report in reports:
+            records = [record for record in report["evidence"]["records"] if record["callee"] == "org.apache.sshd.server.SshServer.setPasswordAuthenticator"]
+            self.assertEqual(len(records), 1)
+            self.assertEqual((records[0]["samType"], records[0]["parameter"], records[0]["modality"]), ("org.apache.sshd.server.auth.password.PasswordAuthenticator", 0, "OPEN"))
+
     def test_callback_parameter_index(self) -> None:
         source = "package demo\nimport vendor.Auth\nfun register(n: Int, callback: Auth) {}\nfun install() { register(1, Auth { true }) }\n"
         result = self.compile("parameter", source)

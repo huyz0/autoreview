@@ -177,6 +177,11 @@ files and 50 classpath JARs. The probe reported the `PasswordAuthenticator`
 argument of `org.apache.sshd.server.SshServer.setPasswordAuthenticator`, whose
 declaration is open. The `FileCluster.kt` input hash was
 `e731be100e841140a07e0830bd28fca14c804d76bd6a008c14ad7285ec267a7c`.
+The fixed revision also compiled with the same 50 JAR inputs and the same six
+other source files; its `FileCluster.kt` hash was
+`e5c2238317c40c8a9c823d6c2a09714ce1b3081234e40ae17713a6e5536fc7e7`.
+It reported the same setter, callback type, and open modality. This does not
+establish the dynamic receiver or execution relationship in either revision.
 
 The classpath came from an isolated Gradle 9.5.1 compile using public
 `libloader` and `libloader-bootstrap` 1.8.1 release JARs. Their GitHub Packages
@@ -200,6 +205,14 @@ home. A temporary task printed `compileClasspath.files` and all `.kt` files
 under `file-cluster/src/main/kotlin`; these were passed explicitly to the
 snapshot runner. Verify the source hashes and compiler options for each run;
 the unverified reconstructed metadata must not become a trusted rule contract.
+An opt-in `test_redicloud_historical_callback_evidence` test repeats both
+compilations when `AUTOREVIEW_TEST_REDICLOUD_INPUTS` points to the trusted task
+output (lines prefixed `PROBE_SOURCE ` or `PROBE_JAR `), and
+`AUTOREVIEW_TEST_REDICLOUD_BEFORE` and `AUTOREVIEW_TEST_REDICLOUD_AFTER` point
+to the two source roots. Set the Kotlin test variables described in the probe
+README to the 2.3.21 compiler and JDK. The test checks the target Git-blob hashes
+and matching other sources, but the supplied classpath and compiler remain
+experimental inputs; it is not a replay or a trusted execution contract.
 
 `sentry-async-executor.yaml` records two async Promise executors in a TSX file
 from Sentry, licensed at the pinned revision under FSL-1.1-Apache-2.0. Replay
