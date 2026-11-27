@@ -122,12 +122,16 @@ pub fn check(spec: &CallOrderSpec, cfg: &Cfg<Stmt>) -> Vec<CallOrderHit> {
     if spec.uses_path_engine() {
         return Vec::new();
     }
-    let out_facts = solver::solve(cfg, |_id, node: &CfgNode<Stmt>, in_fact: &Pending| {
-        Pending(node.stmts.iter().fold(in_fact.0, |pending, stmt| apply(spec, pending, stmt)))
+    let reachable = cfg.reachable();
+    let out_facts = solver::solve(cfg, |id, node: &CfgNode<Stmt>, in_fact: &Pending| {
+        Pending(reachable[id] && node.stmts.iter().fold(in_fact.0, |pending, stmt| apply(spec, pending, stmt)))
     });
 
     let mut hits = Vec::new();
     for (node_id, node) in cfg.nodes.iter().enumerate() {
+        if !reachable[node_id] {
+            continue;
+        }
         let preds = cfg.predecessors(node_id);
         let mut pending = preds.iter().any(|&p| out_facts[p].0);
         for (index, stmt) in node.stmts.iter().enumerate() {

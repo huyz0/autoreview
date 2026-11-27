@@ -1388,12 +1388,35 @@ fn rust_returned_matches_preserve_results_through_helpers() {
     let root = write_single_file("lib.rs", source);
     assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 3)]);
     let clean = source.replace("    remove(path, flag);", "    assert!(remove(path, flag).is_ok());");
-    for form in [clean.clone(), clean.replace("    match flag", "    return match flag").replace("result } }\n", "result } };\n")] {
+    for form in [clean.clone(), clean.replace("    match flag", "    return /* chosen result */ match flag").replace("result } }\n", "result } };\n")] {
         std::fs::write(root.path().join("lib.rs"), form).unwrap();
         assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[]);
         let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
         assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", report.coverage);
     }
+}
+
+#[test]
+fn rust_let_else_lowers_both_paths_and_limits_projection() {
+    let source = concat!(
+        "use std::fs::remove_file;\n",
+        "fn run(path: Option<&str>) {\n",
+        "    let Some(path) = path else {\n",
+        "        remove_file(\"fallback.txt\");\n",
+        "        return;\n",
+        "    };\n",
+        "    remove_file(path);\n",
+        "}\n",
+    );
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 4), ("lib.rs", 7)]);
+    let scan = || run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    let report = scan();
+    assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"));
+    assert!(report.coverage.iter().any(|issue| issue.reason == "rust_let_else_binding_projection" && issue.line == Some(3)));
+    let unbound = source.replace("Some(path)", "Some(_)").replace("remove_file(path);", "remove_file(\"present.txt\");");
+    std::fs::write(root.path().join("lib.rs"), unbound).unwrap();
+    assert!(!scan().coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" || issue.reason == "rust_let_else_binding_projection"));
 }
 
 #[test]
@@ -1460,7 +1483,7 @@ fn rust_match_guards_short_circuit_before_running_the_right_operand() {
     let source = concat!(
         "fn partial(flag: u8) {\n match flag { 0 if gate() || begin() => {}, _ => {} };\n}\n",
         "fn clean(flag: u8) {\n match flag { 0 if gate() && begin() => { finish(); }, _ => { finish(); } };\n}\n",
-        "fn skipped(flag: u8) {\n match flag { 0 if false && begin() => {}, 1 if true || begin() => {}, _ => {} };\n}\n",
+        "fn skipped(flag: u8) {\n match flag { 0 if false && begin() => {}, 1 if !(true || begin()) => {}, _ => {} };\n}\n",
     );
     assert_rust_match_cleanup("rust-short-circuit-cleanup", source);
 }

@@ -3,6 +3,7 @@
 
 mod values;
 mod match_flow;
+mod let_else;
 
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -83,30 +84,32 @@ impl Lower<'_> {
 
     fn statement(&mut self, stmt: Node<'_>, at: NodeId, names: &mut Bindings) -> Option<NodeId> {
         match stmt.kind() {
-            "let_declaration" => return Some(self.binding(stmt, at, names)),
-            "expression_statement" => {
-                return self.statement(stmt.named_child(0)?, at, names);
+            "let_declaration" if stmt.child_by_field_name("alternative").is_some() => {
+                self.lower_let_else(stmt, at, names)
             }
-            "return_expression" => {
-                if let Some(value) = stmt.named_child(0).filter(|node| node.kind() == "match_expression") {
-                    return self.match_expression(value, at, names);
-                }
-                let at = self.value(stmt.named_child(0), at, names, None);
-                super::record_evaluation(&mut self.cfg, at, stmt);
-                if self.cfg.keyed_flow.is_some() {
-                    let value = stmt.named_child(0).and_then(|value| super::keyed_syntax::result_operand(value, self.source, false));
-                    self.cfg.emit(at, Stmt::ReturnIdentity(value), line(stmt));
-                }
-                self.finish(at, line(stmt));
-                return None;
-            }
+            "let_declaration" => Some(self.binding(stmt, at, names)),
+            "expression_statement" => self.statement(super::site::children(stmt).next()?, at, names),
+            "return_expression" => self.explicit_return(stmt, at, names),
             "break_expression" | "continue_expression" => {
                 self.jump(stmt, at, names);
-                return None;
+                None
             }
-            _ => {}
+            _ => self.flow_expression(stmt, at, names),
         }
-        self.flow_expression(stmt, at, names)
+    }
+
+    fn explicit_return(&mut self, stmt: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
+        let value = super::site::children(stmt).next();
+        if let Some(value) = value.filter(|node| node.kind() == "match_expression") {
+            return self.match_expression(value, at, names);
+        }
+        let end = self.value(value, at, names, None);
+        super::record_evaluation(&mut self.cfg, end, stmt);
+        if let Some(value) = value {
+            self.return_identity(value, end);
+        }
+        self.finish(end, line(stmt));
+        None
     }
 
     fn flow_expression(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
@@ -291,7 +294,8 @@ fn supported(node: Node<'_>) -> bool {
         "let_chain" | "let_condition" | "label" | "unsafe_block" => {
             return false
         }
-        "for_expression" | "let_declaration" if !simple_binding(node) => return false,
+        "let_declaration" if !simple_binding(node) && !let_else::supports(node) => return false,
+        "for_expression" if !simple_binding(node) => return false,
         "if_expression"
         | "while_expression"
         | "for_expression"
@@ -325,7 +329,19 @@ pub fn match_arm_bindings(arm: Node<'_>) -> Vec<Node<'_>> {
 
 /// Lines where a supported match projects one or more arm-local values.
 pub fn match_binding_lines(function: Node<'_>) -> Vec<u32> {
-    match_flow::binding_lines(function)
+    match_flow::binding_lines(function, match_flow::has_bindings)
+}
+
+pub(crate) use let_else::bindings as let_else_bindings;
+
+pub(crate) fn pattern_projection_sites(function: Node<'_>) -> Vec<(&'static str, u32)> {
+    let match_sites = match_binding_lines(function);
+    let let_else_sites = match_flow::binding_lines(function, |node| {
+        let_else_bindings(node).is_some_and(|names| !names.is_empty())
+    });
+    match_sites.into_iter().map(|line| ("rust_match_binding_projection", line))
+        .chain(let_else_sites.into_iter().map(|line| ("rust_let_else_binding_projection", line)))
+        .collect()
 }
 
 fn statement_position(node: Node<'_>) -> bool {

@@ -55,7 +55,7 @@ fn simple_arm(node: Node<'_>) -> bool {
     }
 }
 
-fn simple_value(node: Node<'_>) -> bool {
+pub(super) fn simple_value(node: Node<'_>) -> bool {
     match node.kind() {
         "identifier" | "self" | "scoped_identifier" | "integer_literal" | "boolean_literal"
         | "char_literal" | "string_literal" | "unit_expression" => true,
@@ -74,7 +74,7 @@ fn simple_value(node: Node<'_>) -> bool {
 fn simple_call(node: Node<'_>) -> bool {
     let Some(function) = node.child_by_field_name("function") else { return false };
     let callee = matches!(function.kind(), "identifier" | "scoped_identifier")
-        || (function.kind() == "field_expression" && function.child_by_field_name("value").is_some_and(|value| value.kind() == "identifier"));
+        || (function.kind() == "field_expression" && function.child_by_field_name("value").is_some_and(simple_value));
     callee && node.child_by_field_name("arguments").is_some_and(|args| args.named_children(&mut args.walk()).all(simple_value))
 }
 
@@ -87,7 +87,7 @@ fn supported_arm(arm: Node<'_>) -> bool {
     })
 }
 
-fn tuple_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
+pub(super) fn tuple_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
     let ty = node.child_by_field_name("type")?;
     if node.kind() != "tuple_struct_pattern" || !matches!(ty.kind(), "identifier" | "scoped_identifier") { return None; }
     let mut bindings = Vec::new();
@@ -107,13 +107,12 @@ pub(super) fn arm_bindings(arm: Node<'_>) -> Vec<Node<'_>> {
     pattern(arm).and_then(|pattern| pattern.named_child(0)).and_then(tuple_bindings).unwrap_or_default()
 }
 
-pub(super) fn binding_lines(function: Node<'_>) -> Vec<u32> {
+pub(super) fn binding_lines(function: Node<'_>, has_bindings: impl Fn(Node<'_>) -> bool) -> Vec<u32> {
     let mut pending = function.child_by_field_name("body").into_iter().collect::<Vec<_>>();
     let mut lines = Vec::new();
     while let Some(node) = pending.pop() {
         if matches!(node.kind(), "function_item" | "closure_expression" | "async_block" | "macro_invocation") { continue; }
-        if supports(node) && node.child_by_field_name("body").is_some_and(|body|
-            body.named_children(&mut body.walk()).any(|arm| !arm_bindings(arm).is_empty())) {
+        if has_bindings(node) {
             lines.push(node.start_position().row as u32 + 1);
         }
         pending.extend(node.named_children(&mut node.walk()));
@@ -121,6 +120,11 @@ pub(super) fn binding_lines(function: Node<'_>) -> Vec<u32> {
     lines.sort_unstable();
     lines.dedup();
     lines
+}
+
+pub(super) fn has_bindings(node: Node<'_>) -> bool {
+    supports(node) && node.child_by_field_name("body").is_some_and(|body|
+        body.named_children(&mut body.walk()).any(|arm| !arm_bindings(arm).is_empty()))
 }
 
 fn wildcard_arm(arm: Node<'_>) -> bool {
@@ -185,14 +189,19 @@ impl Lower<'_> {
     fn bind_arm(&mut self, arm: Node<'_>, start: NodeId, names: &Bindings) -> Bindings {
         let mut arm_names = names.clone();
         for binding in arm_bindings(arm) {
-            let name = self.text(binding).to_owned();
-            arm_names.insert(name.clone(), self.fresh(&name));
-            if self.cfg.keyed_flow.is_some() {
-                self.cfg.emit(start, Stmt::Rebind(BindingWrite { name: name.clone(), start: binding.start_byte(),
-                    value: Some(IdentityOperand::Fresh { name, start: binding.start_byte(), age: 0, unit: 0 }) }), super::line(binding));
-            }
+            self.project_pattern_binding(binding, start, &mut arm_names);
         }
         arm_names
+    }
+
+    pub(super) fn project_pattern_binding(&mut self, binding: Node<'_>, at: NodeId, names: &mut Bindings) {
+        let name = self.text(binding).to_owned();
+        let start = binding.start_byte();
+        names.insert(name.clone(), self.fresh(&name));
+        if self.cfg.keyed_flow.is_some() {
+            let value = Some(IdentityOperand::Fresh { name: name.clone(), start, age: 0, unit: 0 });
+            self.cfg.emit(at, Stmt::Rebind(BindingWrite { name, start, value }), super::line(binding));
+        }
     }
 
     fn guard_entry(

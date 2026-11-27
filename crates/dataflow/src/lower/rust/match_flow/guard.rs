@@ -14,21 +14,26 @@ fn predicate(mut node: Node<'_>) -> Predicate<'_> {
         };
         node = inner;
     }
-    if let Some(operator) = node.child_by_field_name("operator") {
-        if let Some((left, right)) = node
-            .child_by_field_name("left")
-            .zip(node.child_by_field_name("right"))
-        {
-            match operator.kind() {
-                "&&" => return Predicate::And(left, right),
-                "||" => return Predicate::Or(left, right),
-                _ => {}
-            }
+    if node.kind() == "unary_expression"
+        && node
+            .children(&mut node.walk())
+            .any(|child| child.kind() == "!")
+    {
+        if let Some(value) = crate::lower::site::children(node).next() {
+            return Predicate::Not(value);
         }
-        if operator.kind() == "!" {
-            if let Some(value) = crate::lower::site::children(node).next() {
-                return Predicate::Not(value);
-            }
+    }
+    if let Some((left, right)) = node
+        .child_by_field_name("left")
+        .zip(node.child_by_field_name("right"))
+    {
+        match node
+            .child_by_field_name("operator")
+            .map(|operator| operator.kind())
+        {
+            Some("&&") => return Predicate::And(left, right),
+            Some("||") => return Predicate::Or(left, right),
+            _ => {}
         }
     }
     Predicate::Value(node)

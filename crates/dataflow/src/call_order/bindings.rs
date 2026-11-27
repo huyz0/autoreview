@@ -124,6 +124,8 @@ impl<'src> Bindings<'src> {
     fn record_declarations(&mut self, node: Node<'_>, source: &'src [u8], track_results: bool) {
         let targets = if node.kind() == "match_arm" && node.parent().and_then(|body| body.parent()).is_some_and(crate::lower::rust::supports_match) {
             crate::lower::rust::match_arm_bindings(node)
+        } else if let Some(names) = crate::lower::rust::let_else_bindings(node) {
+            names
         } else if declares_iteration(node) {
             crate::lower::keyed_flow::loops::iterator_bindings(node)
         } else {
@@ -215,7 +217,7 @@ fn initializer(node: Node<'_>) -> Option<Node<'_>> {
                 .last()
                 .filter(|value| *value != node)
         }
-        "variable_declarator" | "let_declaration" => node.child_by_field_name("value"),
+        "variable_declarator" | "let_declaration" if node.child_by_field_name("alternative").is_none() => node.child_by_field_name("value"),
         "var_spec" => single(node.child_by_field_name("value")?),
         _ => None,
     }
