@@ -94,41 +94,34 @@ fn extract_class(node: Node, source: &[u8], file: &Path, scope: &Arc<JavaScope>)
     let body = node.child_by_field_name("body")?;
     let mut java = JavaClass::extract(node, source, scope);
 
-    // Fields first, in a separate pass, so a method declared before a field
-    // in source order (legal in Java) still sees the complete field list
-    // when classifying its own-field accesses below.
-    let mut fields = Vec::new();
-    {
-        let mut cursor = body.walk();
-        for child in body.named_children(&mut cursor) {
-            if child.kind() == "field_declaration" {
-                let type_text = child.child_by_field_name("type").map(|t| text(t, source).to_string()).unwrap_or_default();
-                let mut dc = child.walk();
-                for declarator in child.children_by_field_name("declarator", &mut dc) {
-                    if let Some(name_node) = declarator.child_by_field_name("name") {
-                        fields.push(NamedSlot { name: text(name_node, source).to_string(), type_text: type_text.clone() });
-                    }
-                }
-            }
-        }
-    }
+    let fields = extract_fields(body, source);
 
     let mut methods = Vec::new();
-    {
-        let mut cursor = body.walk();
-        for child in body.named_children(&mut cursor) {
-            if child.kind() == "method_declaration" {
-                if let Some(m) = extract_method(child, source, file, &name, &fields) {
-                    if let Some(java) = &mut java {
-                        java.add_method(child, source);
-                    }
-                    methods.push(m);
-                }
-            }
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor).filter(|node| node.kind() == "method_declaration") {
+        let Some(method) = extract_method(child, source, file, &name, &fields) else { continue };
+        if let Some(java) = &mut java {
+            java.add_method(child, source);
         }
+        methods.push(method);
     }
 
     Some(TypeDecl { name, file: file.to_path_buf(), start_line: line_of(node), fields, methods, superclass, java })
+}
+
+fn extract_fields(body: Node, source: &[u8]) -> Vec<NamedSlot> {
+    let mut fields = Vec::new();
+    let mut cursor = body.walk();
+    for field in body.named_children(&mut cursor).filter(|node| node.kind() == "field_declaration") {
+        let type_text = field.child_by_field_name("type").map(|t| text(t, source).to_owned()).unwrap_or_default();
+        let mut cursor = field.walk();
+        for declarator in field.children_by_field_name("declarator", &mut cursor) {
+            if let Some(name) = declarator.child_by_field_name("name") {
+                fields.push(NamedSlot { name: text(name, source).to_owned(), type_text: type_text.clone() });
+            }
+        }
+    }
+    fields
 }
 
 fn extract_method(node: Node, source: &[u8], file: &Path, owner_type: &str, fields: &[NamedSlot]) -> Option<MethodDecl> {

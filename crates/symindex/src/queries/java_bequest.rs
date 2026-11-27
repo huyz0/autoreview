@@ -23,9 +23,11 @@ pub(super) fn find(index: &SymbolIndex) -> Vec<RefusedBequestFinding> {
     let mut findings = Vec::new();
     for child in &index.types {
         let Some(java) = &child.java else { continue };
+        if !child.methods.iter().any(|method| method.is_trivial_body) {
+            continue;
+        }
         let Some(parent) = resolve_parent(child, java, &types) else { continue };
-        let Some(parent_java) = &parent.java else { continue };
-        collect_overrides(child, java, parent, parent_java, &types, &mut findings);
+        collect_overrides(child, parent, &types, &mut findings);
     }
     findings
 }
@@ -40,26 +42,18 @@ fn resolve_parent<'a>(child: &TypeDecl, java: &JavaClass, types: &Types<'a>) -> 
 
 fn collect_overrides(
     child: &TypeDecl,
-    java: &JavaClass,
     parent: &TypeDecl,
-    parent_java: &JavaClass,
     types: &Types<'_>,
     findings: &mut Vec<RefusedBequestFinding>,
 ) {
-    let same_package = java.scope.package == parent_java.scope.package;
-    let mut inherited = HashMap::new();
-    for (method, signature) in parent.methods.iter().zip(&parent_java.signatures) {
-        let Some(signature) = signature.as_ref().filter(|s| !s.is_final && (same_package || !s.package_private)) else { continue };
-        if let Some(parameters) = resolved_parameters(&signature.parameters, parent_java, None, types) {
-            inherited.entry(method.name.as_str()).or_insert_with(Vec::new).push(parameters);
-        }
-    }
+    let Some((java, parent_java)) = child.java.as_ref().zip(parent.java.as_ref()) else { return };
+    let inherited = inherited_methods(parent, parent_java, &java.scope.package, types);
 
     for (method, signature) in child.methods.iter().zip(&java.signatures) {
         let Some(signature) = signature.as_ref().filter(|_| method.is_trivial_body) else { continue };
         let Some(candidates) = inherited.get(method.name.as_str()) else { continue };
         let Some(parameters) = resolved_parameters(&signature.parameters, java, Some(parent_java), types) else { continue };
-        if candidates.contains(&parameters) {
+        if candidates.iter().any(|parent| is_subsignature(&parameters, parent)) {
             findings.push(RefusedBequestFinding {
                 file: method.file.clone(),
                 line: method.start_line,
@@ -69,6 +63,29 @@ fn collect_overrides(
             });
         }
     }
+}
+
+fn is_subsignature(child: &[JavaParameter], parent: &[JavaParameter]) -> bool {
+    child == parent || (child.len() == parent.len() && child.iter().zip(parent).all(|(child, parent)| {
+        child.arguments.is_empty() && child.name == parent.name
+            && child.dimensions == parent.dimensions && child.primitive == parent.primitive
+    }))
+}
+
+fn inherited_methods<'a>(
+    parent: &'a TypeDecl,
+    java: &JavaClass,
+    child_package: &str,
+    types: &Types<'_>,
+) -> HashMap<&'a str, Vec<Vec<JavaParameter>>> {
+    let mut inherited = HashMap::new();
+    for (method, signature) in parent.methods.iter().zip(&java.signatures) {
+        let Some(signature) = signature.as_ref().filter(|s| !s.is_final && (java.scope.package == child_package || !s.package_private)) else { continue };
+        if let Some(parameters) = resolved_parameters(&signature.parameters, java, None, types) {
+            inherited.entry(method.name.as_str()).or_insert_with(Vec::new).push(parameters);
+        }
+    }
+    inherited
 }
 
 fn resolved_parameters(params: &[JavaParameter], class: &JavaClass, parent: Option<&JavaClass>, types: &Types<'_>) -> Option<Vec<JavaParameter>> {
@@ -108,6 +125,10 @@ fn resolve_simple(name: &str, scope: &JavaScope, types: &Types<'_>) -> Option<St
     if let Some(first) = explicit.next() {
         return explicit.all(|path| path == first).then(|| first.clone());
     }
+    resolve_unimported(name, local, scope, types)
+}
+
+fn resolve_unimported(name: &str, local: String, scope: &JavaScope, types: &Types<'_>) -> Option<String> {
     if scope.static_imports.iter().any(|path| simple_name(path) == name) {
         return None;
     }
@@ -215,16 +236,18 @@ mod tests {
                 public class Base {
                     public void array(String items[]) {}
                     public void list(List<String> items) {}
+                    public void erased(List<String> items) {}
                     public void different(java.util.Date date) {}
                 }"),
             ("Sub.java", "package child; import base.Base; import java.sql.Date;
                 class Sub extends Base {
                     @Override public void array(String... names) {}
                     @Override public void list(java.util.List<java.lang.String> names) {}
+                    @Override public void erased(java.util.List names) {}
                     public void different(Date date) {}
                 }"),
         ];
-        assert_eq!(flagged_methods(&files), ["Sub.array", "Sub.list"]);
+        assert_eq!(flagged_methods(&files), ["Sub.array", "Sub.list", "Sub.erased"]);
     }
 
     #[test]
