@@ -121,14 +121,16 @@ budget. Same-named shadowed identifiers conservatively prevent that proof.
 
 An experimental standalone compiler-IR probe lives in
 `tools/kotlin-callback-evidence`. It records some resolved SAM conversions,
-but it is not connected to review, replay, or rule decisions. Its output does
+and can optionally add unverified metadata to unresolved review findings. It
+does not change review or replay decisions. Its output does
 not prove execution timing, complete resolution, overload identity, or that
 source and dependency snapshots are unchanged. Simple parameter classifiers can
 distinguish some overloads, but are not complete signatures. The README records its limits
 and the additional verification required before using it as rule evidence.
 An optional snapshot runner copies explicitly listed sources, JARs and the
 plugin, checks them after successful compilation, and maps spans back to
-source paths. It is not integrated into the rule engine, does not discover a
+source paths. Its optional diagnostic metadata is not execution evidence and
+cannot suppress a finding. The runner does not discover a
 project's full classpath, and does not establish immutable compiler or JDK
 identity, process containment, overload identity, or execution behavior.
 

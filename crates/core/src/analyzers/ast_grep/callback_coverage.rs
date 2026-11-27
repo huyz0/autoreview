@@ -5,6 +5,8 @@ use autoreview_langsupport::{parser_for, Language};
 use autoreview_schema::{AgentFinding, AnalysisCoverageIssue};
 use tree_sitter::{Node, Point, Tree};
 
+mod evidence;
+
 struct ParsedSource {
     source: String,
     tree: Tree,
@@ -20,8 +22,24 @@ const RULES: &[&str] = &[
 const DETAIL: &str = "The callback's execution timing and identity were not resolved; review whether its body executes in this suspend function.";
 
 pub(super) fn annotate(root: &Path, findings: &mut Vec<AgentFinding>) -> Vec<AnalysisCoverageIssue> {
-    let mut trees: HashMap<String, Option<ParsedSource>> = HashMap::new();
     let mut coverage = Vec::new();
+    let relevant = findings.iter().any(|finding| finding.source.rule_id.as_deref().is_some_and(|rule| RULES.contains(&rule))
+        && !finding.meta.as_ref().is_some_and(|meta| meta.contains_key("rulePackId")));
+    let evidence = match if relevant { evidence::from_environment(root) } else { Ok(None) } {
+        Ok(value) => value,
+        Err(()) => {
+            coverage.push(AnalysisCoverageIssue { analyzer: "ast-grep".into(), reason: "callback_evidence_unavailable".into(),
+                scope: "repository".into(), path: None, line: None, rule: None,
+                detail: "The configured experimental Kotlin callback evidence could not be read or validated; callback findings remain unresolved.".into() });
+            None
+        }
+    };
+    annotate_with(root, findings, evidence.as_ref(), &mut coverage);
+    coverage
+}
+
+fn annotate_with(root: &Path, findings: &mut Vec<AgentFinding>, evidence: Option<&evidence::Evidence>, coverage: &mut Vec<AnalysisCoverageIssue>) {
+    let mut trees: HashMap<String, Option<ParsedSource>> = HashMap::new();
     findings.retain_mut(|finding| {
         let Some(rule) = finding.source.rule_id.as_deref().filter(|rule| RULES.contains(rule)) else { return true };
         if finding.meta.as_ref().is_some_and(|meta| meta.contains_key("rulePackId")) {
@@ -37,6 +55,11 @@ pub(super) fn annotate(root: &Path, findings: &mut Vec<AgentFinding>) -> Vec<Ana
             Some(Execution::Immediate) => return true,
             Some(Execution::Unknown) | None => {}
         }
+        if let (Some(evidence), Some(parsed)) = (evidence, tree.as_ref()) {
+            if let Some(value) = evidence.for_finding(root, &finding.location.path, parsed, finding) {
+                finding.meta.get_or_insert_with(HashMap::new).insert("experimentalCallbackEvidence".into(), value);
+            }
+        }
         finding.confidence = finding.confidence.min(0.5);
         finding.message.push_str(" Callback execution timing is unresolved; verify the execution context.");
         coverage.push(AnalysisCoverageIssue {
@@ -46,7 +69,6 @@ pub(super) fn annotate(root: &Path, findings: &mut Vec<AgentFinding>) -> Vec<Ana
         });
         true
     });
-    coverage
 }
 
 enum Execution { Immediate, Deferred, Unknown }
