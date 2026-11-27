@@ -218,6 +218,136 @@ func parseOld() { tokens.NewParser(tokens.WithoutClaimsValidation()) }
 }
 
 #[test]
+fn url_markup_requires_a_browser_source_and_a_raw_html_sink() {
+    let js = r#"const target = document.querySelector('.preview');
+const query = new URLSearchParams(window.location.search).get('label');
+const markup = `<span>${query}</span>`;
+target.innerHTML = markup;
+target.insertAdjacentHTML('beforeend', decodeURIComponent(location.hash));
+target.outerHTML = '<p>' + window.location.hash;
+target.textContent = location.hash;
+target.innerHTML = DOMPurify.sanitize(location.hash);
+target.innerHTML = '<span>Example</span>';
+fake.innerHTML = location.href;
+function custom(document, location) {
+    document.querySelector('.preview').innerHTML = location.hash;
+}
+"#;
+    let tsx = r#"export function View() {
+    const label = window.location.hash;
+    return <div dangerouslySetInnerHTML={{ __html: label }} />;
+}
+const safe = <div>{window.location.hash}</div>;
+const custom = <Component dangerouslySetInnerHTML={{ __html: window.location.hash }} />;
+const overwritten = <div dangerouslySetInnerHTML={{ __html: location.hash }} {...props} />;
+const sanitized = <div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(location.hash) }} />;
+"#;
+    let findings = scan(&[("preview.js", js), ("View.tsx", tsx)], &["preview.js", "View.tsx"]);
+    let sites: Vec<_> = findings.iter().filter_map(|finding| {
+        let id = finding.source.rule_id.as_deref()?;
+        matches!(id, "web-url-input-to-dom-html" | "react-url-input-to-raw-html")
+            .then_some((&finding.location.range.start_line, id))
+    }).collect();
+    assert_eq!(sites, [
+        (&4, "web-url-input-to-dom-html"),
+        (&5, "web-url-input-to-dom-html"),
+        (&6, "web-url-input-to-dom-html"),
+        (&3, "react-url-input-to-raw-html"),
+    ], "{findings:#?}");
+}
+
+#[test]
+fn zip_extraction_checks_joined_destinations_and_honors_local_path_guards() {
+    let go = r#"package fixture
+import files "os"
+import paths "path/filepath"
+import archives "archive/zip"
+func unpack(reader *archives.Reader, root string) {
+    for _, item := range reader.File {
+        files.Create(paths.Join(root, item.Name))
+        dest := paths.Join(root, item.Name)
+        files.MkdirAll(dest, 0700)
+        files.Create(paths.Join(root, "metadata"))
+    }
+}
+func checked(reader *archives.ReadCloser, root string) {
+    for _, item := range reader.File {
+        if !paths.IsLocal(item.Name) { continue }
+        files.Create(paths.Join(root, item.Name))
+    }
+}
+func rooted(reader *archives.Reader, root *files.Root) {
+    for _, item := range reader.File {
+        root.Create(item.Name)
+    }
+}
+type entries struct { File []struct { Name string } }
+func similar(reader entries, root string) {
+    for _, item := range reader.File {
+        files.Create(paths.Join(root, item.Name))
+    }
+}
+"#;
+    let found = scan(&[("extract.go", go)], &["extract.go"]);
+    let lines: Vec<_> = found.iter().filter(|finding| {
+        finding.source.rule_id.as_deref() == Some("go-zip-entry-name-to-filesystem-write")
+    }).map(|finding| finding.location.range.start_line).collect();
+    assert_eq!(lines, [7, 9], "{found:#?}");
+}
+
+#[test]
+fn express_request_flow_checks_resolved_sink_positions_and_exact_url_guards() {
+    let js = r#"import express from 'express';
+import { Pool } from 'pg';
+import { exec as run, execFile } from 'node:child_process';
+import axios from 'axios';
+const app = express();
+const pool = new Pool();
+app.get('/items', (req, res) => {
+    const label = req.query.label;
+    pool.query('SELECT name FROM item WHERE name = ' + label);
+    pool.query('SELECT name FROM item WHERE name = $1', [label]);
+    run(req.params.operation);
+    execFile('fixture-tool', [req.params.operation]);
+    axios.post(req.body.destination, {});
+    axios.get('https://service.test/items', { params: { label } });
+});
+app.get('/fixed', (req, res) => {
+    const url = req.query.destination;
+    if (url !== 'https://service.test/items') return;
+    axios.get(url);
+});
+app.get('/wrong-guard', (req, res) => {
+    const url = req.query.destination;
+    const alternative = 'https://service.test/items';
+    if (alternative !== 'https://service.test/items') return;
+    axios.get(url);
+});
+app.get('/overwrite', (req, res) => {
+    req.query.destination = 'https://service.test/items';
+    axios.get(req.query.destination);
+});
+another.get('/fake', (req, res) => { axios.get(req.query.destination); });
+app.get('/config', (req, res) => {
+    pool.query({ text: req.query.statement, values: [] });
+    pool.query({ text: 'SELECT name FROM item WHERE id = $1', values: [req.query.id] });
+});
+"#;
+    let findings = scan(&[("routes.js", js)], &["routes.js"]);
+    let actual: Vec<_> = findings.iter().filter_map(|finding| {
+        let id = finding.source.rule_id.as_deref()?;
+        id.starts_with("express-request-to-").then_some((finding.location.range.start_line, id))
+    }).collect();
+    assert_eq!(actual, [
+        (9, "express-request-to-pg-query-text"),
+        (11, "express-request-to-node-exec"),
+        (13, "express-request-to-axios-destination"),
+        (25, "express-request-to-axios-destination"),
+        (33, "express-request-to-pg-query-text"),
+    ], "{findings:#?}");
+}
+
+#[test]
 fn constructor_dispatch_reports_resolved_overridable_calls() {
     let source = r#"class Base {
     Base(String value) {

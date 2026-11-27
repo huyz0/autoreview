@@ -1,6 +1,9 @@
+mod local_values;
+
+use local_values::const_declarations;
 use tree_sitter::Node;
 
-use super::{field_text, first_argument, imports_from, is_function, BindingScopes};
+use super::{field_text, first_argument, imports_from, BindingScopes};
 use crate::analyzers::framework_checks::{children, descendants, text};
 
 pub(in crate::analyzers::framework_checks) struct NodeCalls<'tree, 'source> {
@@ -126,53 +129,25 @@ impl<'t, 's> NodeCalls<'t, 's> {
         imports_from(self.root, self.source, specifier).filter(|import| !has_type_modifier(*import))
     }
 
-    pub fn options_object(&self, argument: Node<'t>, call: Node<'t>) -> Option<Node<'t>> {
-        let object = if argument.kind() == "identifier" {
-            self.local_options(argument, call)?
-        } else {
-            argument
-        };
-        (object.kind() == "object").then_some(object)
+    pub fn unshadowed(&self, identifier: Node<'t>) -> bool {
+        let name = text(identifier, self.source);
+        identifier.kind() == "identifier"
+            && self.scopes.visible(name, identifier).is_none()
+            && !inside_named_expression(identifier, name, self.source)
+            && !imports_binding(self.root, name, self.source)
     }
 
-    fn local_options(&self, options: Node<'t>, call: Node<'t>) -> Option<Node<'t>> {
-        let name = text(options, self.source);
-        if inside_named_expression(options, name, self.source) {
-            return None;
-        }
-        let scope = self.scopes.visible(name, options)?;
-        let (declaration, object) = const_value(scope, name, self.source)?;
-        let statement = containing_statement(call, scope)?;
-        if declaration.end_byte() > statement.start_byte()
-            || descendants(scope).any(|node| {
-                node.start_byte() < options.start_byte()
-                    && !declaration.byte_range().contains(&node.start_byte())
-                    && matches!(node.kind(), "identifier" | "shorthand_property_identifier")
-                    && text(node, self.source) == name
-            })
-        {
-            return None;
-        }
-        Some(object)
+    pub fn binding_scope(&self, binding: Node<'t>) -> Option<Node<'t>> {
+        self.scopes.visible(text(binding, self.source), binding)
     }
-}
 
-fn containing_statement<'t>(call: Node<'t>, scope: Node<'t>) -> Option<Node<'t>> {
-    std::iter::successors(Some(call), |node| node.parent())
-        .take_while(|node| {
-            !is_function(*node)
-                && !matches!(
-                    node.kind(),
-                    "statement_block"
-                        | "if_statement"
-                        | "for_statement"
-                        | "for_in_statement"
-                        | "while_statement"
-                        | "do_statement"
-                        | "switch_statement"
-                )
-        })
-        .find(|node| node.parent() == Some(scope))
+    pub fn member(&self, node: Node<'t>) -> Option<(Node<'t>, &'s str)> {
+        (node.kind() == "member_expression").then_some(())?;
+        Some((
+            node.child_by_field_name("object")?,
+            field_text(node, "property", self.source)?,
+        ))
+    }
 }
 
 fn has_type_modifier(node: Node<'_>) -> bool {
@@ -192,24 +167,6 @@ fn imported_name<'s>(node: Node<'_>, source: &'s str) -> Option<(&'s str, &'s st
         }
         _ => None,
     }
-}
-
-fn const_value<'t>(scope: Node<'t>, name: &str, source: &str) -> Option<(Node<'t>, Node<'t>)> {
-    let mut declarations =
-        const_declarations(scope).filter(|decl| field_text(*decl, "name", source) == Some(name));
-    let decl = declarations.next()?;
-    (declarations.next().is_none()).then_some((decl, decl.child_by_field_name("value")?))
-}
-
-fn const_declarations(scope: Node<'_>) -> impl Iterator<Item = Node<'_>> {
-    children(scope)
-        .filter(|statement| {
-            statement.kind() == "lexical_declaration"
-                && statement
-                    .child(0)
-                    .is_some_and(|token| token.kind() == "const")
-        })
-        .flat_map(children)
 }
 
 fn destructured_member<'s>(pattern: Node<'_>, binding: &str, source: &'s str) -> Option<&'s str> {
