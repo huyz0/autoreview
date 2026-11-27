@@ -28,6 +28,8 @@ pub(super) fn run(
             parse: &parse,
             persistent: &persistent,
             java_kotlin_packages: Default::default(),
+            summary_issues: Default::default(),
+            entries: paths.iter().map(|path| root.join(path)).collect(),
         },
     };
     let mut findings = Vec::new();
@@ -38,6 +40,7 @@ pub(super) fn run(
             coverage.extend(issue);
         }
     }
+    coverage.extend(std::mem::take(&mut *review.caches.summary_issues.borrow_mut()));
     let (cross_file, limitations) = super::keyed_imports::run(root, paths, &review.call_sequences, &review.caches);
     findings.extend(cross_file);
     coverage.extend(limitations);

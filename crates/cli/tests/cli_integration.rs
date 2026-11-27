@@ -535,6 +535,27 @@ fn review_excludes_deleted_files_from_missing_source_coverage() {
 }
 
 #[test]
+fn malformed_helper_summary_reaches_review_and_blocks_replay() {
+    let initial = "package sample;\nclass Main { void run() {} }\n";
+    let changed = "package sample;\nclass Main { void run() { int n = 1; } }\n";
+    let repo = init_repo(&[("Main.java", initial), ("Bad.java", "package sample;\nclass Bad { void run( {\n")]);
+    let base = current_commit(repo.path());
+    repo.commit(&[("Main.java", changed)], "change caller");
+    let head = current_commit(repo.path());
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["diff", "--base", &base, "--head", &head, "--static-only"]).assert().success();
+    let report = report_path_from_stdout(&String::from_utf8_lossy(&output.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    assert!(report["analysisCoverage"].as_array().unwrap().iter().any(|issue| issue["reason"] == "summary_dependency_syntax_errors" && issue["rule"] == "npe-risk-from-helper-return" && issue["path"] == "Bad.java"), "{report}");
+    let suite = serde_json::json!({"cases": [{"name":"malformed helper", "rule":{"tool":"autoreview-dataflow","id":"npe-risk-from-helper-return"},
+        "before":{"commit":base,"path":"Main.java","lines":[]}, "after":{"commit":head,"path":"Main.java","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let replay = failed_replay_report(repo.path());
+    assert_eq!(replay["coverage"][0]["incomplete"], 1, "{replay}");
+    assert!(replay["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue| issue["reason"] == "summary_dependency_syntax_errors" && issue["path"] == "Bad.java"), "{replay}");
+}
+
+#[test]
 fn unresolved_kotlin_callback_reaches_review_and_blocks_replay() {
     if !ast_grep_available() { return; }
     let clean = "suspend fun run() {\n work()\n}\n";
