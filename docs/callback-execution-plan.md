@@ -28,6 +28,22 @@ classification. A rule may use that result to decide whether the operation
 belongs to its enclosing execution context; unknown must never silently become
 either a definite finding or a clean negative.
 
+Execution context and wall-clock timing are different. RediCloud calls
+`start()` before its suspend function returns, so an SSH client could trigger
+authentication while that function is still active. That alone does not put
+the callback on the suspend function's execution stack. Contracts and their
+consumers must describe the execution relationship, not infer it from whether
+the enclosing function has returned.
+
+The RediCloud before snapshot pins Apache SSHD 2.17.1. In that version,
+[`SshServer.setPasswordAuthenticator`](https://github.com/apache/mina-sshd/blob/sshd-2.17.1/sshd-core/src/main/java/org/apache/sshd/server/SshServer.java)
+stores its parameter in a field. The method and class are overridable, so
+this implementation alone does not prove behavior for an arbitrary receiver.
+The compiler probe test uses the real 2.17.1 classes and checks that the
+resolved setter is reported as open. Before using a contract, verify the
+concrete receiver, artifact identity, and relevant invocation paths; do not
+assume the setter's behavior for a subclass or another version.
+
 Initially target Kotlin coroutine checks, but make contracts independent of
 the individual rule and language. The model must distinguish a functional
 interface value from its later invocation, including immediate invocation of

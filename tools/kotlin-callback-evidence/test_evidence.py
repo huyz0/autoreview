@@ -8,6 +8,7 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
+import zipfile
 
 from build import build
 
@@ -38,14 +39,15 @@ class EvidenceTest(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.directory.cleanup()
 
-    def compile(self, name: str, source: str, output: pathlib.Path | None = None) -> subprocess.CompletedProcess:
+    def compile(self, name: str, source: str, output: pathlib.Path | None = None, classpath: list[pathlib.Path] | None = None) -> subprocess.CompletedProcess:
         file = self.root / f"{name}.kt"
         file.write_text(source, encoding="utf-8", newline="\n")
         destination = output or self.root / f"{name}.json"
         env = os.environ.copy()
         env["AUTOREVIEW_CALLBACK_EVIDENCE_OUTPUT"] = str(destination)
+        classpath_arg = os.pathsep.join(str(path) for path in (classpath or [self.classes]))
         return subprocess.run(
-            [str(self.kotlinc), str(file), "-cp", str(self.classes), "-d", str(self.root / f"{name}-out"), f"-Xplugin={self.plugin}"],
+            [str(self.kotlinc), str(file), "-cp", classpath_arg, "-d", str(self.root / f"{name}-out"), f"-Xplugin={self.plugin}"],
             env=env, capture_output=True, text=True, timeout=120,
         )
 
@@ -98,6 +100,32 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         records = json.loads((self.root / "generic.json").read_text(encoding="utf-8"))["records"]
         self.assertEqual(records[0]["parameterTypes"], [None, "vendor.Auth"])
+
+    @unittest.skipUnless(os.getenv("AUTOREVIEW_TEST_SSHD_CORE") and os.getenv("AUTOREVIEW_TEST_SSHD_COMMON"), "Apache SSHD artifacts not configured")
+    def test_apache_sshd_password_authenticator(self) -> None:
+        source = "package demo\nimport org.apache.sshd.server.SshServer\nimport org.apache.sshd.server.auth.password.PasswordAuthenticator\nsuspend fun install(s: SshServer) { s.passwordAuthenticator = PasswordAuthenticator { _, _, _ -> true } }\n"
+        jars = [pathlib.Path(os.environ[name]).resolve(strict=True) for name in ("AUTOREVIEW_TEST_SSHD_CORE", "AUTOREVIEW_TEST_SSHD_COMMON")]
+        # A single classpath directory avoids kotlinc.bat splitting a Windows
+        # semicolon-delimited classpath. Only trusted, pinned test jars are read.
+        classes = self.root / "sshd-classes"
+        for jar in jars:
+            with zipfile.ZipFile(jar) as archive:
+                for entry in archive.infolist():
+                    path = pathlib.PurePosixPath(entry.filename)
+                    if path.is_absolute() or ".." in path.parts or "\\" in entry.filename or ":" in entry.filename or not entry.filename.endswith(".class"):
+                        continue
+                    target = classes.joinpath(*path.parts)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(archive.read(entry))
+        result = self.compile("sshd", source, classpath=[classes])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        records = json.loads((self.root / "sshd.json").read_text(encoding="utf-8"))["records"]
+        self.assertEqual(len(records), 1, records)
+        record = records[0]
+        self.assertEqual(record["callee"], "org.apache.sshd.server.SshServer.setPasswordAuthenticator")
+        self.assertEqual(record["parameterTypes"], ["org.apache.sshd.server.auth.password.PasswordAuthenticator"])
+        self.assertEqual(record["samType"], "org.apache.sshd.server.auth.password.PasswordAuthenticator")
+        self.assertEqual(record["modality"], "OPEN")
 
     def test_existing_output_is_not_overwritten(self) -> None:
         output = self.root / "existing.json"

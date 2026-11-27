@@ -36,11 +36,19 @@ jobs:
           curl --fail --location --retry 3 --output "$RUNNER_TEMP/kotlin.zip" https://github.com/JetBrains/kotlin/releases/download/v2.2.20/kotlin-compiler-2.2.20.zip
           echo '81f0264c9073b5cbbdb3ff8418cf2c5dac076879fc156fa1a6462f5a5acc4420  '"$RUNNER_TEMP/kotlin.zip" | sha256sum --check
           unzip -q "$RUNNER_TEMP/kotlin.zip" -d "$RUNNER_TEMP/kotlin"
+      - name: Install pinned Apache SSHD test artifacts
+        run: |
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/sshd-core.jar" https://repo.maven.apache.org/maven2/org/apache/sshd/sshd-core/2.17.1/sshd-core-2.17.1.jar
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/sshd-common.jar" https://repo.maven.apache.org/maven2/org/apache/sshd/sshd-common/2.17.1/sshd-common-2.17.1.jar
+          echo 'b30769bbc053da28949ed1404abed546598ccf3de9100945b627f5b3a0fe003c  '"$RUNNER_TEMP/sshd-core.jar" | sha256sum --check
+          echo '4be43cffd261eb8138da20f87bd2d5609022df85b67bf8329cee2db488c0a1a4  '"$RUNNER_TEMP/sshd-common.jar" | sha256sum --check
       - name: Test compiler evidence prototype
         run: |
           export AUTOREVIEW_TEST_KOTLINC="$RUNNER_TEMP/kotlin/kotlinc/bin/kotlinc"
           export AUTOREVIEW_TEST_KOTLIN_COMPILER_JAR="$RUNNER_TEMP/kotlin/kotlinc/lib/kotlin-compiler.jar"
           export AUTOREVIEW_TEST_JAVAC="$(command -v javac)"
+          export AUTOREVIEW_TEST_SSHD_CORE="$RUNNER_TEMP/sshd-core.jar"
+          export AUTOREVIEW_TEST_SSHD_COMMON="$RUNNER_TEMP/sshd-common.jar"
           python3 tools/kotlin-callback-evidence/test_evidence.py
 
   test:
