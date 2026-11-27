@@ -281,6 +281,13 @@ for the token-replacement case, including imported dependencies. Examples are
 this run's reported issues, not precision or recall, and the first failure in
 each case prevented replay from evaluating its after revision.
 
+With void-returning calls treated as unresolved unless observed, the same
+Windows setup reported 13 and 58 unresolved locations respectively. A
+TypeScript `void` callback can return a promise at runtime, so the previous
+classification could incorrectly count such calls as synchronous. These
+locations are coverage limitations, not confirmed ignored promises; both
+cases remain unscored.
+
 To reproduce from a fresh clone, set `AUTOREVIEW_ROOT` to the absolute path of
 this Autoreview checkout and run:
 
