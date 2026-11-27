@@ -110,7 +110,8 @@ fn parameter_read_before_branch(
         ..State::default()
     };
     state.aliases.insert(parameter);
-    straight_line(body, cfg, syntax, body.flow.entry, |effects| {
+    straight_line(body, cfg, syntax, body.flow.entry, false, |_, effects, hidden| {
+        if hidden { return Some(false); }
         if !effects
             .iter()
             .all(|effect| supported_effect_with_return(effect, true))

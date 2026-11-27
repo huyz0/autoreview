@@ -43,6 +43,13 @@ are not a population-wide accuracy estimate; repeated findings within one fix
 or across both snapshots are not independent samples. Reproduction and
 dependency setup are documented in [the benchmark README](README.md).
 
+A subsequent result-use change recognizes a returned Go result after a call
+with a function-literal argument and an unconditional left-hand nil check in a
+short-circuit expression. With that change, the yq multi-result replay completed
+with five true positives and no false positives or false negatives. This is
+still one selected fix pair; other callback and conditional shapes can remain
+incomplete.
+
 ## Additional Kotlin and TSX cases
 
 On Windows using the debug CLI from main `eac1f2ce5b59b07da0dad6b09741d239d9dd9d16`

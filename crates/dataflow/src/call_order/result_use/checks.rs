@@ -164,7 +164,7 @@ fn collect_hits(
             let (partial, status) = super::partial::unused(&analysis.owner, function.graph, plan, syntax, !analysis.closures.is_empty());
             let helper = super::partial::helper_paths(&analysis.owner, function.graph, plan, syntax, (&unused, !analysis.closures.is_empty()));
             let resolved: Vec<_> = unused.iter().chain(&helper.hits).chain(&helper.observed).cloned().collect();
-            let reason = partial_reason(status, &analysis.owner, function.graph, syntax, &resolved)
+            let reason = partial_reason(status, (&analysis.owner, function.graph, plan, syntax), &resolved)
                 .or_else(|| helper.incomplete.then_some("result_use_path_unmodeled"));
             if let Some(reason) = reason {
                 limitations.push(super::super::keyed::KeyedLimitation { reason, path: Some(unit.path.to_owned()), line: Some(function.node.start_position().row as u32 + 1) });
@@ -175,10 +175,11 @@ fn collect_hits(
     hits
 }
 
-fn partial_reason(status: super::partial::Status, body: &super::Body, graph: &crate::cfg::Cfg<crate::cfg::Stmt>, syntax: (tree_sitter::Node<'_>, &[u8]), unused: &[(crate::cfg::NodeId, Origin)]) -> Option<&'static str> {
+fn partial_reason(status: super::partial::Status, context: (&super::Body, &crate::cfg::Cfg<crate::cfg::Stmt>, &super::Plan<'_, '_>, (tree_sitter::Node<'_>, &[u8])), unused: &[(crate::cfg::NodeId, Origin)]) -> Option<&'static str> {
+    let (body, graph, plan, syntax) = context;
     match status {
         super::partial::Status::Limited => Some("result_use_path_limit"),
-        super::partial::Status::Unsupported if super::partial::has_observed_origin(body, graph, syntax, unused) => Some("result_use_path_unmodeled"),
+        super::partial::Status::Unsupported if super::partial::has_observed_origin(body, graph, plan, syntax, unused) => Some("result_use_path_unmodeled"),
         _ => None,
     }
 }
