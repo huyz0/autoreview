@@ -28,6 +28,15 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def resolve_input(path: pathlib.Path) -> pathlib.Path:
+    if os.name == "nt":
+        absolute = os.path.abspath(path)
+        if len(absolute) >= 240 and not absolute.startswith("\\\\?\\"):
+            absolute = "\\\\?\\UNC\\" + absolute[2:] if absolute.startswith("\\\\") else "\\\\?\\" + absolute
+        return pathlib.Path(absolute).resolve(strict=True)
+    return path.resolve(strict=True)
+
+
 def snapshot_inputs(paths: list[pathlib.Path], directory: pathlib.Path, suffix: str, limit: int, total_limit: int) -> list[dict]:
     if not paths or len(paths) > 512:
         raise ValueError("invalid input count")
@@ -35,7 +44,7 @@ def snapshot_inputs(paths: list[pathlib.Path], directory: pathlib.Path, suffix: 
     total = 0
     seen = set()
     for index, original in enumerate(paths):
-        original = original.resolve(strict=True)
+        original = resolve_input(original)
         if not original.is_file() or original in seen or original.suffix.lower() != suffix or (suffix == ".jar" and os.pathsep in original.name):
             raise ValueError(f"invalid or duplicate input: {original}")
         seen.add(original)
@@ -80,8 +89,10 @@ def verified_report(report_path: pathlib.Path, sources: list[dict], inputs: list
     return report
 
 
-def run(kotlinc: pathlib.Path, plugin: pathlib.Path, sources: list[pathlib.Path], jars: list[pathlib.Path], output: pathlib.Path) -> None:
-    kotlinc = kotlinc.resolve(strict=True)
+def run(kotlinc: pathlib.Path, plugin: pathlib.Path, sources: list[pathlib.Path], jars: list[pathlib.Path], output: pathlib.Path, jvm_target: str = "1.8") -> None:
+    if jvm_target not in ("1.8", *(str(version) for version in range(9, 26))):
+        raise ValueError("unsupported JVM target")
+    kotlinc = resolve_input(kotlinc)
     if output.exists():
         raise FileExistsError(output)
     with tempfile.TemporaryDirectory(prefix="autoreview-kotlin-snapshot-") as temporary:
@@ -94,7 +105,7 @@ def run(kotlinc: pathlib.Path, plugin: pathlib.Path, sources: list[pathlib.Path]
         for item in dependencies + copied_plugin:
             item["limit"] = JAR_LIMIT
         report_path = root / "evidence.json"
-        args = ["-no-stdlib", "-no-reflect", "-cp", os.pathsep.join(str(item["snapshot"]) for item in dependencies),
+        args = ["-no-stdlib", "-no-reflect", "-jvm-target", jvm_target, "-cp", os.pathsep.join(str(item["snapshot"]) for item in dependencies),
                 "-d", str(root / "classes"), f'-Xplugin={copied_plugin[0]["snapshot"]}'] + [str(item["snapshot"]) for item in copied_sources]
         args_path = root / "args.txt"
         args_path.write_text("\n".join(argument(item) for item in args), encoding="utf-8")
@@ -103,7 +114,7 @@ def run(kotlinc: pathlib.Path, plugin: pathlib.Path, sources: list[pathlib.Path]
         subprocess.run([str(kotlinc), f"@{args_path}"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=120)
         report = verified_report(report_path, copied_sources, copied_sources + dependencies + copied_plugin)
         manifest = lambda items: [{"path": str(item["original"]), "sha256": item["sha256"]} for item in items]
-        result = {"snapshotVersion": 1, "sources": manifest(copied_sources), "dependencies": manifest(dependencies),
+        result = {"snapshotVersion": 1, "jvmTarget": jvm_target, "sources": manifest(copied_sources), "dependencies": manifest(dependencies),
                   "plugin": manifest(copied_plugin)[0], "evidence": report}
         encoded = json.dumps(result, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         if len(encoded) > OUTPUT_LIMIT:
@@ -119,8 +130,9 @@ def main() -> None:
     parser.add_argument("--source", type=pathlib.Path, action="append", required=True)
     parser.add_argument("--jar", type=pathlib.Path, action="append", required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
+    parser.add_argument("--jvm-target", default="1.8")
     args = parser.parse_args()
-    run(args.kotlinc, args.plugin, args.source, args.jar, args.output)
+    run(args.kotlinc, args.plugin, args.source, args.jar, args.output, args.jvm_target)
 
 
 if __name__ == "__main__":

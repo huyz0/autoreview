@@ -165,15 +165,40 @@ class EvidenceTest(unittest.TestCase):
         text = "package demo\nimport vendor.Auth\nimport vendor.Server\nfun install(s: Server) { s.authenticator = Auth { true } }\n"
         source.write_text(text, encoding="utf-8", newline="\n")
         output = self.root / "snapshot-report.json"
-        snapshot.run(self.kotlinc, self.plugin, [source], self.snapshot_dependencies(), output)
+        snapshot.run(self.kotlinc, self.plugin, [source], self.snapshot_dependencies(), output, "21")
         report = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(report["snapshotVersion"], 1)
+        self.assertEqual(report["jvmTarget"], "21")
         self.assertEqual(report["sources"][0], {"path": str(source.resolve()), "sha256": hashlib.sha256(text.encode()).hexdigest()})
         self.assertEqual(report["evidence"]["records"][0]["path"], str(source.resolve()))
         self.assertEqual(report["evidence"]["records"][0]["callee"], "vendor.Server.setAuthenticator")
         self.assertEqual(len(report["dependencies"]), 2)
         with self.assertRaises(FileExistsError):
             snapshot.run(self.kotlinc, self.plugin, [source], self.snapshot_dependencies(), output)
+        with self.assertRaisesRegex(ValueError, "JVM target"):
+            snapshot.run(self.kotlinc, self.plugin, [source], self.snapshot_dependencies(), self.root / "invalid-target.json", "-Xplugin=unexpected")
+
+    @unittest.skipUnless(os.name == "nt", "Windows extended paths")
+    def test_snapshot_reads_long_windows_source_path(self) -> None:
+        long_path = self.root.joinpath(*(["long-directory-" + "x" * 45] * 4), "Long.kt")
+        extended = pathlib.Path("\\\\?\\" + str(long_path))
+        long_jar = long_path.with_name("fixture.jar")
+        extended_jar = extended.with_name("fixture.jar")
+        extended.parent.mkdir(parents=True)
+        try:
+            extended.write_text("fun valid() {}\n", encoding="utf-8", newline="\n")
+            shutil.copyfile(self.snapshot_dependencies()[0], extended_jar)
+            output = self.root / "long-path-report.json"
+            snapshot.run(self.kotlinc, self.plugin, [long_path], [long_jar, self.snapshot_dependencies()[1]], output)
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(report["sources"][0]["sha256"], hashlib.sha256(b"fun valid() {}\n").hexdigest())
+        finally:
+            extended.unlink(missing_ok=True)
+            extended_jar.unlink(missing_ok=True)
+            parent = extended.parent
+            for _ in range(4):
+                parent.rmdir()
+                parent = parent.parent
 
     def test_snapshot_rejects_source_changes_and_compile_failure(self) -> None:
         source = self.root / "changed.kt"

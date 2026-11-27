@@ -41,6 +41,7 @@ library. The output path must not already exist:
 ```sh
 python3 tools/kotlin-callback-evidence/snapshot.py \
   --kotlinc /path/to/kotlinc/bin/kotlinc --plugin /path/to/evidence-plugin.jar \
+  --jvm-target 21 \
   --source /path/to/source.kt --jar /path/to/kotlinc/lib/kotlin-stdlib.jar \
   --jar /path/to/dependency.jar --output /path/to/new-snapshot-report.json
 ```
@@ -56,6 +57,12 @@ required. The JDK and compiler installation are not snapshotted; before/after
 hashes do not defend against adversarial mutation and restoration; and the
 timeout does not guarantee termination of descendant processes. The snapshot
 report is experimental.
+
+`--jvm-target` defaults to `1.8`; set it to the project's target. The runner
+validates the argument and records it in the report, but the selected compiler
+still decides which target versions it supports. On Windows, long input paths
+are opened with the extended path prefix. Other compiler options and build
+plugins are not inferred or reproduced by the runner.
 
 To attach matching records to unresolved Kotlin callback findings, set
 `AUTOREVIEW_KOTLIN_CALLBACK_EVIDENCE` to the absolute path of a snapshot
