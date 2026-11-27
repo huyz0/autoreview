@@ -207,15 +207,41 @@ pub(super) fn content_hash(content: &str) -> String {
 /// two separate parameters purely to stay under clippy's argument-count
 /// lint on the functions that also take a rule id, package filter, and
 /// summary closure.
+pub(super) struct JvmPackageIndex {
+    pub(super) packages: HashMap<String, Vec<PathBuf>>,
+    pub(super) unavailable: Vec<PathBuf>,
+    pub(super) malformed: Vec<PathBuf>,
+}
+
 pub(super) struct SummaryCaches<'a> {
     pub(super) parse: &'a ParseCache,
     pub(super) persistent: &'a PersistentSummaryCache,
-    pub(super) java_kotlin_packages: OnceCell<autoreview_archgraph::JavaKotlinPackageIndex>,
+    pub(super) java_kotlin_packages: OnceCell<JvmPackageIndex>,
     pub(super) summary_issues: RefCell<std::collections::BTreeSet<autoreview_schema::AnalysisCoverageIssue>>,
     pub(super) entries: std::collections::BTreeSet<PathBuf>,
 }
 
 impl SummaryCaches<'_> {
+    pub(super) fn jvm_index(&self, root: &Path) -> &JvmPackageIndex {
+        self.java_kotlin_packages.get_or_init(|| {
+            let raw = autoreview_archgraph::index_java_kotlin_packages_with_coverage(root);
+            let mut index = JvmPackageIndex { packages: raw.packages, unavailable: raw.unavailable, malformed: Vec::new() };
+            for path in raw.unclassified {
+                let Some(language) = autoreview_langsupport::language_for_path(&path) else { continue };
+                match self.parse.get(&path, language) {
+                    None => index.unavailable.push(path),
+                    Some(parsed) if parsed.1.root_node().has_error() => index.malformed.push(path),
+                    Some(_) => {}
+                }
+            }
+            index.unavailable.sort();
+            index.unavailable.dedup();
+            index.malformed.sort();
+            index.malformed.dedup();
+            index
+        })
+    }
+
     pub(super) fn report_summary_issue(&self, path: &Path, rule: &str, reason: &str, detail: &str) {
         if self.entries.contains(path) { return; }
         let relative = path.strip_prefix(&self.persistent.source_root).ok()

@@ -441,9 +441,12 @@ fn java_kotlin_imported_package_summaries(
     let mut summaries = HashMap::new();
     for import in autoreview_archgraph::extract_java_kotlin_imports(own_content) {
         let pkg = autoreview_archgraph::import_package(&import);
-        let index = caches.java_kotlin_packages.get_or_init(|| autoreview_archgraph::index_java_kotlin_packages_with_coverage(repo_root));
+        let index = caches.jvm_index(repo_root);
         for path in &index.unavailable {
             caches.report_summary_issue(path, rule_id, "package_index_unavailable", "A source or directory could not be inspected during Java/Kotlin package discovery; imported helper summaries may be incomplete.");
+        }
+        for path in &index.malformed {
+            caches.report_summary_issue(path, rule_id, "package_index_syntax_errors", "A source has syntax errors and no recognizable package; imported helper summaries may be incomplete.");
         }
         for path in index.packages.get(&pkg).into_iter().flatten() {
             add_java_kotlin_summaries_from_file(path, &mut summaries, compute_summary, rule_id, caches);
@@ -579,6 +582,8 @@ mod tests {
         let pack = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("unknown")).unwrap();
         std::fs::write(dir.path().join("unknown/Hidden.java"), [0xff, 0xfe]).unwrap();
+        std::fs::write(dir.path().join("unknown/Broken.kt"), "fun broken( {\n").unwrap();
+        std::fs::write(dir.path().join("unknown/Default.java"), "class Default {}\n").unwrap();
         std::fs::write(dir.path().join("Main.java"), "package caller;\nimport target.Helper;\nclass Main { void run() {} }\n").unwrap();
         std::fs::write(dir.path().join("Main.kt"), "package kcaller\nimport target.helper\nfun run() {}\n").unwrap();
         std::fs::write(dir.path().join("main.go"), "package example\nfunc main() {}\n").unwrap();
@@ -589,11 +594,14 @@ mod tests {
         let result = run_dataflow_check_with_coverage(dir.path(), dir.path(), &paths, &packs);
         for rule in ["npe-risk-from-helper-return", "java-resource-test", "kotlin-resource-test"] {
             assert!(result.coverage.iter().any(|issue| issue.reason == "package_index_unavailable" && issue.rule.as_deref() == Some(rule) && issue.path.as_deref() == Some("unknown/Hidden.java")), "{rule}: {:?}", result.coverage);
+            assert!(result.coverage.iter().any(|issue| issue.reason == "package_index_syntax_errors" && issue.rule.as_deref() == Some(rule) && issue.path.as_deref() == Some("unknown/Broken.kt")), "{rule}: {:?}", result.coverage);
         }
+        assert!(!result.coverage.iter().any(|issue| issue.path.as_deref() == Some("unknown/Default.java") && issue.reason.starts_with("package_index_")), "{:?}", result.coverage);
         assert!(!result.coverage.iter().any(|issue| issue.reason == "package_index_unavailable" && issue.rule.as_deref() == Some("typed-nil-interface-return")), "{:?}", result.coverage);
         std::fs::remove_file(dir.path().join("unknown/Hidden.java")).unwrap();
+        std::fs::remove_file(dir.path().join("unknown/Broken.kt")).unwrap();
         let clean = run_dataflow_check_with_coverage(dir.path(), dir.path(), &paths, &packs);
-        assert!(!clean.coverage.iter().any(|issue| issue.reason == "package_index_unavailable"), "{:?}", clean.coverage);
+        assert!(!clean.coverage.iter().any(|issue| issue.reason.starts_with("package_index_")), "{:?}", clean.coverage);
     }
 
     #[test]
