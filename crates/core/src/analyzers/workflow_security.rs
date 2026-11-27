@@ -158,7 +158,6 @@ fn check_workflow(path: &str, source: &str, checks: &ArtifactChecksConfig) -> Ve
     if checks.github_actions_least_privilege {
         findings.extend(source.permission_findings(&workflow, jobs));
     }
-    findings.sort_by_key(|finding| finding.location.range.start_line);
     findings
 }
 
