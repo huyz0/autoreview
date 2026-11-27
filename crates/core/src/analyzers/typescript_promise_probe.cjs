@@ -192,15 +192,15 @@ function run(request) {
     }
     visit(file);
     // Accumulate UTF-8 offsets in source order instead of encoding the whole
-    // prefix for every call. Equal starts retain traversal order, so the
-    // innermost call wins just as it did in the original lookup.
+    // prefix for every call. Multiple calls can share a start offset; the
+    // request cannot identify which one was lowered, so leave it unresolved.
     nodes.sort((a, b) => a.start - b.start || a.order - b.order);
     const index = new Map();
     let previous = 0;
     let bytes = 0;
     for (const entry of nodes) {
       bytes += Buffer.byteLength(file.text.slice(previous, entry.start), 'utf8');
-      index.set(bytes, entry.node);
+      index.set(bytes, index.has(bytes) ? null : entry.node);
       previous = entry.start;
     }
     return index;
@@ -215,6 +215,7 @@ function run(request) {
     if (cached.digest !== call.source_sha256) return { ...call, status: 'source_changed' };
     if (!cached.calls) cached.calls = indexCalls(file);
     const selected = cached.calls.get(call.start);
+    if (selected === null) return { ...call, status: 'not_proven' };
     if (!selected) return { ...call, status: 'unavailable' };
     const type = checker.getTypeAtLocation(selected);
     const local = localFunctionLiteral(selected);

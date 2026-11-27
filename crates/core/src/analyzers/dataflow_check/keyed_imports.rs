@@ -422,6 +422,18 @@ mod budget_tests {
         assert_async_return_unknown_coverage(dir, checker, rules);
         assert_typed_unresolved_receiver(dir, checker, rules);
         assert_void_callback_coverage(dir, checker, rules, "view.tsx");
+        assert_nested_call_coverage(dir, checker, rules);
+    }
+
+    fn assert_nested_call_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
+        let source = "declare function factory(): string & (() => Promise<void>);\nexport function run() { factory()(); }\n";
+        for path in ["nested.ts", "nested.tsx"] {
+            std::fs::write(dir.join(path), source).unwrap();
+            let paths = [path.to_owned()];
+            let (_, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(2)), "{path}: {coverage:?}");
+            std::fs::remove_file(dir.join(path)).unwrap();
+        }
     }
 
     fn assert_partial_typed_observation(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
