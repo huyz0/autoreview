@@ -2310,6 +2310,18 @@ legacy.record(performance.now() - started);
     ]);
 }
 
+#[test]
+fn html_review_includes_an_unchanged_sink_with_a_changed_source() {
+    let before = "const source = 'Example';\nconst node = document.createElement('div');\nnode.innerHTML = source;\n";
+    let after = before.replace("'Example'", "window.location.hash");
+    let repo = init_repo_with_diff(&[("main.js", before)], &[("main.js", &after)], "use URL text in preview");
+    let report = scoped_static_diff(repo.path(), "output.html");
+    let [finding] = &report.findings[..] else { panic!("expected one raw HTML finding, got {:?}", report.findings); };
+    assert_eq!(finding.source.rule_id.as_deref(), Some("web-url-input-to-dom-html"));
+    assert_eq!(finding.location.range.start_line, 3);
+    assert_eq!(finding.related_locations.as_ref().unwrap()[0].range.start_line, 1);
+}
+
 fn scoped_static_diff(repo: &std::path::Path, subcategory: &str) -> autoreview_schema::ReviewReport {
     let output = Command::cargo_bin("autoreview").unwrap()
         .current_dir(repo)

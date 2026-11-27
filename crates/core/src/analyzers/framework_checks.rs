@@ -5,12 +5,14 @@ mod java;
 mod jest;
 mod node_security;
 mod node_tls;
+mod request_sinks;
 pub(super) mod outbox;
 mod prisma;
 mod promise_value;
 mod rabbitmq;
 mod react;
 mod web;
+mod web_markup;
 
 pub use outbox::run_outbox_policy;
 pub use java::run_nullability_regressions;
@@ -48,8 +50,12 @@ fn rules() -> impl Iterator<Item = &'static Rule> {
         &prisma::RULE,
         &rabbitmq::RULE,
         &go_cancel::JWT_RULE,
+        &go_cancel::ARCHIVE_RULE,
+        &web_markup::DOM_RULE,
+        &web_markup::REACT_RULE,
     ].into_iter().chain(fetch::RULES).chain(discarded_strings::RULES)
         .chain(promise_value::RULES).chain(node_security::RULES.iter().copied())
+        .chain(request_sinks::RULES.iter().copied())
 }
 
 pub(super) fn semantic_ids() -> impl Iterator<Item = String> {
@@ -95,6 +101,8 @@ pub fn run_framework_checks(root: &Path, changed: &[String]) -> Vec<AgentFinding
         web_findings.extend(node_tls::inspect(path, source, file));
         web_findings.extend(fetch::inspect(path, source, file));
         web_findings.extend(promise_value::inspect(path, source, file));
+        web_findings.extend(web_markup::inspect(path, source, file));
+        web_findings.extend(request_sinks::inspect(path, source, file));
         web_findings
     }));
     findings

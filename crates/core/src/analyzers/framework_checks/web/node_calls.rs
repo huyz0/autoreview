@@ -135,6 +135,36 @@ impl<'t, 's> NodeCalls<'t, 's> {
         (object.kind() == "object").then_some(object)
     }
 
+    pub fn unshadowed(&self, identifier: Node<'t>) -> bool {
+        let name = text(identifier, self.source);
+        identifier.kind() == "identifier"
+            && self.scopes.visible(name, identifier).is_none()
+            && !inside_named_expression(identifier, name, self.source)
+            && !imports_binding(self.root, name, self.source)
+    }
+
+    pub fn const_initializer(&self, binding: Node<'t>) -> Option<Node<'t>> {
+        let name = text(binding, self.source);
+        if binding.kind() != "identifier" || inside_named_expression(binding, name, self.source) {
+            return None;
+        }
+        let scope = self.scopes.visible(name, binding)?;
+        let (decl, value) = const_value(scope, name, self.source)?;
+        (decl.end_byte() <= binding.start_byte()).then_some(value)
+    }
+
+    pub fn binding_scope(&self, binding: Node<'t>) -> Option<Node<'t>> {
+        self.scopes.visible(text(binding, self.source), binding)
+    }
+
+    pub fn member(&self, node: Node<'t>) -> Option<(Node<'t>, &'s str)> {
+        (node.kind() == "member_expression").then_some(())?;
+        Some((
+            node.child_by_field_name("object")?,
+            field_text(node, "property", self.source)?,
+        ))
+    }
+
     fn local_options(&self, options: Node<'t>, call: Node<'t>) -> Option<Node<'t>> {
         let name = text(options, self.source);
         if inside_named_expression(options, name, self.source) {
