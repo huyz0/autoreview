@@ -103,17 +103,28 @@ available. Unknown or malformed probe responses and process failures retain
 the generic rule-scoped incomplete-checker reason. These reports do not expose
 raw subprocess errors.
 
-Rust lowering supports non-tail statement matches with a simple scrutinee,
-including supported direct calls, and a final wildcard. Arms can use literals,
+Rust lowering supports discarded statement matches, function-tail matches,
+and direct `return match` expressions with a final wildcard. Scrutinees can
+include simple field paths and supported direct calls. Arms can use literals,
 qualified unit variants, and simple tuple variants such as `Some(_)` or
 `Some(value)`. Arm-local names receive distinct identities, but the analyzer
 does not connect them to the matched value or resolve whether an identifier
 pattern denotes a constant: those cases report `rust_match_binding_projection`
 and replay remains incomplete. Arm bodies and guards must use supported
-simple expressions and calls, and the final wildcard must be unguarded. The
-analyzer explores pattern outcomes conservatively and carries guard effects to
-later arms when the guard fails. Tail matches, complex scrutinees, guards or
-arm expressions, and more complex binding patterns remain limitations.
+simple expressions and calls, and the final wildcard must be unguarded.
+Returned arms preserve result identity on each exit. Guards preserve the
+evaluation order of `&&`, `||`, and `!` and carry effects to the next arm
+when the guard fails. Matches used as initializers or other nested values,
+complex patterns, and guards whose operands need additional lowering still
+produce coverage diagnostics. [Rust match expressions](https://doc.rust-lang.org/reference/expressions/match-expr.html) [Rust lazy boolean operators](https://doc.rust-lang.org/reference/expressions/operator-expr.html#lazy-boolean-operators)
+
+Rust `let-else` lowering represents both pattern outcomes when the
+initializer is supported and the fallback ends with `return`, `break`, or
+`continue`. The fallback sees the outer bindings. Names introduced on the
+success path have distinct identities and report
+`rust_let_else_binding_projection` because their relationship to the
+initializer is unresolved. Complex patterns, `if let`, and let chains still
+report incomplete coverage. [Rust let statements](https://doc.rust-lang.org/reference/statements.html#let-statements)
 
 Report scopes should distinguish an entire file, a function or root, a rule,
 and an imported dependency. Findings from unaffected scopes remain useful.

@@ -146,7 +146,7 @@ fn conditional_wrapper(kind: &str) -> bool {
 }
 
 fn discarded_match_arm(arm: Node<'_>) -> bool {
-    arm.parent().and_then(|body| body.parent()).is_some_and(crate::lower::rust::supports_match)
+    arm.parent().and_then(|body| body.parent()).is_some_and(crate::lower::rust::discards_match)
 }
 
 fn local_call(call: Node<'_>) -> bool {

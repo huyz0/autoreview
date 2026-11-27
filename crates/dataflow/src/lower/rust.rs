@@ -3,6 +3,12 @@
 
 mod values;
 mod match_flow;
+mod let_else;
+mod support;
+
+use support::{simple_binding, supported};
+pub use support::{match_arm_bindings, match_binding_lines, supports_function, supports_match};
+pub(crate) use support::{discards_match, let_else_bindings, pattern_projection_sites};
 
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -45,11 +51,6 @@ fn lower_function_with(cfg: Cfg<Stmt>, source: &[u8], function: Node<'_>) -> Cfg
     lower.cfg
 }
 
-/// Whether this function's body can be lowered without skipping it entirely.
-pub fn supports_function(function: Node<'_>) -> bool {
-    function.child_by_field_name("body").is_some_and(supported)
-}
-
 type Bindings = HashMap<String, String>;
 
 struct Lower<'src> {
@@ -83,27 +84,32 @@ impl Lower<'_> {
 
     fn statement(&mut self, stmt: Node<'_>, at: NodeId, names: &mut Bindings) -> Option<NodeId> {
         match stmt.kind() {
-            "let_declaration" => return Some(self.binding(stmt, at, names)),
-            "expression_statement" => {
-                return self.statement(stmt.named_child(0)?, at, names);
+            "let_declaration" if stmt.child_by_field_name("alternative").is_some() => {
+                self.lower_let_else(stmt, at, names)
             }
-            "return_expression" => {
-                let at = self.value(stmt.named_child(0), at, names, None);
-                super::record_evaluation(&mut self.cfg, at, stmt);
-                if self.cfg.keyed_flow.is_some() {
-                    let value = stmt.named_child(0).and_then(|value| super::keyed_syntax::result_operand(value, self.source, false));
-                    self.cfg.emit(at, Stmt::ReturnIdentity(value), line(stmt));
-                }
-                self.finish(at, line(stmt));
-                return None;
-            }
+            "let_declaration" => Some(self.binding(stmt, at, names)),
+            "expression_statement" => self.statement(super::site::children(stmt).next()?, at, names),
+            "return_expression" => self.explicit_return(stmt, at, names),
             "break_expression" | "continue_expression" => {
                 self.jump(stmt, at, names);
-                return None;
+                None
             }
-            _ => {}
+            _ => self.flow_expression(stmt, at, names),
         }
-        self.flow_expression(stmt, at, names)
+    }
+
+    fn explicit_return(&mut self, stmt: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
+        let value = super::site::children(stmt).next();
+        if let Some(value) = value.filter(|node| node.kind() == "match_expression") {
+            return self.match_expression(value, at, names);
+        }
+        let end = self.value(value, at, names, None);
+        super::record_evaluation(&mut self.cfg, end, stmt);
+        if let Some(value) = value {
+            self.return_identity(value, end);
+        }
+        self.finish(end, line(stmt));
+        None
     }
 
     fn flow_expression(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
@@ -280,59 +286,4 @@ impl Lower<'_> {
         self.serial += 1;
         format!("{name}#{}", self.serial)
     }
-}
-
-fn supported(node: Node<'_>) -> bool {
-    match node.kind() {
-        "function_item" | "closure_expression" | "async_block" | "macro_invocation" => return true,
-        "let_chain" | "let_condition" | "label" | "unsafe_block" => {
-            return false
-        }
-        "for_expression" | "let_declaration" if !simple_binding(node) => return false,
-        "if_expression"
-        | "while_expression"
-        | "for_expression"
-        | "loop_expression"
-        | "return_expression"
-        | "break_expression"
-        | "continue_expression"
-            if !statement_position(node) =>
-        {
-            return false
-        }
-        _ => {}
-    }
-    (node.kind() != "match_expression" || supports_match(node))
-        && node.named_children(&mut node.walk()).all(supported)
-}
-
-/// Whether this match can be represented without pattern binding or guards.
-pub fn supports_match(node: Node<'_>) -> bool {
-    match_flow::supports(node)
-}
-
-/// Simple arm-local bindings in a supported Rust match pattern.
-pub fn match_arm_bindings(arm: Node<'_>) -> Vec<Node<'_>> {
-    match_flow::arm_bindings(arm)
-}
-
-/// Lines where a supported match projects one or more arm-local values.
-pub fn match_binding_lines(function: Node<'_>) -> Vec<u32> {
-    match_flow::binding_lines(function)
-}
-
-fn statement_position(node: Node<'_>) -> bool {
-    node.parent().is_some_and(|parent| {
-        matches!(
-            parent.kind(),
-            "block" | "expression_statement" | "else_clause"
-        )
-    })
-}
-
-fn simple_binding(node: Node<'_>) -> bool {
-    node.child_by_field_name("alternative").is_none()
-        && node
-            .child_by_field_name("pattern")
-            .is_none_or(|pattern| matches!(pattern.kind(), "identifier" | "_"))
 }
