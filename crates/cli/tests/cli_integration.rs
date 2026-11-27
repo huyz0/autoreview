@@ -1139,6 +1139,51 @@ https.get({ rejectUnauthorized: false });
 }
 
 #[test]
+fn explicit_security_downgrades_reach_the_report() {
+    let web = r#"import { verify } from 'jsonwebtoken';
+import sessions from 'express-session';
+import { createCipheriv } from 'node:crypto';
+verify(token, key, { ignoreExpiration: true, ignoreNotBefore: true });
+sessions({ cookie: { secure: false, httpOnly: false } });
+createCipheriv('aes-192-ecb', key, null);
+createCipheriv('aes-192-gcm', key, iv);
+"#;
+    let go = r#"package fixture
+import "github.com/golang-jwt/jwt/v5"
+func parse() { jwt.NewParser(jwt.WithoutClaimsValidation()) }
+"#;
+    let spring = "server.servlet.session.cookie.secure=false\nserver.servlet.session.cookie.http-only=false\n";
+    let repo = init_repo_with_diff(
+        &[("README.md", "Fixture project\n")],
+        &[
+            ("settings.js", web),
+            ("settings.go", go),
+            ("app/src/main/resources/application-prod.properties", spring),
+            ("app/src/test/resources/application.properties", spring),
+        ],
+        "add inert security settings",
+    );
+    let report = static_review_report(&repo, "main~1", None);
+    let mut findings: Vec<_> = report["findings"].as_array().unwrap().iter()
+        .filter(|finding| finding["category"] == "security")
+        .map(|finding| (
+            finding["source"]["ruleId"].as_str().unwrap(),
+            finding["location"]["range"]["startLine"].as_u64().unwrap(),
+        )).collect();
+    findings.sort_unstable();
+    assert_eq!(findings, [
+        ("express-session-cookie-without-http-only", 5),
+        ("express-session-cookie-without-secure", 5),
+        ("go-jwt-v5-claims-validation-disabled", 3),
+        ("node-aes-ecb-encryption", 6),
+        ("node-jwt-ignores-expiration", 4),
+        ("node-jwt-ignores-not-before", 4),
+        ("spring-session-cookie-without-http-only", 2),
+        ("spring-session-cookie-without-secure", 1),
+    ], "{report}");
+}
+
+#[test]
 fn scoped_rust_rules_report_explain_and_replay_historical_commits() {
     let repo = init_repo(&[("lib.rs", "fn now() {}\n")]);
     let base = current_commit(repo.path());

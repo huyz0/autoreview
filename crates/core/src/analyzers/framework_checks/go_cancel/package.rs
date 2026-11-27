@@ -319,7 +319,8 @@ pub(super) fn local_names<'src>(function: Node<'_>, source: &'src str) -> HashSe
     descendants(function)
         .flat_map(|node| {
             match node.kind() {
-                "short_var_declaration" => node.child_by_field_name("left"),
+                "short_var_declaration" | "range_clause" => node.child_by_field_name("left"),
+                "type_switch_statement" => node.child_by_field_name("alias"),
                 "parameter_declaration"
                 | "variadic_parameter_declaration"
                 | "var_spec"
