@@ -1,8 +1,26 @@
 # Historical replay cases
 
+See [the Windows baseline](windows-baseline.md) for a measured selection of
+these cases, including replay failures and the known Cilium false positive.
+
 These cases reference public repositories and pinned commits; they do not
 copy the source files into Autoreview. Check each project's license before
 adding cases. Labels cover an entire file, not only the changed lines.
+
+`silphscope-digest.yaml` records an MIT-licensed JavaScript fix where a Web
+Crypto digest promise was passed to `Uint8Array` before being awaited. The
+framework check recognizes direct calls and a single-use local `const`, with
+conservative shadowing checks; it does not model general promise misuse or
+runtime replacement of globals. A local replay found the constructor before
+the fix and no finding after it, with no reported incomplete analysis. This
+one fix pair does not establish general accuracy. To reproduce:
+
+```sh
+git init silphscope
+cd silphscope
+git fetch --depth 2 https://github.com/chickenpoo351/SilphScope.git 0079a6f5d13e081dc5a26f683047895e6d1b7465
+autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/silphscope-digest.yaml
+```
 
 For cross-file findings, each `before` or `after` label may specify an
 optional `entry` path. Autoreview analyzes that file and its supported
@@ -143,6 +161,84 @@ Coverage reporting is not exhaustive: unsupported expressions and unresolved
 imports can still escape the current diagnostics. A clean replay is evidence
 for this case, not a guarantee of complete analysis in general.
 
+`redicloud-coroutines.yaml` records an EUPL-1.2 Kotlin fix that removes two
+blocking calls from suspend functions. The pattern also flags an authenticator
+callback in both revisions. Replay now reports the first revision as incomplete
+because it cannot establish when that callback executes, and does not score the
+case. Earlier replay counted two true positives and the same callback as a false
+positive in each revision. The callback is registered for later invocation,
+rather than executed at the registration site. Inline lambdas such as
+`map` can execute immediately, so excluding all nested lambdas would miss real
+blocking calls. This case does not measure general Kotlin rule accuracy.
+
+An exploratory Windows run compiled the actual before-revision file-cluster
+sources with Kotlin 2.3.21 and JVM target 21, using seven exact Git-blob source
+files and 50 classpath JARs. The probe reported the `PasswordAuthenticator`
+argument of `org.apache.sshd.server.SshServer.setPasswordAuthenticator`, whose
+declaration is open. The `FileCluster.kt` input hash was
+`e731be100e841140a07e0830bd28fca14c804d76bd6a008c14ad7285ec267a7c`.
+The fixed revision also compiled with the same 50 JAR inputs and the same six
+other source files; its `FileCluster.kt` hash was
+`e5c2238317c40c8a9c823d6c2a09714ce1b3081234e40ae17713a6e5536fc7e7`.
+It reported the same setter, callback type, and open modality. This does not
+establish the dynamic receiver or execution relationship in either revision.
+
+The classpath came from an isolated Gradle 9.5.1 compile using public
+`libloader` and `libloader-bootstrap` 1.8.1 release JARs. Their GitHub Packages
+repository required credentials, so local Maven POMs were reconstructed from
+the plugin's published source and dependency versions. The build environment
+was scrubbed of credentials. This setup is useful evidence about the compiler
+probe, but is not a verified reproduction of the original dependency metadata
+or a scored replay. The probe does not establish the runtime receiver or
+callback execution context. The initial Windows archive used CRLF conversion;
+the successful probe used source bytes restored from the pinned Git blobs.
+For reproduction, the Gradle distribution SHA-256 was
+`bafc141b619ad6350fd975fc903156dd5c151998cc8b058e8c1044ab5f7b031f`;
+the [v1.8.1 plugin release](https://github.com/RediCloud/gradle-plugins/releases/tag/v1.8.1)
+JAR hashes were `54cfdf68c8532ad0cf53d248ee8c4e97f31a21a95909bef1d6da2eeb9f24152d`
+for `libloader` and `0263369396ac3f8f1f9c42e65a4a2344c5c295f9e896bbfcbe118b98e631f48d`
+for `libloader-bootstrap`. The reconstructed POMs listed Kotlin stdlib 2.3.20
+for the plugin and Gson 2.14.0 and jsoup 1.22.2 for the bootstrap JAR. An init
+script placed that local Maven repository first for buildscript and project
+dependencies, then `:file-cluster:compileKotlin` ran with a separate Gradle
+home. A temporary task printed `compileClasspath.files` and all `.kt` files
+under `file-cluster/src/main/kotlin`; these were passed explicitly to the
+snapshot runner. Verify the source hashes and compiler options for each run;
+the unverified reconstructed metadata must not become a trusted rule contract.
+An opt-in `test_redicloud_historical_callback_evidence` test repeats both
+compilations when `AUTOREVIEW_TEST_REDICLOUD_INPUTS` points to the trusted task
+output (lines prefixed `PROBE_SOURCE ` or `PROBE_JAR `), and
+`AUTOREVIEW_TEST_REDICLOUD_BEFORE` and `AUTOREVIEW_TEST_REDICLOUD_AFTER` point
+to the two source roots. Set the Kotlin test variables described in the probe
+README to the 2.3.21 compiler and JDK. The test checks the target Git-blob hashes
+and matching other sources, but the supplied classpath and compiler remain
+experimental inputs; it is not a replay or a trusted execution contract.
+
+`sentry-async-executor.yaml` records two async Promise executors in a TSX file
+from Sentry, licensed at the pinned revision under FSL-1.1-Apache-2.0. Replay
+detects both before the fix and no findings afterward. The two findings are
+from one fix pair, not independent evidence of general accuracy. The manifest
+references upstream revisions and does not redistribute their source.
+
+To reproduce either case, initialize a separate Git repository, fetch the fix
+and its parent, and run replay with ast-grep installed:
+
+```sh
+git init redicloud && cd redicloud
+git fetch --depth 2 https://github.com/RediCloud/cloud-v2.git 77c38cb88f1632978cb7fae22cd2093ad166908a
+autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/redicloud-coroutines.yaml
+```
+
+```sh
+git init sentry && cd sentry
+git fetch --depth 2 https://github.com/getsentry/sentry.git 40041a2c736a0a07085aeeb649ea60b0ca3ccfbc
+autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/sentry-async-executor.yaml
+```
+
+The snapshot checkout requires source objects for both revisions. A partial
+clone may not provide them through the temporary checkout's object alternates;
+fetch the required objects before replaying.
+
 `uwas-rename.yaml` records an independent Go error-handling fix in UWAS,
 dual licensed under AGPL-3.0-or-later or a commercial license. Session
 persistence discarded an `os.Rename` error; the fix logs it. An earlier
@@ -190,6 +286,16 @@ snapshot's nested configuration without a configuration adapter.
 the MIT-licensed actions/checkout fix documented in `docs/benchmark-candidates.md`.
 The normal replay currently exits nonzero and marks both cases incomplete due
 to unresolved call types; they are not included in accuracy scores.
+Nested calls such as `factory()()` can share a starting offset. General
+TypeScript promise sources now carry full spans through the checker and
+result-use engine, allowing an outer call to be reported while an unresolved
+inner call retains its coverage warning. Lowered helper calls are also keyed
+by their full spans; helper calls that the control-flow graph cannot lower
+remain subject to the existing coverage limitations.
+With shared offsets handled conservatively, the same Windows setup reported 13
+and 60 unresolved locations in the respective before revisions, down from 14
+and 63 when all shared offsets were left unresolved. These are coverage
+warnings, not confirmed bugs; both cases remain unscored.
 
 On main at `8af2697` with TypeScript 5.6.3 and the setup below, the before
 revision reported three unresolved call locations for the deletion case and 21
@@ -197,6 +303,13 @@ for the token-replacement case, including imported dependencies. Examples are
 `src/github-api-helper.ts:39` and `src/fs-helper.ts:10`. These counts describe
 this run's reported issues, not precision or recall, and the first failure in
 each case prevented replay from evaluating its after revision.
+
+With void-returning calls treated as unresolved unless observed, the same
+Windows setup reported 13 and 58 unresolved locations respectively. A
+TypeScript `void` callback can return a promise at runtime, so the previous
+classification could incorrectly count such calls as synchronous. These
+locations are coverage limitations, not confirmed ignored promises; both
+cases remain unscored.
 
 To reproduce from a fresh clone, set `AUTOREVIEW_ROOT` to the absolute path of
 this Autoreview checkout and run:

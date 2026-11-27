@@ -21,7 +21,7 @@ pub(super) fn lower<'src>(
     function: &KeyedFunction<'_, '_>,
     source: &'src [u8],
     returns_to_caller: bool,
-    helpers: &BTreeMap<usize, HelperSummary>,
+    helpers: &BTreeMap<(usize, usize), HelperSummary>,
 ) -> Analysis {
     let language = plan.spec.contract.as_ref().unwrap().language;
     let mut places = Places::new(plan, function.node, source);
@@ -61,13 +61,17 @@ pub(super) fn lower<'src>(
     }
 }
 
-fn evaluation<'tree>(function: Node<'tree>, evaluation: &Evaluation) -> Option<Node<'tree>> {
+pub(super) fn evaluation<'tree>(function: Node<'tree>, evaluation: &Evaluation) -> Option<Node<'tree>> {
+    syntax_at(function, &evaluation.span, evaluation.syntax_kind)
+}
+
+fn syntax_at<'tree>(function: Node<'tree>, span: &std::ops::Range<usize>, syntax_kind: u16) -> Option<Node<'tree>> {
     let inner =
-        function.named_descendant_for_byte_range(evaluation.span.start, evaluation.span.end)?;
+        function.named_descendant_for_byte_range(span.start, span.end)?;
     // A wrapper and its only child can have identical spans.
     std::iter::successors(Some(inner), Node::parent)
-        .take_while(|node| *node != function && node.byte_range() == evaluation.span)
-        .find(|node| node.kind_id() == evaluation.syntax_kind)
+        .take_while(|node| *node != function && node.byte_range() == *span)
+        .find(|node| node.kind_id() == syntax_kind)
 }
 
 struct Lower<'plan, 'src, 'tree> {
@@ -79,7 +83,7 @@ struct Lower<'plan, 'src, 'tree> {
     inside: Option<&'plan Closure<'tree>>,
     returns_to_caller: bool,
     return_tail: Option<Node<'tree>>,
-    helpers: &'plan BTreeMap<usize, HelperSummary>,
+    helpers: &'plan BTreeMap<(usize, usize), HelperSummary>,
 }
 
 impl Lower<'_, '_, '_> {
@@ -92,12 +96,19 @@ impl Lower<'_, '_, '_> {
             .map(|(node, &reached)| {
                 let mut effects = Vec::new();
                 if reached {
-                    for syntax in node
-                        .evaluations
-                        .iter()
-                        .filter_map(|range| evaluation(function, range))
-                    {
-                        self.statement(syntax, &mut effects);
+                    for range in &node.evaluations {
+                        let Some(syntax) = evaluation(function, range) else { continue; };
+                        if site::identifier(syntax) && site::discarded_conditional_arm(syntax) { continue; }
+                        if let Some((span, kind)) = &range.assignment {
+                            if let Some((owner, target, reassign)) = syntax_at(function, span, *kind)
+                                .and_then(|owner| assignment_parts(owner, self.source).map(|(target, _, reassign)| (owner, target, reassign))) {
+                                self.assignment(owner, target, Some(syntax), reassign, &mut effects);
+                            }
+                        } else if range.returned && (self.returns_to_caller || self.inside.is_some()) {
+                            self.returned(syntax, &mut effects);
+                        } else {
+                            self.statement(syntax, &mut effects);
+                        }
                     }
                 }
                 effects
@@ -121,11 +132,7 @@ impl Lower<'_, '_, '_> {
             None
         };
         if let Some(value) = value {
-            let value = self.value(value, effects);
-            effects.push(Effect::Write(vec![Write {
-                target: Some(Place::Return),
-                value,
-            }]));
+            self.returned(value, effects);
             return;
         }
         match node.kind() {
@@ -152,6 +159,11 @@ impl Lower<'_, '_, '_> {
                 None => self.expression(node, effects),
             },
         }
+    }
+
+    fn returned(&self, value: Node<'_>, effects: &mut Vec<Effect>) {
+        let value = self.value(value, effects);
+        effects.push(Effect::Write(vec![Write { target: Some(Place::Return), value }]));
     }
 
     fn assignment(
@@ -253,7 +265,7 @@ impl Lower<'_, '_, '_> {
             return Value::Copy(binding);
         }
         if self.closure_call(value).is_some() || self.helper_call(value).is_some() {
-            let output = Place::CallResult(value.start_byte());
+            let output = Place::CallResult(value.start_byte(), value.end_byte());
             self.reads_with(value, effects, Demand::Slot(output));
             return Value::Copy(output);
         }
@@ -338,10 +350,11 @@ impl Lower<'_, '_, '_> {
             return None;
         }
         let call = site::name(node, self.source)?;
-        self.plan.source_mode_at(&call, node.start_byte())?;
+        self.plan.source_mode_at(&call, node.start_byte(), node.end_byte())?;
         Some(Origin {
             call,
             start: node.start_byte(),
+            end: node.end_byte(),
             component: None,
             line: node.start_position().row as u32 + 1,
             path: None,

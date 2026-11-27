@@ -12,6 +12,7 @@ pub(super) struct Plan<'a, 'src> {
     pub syntax: Syntax<'src>,
     api: Option<ApiMatcher<'a>>,
     pub(super) extra_sources: BTreeSet<usize>,
+    pub(super) extra_spans: BTreeSet<(usize, usize)>,
     pub(super) result_components: BTreeMap<usize, super::ResultComponents>,
 }
 
@@ -23,6 +24,38 @@ pub(super) struct Call {
 }
 
 impl<'a, 'src> Plan<'a, 'src> {
+    pub(super) fn declined_contract(
+        spec: &CallOrderSpec, cfg: &Cfg<Stmt>, function: Node<'_>, source: &[u8], unit: usize,
+    ) -> Option<u32> {
+        let contract = spec.contract.as_ref()?;
+        let api = ApiMatcher::new(contract, function, source);
+        if api.supports_local_handles(function, source) { return None; }
+        let mut sources = Sources::default();
+        sources.collect(cfg)?;
+        let syntax = Syntax::scan(function, source, &sources.writes, unit, false)?;
+        let start = syntax.first_call(|name| api.matches(name, |root| syntax.shadows_api(root)))?;
+        Some(source.get(..start)?.iter().filter(|byte| **byte == b'\n').count() as u32 + 1)
+    }
+
+    pub(super) fn declined_cleanup(
+        spec: &CallOrderSpec, cfg: &Cfg<Stmt>, function: Node<'_>, source: &[u8], unit: usize,
+    ) -> Option<(u32, bool)> {
+        if spec.contract.as_ref().is_some_and(|contract| contract.mode != ContractMode::MustComplete) || spec.unless.is_empty() { return None; }
+        let mut sources = Sources::default();
+        sources.collect(cfg)?;
+        let syntax = Syntax::scan(function, source, &sources.writes, unit, false)?;
+        let start = syntax.unmodeled_cleanup(&spec.unless, &sources.calls)?;
+        let line = source.get(..start)?.iter().filter(|byte| **byte == b'\n').count() as u32 + 1;
+        let registered = match &spec.contract {
+            Some(contract) => {
+                let api = ApiMatcher::new(contract, function, source);
+                syntax.any_call(|name| api.matches(name, |root| syntax.shadows_api(root)))
+            }
+            None => syntax.has_registration(&spec.after),
+        };
+        Some((line, registered))
+    }
+
     pub(super) fn new(
         spec: &'a CallOrderSpec,
         cfg: &Cfg<Stmt>,
@@ -44,6 +77,7 @@ impl<'a, 'src> Plan<'a, 'src> {
                 syntax,
                 api,
                 extra_sources: BTreeSet::new(),
+                extra_spans: BTreeSet::new(),
                 result_components: BTreeMap::new(),
             })
     }
@@ -83,7 +117,7 @@ impl<'a, 'src> Plan<'a, 'src> {
     }
 
     pub(super) fn has_registration(&self) -> bool {
-        if !self.extra_sources.is_empty() { return true; }
+        if !self.extra_sources.is_empty() || !self.extra_spans.is_empty() { return true; }
         match &self.api {
             Some(api) => self.syntax.any_call(|name| api.matches(name, |root| self.syntax.shadows_api(root))),
             None => self.syntax.has_registration(&self.spec.after),
@@ -96,8 +130,8 @@ impl<'a, 'src> Plan<'a, 'src> {
             .then_some(api.mode())
     }
 
-    pub(super) fn source_mode_at(&self, name: &str, start: usize) -> Option<ContractMode> {
-        self.extra_sources.contains(&start).then_some(ContractMode::MustUse).or_else(|| self.source_mode(name))
+    pub(super) fn source_mode_at(&self, name: &str, start: usize, end: usize) -> Option<ContractMode> {
+        (self.extra_sources.contains(&start) || self.extra_spans.contains(&(start, end))).then_some(ContractMode::MustUse).or_else(|| self.source_mode(name))
     }
 
     pub(super) fn is_completion(&self, name: &str, start: usize, values: &Values) -> bool {

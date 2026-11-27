@@ -1,11 +1,11 @@
 //! Whole-repo symbol index data model — deliberately unresolved, name-based,
-//! raw syntactic text throughout. A field's or parameter's "type" is
+//! raw syntactic text for common fields. A field's or parameter's "type" is
 //! whatever token sequence appeared in source (`"int"`, `"*Widget"`,
 //! `"List<String>"`), never normalized or resolved against imports. This
 //! mirrors `autoreview-archgraph`'s own restraint (package identity is "a
 //! plain `String`", not a resolved module) — real type resolution is
-//! explicitly deferred future work (a "Tier 4" compiler-frontend backend),
-//! not attempted here.
+//! left to compiler-backed analyses. Java stores additional scope and
+//! signature facts for the Refused Bequest query.
 
 use std::path::PathBuf;
 
@@ -30,6 +30,7 @@ pub struct TypeDecl {
     /// name, unresolved against imports. `None` for Go types and for Java
     /// classes with no explicit superclass.
     pub superclass: Option<String>,
+    pub java: Option<crate::extract::java::JavaClass>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,6 +45,7 @@ pub struct MethodDecl {
     pub return_type_text: Option<String>,
     pub own_field_accesses: Vec<AccessRef>,
     pub foreign_accesses: Vec<ForeignAccessRef>,
+    pub helper_accesses: Vec<HelperAccess>,
     pub chains: Vec<CallChain>,
     /// True when the method body is empty, or its only statement is a
     /// `throw` whose text mentions `UnsupportedOperationException` or
@@ -71,6 +73,24 @@ pub struct ForeignAccessRef {
     pub receiver_type: Option<String>,
     pub member_name: String,
     pub line: u32,
+}
+
+/// Foreign-member accesses on a caller parameter inside a resolved helper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelperAccess {
+    pub receiver_type: String,
+    pub type_file: PathBuf,
+    pub type_line: u32,
+    /// The helper that supplies the count and any forwarding helpers that lead to it.
+    pub locations: Vec<HelperLocation>,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HelperLocation {
+    pub file: PathBuf,
+    pub start_line: u32,
+    pub end_line: u32,
 }
 
 /// One maximal chain of consecutive `.member`/`.method()` accesses off a

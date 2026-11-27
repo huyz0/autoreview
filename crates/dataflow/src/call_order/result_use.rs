@@ -27,7 +27,10 @@ pub use sources::{discover_factory_sources, FactorySourceDiscovery};
 
 mod checks;
 mod opaque;
-pub(super) use checks::{check_units, check_units_with_components};
+mod partial;
+pub(super) use checks::{check_units, check_units_with_spans};
+#[cfg(test)]
+use checks::check_units_with_components;
 #[cfg(test)]
 use checks::check_units_with_sources;
 
@@ -52,9 +55,18 @@ struct HelperSummary {
 #[derive(Clone, PartialEq, Eq)]
 struct HelperOutcome {
     parameters: Vec<bool>,
+    unobserved_parameters: Vec<Option<bool>>,
+    conditional_parameters: Option<ConditionalParameters>,
     origins: Vec<(Origin, bool)>,
     opaque_parameters: Vec<bool>,
     opaque_origins: Vec<Origin>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ConditionalParameters {
+    guard_index: usize,
+    when_false: Vec<Option<bool>>,
+    when_true: Vec<Option<bool>>,
 }
 
 impl Analysis {
@@ -107,6 +119,8 @@ impl Analysis {
                 .iter()
                 .map(|parameter| parameter.is_none_or(|place| live.contains(&place)))
                 .collect(),
+            unobserved_parameters: vec![None; parameters.len()],
+            conditional_parameters: None,
             origins: origins.into_values().collect(),
             opaque_parameters: parameters.iter().map(|parameter| parameter.is_none_or(|place| opaque_live.contains(&place))).collect(),
             opaque_origins: opaque_origins.into_values().collect(),
@@ -352,7 +366,7 @@ mod tests {
             let (hits, exhausted, limits) = check_units_with_components(spec, units, &BTreeMap::from([(0, offsets)]), &BTreeMap::from([(0, shapes)]));
             assert!(!exhausted && limits.is_empty());
             assert_eq!(hits.iter().map(|hit| hit.source_line).collect::<Vec<_>>(), [2, 4, 5]);
-            let invalid = FactorySourceDiscovery { candidates: BTreeMap::from([(0, BTreeSet::from([start]))]), limitations: Vec::new() };
+            let invalid = FactorySourceDiscovery { spans: BTreeMap::new(), candidates: BTreeMap::from([(0, BTreeSet::from([start]))]), limitations: Vec::new() };
             let bad = BTreeMap::from([(0, BTreeMap::from([(start, super::super::ResultComponents { count: 2, indices: vec![2] })]))]);
             let result = super::super::check_keyed_units_with_verified_components(spec, units, invalid, &bad);
             assert!(result.hits.is_empty());
@@ -458,12 +472,17 @@ func f(x string) { switch x { case "p\n", "q": return; default: return } }"#, tr
 
     #[test]
     fn helper_effect_propagates_only_the_arguments_required_by_the_caller() {
-        let output = Place::CallResult(50);
+        let output = Place::CallResult(50, 60);
         let effects = [Effect::ApplyHelper(Box::new(HelperCall {
             arguments: vec![Some(Place::Local(1)), Some(Place::Local(2))],
             demand: Demand::Slot(output),
             when_discarded: vec![true, false],
             when_observed: vec![true, true],
+            unobserved_discarded: vec![None, None],
+            unobserved_observed: vec![None, None],
+            guard: None,
+            conditional_discarded: None,
+            conditional_observed: None,
             origins_discarded: vec![],
             origins_observed: vec![],
             opaque_discarded: vec![false, false],
@@ -480,6 +499,28 @@ func f(x string) { switch x { case "p\n", "q": return; default: return } }"#, tr
             assert!(live.contains(&Place::Local(1)));
             assert_eq!(live.contains(&Place::Local(2)), observed);
             assert!(!live.contains(&output));
+        }
+    }
+
+    #[test]
+    fn nested_helper_results_keep_separate_return_demand() {
+        let inner = Place::CallResult(50, 59);
+        let outer = Place::CallResult(50, 61);
+        let helper = |argument, output| Effect::ApplyHelper(Box::new(HelperCall {
+            arguments: vec![Some(argument)], demand: Demand::Slot(output),
+            when_discarded: vec![false], when_observed: vec![true],
+            unobserved_discarded: vec![None], unobserved_observed: vec![None],
+            guard: None, conditional_discarded: None, conditional_observed: None,
+            origins_discarded: vec![], origins_observed: vec![],
+            opaque_discarded: vec![false], opaque_observed: vec![false],
+            opaque_origins_discarded: vec![], opaque_origins_observed: vec![],
+        }));
+        let effects = [helper(Place::Local(1), inner), helper(Place::Local(2), outer)];
+        for (observed, expected, other) in [(inner, 1, 2), (outer, 2, 1)] {
+            let mut live = Live::from([observed]);
+            transfer(&effects, &mut live, &[], None);
+            assert!(live.contains(&Place::Local(expected)));
+            assert!(!live.contains(&Place::Local(other)));
         }
     }
 

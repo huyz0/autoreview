@@ -1,0 +1,16 @@
+cases:
+  - name: Web Crypto digest used as synchronous typed array input
+    rule: {tool: autoreview-frameworks, id: javascript-webcrypto-digest-promise-as-array}
+    evidence:
+      kind: historical
+      source: https://github.com/chickenpoo351/SilphScope/commit/0079a6f5d13e081dc5a26f683047895e6d1b7465
+      license: MIT
+      rationale: The fix awaits the digest before constructing the typed array; labels cover the complete file.
+    before:
+      commit: 888e9e2be27eefec0bb627f124c0bfcc2b38229d
+      path: src/get-rom-config.js
+      lines: [15]
+    after:
+      commit: 0079a6f5d13e081dc5a26f683047895e6d1b7465
+      path: src/get-rom-config.js
+      lines: []

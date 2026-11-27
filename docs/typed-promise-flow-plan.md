@@ -147,8 +147,24 @@ these call sites are reported as incomplete instead of being counted as clean.
 An experimental custom call-sequence rule may also set `source: typed-promise`
 on a TypeScript or TSX `must-use` contract. It sends call sites to the trusted
 compiler and tracks only confirmed promise-like returns. Known primitive
-non-promises are excluded; unknown types remain coverage limitations unless
-the call itself is directly awaited (including through parentheses). This
+non-promises are excluded; `void` is not sufficient evidence because an async
+function can be assigned to a void-returning callback. Such calls and other
+unknown types remain coverage limitations unless
+the call's value is awaited or returned from a supported async function,
+including through parentheses, conditional arms, right operands of `&&`,
+`||`, and `??`, and ordinary blocks, `if` branches, or `switch` cases. Calls
+used as conditions or left operands are not assumed observed. Async generators,
+returns inside loops or `try` statements,
+and functions with `using` declarations remain unclassified because cleanup
+can replace a return before its value is adopted.
+An exception is a direct call to an immutable, same-file synchronous function
+literal whose body only returns without a value (or explicitly returns a
+`void` expression). The probe examines the body with a bounded syntax walk;
+mutable bindings, returned values, and exhausted walks remain unresolved.
+Nested function returns do not describe the outer function. A directly called
+immutable local async function literal is instead verified as a promise source
+even when its contextual type says `void`; async generators remain unresolved.
+This
 observation does not classify the return type, and an unresolved call on the
 same line still retains its warning. Unavailable sources, project errors,
 and unmodeled verified calls remain coverage limitations. Direct synchronous

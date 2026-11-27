@@ -30,6 +30,44 @@ fn failed_replay_report(repo: &std::path::Path) -> serde_json::Value {
     serde_json::from_slice(&result.get_output().stdout).unwrap()
 }
 
+fn successful_replay_report(repo: &std::path::Path, suite: &serde_json::Value) -> serde_json::Value {
+    std::fs::write(repo.join("suite.json"), suite.to_string()).unwrap();
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo)
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().success();
+    serde_json::from_slice(&output.get_output().stdout).unwrap()
+}
+
+fn assert_incomplete_replay(report: &serde_json::Value, reason: &str, path: &str, line: u32) {
+    assert_eq!(report["coverage"][0]["incomplete"], 1, "{report}");
+    assert_eq!(report["coverage"][0]["completed"], 0, "{report}");
+    assert!(report["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == reason && issue["path"] == path && issue["line"] == line), "{report}");
+}
+
+#[cfg(windows)]
+#[test]
+fn replay_checks_out_unrelated_long_paths_on_windows() {
+    let repo = init_repo(&[("main.go", "package main\nfunc main() {}\n")]);
+    let before = current_commit(repo.path());
+    let blob = StdCommand::new("git").args(["hash-object", "-w", "main.go"]).current_dir(repo.path()).output().unwrap();
+    assert!(blob.status.success());
+    let hash = std::str::from_utf8(&blob.stdout).unwrap().trim();
+    let long_path = format!("{}/file.txt", vec!["a".repeat(50); 6].join("/"));
+    let added = StdCommand::new("git").args(["update-index", "--add", "--cacheinfo", "100644", hash, &long_path]).current_dir(repo.path()).output().unwrap();
+    assert!(added.status.success(), "{}", String::from_utf8_lossy(&added.stderr));
+    let commit = StdCommand::new("git").args(["commit", "-m", "add long path"]).current_dir(repo.path()).output().unwrap();
+    assert!(commit.status.success(), "{}", String::from_utf8_lossy(&commit.stderr));
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name": "long snapshot path", "rule": {"tool": "autoreview-dataflow", "id": "go-os-rename-discarded-error"},
+        "before": {"commit": before, "path": "main.go", "lines": []}, "after": {"commit": after, "path": "main.go", "lines": []}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .env("GIT_CONFIG_COUNT", "1").env("GIT_CONFIG_KEY_0", "core.longpaths").env("GIT_CONFIG_VALUE_0", "false")
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().success();
+    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(report["coverage"][0]["completed"], 1, "{report}");
+}
+
 #[test]
 fn replay_reports_analysis_failures_without_losing_successful_cases() {
     let bad = "package main\nimport \"os\"\nfunc move(a, b string) { os.Rename(a, b) }\n";
@@ -104,6 +142,153 @@ fn replay_excludes_ambiguous_helpers_even_without_a_known_result_source() {
     assert_eq!(report["coverage"][0]["attempted"], 2);
     assert_eq!(report["coverage"][0]["completed"], 1);
     assert_eq!(report["coverage"][0]["incomplete"], 1);
+}
+
+fn assert_conditional_replay(bad: &str, fixed: &str, line: u32, test_unmodeled: bool) {
+    let repo = init_repo(&[("main.js", bad)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("main.js", fixed)], "observe conditional promise");
+    let after = current_commit(repo.path());
+    let mut suite = serde_json::json!({"cases": [{"name":"conditional promise", "rule":{"tool":"autoreview-dataflow","id":"javascript-node-fs-discarded-promise"}, "before":{"commit":before,"path":"main.js","lines":[line]}, "after":{"commit":after,"path":"main.js","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["rules", "replay", "--suite", "suite.json"]).assert().success();
+    let report: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(report["rules"][0]["truePositives"], 1, "{report}");
+    assert_eq!(report["coverage"][0]["completed"], 1, "{report}");
+    if !test_unmodeled { return; }
+    repo.commit(&[("main.js", &bad.replace("flag ?", "check(flag) ?"))], "use unmodeled condition");
+    suite["cases"][0]["before"]["commit"] = current_commit(repo.path()).into();
+    suite["cases"][0]["before"]["lines"] = serde_json::json!([]);
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    assert_incomplete_replay(&failed_replay_report(repo.path()), "unmodeled_conditional_result", "main.js", line);
+}
+
+#[test]
+fn replay_tracks_conditional_assignment_results() {
+    let bad = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = flag ? rename(a, b) : null;\n}\n";
+    assert_conditional_replay(bad, &bad.replace("\n}\n", "\n await pending;\n}\n"), 3, true);
+}
+
+#[test]
+fn replay_tracks_returned_conditional_helper_results() {
+    let bad = "import { rename } from 'node:fs/promises';\nfunction make(a, b, flag) { return flag ? rename(a, b) : null; }\nexport function run(a, b, flag) { make(a, b, flag); }\n";
+    let fixed = bad.replace("export function run(a, b, flag) { make(a, b, flag); }", "export async function run(a, b, flag) { await make(a, b, flag); }");
+    assert_conditional_replay(bad, &fixed, 2, true);
+}
+
+#[test]
+fn replay_tracks_boolean_helper_guard() {
+    let bad = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b) { return consume(rename(a, b), false); }\n";
+    assert_conditional_replay(bad, &bad.replace(", false)", ", true)"), 3, false);
+    let bound = bad.replace("return consume(rename(a, b), false);", "const enabled = false; return consume(rename(a, b), enabled);");
+    assert_conditional_replay(&bound, &bound.replace("enabled = false", "enabled = true"), 3, false);
+    let aliased = bound.replace("return consume(rename(a, b), enabled);", "const alias = enabled; return consume(rename(a, b), alias);");
+    assert_conditional_replay(&aliased, &aliased.replace("enabled = false", "enabled = true"), 3, false);
+}
+
+#[test]
+fn replay_tracks_correlated_caller_helper_guards() {
+    let bad = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b, flag) { if (!flag) return consume(rename(a, b), flag); }\n";
+    assert_conditional_replay(bad, &bad.replace("if (!flag) return consume", "if (flag) return consume"), 3, false);
+    let assigned = bad.replace("if (!flag) return consume(rename(a, b), flag);", "if (!flag) { const value = rename(a, b); return consume(value, flag); }");
+    assert_conditional_replay(&assigned, &assigned.replace("if (!flag) { const value", "if (flag) { const value"), 3, false);
+    let forwarded = bad.replace("export function run(a, b, flag) { if (!flag) return consume(rename(a, b), flag); }", "export async function run(a, b, flag) { if (!flag) { const value = rename(a, b); const forwarded = consume(value, flag); await forwarded; } }");
+    assert_conditional_replay(&forwarded, &forwarded.replace("if (!flag) { const value", "if (flag) { const value"), 3, false);
+}
+
+#[test]
+fn replay_detects_conditional_discarded_promise() {
+    let bad = "import { rename } from 'node:fs/promises';\nexport function run(a, b, flag) {\n flag ? rename(a, b) : null;\n}\n";
+    let clean = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n if (flag) { await rename(a, b); }\n}\n";
+    assert_conditional_replay(bad, clean, 3, true);
+}
+
+#[test]
+fn replay_detects_a_result_observed_on_only_one_branch() {
+    let bad = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = rename(a, b);\n if (flag) await pending;\n}\n";
+    assert_conditional_replay(bad, &bad.replace("if (flag) await pending;", "if (flag) await pending; else await pending;"), 3, false);
+}
+
+#[test]
+fn replay_excludes_unmodeled_partial_observation() {
+    let bad = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = rename(a, b);\n if (check(flag)) await pending;\n}\n";
+    let fixed = bad.replace("if (check(flag)) await pending;", "await pending;");
+    let repo = init_repo(&[("main.js", bad)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("main.js", &fixed)], "observe promise");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"partial observation", "rule":{"tool":"autoreview-dataflow","id":"javascript-node-fs-discarded-promise"}, "before":{"commit":before,"path":"main.js","lines":[]}, "after":{"commit":after,"path":"main.js","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    assert_incomplete_replay(&failed_replay_report(repo.path()), "result_use_path_unmodeled", "main.js", 2);
+}
+
+#[test]
+fn replay_excludes_partial_helper_observation() {
+    let bad = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b, flag) { const pending = rename(a, b); return consume(pending, flag); }\n";
+    let direct = bad.replace("const pending = rename(a, b); return consume(pending, flag);", "return consume(rename(a, b), flag);");
+    for bad in [bad, direct.as_str()] {
+        let fixed = bad.replace("if (flag) return value;", "return value;");
+        let repo = init_repo(&[("main.js", bad)]);
+        let before = current_commit(repo.path());
+        repo.commit(&[("main.js", &fixed)], "always forward result");
+        let after = current_commit(repo.path());
+        let suite = serde_json::json!({"cases": [{"name":"partial helper observation", "rule":{"tool":"autoreview-dataflow","id":"javascript-node-fs-discarded-promise"}, "before":{"commit":before,"path":"main.js","lines":[]}, "after":{"commit":after,"path":"main.js","lines":[]}}]});
+        std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+        assert_incomplete_replay(&failed_replay_report(repo.path()), "result_use_path_unmodeled", "main.js", 3);
+    }
+}
+
+#[test]
+fn replay_detects_discarded_conditional_binding() {
+    let bad = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = rename(a, b);\n flag ? pending : null;\n}\n";
+    assert_conditional_replay(bad, &bad.replace("\n}\n", "\n await pending;\n}\n"), 3, false);
+}
+
+#[test]
+fn replay_excludes_unmodeled_contract_cleanup() {
+    let bad = "import java.util.concurrent.CompletableFuture;\nclass Main {\n Object run(Runnable work, boolean flag) {\n  var task = CompletableFuture.runAsync(work);\n  return flag ? task.join() : null;\n }\n}\n";
+    let clean = "import java.util.concurrent.CompletableFuture;\nclass Main { void run(Runnable work) { var task = CompletableFuture.runAsync(work); task.join(); } }\n";
+    let repo = init_repo(&[("Main.java", bad)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("Main.java", clean)], "observe task");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"conditional cleanup", "rule":{"tool":"autoreview-dataflow","id":"java-completable-future-unobserved"}, "before":{"commit":before,"path":"Main.java","lines":[]}, "after":{"commit":after,"path":"Main.java","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    assert_incomplete_replay(&failed_replay_report(repo.path()), "unmodeled_cleanup_call", "Main.java", 5);
+}
+
+#[test]
+fn replay_excludes_unmodeled_contract_handle_storage() {
+    let bad = "package main\nimport (\"compress/gzip\"; \"io\")\nfunc run(out io.Writer, holder *Holder) {\n holder.writer = gzip.NewWriter(out)\n}\n";
+    let clean = "package main\nimport (\"compress/gzip\"; \"io\")\nfunc run(out io.Writer) { w := gzip.NewWriter(out); w.Close() }\n";
+    let repo = init_repo(&[("main.go", bad)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("main.go", clean)], "close writer");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"stored handle", "rule":{"tool":"autoreview-dataflow","id":"go-gzip-writer-unclosed"}, "before":{"commit":before,"path":"main.go","lines":[]}, "after":{"commit":after,"path":"main.go","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let report = failed_replay_report(repo.path());
+    assert_incomplete_replay(&report, "unmodeled_contract_handle", "main.go", 4);
+}
+
+#[test]
+fn replay_excludes_unmodeled_keyed_cleanup() {
+    let bad = "export function run(root, key, flag) {\n root.register(key);\n return flag ? root.remove(key) : undefined;\n}\n";
+    let clean = "export function run(root, key) { root.register(key); root.remove(key); }\n";
+    let repo = init_repo(&[("main.js", bad)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("main.js", clean)], "model cleanup");
+    let after = current_commit(repo.path());
+    let pack = tempfile::tempdir().unwrap();
+    std::fs::write(pack.path().join("rulepack.yaml"), "id: custom\nversion: '1'\n").unwrap();
+    std::fs::write(pack.path().join("rule.yml"), "id: custom-cleanup\nlanguage: JavaScript\ncategory: correctness\nseverity: warning\nkind: call-sequence\nmessage: Clean up.\nafter: [{call: register}]\nunless: [{call: remove}]\ncheckBeforeReturn: true\nidentity: {receiver: true, keyArgument: 0}\n").unwrap();
+    std::fs::create_dir_all(repo.path().join(".autoreview")).unwrap();
+    let path = serde_json::to_string(&pack.path().to_string_lossy()).unwrap();
+    std::fs::write(repo.path().join(".autoreview/rulepacks.yaml"), format!("packs:\n  - id: custom\n    trust: shadow\n    source:\n      kind: local\n      path: {path}\n")).unwrap();
+    let suite = serde_json::json!({"cases": [{"name":"unmodeled", "rule":{"tool":"autoreview-dataflow","id":"custom-cleanup"}, "before":{"commit":before,"path":"main.js","lines":[]}, "after":{"commit":after,"path":"main.js","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let report = failed_replay_report(repo.path());
+    assert_incomplete_replay(&report, "unmodeled_cleanup_call", "main.js", 3);
 }
 
 #[test]
@@ -230,7 +415,8 @@ fn replay_keeps_typed_benchmark_incomplete_with_compatibility_adapter() {
     let config = r#"{"compilerOptions":{"target":"ES2022","strict":true},"files":["main.ts"]}"#;
     let repo = init_repo(&[("main.ts", source), ("tsconfig.json", config)]);
     let before = current_commit(repo.path());
-    repo.commit(&[("main.ts", &format!("{source}// fixed snapshot\n"))], "second revision");
+    let nested = format!("{source}declare function factory(): string & (() => Promise<void>);\nexport function nested() {{ factory()(); }}\n");
+    repo.commit(&[("main.ts", &nested)], "add nested call");
     let after = current_commit(repo.path());
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
     let pack = root.join("benchmarks/packs/checkout-promise");
@@ -241,13 +427,31 @@ fn replay_keeps_typed_benchmark_incomplete_with_compatibility_adapter() {
     let suite = serde_json::json!({"cases":[{"name":"typed","rule":{"tool":"autoreview-dataflow","id":"benchmark-typescript-unobserved-promise"},"before":{"commit":before,"path":"main.ts","lines":[]},"after":{"commit":after,"path":"main.ts","lines":[]}}]});
     std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
     let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
-        .env("AUTOREVIEW_TYPESCRIPT_MODULE", adapter).env("AUTOREVIEW_BENCHMARK_TYPESCRIPT_MODULE", compiler)
+        .env("AUTOREVIEW_TYPESCRIPT_MODULE", &adapter).env("AUTOREVIEW_BENCHMARK_TYPESCRIPT_MODULE", &compiler)
         .args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
     let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
     assert_eq!(report["coverage"][0]["incomplete"], 1);
     assert_eq!(report["failures"][0]["kind"], "incomplete-analysis");
     assert!(report["failures"][0]["error"].as_str().unwrap().contains("promise type could not be verified"));
     assert!(report["rules"].as_array().unwrap().is_empty());
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .env("AUTOREVIEW_TYPESCRIPT_MODULE", &adapter).env("AUTOREVIEW_BENCHMARK_TYPESCRIPT_MODULE", &compiler)
+        .args(["diff", "--base", &before, "--head", &after, "--static-only"]).assert().success();
+    let path = report_path_from_stdout(&String::from_utf8_lossy(&result.get_output().stdout));
+    let review: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert!(review["findings"].as_array().unwrap().iter().any(|finding|
+        finding["source"]["ruleId"] == "benchmark-typescript-unobserved-promise" && finding["location"]["range"]["startLine"] == 5), "{review}");
+    assert!(review["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "promise_type_unresolved" && issue["line"] == 5), "{review}");
+    let nested_suite = serde_json::json!({"cases":[{"name":"nested", "rule":{"tool":"autoreview-dataflow","id":"benchmark-typescript-unobserved-promise"},"before":{"commit":after,"path":"main.ts","lines":[5]},"after":{"commit":after,"path":"main.ts","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), nested_suite.to_string()).unwrap();
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .env("AUTOREVIEW_TYPESCRIPT_MODULE", &adapter).env("AUTOREVIEW_BENCHMARK_TYPESCRIPT_MODULE", &compiler)
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
+    let replay: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(replay["coverage"][0]["incomplete"], 1, "{replay}");
+    assert!(replay["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "promise_type_unresolved" && issue["line"] == 5), "{replay}");
 }
 
 #[test]
@@ -333,6 +537,216 @@ fn report_path_from_stdout(stdout: &str) -> PathBuf {
         .expect("malformed report-written line")
         .trim();
     PathBuf::from(path_str)
+}
+
+#[test]
+fn review_excludes_deleted_files_from_missing_source_coverage() {
+    let repo = init_repo(&[("removed.go", "package example\n"), ("keep.go", "package example\n")]);
+    let base = current_commit(repo.path());
+    std::fs::remove_file(repo.path().join("removed.go")).unwrap();
+    repo.commit(&[("keep.go", "package example\n\nfunc keep() {}\n")], "delete source");
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["diff", "--base", &base, "--head", "HEAD", "--static-only"]).assert().success();
+    let report = report_path_from_stdout(&String::from_utf8_lossy(&output.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    assert!(!report["analysisCoverage"].as_array().is_some_and(|issues| issues.iter().any(|issue|
+        issue["reason"] == "source_unavailable" && issue["path"] == "removed.go")), "{report}");
+}
+
+fn assert_jvm_dependency_coverage(repo: &autoreview_test_support::TestRepo, changed: &str, reason: &str, path: &str) {
+    let base = current_commit(repo.path());
+    repo.commit(&[("Main.java", changed)], "change caller");
+    let head = current_commit(repo.path());
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["diff", "--base", &base, "--head", &head, "--static-only"]).assert().success();
+    let report = report_path_from_stdout(&String::from_utf8_lossy(&output.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    assert!(report["analysisCoverage"].as_array().unwrap().iter().any(|issue| issue["reason"] == reason && issue["rule"] == "npe-risk-from-helper-return" && issue["path"] == path), "{report}");
+    let suite = serde_json::json!({"cases": [{"name":"unavailable helper", "rule":{"tool":"autoreview-dataflow","id":"npe-risk-from-helper-return"},
+        "before":{"commit":base,"path":"Main.java","lines":[]}, "after":{"commit":head,"path":"Main.java","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let replay = failed_replay_report(repo.path());
+    assert_eq!(replay["coverage"][0]["incomplete"], 1, "{replay}");
+    assert!(replay["failures"][0]["analysisCoverage"].as_array().unwrap().iter().any(|issue| issue["reason"] == reason && issue["path"] == path), "{replay}");
+}
+
+#[test]
+fn malformed_helper_summary_reaches_review_and_blocks_replay() {
+    let initial = "package sample;\nclass Main { void run() {} }\n";
+    let changed = "package sample;\nclass Main { void run() { int n = 1; } }\n";
+    let repo = init_repo(&[("Main.java", initial), ("Bad.java", "package sample;\nclass Bad { void run( {\n")]);
+    assert_jvm_dependency_coverage(&repo, changed, "summary_dependency_syntax_errors", "Bad.java");
+}
+
+#[test]
+fn unreadable_package_index_source_reaches_review_and_blocks_replay() {
+    let initial = "package caller;\nimport target.Helper;\nclass Main { void run() {} }\n";
+    let changed = "package caller;\nimport target.Helper;\nclass Main { void run() { int n = 1; } }\n";
+    let repo = init_repo(&[("Main.java", initial), ("unknown/Hidden.java", "class Hidden {}\n")]);
+    std::fs::write(repo.path().join("unknown/Hidden.java"), [0xff, 0xfe]).unwrap();
+    repo.commit(&[], "unreadable candidate");
+    assert_jvm_dependency_coverage(&repo, changed, "package_index_unavailable", "unknown/Hidden.java");
+}
+
+#[test]
+fn malformed_unknown_package_source_reaches_review_and_blocks_replay() {
+    let initial = "package caller;\nimport target.Helper;\nclass Main { void run() {} }\n";
+    let changed = "package caller;\nimport target.Helper;\nclass Main { void run() { int n = 1; } }\n";
+    let repo = init_repo(&[("Main.java", initial), ("unknown/Broken.kt", "fun broken( {\n")]);
+    assert_jvm_dependency_coverage(&repo, changed, "package_index_syntax_errors", "unknown/Broken.kt");
+}
+
+fn assert_kotlin_npe_review_replay(bad: &str, fixed: &str, helper_path: &str, helper: &str, line: u32) {
+    let repo = init_repo(&[("app/Main.kt", bad), (helper_path, helper)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("app/Main.kt", fixed)], "guard result");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"commented package helper", "rule":{"tool":"autoreview-dataflow","id":"npe-risk-from-helper-return"},
+        "before":{"commit":before,"path":"app/Main.kt","lines":[line]}, "after":{"commit":after,"path":"app/Main.kt","lines":[]}}]});
+    let replay = successful_replay_report(repo.path(), &suite);
+    assert_eq!(replay["coverage"][0]["completed"], 1, "{replay}");
+    assert_eq!(replay["rules"][0]["truePositives"], 1, "{replay}");
+    repo.commit(&[("app/Main.kt", bad)], "restore issue");
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["diff", "--base", &after, "--head", "HEAD", "--static-only"]).assert().success();
+    let report = report_path_from_stdout(&String::from_utf8_lossy(&output.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    assert!(report["findings"].as_array().unwrap().iter().any(|finding| finding["source"]["ruleId"] == "npe-risk-from-helper-return" && finding["location"]["path"] == "app/Main.kt"), "{report}");
+}
+
+#[test]
+fn commented_package_helper_is_resolved_in_review_and_replay() {
+    let bad = "package app\nimport support.risky\nfun run() {\n val value = risky()\n value.hashCode()\n}\n";
+    let fixed = "package app\nimport support.risky\nfun run() {\n val value = risky()\n if (value != null) { value.hashCode() }\n}\n";
+    let helper = "/*\npackage misleading.comment\n*/\npackage support\nfun risky(): String? {\n val value: String? = null\n return value\n}\n";
+    assert_kotlin_npe_review_replay(bad, fixed, "support/Helper.kt", helper, 5);
+}
+
+#[test]
+fn commented_caller_package_resolves_same_package_helper_in_review_and_replay() {
+    let bad = "/*\npackage fake\n*/\npackage app\nfun run() {\n val value = risky()\n value.hashCode()\n}\n";
+    let fixed = "/*\npackage fake\n*/\npackage app\nfun run() {\n val value = risky()\n if (value != null) { value.hashCode() }\n}\n";
+    let helper = "/*\npackage misleading\n*/\npackage app\nfun risky(): String? {\n val value: String? = null\n return value\n}\n";
+    assert_kotlin_npe_review_replay(bad, fixed, "app/Helper.kt", helper, 7);
+}
+
+#[test]
+fn unresolved_kotlin_callback_reaches_review_and_blocks_replay() {
+    if !ast_grep_available() { return; }
+    let clean = "suspend fun run() {\n work()\n}\n";
+    let callback = "suspend fun run() {\n register { runBlocking { work() } }\n}\n";
+    let repo = init_repo(&[("Main.kt", clean)]);
+    let base = current_commit(repo.path());
+    repo.commit(&[("Main.kt", callback)], "register callback");
+    let before = current_commit(repo.path());
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["diff", "--base", &base, "--head", &before, "--static-only"]).assert().success();
+    let report = report_path_from_stdout(&String::from_utf8_lossy(&output.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    assert!(report["analysisCoverage"].as_array().unwrap().iter().any(|issue|
+        issue["reason"] == "callback_execution_unresolved" && issue["rule"] == "kotlin-runblocking-in-suspend-function" && issue["path"] == "Main.kt" && issue["line"] == 2), "{report}");
+    repo.commit(&[("Main.kt", clean)], "remove callback");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"unresolved callback", "rule":{"tool":"ast-grep","id":"kotlin-runblocking-in-suspend-function"}, "before":{"commit":before,"path":"Main.kt","lines":[]}, "after":{"commit":after,"path":"Main.kt","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    assert_incomplete_replay(&failed_replay_report(repo.path()), "callback_execution_unresolved", "Main.kt", 2);
+    let unrelated = serde_json::json!({"cases": [{"name":"unrelated rule", "rule":{"tool":"ast-grep","id":"kotlin-thread-sleep-in-suspend"}, "before":{"commit":before,"path":"Main.kt","lines":[]}, "after":{"commit":after,"path":"Main.kt","lines":[]}}]});
+    let report = successful_replay_report(repo.path(), &unrelated);
+    assert_eq!(report["coverage"][0]["completed"], 1, "{report}");
+}
+
+#[test]
+fn kotlin_snapshot_metadata_maps_into_diff_without_resolving_coverage() {
+    use sha2::{Digest, Sha256};
+    if !ast_grep_available() { return; }
+    let clean = "suspend fun run() { work() }\n";
+    let callback = "suspend fun run() {\n register { runBlocking { work() } }\n}\n";
+    let repo = init_repo(&[("Main.kt", clean)]);
+    let base = current_commit(repo.path());
+    repo.commit(&[("Main.kt", callback)], "register callback");
+    let head = current_commit(repo.path());
+    let path = repo.path().join("Main.kt").canonicalize().unwrap();
+    let hash = format!("{:x}", Sha256::digest(callback.as_bytes()));
+    let lambda = "{ runBlocking { work() } }";
+    let start = callback.find(lambda).unwrap();
+    let first = callback[..start].encode_utf16().count();
+    let evidence = serde_json::json!({"snapshotVersion":1,"sources":[{"path":path,"sha256":hash}],"evidence":{"version":2,"compiler":"2.2.20","records":[{"path":path,"sha256":hash,"lambdaStartUtf16":first,"lambdaEndUtf16":first + lambda.encode_utf16().count(),"callee":"example.register","parameter":0,"samType":"example.Callback","modality":"OPEN"}]}});
+    let evidence_path = repo.path().join("evidence.json");
+    std::fs::write(&evidence_path, evidence.to_string()).unwrap();
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .env("AUTOREVIEW_KOTLIN_CALLBACK_ROOT", repo.path()).env("AUTOREVIEW_KOTLIN_CALLBACK_EVIDENCE", &evidence_path)
+        .args(["diff", "--base", &base, "--head", &head, "--static-only"]).assert().success();
+    let report = report_path_from_stdout(&String::from_utf8_lossy(&output.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    let finding = report["findings"].as_array().unwrap().iter().find(|item| item["source"]["ruleId"] == "kotlin-runblocking-in-suspend-function").unwrap();
+    assert_eq!(finding["meta"]["experimentalCallbackEvidence"]["status"], "unverified", "{report}");
+    assert_eq!(finding["meta"]["experimentalCallbackEvidence"]["callee"], "example.register", "{report}");
+    assert!(report["analysisCoverage"].as_array().unwrap().iter().any(|issue| issue["reason"] == "callback_execution_unresolved"), "{report}");
+    repo.commit(&[("Main.kt", clean)], "remove callback");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"unresolved callback", "rule":{"tool":"ast-grep","id":"kotlin-runblocking-in-suspend-function"}, "before":{"commit":head,"path":"Main.kt","lines":[]}, "after":{"commit":after,"path":"Main.kt","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let result = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .env("AUTOREVIEW_KOTLIN_CALLBACK_ROOT", repo.path()).env("AUTOREVIEW_KOTLIN_CALLBACK_EVIDENCE", &evidence_path)
+        .args(["rules", "replay", "--suite", "suite.json"]).assert().failure();
+    let replay: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_incomplete_replay(&replay, "callback_execution_unresolved", "Main.kt", 2);
+}
+
+#[test]
+fn directly_invoked_kotlin_lambda_replays_without_hiding_outer_uncertainty() {
+    if !ast_grep_available() { return; }
+    let direct = "suspend fun run() {\n ({ runBlocking { work() } })()\n}\n";
+    let clean = "suspend fun run() {\n work()\n}\n";
+    let repo = init_repo(&[("Main.kt", direct)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("Main.kt", clean)], "remove blocking");
+    let after = current_commit(repo.path());
+    let mut suite = serde_json::json!({"cases": [{"name":"direct lambda", "rule":{"tool":"ast-grep","id":"kotlin-runblocking-in-suspend-function"}, "before":{"commit":before,"path":"Main.kt","lines":[2]}, "after":{"commit":after,"path":"Main.kt","lines":[]}}]});
+    let report = successful_replay_report(repo.path(), &suite);
+    assert_eq!(report["rules"][0]["truePositives"], 1, "{report}");
+    repo.commit(&[("Main.kt", "suspend fun run() {\n register { ({ runBlocking { work() } })() }\n}\n")], "nest callback");
+    suite["cases"][0]["before"]["commit"] = current_commit(repo.path()).into();
+    repo.commit(&[("Main.kt", clean)], "remove nested callback");
+    suite["cases"][0]["after"]["commit"] = current_commit(repo.path()).into();
+    suite["cases"][0]["before"]["lines"] = serde_json::json!([]);
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    assert_incomplete_replay(&failed_replay_report(repo.path()), "callback_execution_unresolved", "Main.kt", 2);
+}
+
+#[test]
+fn kotlin_literal_invoke_and_immutable_alias_replay() {
+    if !ast_grep_available() { return; }
+    let bad = "suspend fun run() {\n ({ runBlocking { work() } }).invoke()\n val original = { runBlocking { work() } }\n val copy = original\n copy.invoke()\n val bare = { runBlocking { work() } }\n bare()\n}\n";
+    let clean = "suspend fun run() { work() }\n";
+    let repo = init_repo(&[("Main.kt", bad)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("Main.kt", clean)], "remove blocking");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"immediate invocation", "rule":{"tool":"ast-grep","id":"kotlin-runblocking-in-suspend-function"}, "before":{"commit":before,"path":"Main.kt","lines":[2,3,6]}, "after":{"commit":after,"path":"Main.kt","lines":[]}}]});
+    let report = successful_replay_report(repo.path(), &suite);
+    assert_eq!(report["rules"][0]["truePositives"], 3, "{report}");
+    let ambiguous = "suspend fun run() {\n fun callback() {}\n val callback = { runBlocking { work() } }\n callback()\n}\n";
+    repo.commit(&[("Main.kt", ambiguous)], "add conflicting local function");
+    let ambiguous_commit = current_commit(repo.path());
+    let uncertain = serde_json::json!({"cases": [{"name":"ambiguous invocation", "rule":{"tool":"ast-grep","id":"kotlin-runblocking-in-suspend-function"}, "before":{"commit":ambiguous_commit,"path":"Main.kt","lines":[]}, "after":{"commit":after,"path":"Main.kt","lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), uncertain.to_string()).unwrap();
+    assert_incomplete_replay(&failed_replay_report(repo.path()), "callback_execution_unresolved", "Main.kt", 3);
+}
+
+#[test]
+fn kotlin_unused_callback_is_clean_until_invoked() {
+    if !ast_grep_available() { return; }
+    let unused = "suspend fun run() {\n val callback = { runBlocking { work() } }\n}\n";
+    let invoked = "suspend fun run() {\n val callback = { runBlocking { work() } }\n callback.invoke()\n}\n";
+    let repo = init_repo(&[("Main.kt", unused)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("Main.kt", invoked)], "invoke callback");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"local callback lifetime", "rule":{"tool":"ast-grep","id":"kotlin-runblocking-in-suspend-function"}, "before":{"commit":before,"path":"Main.kt","lines":[]}, "after":{"commit":after,"path":"Main.kt","lines":[2]}}]});
+    let report = successful_replay_report(repo.path(), &suite);
+    assert_eq!(report["rules"][0]["truePositives"], 1, "{report}");
+    assert_eq!(report["coverage"][0]["completed"], 1, "{report}");
 }
 
 #[test]
@@ -1526,6 +1940,8 @@ class Caller {
 
 #[test]
 fn api_contract_rules_replay_on_bad_and_fixed_commits() {
+    // The broader negative fixtures also contain unsupported ownership transfers;
+    // keep this scored replay's clean versions within the modeled flow.
     const FIXTURES: [(&str, &str, &str, &str, u32); 3] = [
         (
             "go-os-rename-discarded-error", "rename/move.go",
@@ -1536,13 +1952,13 @@ fn api_contract_rules_replay_on_bad_and_fixed_commits() {
         (
             "go-gzip-writer-unclosed", "gzip/archive.go",
             include_str!("../../core/tests/fixtures/rules/go-gzip-writer-unclosed/positive.go"),
-            include_str!("../../core/tests/fixtures/rules/go-gzip-writer-unclosed/negative.go"),
+            "package storage\nimport (\"bytes\"; \"compress/gzip\")\nfunc Compress(buffer *bytes.Buffer) { writer := gzip.NewWriter(buffer); writer.Close() }\n",
             15,
         ),
         (
             "java-completable-future-unobserved", "Main.java",
             include_str!("../../core/tests/fixtures/rules/java-completable-future-unobserved/positive.java"),
-            include_str!("../../core/tests/fixtures/rules/java-completable-future-unobserved/negative.java"),
+            "import java.util.concurrent.CompletableFuture;\nclass TaskOwner { void run(Runnable work) { var task = CompletableFuture.runAsync(work); task.join(); } }\n",
             7,
         ),
     ];
@@ -1566,15 +1982,32 @@ fn contract_replay_case(id: &str, path: &str, lines: &[u32], before: &str, after
 }
 
 fn assert_contract_replay(repo: &std::path::Path, cases: &[serde_json::Value]) {
+    assert_contract_replay_with_incomplete(repo, cases, &[]);
+}
+
+fn assert_contract_replay_with_incomplete(repo: &std::path::Path, cases: &[serde_json::Value], incomplete: &[(&str, u32)]) {
     std::fs::write(repo.join("contracts.yaml"), serde_json::json!({ "cases": cases }).to_string()).unwrap();
     let replay = Command::cargo_bin("autoreview").unwrap()
         .current_dir(repo)
         .args(["rules", "replay", "--suite", "contracts.yaml"])
         .output().unwrap();
-    assert!(
-        replay.status.success(), "{}\n{}",
+    assert_eq!(
+        replay.status.success(), incomplete.is_empty(), "{}\n{}",
         String::from_utf8_lossy(&replay.stderr), String::from_utf8_lossy(&replay.stdout),
     );
+    let report: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+    let failures = report["failures"].as_array().unwrap();
+    assert_eq!(failures.len(), incomplete.len(), "{report}");
+    assert_eq!(report["cases"].as_array().unwrap().len(), cases.len() - incomplete.len(), "{report}");
+    for &(path, line) in incomplete {
+        assert!(failures.iter().any(|failure| failure["beforePath"] == path && failure["kind"] == "incomplete-analysis"
+            && failure["analysisCoverage"].as_array().is_some_and(|issues| issues.iter().any(|issue|
+                issue["reason"] == "result_use_path_unmodeled" && issue["path"] == path && issue["line"] == line))), "{report}");
+    }
+    for score in report["rules"].as_array().unwrap() {
+        assert_eq!(score["falsePositives"], 0, "{report}");
+        assert_eq!(score["falseNegatives"], 0, "{report}");
+    }
 }
 
 #[test]
@@ -1617,7 +2050,7 @@ fn assigned_api_results_replay_in_every_supported_language() {
     repo.commit(&fixtures.each_ref().map(|(_, path, _, fixed, _)| (*path, fixed.as_str())), "Use the original API results");
     let after = current_commit(repo.path());
     let cases = fixtures.map(|(id, path, _, _, line)| contract_replay_case(id, path, &[line], &before, &after));
-    assert_contract_replay(repo.path(), &cases);
+    assert_contract_replay_with_incomplete(repo.path(), &cases, &[("publish/move.go", 3), ("Label.java", 2)]);
 }
 
 #[test]
@@ -1681,7 +2114,7 @@ fn closure_and_field_result_contracts_replay_across_all_languages() {
         assert!(!lines.is_empty(), "{path}");
         contract_replay_case(id, path, lines, &before, &after)
     }).collect();
-    assert_contract_replay(repo.path(), &cases);
+    assert_contract_replay_with_incomplete(repo.path(), &cases, &[("lib.rs", 20)]);
 }
 
 fn fixture_result_edits(source: &str) -> (Vec<u32>, String) {

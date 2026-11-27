@@ -95,6 +95,7 @@ fn result_is_discarded(call: Node<'_>, source: &[u8]) -> bool {
     let Some(parent) = call.parent() else { return false };
     match parent.kind() {
         "expression_statement" => true,
+        "ternary_expression" => discarded_conditional_arm(call),
         "block" => parent.parent().is_some_and(|owner| owner.kind() == "function_body"
             || (owner.kind() == "match_arm" && discarded_match_arm(owner))),
         "match_arm" => discarded_match_arm(parent),
@@ -108,6 +109,40 @@ fn result_is_discarded(call: Node<'_>, source: &[u8]) -> bool {
         }
         _ => false,
     }
+}
+
+pub(crate) fn discarded_conditional_arm(node: Node<'_>) -> bool {
+    let mut arm = node;
+    while let Some(wrapper) = arm.parent().filter(|parent| conditional_wrapper(parent.kind())) { arm = wrapper; }
+    let Some(parent) = arm.parent().filter(|parent| parent.kind() == "ternary_expression") else { return false; };
+    if !["consequence", "alternative"].into_iter().any(|field| parent.child_by_field_name(field) == Some(arm)) { return false; }
+    discarded_conditional_expression(parent)
+}
+
+pub(crate) fn discarded_conditional_expression(node: Node<'_>) -> bool {
+    let mut value = node;
+    while let Some(wrapper) = value.parent().filter(|parent| conditional_wrapper(parent.kind())) { value = wrapper; }
+    value.parent().is_some_and(|owner| owner.kind() == "expression_statement")
+}
+
+pub(crate) fn returned_conditional_expression(node: Node<'_>) -> bool {
+    let mut value = node;
+    while let Some(wrapper) = value.parent().filter(|parent| conditional_wrapper(parent.kind())) { value = wrapper; }
+    value.parent().is_some_and(|owner| owner.kind() == "return_statement")
+}
+
+pub(crate) fn assigned_conditional_expression(node: Node<'_>) -> bool {
+    let mut value = node;
+    while let Some(wrapper) = value.parent().filter(|parent| conditional_wrapper(parent.kind())) { value = wrapper; }
+    value.parent().is_some_and(|owner| match owner.kind() {
+        "variable_declarator" => owner.child_by_field_name("value") == Some(value),
+        "assignment_expression" | "augmented_assignment_expression" => owner.child_by_field_name("right") == Some(value),
+        _ => false,
+    })
+}
+
+fn conditional_wrapper(kind: &str) -> bool {
+    matches!(kind, "parenthesized_expression" | "as_expression" | "satisfies_expression" | "non_null_expression")
 }
 
 fn discarded_match_arm(arm: Node<'_>) -> bool {

@@ -36,8 +36,11 @@ impl SummarySource<'_> {
         compute: &dyn Fn(&Cfg<Stmt>) -> bool,
         rule_id: &str,
     ) -> HashMap<String, bool> {
-        let mut summaries = match autoreview_archgraph::declared_package(self.content) {
-            Some(package) => java_kotlin_package_summaries(
+        let parsed = autoreview_langsupport::language_for_path(Path::new(self.path))
+            .and_then(|language| self.caches.parse.get(&self.root.join(self.path), language));
+        let package = parsed.as_ref().map(|parsed| super::jvm_index::package(parsed.1.root_node(), self.content));
+        let mut summaries = match package {
+            Some(super::jvm_index::Package::Named(package)) => java_kotlin_package_summaries(
                 self.root,
                 self.path,
                 &package,
@@ -45,7 +48,10 @@ impl SummarySource<'_> {
                 rule_id,
                 self.caches,
             ),
-            None => {
+            other => {
+                if matches!(other, Some(super::jvm_index::Package::Unresolved)) {
+                    self.caches.report_entry_package_issue(self.path, rule_id);
+                }
                 let mut own_only = HashMap::new();
                 add_java_kotlin_summaries_from_file(
                     &self.root.join(self.path),

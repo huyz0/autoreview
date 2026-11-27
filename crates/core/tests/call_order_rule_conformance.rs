@@ -161,6 +161,633 @@ func Write(out io.Writer, other *gzip.Writer) {
 }
 
 #[test]
+fn unsupported_contract_handle_storage_reports_incomplete_analysis() {
+    let source = "package example\nimport (\"compress/gzip\"; \"io\")\nfunc run(out io.Writer, holder *Holder) {\n holder.writer = gzip.NewWriter(out)\n}\n";
+    let root = write_single_file("main.go", source);
+    let check = || autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &["main.go".into()], &[]);
+    let result = check();
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_contract_handle"
+        && issue.rule.as_deref() == Some("go-gzip-writer-unclosed") && issue.path.as_deref() == Some("main.go") && issue.line == Some(4)), "{:?}", result.coverage);
+    std::fs::write(root.path().join("main.go"), "package example\nimport (\"compress/gzip\"; \"io\")\nfunc run(out io.Writer) { w := gzip.NewWriter(out); w.Close() }\n").unwrap();
+    assert!(!check().coverage.iter().any(|issue| issue.reason == "unmodeled_contract_handle"));
+    std::fs::write(root.path().join("main.go"), "package example\nimport \"compress/gzip\"\nfunc run(gzip Factory, holder *Holder) { holder.writer = gzip.NewWriter(nil) }\n").unwrap();
+    assert!(!check().coverage.iter().any(|issue| issue.reason == "unmodeled_contract_handle"));
+    std::fs::write(root.path().join("go.mod"), "module example.test/project\n\ngo 1.22\n").unwrap();
+    std::fs::create_dir(root.path().join("helper")).unwrap();
+    std::fs::write(root.path().join("helper/writer.go"), "package helper\nimport (\"compress/gzip\"; \"io\")\nfunc Make(out io.Writer, holder *Holder) {\n holder.writer = gzip.NewWriter(out)\n}\n").unwrap();
+    std::fs::write(root.path().join("main.go"), "package example\nimport (\"example.test/project/helper\"; \"io\")\nfunc run(out io.Writer, holder *Holder) { helper.Make(out, holder) }\n").unwrap();
+    let result = check();
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_contract_handle"
+        && issue.rule.as_deref() == Some("go-gzip-writer-unclosed") && issue.path.as_deref() == Some("helper/writer.go") && issue.line == Some(4)), "{:?}", result.coverage);
+    std::fs::write(root.path().join("main.go"), "package example\nimport \"example.test/project/helper\"\nfunc run() {}\n").unwrap();
+    assert!(!check().coverage.iter().any(|issue| issue.reason == "unmodeled_contract_handle"));
+}
+
+fn conditional_test_result(root: &tempfile::TempDir, path: &str) -> autoreview_core::DataflowReviewResult {
+    autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &[path.into()], &[])
+}
+
+fn conditional_finding_fixture(path: &str, rule: &str, source: &str) -> tempfile::TempDir {
+    let root = write_single_file(path, source);
+    let result = conditional_test_result(&root, path);
+    let hits: Vec<_> = result.findings.iter().filter(|hit| hit.source.rule_id.as_deref() == Some(rule)).collect();
+    assert_eq!(hits.len(), 1, "{path}: {hits:#?} {:?}", result.coverage);
+    assert_eq!(hits[0].location.range.start_line, 3);
+    root
+}
+
+#[test]
+fn discarded_conditional_bindings_do_not_consume_results() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = rename(a, b);\n flag ? pending : null;\n}\n";
+        let root = conditional_finding_fixture(path, rule, source);
+        let check = || conditional_test_result(&root, path);
+        let observed = source.replace("\n}\n", "\n await pending;\n}\n");
+        std::fs::write(root.path().join(path), observed).unwrap();
+        let result = check();
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        let helper = "import { rename } from 'node:fs/promises';\nfunction ignore(value, flag) { flag ? value : null; }\nexport function run(a, b, flag) { const pending = rename(a, b); ignore(pending, flag); }\n";
+        std::fs::write(root.path().join(path), helper).unwrap();
+        let result = check();
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let branch = source.replace("\n}\n", "\n if (flag) await pending;\n}\n");
+        std::fs::write(root.path().join(path), branch).unwrap();
+        let result = check();
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let imported = "import { rename } from 'node:fs/promises';\nimport { ignore } from './helper';\nexport function run(a, b, flag) { const pending = rename(a, b); ignore(pending, flag); }\n";
+        std::fs::write(root.path().join(path), imported).unwrap();
+        let extension = path.rsplit('.').next().unwrap();
+        std::fs::write(root.path().join(format!("helper.{extension}")), "export function ignore(value, flag) { flag ? value : null; }\n").unwrap();
+        let result = check();
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        std::fs::write(root.path().join(path), source.replace("flag ?", "check(flag) ?")).unwrap();
+        let result = check();
+        assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        let short_circuit = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = rename(a, b);\n flag && await pending;\n}\n";
+        std::fs::write(root.path().join(path), short_circuit).unwrap();
+        let result = check();
+        assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+    }
+}
+
+#[test]
+fn partial_result_observation_respects_correlated_guards() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n let pending;\n if (flag) pending = rename(a, b);\n if (flag) await pending;\n}\n";
+        let root = write_single_file(path, source);
+        let check = || conditional_test_result(&root, path);
+        let result = check();
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        std::fs::write(root.path().join(path), source.replace("if (flag) await", "if (!flag) await")).unwrap();
+        let result = check();
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let both = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = rename(a, b);\n if (flag) await pending; else await pending;\n}\n";
+        std::fs::write(root.path().join(path), both).unwrap();
+        let result = check();
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let alias = both.replace("if (flag) await pending; else await pending;", "const alias = pending; if (flag) await alias;");
+        std::fs::write(root.path().join(path), alias).unwrap();
+        let result = check();
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let reassigned = source.replace("if (flag) await pending;", "flag = !flag; if (!flag) await pending;");
+        std::fs::write(root.path().join(path), reassigned).unwrap();
+        let result = check();
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+    }
+}
+
+fn assert_partial_helper_coverage(root: &tempfile::TempDir, path: &str, rule: &str) {
+    let result = conditional_test_result(root, path);
+    assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+}
+
+fn assert_go_observed_and_conditional(source: &str, conditional: &str) {
+    let path = "main.go";
+    let rule = "go-os-rename-discarded-error";
+    let root = write_single_file(path, source);
+    let result = conditional_test_result(&root, path);
+    assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{:?}", result.findings);
+    assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{:?}", result.coverage);
+    std::fs::write(root.path().join(path), conditional).unwrap();
+    let result = conditional_test_result(&root, path);
+    assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)) || result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{:?} {:?}", result.findings, result.coverage);
+}
+
+#[test]
+fn go_result_observed_after_callback_argument() {
+    let source = "package main\nimport \"os\"\nfunc run(a, b string, flag bool) error {\n err := os.Rename(func() string { if flag { return a }; return b }(), b)\n return err\n}\n";
+    assert_go_observed_and_conditional(source, &source.replace("return err", "if flag { return err }; return nil"));
+}
+
+#[test]
+fn go_short_circuit_guard_observes_only_the_left_operand() {
+    let source = "package main\nimport \"os\"\nfunc run(a, b string, flag bool) error {\n err := os.Rename(a, b)\n if err != nil && flag { return err }; return nil\n}\n";
+    assert_go_observed_and_conditional(source, &source.replace("err != nil && flag", "flag && err != nil"));
+}
+
+fn assert_partial_helper_source(path: &str, rule: &str, source: &str) {
+    let root = write_single_file(path, source);
+    assert_partial_helper_coverage(&root, path, rule);
+}
+
+#[test]
+fn partial_helper_observation_reports_incomplete_analysis() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b, flag) { const pending = rename(a, b); return consume(pending, flag); }\n";
+        let root = write_single_file(path, source);
+        assert_partial_helper_coverage(&root, path, rule);
+        let direct = source.replace("const pending = rename(a, b); return consume(pending, flag);", "return consume(rename(a, b), flag);");
+        std::fs::write(root.path().join(path), &direct).unwrap();
+        assert_partial_helper_coverage(&root, path, rule);
+        let fixed_direct = direct.replace("if (flag) return value;", "return value;");
+        std::fs::write(root.path().join(path), fixed_direct).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        let fixed = source.replace("if (flag) return value;", "if (flag) return value; else return value;");
+        std::fs::write(root.path().join(path), fixed).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        let observed_after = source.replace("export function run(a, b, flag) { const pending = rename(a, b); return consume(pending, flag); }", "export async function run(a, b, flag) { const pending = rename(a, b); consume(pending, flag); await pending; }");
+        std::fs::write(root.path().join(path), observed_after).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        let conditional_after = source.replace("export function run(a, b, flag) { const pending = rename(a, b); return consume(pending, flag); }", "export async function run(a, b, flag) { const pending = rename(a, b); consume(pending, flag); flag && await pending; }");
+        std::fs::write(root.path().join(path), conditional_after).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        let imported = source.replace("function consume(value, flag) { if (flag) return value; }", "import { consume } from './helper';");
+        let extension = path.rsplit('.').next().unwrap();
+        std::fs::write(root.path().join(format!("helper.{extension}")), "export function consume(value, flag) { if (flag) return value; }\n").unwrap();
+        std::fs::write(root.path().join(path), imported).unwrap();
+        assert_partial_helper_coverage(&root, path, rule);
+        let imported_direct = direct.replace("function consume(value, flag) { if (flag) return value; }", "import { consume } from './helper';");
+        std::fs::write(root.path().join(path), imported_direct).unwrap();
+        assert_partial_helper_coverage(&root, path, rule);
+    }
+}
+
+fn assert_boolean_helper_guard(path: &str, rule: &str, source: &str) -> tempfile::TempDir {
+    let root = write_single_file(path, source);
+    let result = conditional_test_result(&root, path);
+    assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+    assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+    std::fs::write(root.path().join(path), source.replace(", true)", ", false)")).unwrap();
+    let result = conditional_test_result(&root, path);
+    assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+    assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+    root
+}
+
+#[test]
+fn helper_conditional_returns_respect_constant_arguments() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b) { return consume(rename(a, b), true); }\n";
+        let root = assert_boolean_helper_guard(path, rule, source);
+        let later = source.replace("export function run(a, b) { return consume(rename(a, b), true); }", "export async function run(a, b) { const value = rename(a, b); consume(value, false); await value; }");
+        std::fs::write(root.path().join(path), later).unwrap();
+        assert_no_helper_finding(&root, path, rule);
+        let imported = import_guarded_helper(&root, path, source);
+        std::fs::write(root.path().join(path), imported.replace(", true)", ", false)")).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let unknown = source.replace("if (flag) return value;", "if (flag && check()) return value;");
+        std::fs::write(root.path().join(path), unknown).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        assert_partial_helper_coverage(&root, path, rule);
+    }
+}
+
+fn assert_bound_helper_guard(path: &str, rule: &str, source: &str) -> tempfile::TempDir {
+    let root = write_single_file(path, source);
+    let result = conditional_test_result(&root, path);
+    assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+    assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+    std::fs::write(root.path().join(path), source.replace("enabled = true", "enabled = false")).unwrap();
+    let result = conditional_test_result(&root, path);
+    assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+    root
+}
+
+fn assert_uncertain_helper_guard(root: &tempfile::TempDir, path: &str, rule: &str) {
+    let result = conditional_test_result(root, path);
+    assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+    assert_partial_helper_coverage(root, path, rule);
+}
+
+#[test]
+fn helper_guards_follow_stable_boolean_bindings() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b) { const enabled = true; return consume(rename(a, b), enabled); }\n";
+        let root = assert_bound_helper_guard(path, rule, source);
+        let reassigned = source.replace("const enabled = true;", "let enabled = false; enabled = true;");
+        std::fs::write(root.path().join(path), reassigned).unwrap();
+        assert_uncertain_helper_guard(&root, path, rule);
+        let captured = source.replace("const enabled = true;", "let enabled = false; function update() { enabled = true; } update();");
+        std::fs::write(root.path().join(path), captured).unwrap();
+        assert_uncertain_helper_guard(&root, path, rule);
+    }
+}
+
+fn assert_correlated_helper_pair(root: &tempfile::TempDir, path: &str, rule: &str, source: &str) {
+    std::fs::write(root.path().join(path), source).unwrap();
+    let result = conditional_test_result(root, path);
+    assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+    assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+    std::fs::write(root.path().join(path), source.replace("if (flag) return consume", "if (!flag) return consume").replace("if flag { return consume", "if !flag { return consume")).unwrap();
+    let result = conditional_test_result(root, path);
+    assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+}
+
+fn assert_no_helper_finding(root: &tempfile::TempDir, path: &str, rule: &str) {
+    let result = conditional_test_result(root, path);
+    assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+}
+
+fn import_guarded_helper(root: &tempfile::TempDir, path: &str, source: &str) -> String {
+    let extension = path.rsplit('.').next().unwrap();
+    std::fs::write(root.path().join(format!("helper.{extension}")), "export function consume(value, flag) { if (flag) return value; }\n").unwrap();
+    source.replace("function consume(value, flag) { if (flag) return value; }", "import { consume } from './helper';")
+}
+
+fn assert_assigned_helper_pair(root: &tempfile::TempDir, path: &str, rule: &str, source: &str) {
+    std::fs::write(root.path().join(path), source).unwrap();
+    let result = conditional_test_result(root, path);
+    assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+    assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+    let bad = source.replace("if (flag) { const pending", "if (!flag) { const pending").replace("if (flag) { ", "if (!flag) { ").replace("if flag { let value", "if !flag { let value");
+    std::fs::write(root.path().join(path), bad).unwrap();
+    let result = conditional_test_result(root, path);
+    assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+}
+
+#[test]
+fn caller_and_helper_guards_are_correlated() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b, flag) { if (flag) return consume(rename(a, b), flag); }\n";
+        let root = write_single_file(path, source);
+        assert_correlated_helper_pair(&root, path, rule, source);
+        let reassigned = source.replace("if (flag) return consume", "if (flag) { flag = false; return consume").replace("); }\n", "); } }\n");
+        std::fs::write(root.path().join(path), reassigned).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        assert_partial_helper_coverage(&root, path, rule);
+        let alias = source.replace("if (flag) return consume(rename(a, b), flag);", "const copy = flag; if (flag) return consume(rename(a, b), copy);");
+        assert_correlated_helper_pair(&root, path, rule, &alias);
+        let assigned = source.replace("if (flag) return consume(rename(a, b), flag);", "if (!flag) { const value = rename(a, b); return consume(value, flag); }");
+        std::fs::write(root.path().join(path), assigned).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        let changed = alias.replace("const copy = flag;", "let copy = flag; copy = false;");
+        std::fs::write(root.path().join(path), changed).unwrap();
+        assert_no_helper_finding(&root, path, rule);
+        assert_partial_helper_coverage(&root, path, rule);
+        let later = source.replace("export function run(a, b, flag) { if (flag) return consume(rename(a, b), flag); }", "export async function run(a, b, flag) { if (!flag) { const value = rename(a, b); consume(value, flag); await value; } }");
+        std::fs::write(root.path().join(path), later).unwrap();
+        assert_no_helper_finding(&root, path, rule);
+        let returned = source.replace("if (flag) return consume(rename(a, b), flag);", "if (!flag) { const value = rename(a, b); consume(value, flag); return value; }");
+        std::fs::write(root.path().join(path), returned).unwrap();
+        assert_no_helper_finding(&root, path, rule);
+        let opaque = source.replace("if (flag) return consume(rename(a, b), flag);", "if (!flag) { const value = rename(a, b); consume(value, flag); unknown(value); }");
+        std::fs::write(root.path().join(path), opaque).unwrap();
+        assert_no_helper_finding(&root, path, rule);
+        let extension = path.rsplit('.').next().unwrap();
+        std::fs::write(root.path().join(format!("helper.{extension}")), "export function consume(value, flag) { if (flag) return value; }\n").unwrap();
+        let imported = source.replace("function consume(value, flag) { if (flag) return value; }", "import { consume } from './helper';");
+        assert_correlated_helper_pair(&root, path, rule, &imported);
+    }
+}
+
+#[test]
+fn assigned_helper_result_respects_correlated_guards() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport async function run(a, b, flag) { if (flag) { const pending = rename(a, b); const forwarded = consume(pending, flag); await forwarded; } }\n";
+        let root = write_single_file(path, source);
+        assert_assigned_helper_pair(&root, path, rule, source);
+        let later = source.replace("if (flag) { const pending", "if (!flag) { const pending").replace("await forwarded;", "await pending;");
+        std::fs::write(root.path().join(path), later).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        let overwritten = source.replace("const forwarded = consume(pending, flag); await forwarded;", "let forwarded = consume(pending, flag); forwarded = null; await forwarded;");
+        std::fs::write(root.path().join(path), overwritten).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let returned = source.replace("await forwarded;", "return forwarded;");
+        std::fs::write(root.path().join(path), returned).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        let alias = source.replace("await forwarded;", "const copy = forwarded; await copy;");
+        std::fs::write(root.path().join(path), alias).unwrap();
+        assert_no_helper_finding(&root, path, rule);
+        let imported = import_guarded_helper(&root, path, source);
+        assert_assigned_helper_pair(&root, path, rule, &imported);
+    }
+}
+
+#[test]
+fn assigned_helper_results_follow_jvm_and_rust_guards() {
+    let cases = [
+        ("Main.java", "java-discarded-objects-comparison", "import java.util.Objects;\nclass Main { static boolean consume(boolean value, boolean flag) { if (flag) return value; return false; }\nboolean run(Object a, Object b, boolean flag) { if (flag) { boolean value = Objects.equals(a,b); boolean forwarded = consume(value, flag); return forwarded; } return false; } }\n"),
+        ("Main.kt", "kotlin-discarded-run-catching-result", "import kotlin.runCatching\nfun consume(value: Result<Int>, flag: Boolean): Result<Int>? { if (flag) return value; return null }\nfun run(flag: Boolean): Result<Int>? { if (flag) { val value = runCatching { 1 }; val forwarded = consume(value, flag); return forwarded; }; return null }\n"),
+        ("lib.rs", "rust-discarded-remove-file-result", "use std::fs::remove_file;\nfn consume(value: std::io::Result<()>, flag: bool) -> std::io::Result<()> { if flag { return value; } Ok(()) }\nfn run(path: &str, flag: bool) -> std::io::Result<()> { if flag { let value = remove_file(path); let forwarded = consume(value, flag); return forwarded; } Ok(()) }\n"),
+    ];
+    for (path, rule, source) in cases {
+        let root = write_single_file(path, source);
+        assert_assigned_helper_pair(&root, path, rule, source);
+    }
+}
+
+#[test]
+fn locally_assigned_results_follow_correlated_helper_guards() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b, flag) { if (flag) { const value = rename(a, b); return consume(value, flag); } }\n";
+        let root = write_single_file(path, source);
+        let result = conditional_test_result(&root, path);
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        let bad = source.replace("if (flag) { const value", "if (!flag) { const value");
+        std::fs::write(root.path().join(path), bad).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let mixed = source.replace("if (flag) { const value = rename(a, b); return consume(value, flag); }", "const value = rename(a, b); if (flag) return consume(value, flag);");
+        std::fs::write(root.path().join(path), mixed).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)) || result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        let another = source.replace("run(a, b, flag)", "run(a, b, flag, other)").replace("return consume(value, flag); } }", "return consume(value, flag); } const remaining = rename(a, b); return consume(remaining, other); }");
+        std::fs::write(root.path().join(path), another).unwrap();
+        assert_partial_helper_coverage(&root, path, rule);
+    }
+}
+
+#[test]
+fn helper_path_budget_does_not_claim_complete_analysis() {
+    let mut source = String::from("import { rename } from 'node:fs/promises';\nfunction consume(value) { return value; }\nexport function run(a, b, flags) {\n");
+    for index in 0..14 { source.push_str(&format!(" const f{index} = flags[{index}]; if (f{index}) {{ a = a; }}\n")); }
+    source.push_str(" return consume(rename(a, b));\n}\n");
+    let root = write_single_file("main.js", &source);
+    assert_partial_helper_coverage(&root, "main.js", "javascript-node-fs-discarded-promise");
+}
+
+#[test]
+fn caller_helper_guard_correlation_across_jvm_and_rust() {
+    let cases = [
+        ("Main.java", "java-discarded-objects-comparison", "import java.util.Objects;\nclass Main { static boolean consume(boolean value, boolean flag) { if (flag) return value; return false; }\nboolean run(Object a, Object b, boolean flag) { if (flag) return consume(Objects.equals(a,b), flag); return false; } }\n"),
+        ("Main.kt", "kotlin-discarded-run-catching-result", "import kotlin.runCatching\nfun consume(value: Result<Int>, flag: Boolean): Result<Int>? { if (flag) return value; return null }\nfun run(flag: Boolean): Result<Int>? { if (flag) return consume(runCatching { 1 }, flag); return null }\n"),
+        ("lib.rs", "rust-discarded-remove-file-result", "use std::fs::remove_file;\nfn consume(value: std::io::Result<()>, flag: bool) -> std::io::Result<()> { if flag { return value; } Ok(()) }\nfn run(path: &str, flag: bool) -> std::io::Result<()> { if flag { return consume(remove_file(path), flag); } Ok(()) }\n"),
+    ];
+    for (path, rule, source) in cases {
+        let root = write_single_file(path, source);
+        assert_correlated_helper_pair(&root, path, rule, source);
+        let assigned = match path {
+            "Main.java" => source.replace("if (flag) return consume(Objects.equals(a,b), flag);", "if (flag) { boolean value = Objects.equals(a,b); return consume(value, flag); }"),
+            "Main.kt" => source.replace("if (flag) return consume(runCatching { 1 }, flag);", "if (flag) { val value = runCatching { 1 }; return consume(value, flag); }"),
+            "lib.rs" => source.replace("if flag { return consume(remove_file(path), flag); }", "if flag { let value = remove_file(path); return consume(value, flag); }"),
+            _ => unreachable!(),
+        };
+        std::fs::write(root.path().join(path), assigned).unwrap();
+        let result = conditional_test_result(&root, path);
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+    }
+}
+
+#[test]
+fn helper_guards_follow_stable_boolean_aliases() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b) { const enabled = true; const first = enabled; const second = first; return consume(rename(a, b), second); }\n";
+        let root = assert_bound_helper_guard(path, rule, source);
+        for changed in [
+            source.replace("const enabled = true; const first = enabled;", "let enabled = false; enabled = true; const first = enabled;"),
+            source.replace("const enabled = true; const first = enabled;", "let enabled = false; const first = enabled; enabled = true;"),
+            source.replace("const second = first;", "let second = first; second = true;"),
+        ] {
+            std::fs::write(root.path().join(path), changed).unwrap();
+            assert_uncertain_helper_guard(&root, path, rule);
+        }
+    }
+}
+
+#[test]
+fn long_boolean_alias_chains_remain_incomplete() {
+    let mut source = String::from("import { rename } from 'node:fs/promises';\nfunction consume(value, flag) { if (flag) return value; }\nexport function run(a, b) { const flag0 = false;\n");
+    for index in 1..=64 { source.push_str(&format!("const flag{index} = flag{};\n", index - 1)); }
+    source.push_str("return consume(rename(a, b), flag64); }\n");
+    let root = write_single_file("main.js", &source);
+    assert_uncertain_helper_guard(&root, "main.js", "javascript-node-fs-discarded-promise");
+}
+
+#[test]
+fn mutable_rust_borrow_keeps_helper_guard_uncertain() {
+    let source = "use std::fs::remove_file;\nfn consume(value: std::io::Result<()>, flag: bool) -> std::io::Result<()> { if flag { return value; } Ok(()) }\nfn run(path: &str) -> std::io::Result<()> { let mut enabled = false; let alias = &mut enabled; *alias = true; consume(remove_file(path), enabled) }\n";
+    let root = write_single_file("lib.rs", source);
+    assert_uncertain_helper_guard(&root, "lib.rs", "rust-discarded-remove-file-result");
+}
+
+#[test]
+fn helper_stable_guards_follow_jvm_and_rust_bindings() {
+    let cases = [
+        ("Main.java", "java-discarded-objects-comparison", "import java.util.Objects;\nclass Main { static boolean consume(boolean value, boolean flag) { if (flag) return value; return false; }\nboolean run(Object a, Object b) { final boolean enabled = true; return consume(Objects.equals(a,b), enabled); } }\n"),
+        ("Main.kt", "kotlin-discarded-run-catching-result", "import kotlin.runCatching\nfun consume(value: Result<Int>, flag: Boolean): Result<Int>? { if (flag) return value; return null }\nfun run(): Result<Int>? { val enabled = true; return consume(runCatching { 1 }, enabled) }\n"),
+        ("lib.rs", "rust-discarded-remove-file-result", "use std::fs::remove_file;\nfn consume(value: std::io::Result<()>, flag: bool) -> std::io::Result<()> { if flag { return value; } Ok(()) }\nfn run(path: &str) -> std::io::Result<()> { let enabled = true; consume(remove_file(path), enabled) }\n"),
+    ];
+    for (path, rule, source) in cases {
+        assert_bound_helper_guard(path, rule, source);
+        let aliased = match path {
+            "Main.java" => source.replace("return consume(Objects.equals(a,b), enabled)", "final boolean alias = enabled; return consume(Objects.equals(a,b), alias)"),
+            "Main.kt" => source.replace("return consume(runCatching { 1 }, enabled)", "val alias = enabled; return consume(runCatching { 1 }, alias)"),
+            "lib.rs" => source.replace("consume(remove_file(path), enabled)", "let alias = enabled; consume(remove_file(path), alias)"),
+            _ => unreachable!(),
+        };
+        assert_bound_helper_guard(path, rule, &aliased);
+    }
+}
+
+#[test]
+fn helper_constant_guards_are_resolved_across_languages() {
+    let cases = [
+        ("Main.java", "java-discarded-objects-comparison", "import java.util.Objects;\nclass Main { static boolean consume(boolean value, boolean flag) { if (flag) return value; return false; }\nboolean run(Object a, Object b) { return consume(Objects.equals(a,b), true); } }\n"),
+        ("Main.kt", "kotlin-discarded-run-catching-result", "import kotlin.runCatching\nfun consume(value: Result<Int>, flag: Boolean): Result<Int>? { if (flag) return value; return null }\nfun run(): Result<Int>? { return consume(runCatching { 1 }, true) }\n"),
+        ("lib.rs", "rust-discarded-remove-file-result", "use std::fs::remove_file;\nfn consume(value: std::io::Result<()>, flag: bool) -> std::io::Result<()> { if flag { return value; } Ok(()) }\nfn run(path: &str) -> std::io::Result<()> { consume(remove_file(path), true) }\n"),
+    ];
+    for (path, rule, source) in cases {
+        assert_boolean_helper_guard(path, rule, source);
+    }
+}
+
+#[test]
+fn shadowed_go_boolean_does_not_specialize_helper_guard() {
+    let source = "package sample\nimport \"os\"\nfunc consume(err error, flag bool) error { if flag { return err }; return nil }\nfunc run(a, b string) error { true := false; return consume(os.Rename(a, b), true) }\n";
+    let root = write_single_file("main.go", source);
+    let result = conditional_test_result(&root, "main.go");
+    assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some("go-os-rename-discarded-error")), "{:?} {:?}", result.findings, result.coverage);
+}
+
+#[test]
+fn partial_helper_observation_reports_incomplete_across_languages() {
+    let cases = [
+        ("main.go", "go-os-rename-discarded-error", "package sample\nimport \"os\"\nfunc consume(err error, flag bool) error { if flag { return err }; return nil }\nfunc run(a, b string, flag bool) error { err := os.Rename(a, b); return consume(err, flag) }\n"),
+        ("Main.java", "java-discarded-objects-comparison", "import java.util.Objects;\nclass Main { static boolean consume(boolean value, boolean flag) { if (flag) return value; return false; }\nboolean run(Object a, Object b, boolean flag) { boolean value = Objects.equals(a,b); return consume(value, flag); } }\n"),
+        ("Main.kt", "kotlin-discarded-run-catching-result", "import kotlin.runCatching\nfun consume(value: Result<Int>, flag: Boolean): Int { if (flag) return value.getOrThrow(); return 0 }\nfun run(flag: Boolean): Int { val value = runCatching { 1 }; return consume(value, flag) }\n"),
+        ("lib.rs", "rust-discarded-remove-file-result", "use std::fs::remove_file;\nfn consume(value: std::io::Result<()>, flag: bool) -> std::io::Result<()> { if flag { return value; } Ok(()) }\nfn run(path: &str, flag: bool) -> std::io::Result<()> { let value = remove_file(path); consume(value, flag) }\n"),
+    ];
+    for (path, rule, source) in cases {
+        assert_partial_helper_source(path, rule, source);
+        let direct = match path {
+            "main.go" => source.replace("err := os.Rename(a, b); return consume(err, flag)", "return consume(os.Rename(a, b), flag)"),
+            "Main.java" => source.replace("boolean value = Objects.equals(a,b); return consume(value, flag);", "return consume(Objects.equals(a,b), flag);"),
+            "Main.kt" => source.replace("val value = runCatching { 1 }; return consume(value, flag)", "return consume(runCatching { 1 }, flag)"),
+            "lib.rs" => source.replace("let value = remove_file(path); consume(value, flag)", "consume(remove_file(path), flag)"),
+            _ => unreachable!(),
+        };
+        assert_partial_helper_source(path, rule, &direct);
+    }
+}
+
+#[test]
+fn partial_result_observation_across_languages() {
+    let cases = [
+        ("main.go", "go-os-rename-discarded-error", "package sample\nimport \"os\"\nfunc run(a, b string, flag bool) error {\n err := os.Rename(a, b)\n if flag { return err }\n return nil\n}\n", 4, ("return nil", "return err")),
+        ("Main.java", "java-discarded-objects-comparison", "import java.util.Objects;\nclass Main { boolean run(Object a, Object b, boolean flag) {\n boolean value = Objects.equals(a, b);\n if (flag) return value;\n return false;\n} }\n", 3, ("return false", "return value")),
+        ("Main.kt", "kotlin-discarded-run-catching-result", "import kotlin.runCatching\nfun run(flag: Boolean): Int {\n val value = runCatching { 1 }\n if (flag) return value.getOrThrow()\n return 0\n}\n", 3, ("return 0", "return value.getOrThrow()")),
+        ("lib.rs", "rust-discarded-remove-file-result", "use std::fs::remove_file;\nfn run(path: &str, flag: bool) -> std::io::Result<()> {\n let result = remove_file(path);\n if flag { return result; }\n Ok(())\n}\n", 3, ("Ok(())", "result")),
+    ];
+    for (path, rule, source, line, (from, to)) in cases {
+        let root = write_single_file(path, source);
+        let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &[path.into()], &[]);
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule) && hit.location.range.start_line == line), "{path}: {:?} {:?}", result.findings, result.coverage);
+        std::fs::write(root.path().join(path), source.replace(from, to)).unwrap();
+        let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &[path.into()], &[]);
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+    }
+}
+
+#[test]
+fn partial_result_observation_reports_its_source_budget() {
+    let mut source = String::from("import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n");
+    for index in 0..65 { source.push_str(&format!(" const p{index} = rename(a, b);\n")); }
+    source.push_str(" if (flag) await p0;\n");
+    for index in 1..65 { source.push_str(&format!(" await p{index};\n")); }
+    source.push_str("}\n");
+    let root = write_single_file("main.js", &source);
+    let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &["main.js".into()], &[]);
+    assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_limit" && issue.rule.as_deref() == Some("javascript-node-fs-discarded-promise") && issue.line == Some(2)), "{:?}", result.coverage);
+}
+
+#[test]
+fn conditional_assignments_track_result_use() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nexport async function run(a, b, flag) {\n const pending = flag ? rename(a, b) : null;\n}\n";
+        let root = conditional_finding_fixture(path, rule, source);
+        let check = || conditional_test_result(&root, path);
+        std::fs::write(root.path().join(path), source.replace("\n}\n", "\n await pending;\n}\n")).unwrap();
+        let result = check();
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        let overwritten = source.replace("\n}\n", "\n pending = null;\n await pending;\n}\n").replace("const pending", "let pending");
+        std::fs::write(root.path().join(path), overwritten).unwrap();
+        let result = check();
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        std::fs::write(root.path().join(path), source.replace("flag ?", "check(flag) ?")).unwrap();
+        let result = check();
+        assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_conditional_result" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        std::fs::write(root.path().join(path), source.replace(": null;", ": null, other = 0;")).unwrap();
+        let result = check();
+        assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_conditional_result" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        let helper = "import { rename } from 'node:fs/promises';\nexport function make(a, b, flag) {\n const pending = flag ? rename(a, b) : null;\n return pending;\n}\n";
+        std::fs::write(root.path().join(path), "import { make } from './helper';\nexport function run(a, b, flag) { make(a, b, flag); }\n").unwrap();
+        let extension = path.rsplit('.').next().unwrap();
+        std::fs::write(root.path().join(format!("helper.{extension}")), helper).unwrap();
+        let result = check();
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule) && hit.location.range.start_line == 3), "{path}: {:?} {:?}", result.findings, result.coverage);
+    }
+}
+
+#[test]
+fn conditional_return_results_flow_through_helpers() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nfunction make(a, b, flag) {\n return flag ? rename(a, b) : null;\n}\nexport function run(a, b, flag) { make(a, b, flag); }\n";
+        let root = conditional_finding_fixture(path, rule, source);
+        let check = || conditional_test_result(&root, path);
+        std::fs::write(root.path().join(path), source.replace("export function run(a, b, flag) { make(a, b, flag); }", "export async function run(a, b, flag) { await make(a, b, flag); }")).unwrap();
+        let result = check();
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        let replaced = source.replace("return flag ? rename(a, b) : null;", "try { return flag ? rename(a, b) : null; } finally { return null; }")
+            .replace("export function run(a, b, flag) { make(a, b, flag); }", "export async function run(a, b, flag) { await make(a, b, flag); }");
+        std::fs::write(root.path().join(path), replaced).unwrap();
+        let result = check();
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
+        std::fs::write(root.path().join(path), source.replace("flag ?", "check(flag) ?")).unwrap();
+        let result = check();
+        assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_conditional_result" && issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        let helper = "import { rename } from 'node:fs/promises';\nexport function make(a, b, flag) {\n return flag ? rename(a, b)\n   : rename(b, a);\n}\n";
+        std::fs::write(root.path().join(path), "import { make } from './helper';\nexport function run(a, b, flag) { make(a, b, flag); }\n").unwrap();
+        let extension = path.rsplit('.').next().unwrap();
+        std::fs::write(root.path().join(format!("helper.{extension}")), helper).unwrap();
+        let result = check();
+        let lines: std::collections::BTreeSet<_> = result.findings.iter().filter(|hit| hit.source.rule_id.as_deref() == Some(rule)).map(|hit| hit.location.range.start_line).collect();
+        assert_eq!(lines, [3, 4].into_iter().collect(), "{path}: {:?} {:?}", result.findings, result.coverage);
+    }
+}
+
+#[test]
+fn discarded_results_in_conditional_statements_are_tracked() {
+    for (path, rule) in [("main.js", "javascript-node-fs-discarded-promise"), ("main.ts", "typescript-node-fs-discarded-promise"), ("main.tsx", "typescript-node-fs-discarded-promise")] {
+        let source = "import { rename } from 'node:fs/promises';\nexport function run(a, b, flag) {\n flag ? rename(a, b) : null;\n}\n";
+        let root = conditional_finding_fixture(path, rule, source);
+        let check = || conditional_test_result(&root, path);
+        std::fs::write(root.path().join(path), source.replace("flag ? rename(a, b) : null;", "((flag ? (rename(a, b)) : null));")).unwrap();
+        let result = check();
+        assert_eq!(result.findings.iter().filter(|hit| hit.source.rule_id.as_deref() == Some(rule)).count(), 1, "{path}: {:?}", result.coverage);
+        std::fs::write(root.path().join(path), source.replace("flag ?", "false ?")).unwrap();
+        let result = check();
+        assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{path}: {:?}", result.findings);
+        std::fs::write(root.path().join(path), source.replace("flag ?", "(flag && a) ?")).unwrap();
+        let result = check();
+        assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule))
+            || result.coverage.iter().any(|issue| issue.rule.as_deref() == Some(rule)), "{path}: {:?}", result.coverage);
+        std::fs::write(root.path().join(path), source.replace("flag ?", "check(flag) ?")).unwrap();
+        let result = check();
+        assert!(result.coverage.iter().any(|issue| issue.rule.as_deref() == Some(rule)
+            && issue.reason == "unmodeled_conditional_result" && issue.line == Some(3)), "{path}: {:?}", result.coverage);
+        std::fs::write(root.path().join(path), source.replace("rename(a, b)", "wrap(rename(a, b))")).unwrap();
+        let result = check();
+        assert!(result.coverage.iter().any(|issue| issue.rule.as_deref() == Some(rule)
+            && issue.reason == "unmodeled_conditional_result" && issue.line == Some(3)), "{path}: {:?}", result.coverage);
+    }
+}
+
+#[test]
+fn unlowered_contract_cleanup_reports_incomplete_analysis() {
+    let source = "import java.util.concurrent.CompletableFuture;\nclass Main {\n Object run(Runnable work, boolean flag) {\n  var task = CompletableFuture.runAsync(work);\n  return flag ? task.join() : null;\n }\n}\n";
+    let root = write_single_file("Main.java", source);
+    let check = || autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &["Main.java".into()], &[]);
+    let result = check();
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_cleanup_call"
+        && issue.rule.as_deref() == Some("java-completable-future-unobserved") && issue.path.as_deref() == Some("Main.java") && issue.line == Some(5)), "{:?}", result.coverage);
+    std::fs::write(root.path().join("Main.java"), "import java.util.concurrent.CompletableFuture;\nclass Main { void run(Runnable work) { var task = CompletableFuture.runAsync(work); task.join(); } }\n").unwrap();
+    assert!(!check().coverage.iter().any(|issue| issue.reason == "unmodeled_cleanup_call"));
+    std::fs::write(root.path().join("Main.java"), "import java.util.concurrent.CompletableFuture;\nclass Main {\n Object finish(CompletableFuture<Void> task, boolean flag) { return flag ? task.join() : null; }\n void run(Runnable work, boolean flag) { var task = CompletableFuture.runAsync(work); finish(task, flag); }\n}\n").unwrap();
+    let result = check();
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_cleanup_call"
+        && issue.rule.as_deref() == Some("java-completable-future-unobserved") && issue.line == Some(3)), "{:?}", result.coverage);
+    std::fs::write(root.path().join("Main.java"), "class Main { Object finish(Other task, boolean flag) { return flag ? task.join() : null; } }\n").unwrap();
+    assert!(!check().coverage.iter().any(|issue| issue.reason == "unmodeled_cleanup_call"));
+}
+
+#[test]
+fn unsupported_java_future_storage_reports_incomplete_analysis() {
+    let source = "import java.util.concurrent.CompletableFuture;\nclass Main {\n Object pending;\n void run() { pending = CompletableFuture.runAsync(() -> {}); }\n}\n";
+    let root = write_single_file("Main.java", source);
+    let result = autoreview_core::run_dataflow_check_with_coverage(root.path(), root.path(), &["Main.java".into()], &[]);
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_contract_handle"
+        && issue.rule.as_deref() == Some("java-completable-future-unobserved") && issue.path.as_deref() == Some("Main.java") && issue.line == Some(4)), "{:?}", result.coverage);
+}
+
+#[test]
 fn every_call_order_rule_declares_a_category() {
     for rule in discover_call_order_rules() {
         assert!(!rule.category.is_empty(), "{}: kind: call-sequence rule has no category field", rule.id);
@@ -546,13 +1173,17 @@ fn imported_jvm_helpers_preserve_result_usage() {
     let cases = [
         (
             "Java", "java-discarded-objects-comparison", "app/Worker.java", "support/Checks.java",
-            r#"package support;
+            r#"/*
+package misleading.comment;
+*/
+package support;
 import java.util.Objects;
 public class Checks {
     public static void discard(boolean value) {}
     public static boolean forward(boolean value) { return value; }
     public static boolean compare(Object a, Object b) { return Objects.equals(a, b); }
 }
+
 "#,
             r#"package app;
 import java.util.Objects;
@@ -569,11 +1200,14 @@ class Worker {
     void dropped(Object a, Object b) { Checks.compare(a, b); }
 }
 "#,
-            6, 6,
+            6, 9,
         ),
         (
             "Kotlin", "kotlin-discarded-run-catching-result", "app/Worker.kt", "support/Checks.kt",
-            r#"package support
+            r#"/*
+package misleading.comment
+*/
+package support
 import kotlin.runCatching
 fun discard(value: Result<Int>) {}
 fun forward(value: Result<Int>): Result<Int> = value
@@ -594,7 +1228,7 @@ fun used(text: String): Result<Int> {
 }
 fun dropped(text: String) { parse(text) }
 "#,
-            7, 5,
+            7, 8,
         ),
     ];
     for (_language, rule, caller, helper, helper_source, caller_source, caller_line, helper_line) in cases {
@@ -606,6 +1240,16 @@ fun dropped(text: String) { parse(text) }
         }
         assert_helper_locations(root.path(), caller, rule, &[(caller, caller_line), (helper, helper_line)]);
     }
+}
+
+#[test]
+fn same_package_kotlin_helpers_ignore_commented_package_text() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("app")).unwrap();
+    std::fs::create_dir_all(root.path().join("lib")).unwrap();
+    std::fs::write(root.path().join("lib/Helper.kt"), "/*\npackage wrong\n*/\npackage shared\nfun discard(value: Result<Int>) {}\n").unwrap();
+    std::fs::write(root.path().join("app/Worker.kt"), "/*\npackage misleading\n*/\npackage shared\nimport kotlin.runCatching\nfun run(text: String) {\n val result = runCatching { text.toInt() }\n discard(result)\n}\n").unwrap();
+    assert_helper_locations(root.path(), "app/Worker.kt", "kotlin-discarded-run-catching-result", &[("app/Worker.kt", 7)]);
 }
 
 const RUST_RESULT_HELPERS: &str = r#"use std::fs::remove_file;
@@ -1221,7 +1865,7 @@ func blank(from, to string) {
 "#),
     ("Main.kt", "kotlin-discarded-run-catching-result", r#"import kotlin.runCatching
 fun parse(s: String, active: Boolean): Int {
-    val result = runCatching { s.toInt() }
+    val result = runCatching { s.toInt() } // unused result on inactive path
     if (active) return result.getOrThrow()
     return 0
 }

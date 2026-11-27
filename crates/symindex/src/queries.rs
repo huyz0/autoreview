@@ -8,7 +8,9 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
-use crate::model::{MethodDecl, NamedSlot, SymbolIndex, TypeDecl};
+use crate::model::{HelperAccess, HelperLocation, MethodDecl, NamedSlot, SymbolIndex, TypeDecl};
+
+mod java_bequest;
 
 /// One message-chain finding: a call chain at or above the reporting
 /// threshold, anchored at the method it was found in.
@@ -55,45 +57,62 @@ pub struct FeatureEnvyFinding {
     pub envied_type: String,
     pub envied_access_count: usize,
     pub own_access_count: usize,
+    pub helper_evidence: Vec<HelperAccess>,
 }
 
-/// Feature Envy: a method envies a foreign type when accesses to it (via a
-/// method parameter — see the plan's scope decision, locals aren't
-/// tracked) reach `min_foreign_accesses` and exceed the method's own-field
-/// access count by at least `margin`. Foreign accesses are grouped by the
-/// parameter's declared type text (not by parameter name — two
-/// differently-named params of the same type both count toward that
-/// type's envy), so a method juggling several unrelated foreign types is
-/// judged per type, not by a single combined count.
+impl FeatureEnvyFinding {
+    pub fn helper_locations(&self) -> impl Iterator<Item = &HelperLocation> {
+        self.helper_evidence.iter().flat_map(|access| &access.locations)
+    }
+}
+
+/// Score accesses to each collaborator type independently. Go can also
+/// contribute accesses from a resolved helper that works on a forwarded
+/// parameter. A finding must clear both the absolute floor and the margin
+/// over the caller's own-field accesses.
 pub fn find_feature_envy(index: &SymbolIndex, min_foreign_accesses: usize, margin: i64) -> Vec<FeatureEnvyFinding> {
     let mut findings = Vec::new();
-    for m in index.methods() {
-        if m.foreign_accesses.is_empty() {
-            continue;
-        }
-        let own_count = m.own_field_accesses.len();
-
-        let mut by_type: BTreeMap<String, usize> = BTreeMap::new();
-        for access in &m.foreign_accesses {
-            let Some(receiver_type) = &access.receiver_type else { continue };
-            *by_type.entry(receiver_type.clone()).or_insert(0) += 1;
-        }
-
-        for (envied_type, envied_access_count) in by_type {
-            if envied_access_count >= min_foreign_accesses && envied_access_count as i64 - own_count as i64 >= margin {
+    for method in index.methods() {
+        let own_count = method.own_field_accesses.len();
+        for (envied_type, score) in feature_envy_scores(method) {
+            if score.count >= min_foreign_accesses && score.count as i64 - own_count as i64 >= margin {
                 findings.push(FeatureEnvyFinding {
-                    file: m.file.clone(),
-                    line: m.start_line,
-                    owner_type: m.owner_type.clone(),
-                    method: m.name.clone(),
-                    envied_type,
-                    envied_access_count,
+                    file: method.file.clone(),
+                    line: method.start_line,
+                    owner_type: method.owner_type.clone(),
+                    method: method.name.clone(),
+                    envied_type: envied_type.to_owned(),
+                    envied_access_count: score.count,
                     own_access_count: own_count,
+                    helper_evidence: score.helpers.into_iter().cloned().collect(),
                 });
             }
         }
     }
     findings
+}
+
+#[derive(Default)]
+struct FeatureEnvyScore<'a> {
+    count: usize,
+    helpers: Vec<&'a HelperAccess>,
+}
+
+fn feature_envy_scores(method: &MethodDecl) -> BTreeMap<&str, FeatureEnvyScore<'_>> {
+    let mut scores: BTreeMap<&str, FeatureEnvyScore<'_>> = BTreeMap::new();
+    for access in &method.helper_accesses {
+        let score = scores.entry(&access.receiver_type).or_default();
+        score.count += access.count;
+        score.helpers.push(access);
+    }
+    for raw_type in method.foreign_accesses.iter().filter_map(|access| access.receiver_type.as_deref()) {
+        // The helper index has already identified the declaration behind this Go pointer type.
+        let receiver_type = raw_type.strip_prefix('*').map(str::trim_start)
+            .filter(|name| scores.get(name).is_some_and(|score| !score.helpers.is_empty()))
+            .unwrap_or(raw_type);
+        scores.entry(receiver_type).or_default().count += 1;
+    }
+    scores
 }
 
 /// Whether Data Clumps are compared across the whole index or only within
@@ -190,10 +209,10 @@ pub struct RefusedBequestFinding {
     pub method: String,
 }
 
-/// Refused Bequest (Java only — Go has no class inheritance): a subclass
+/// Refused Bequest: a subclass
 /// method whose body is empty or just throws
 /// `UnsupportedOperationException`/`NotImplementedError`, overriding a
-/// same-named method the parent actually declares. Requires the
+/// method the parent actually declares. Requires the
 /// superclass to be present *in this index* (i.e. in-repo, not an external
 /// library) — a same-named method match against an unresolved external
 /// type wouldn't be a confirmed override, just a name coincidence, so this
@@ -203,8 +222,11 @@ pub fn find_refused_bequest(index: &SymbolIndex) -> Vec<RefusedBequestFinding> {
     // building one name->type lookup up front makes the whole pass O(types).
     let types_by_name: std::collections::HashMap<&str, &TypeDecl> = index.types.iter().map(|t| (t.name.as_str(), t)).collect();
 
-    let mut findings = Vec::new();
+    let mut findings = java_bequest::find(index);
     for sub in &index.types {
+        if java_bequest::is_java(&sub.file) {
+            continue;
+        }
         let Some(super_name) = &sub.superclass else { continue };
         let Some(parent) = types_by_name.get(super_name.as_str()).copied() else { continue };
         for method in &sub.methods {
@@ -242,6 +264,7 @@ mod tests {
             return_type_text: None,
             own_field_accesses: vec![],
             foreign_accesses: vec![],
+            helper_accesses: Vec::new(),
             chains: vec![CallChain {
                 root_text: "owner".to_string(),
                 depth,
@@ -253,7 +276,7 @@ mod tests {
     }
 
     fn index_with_method(method: MethodDecl) -> SymbolIndex {
-        SymbolIndex { types: vec![TypeDecl { name: "Widget".to_string(), file: PathBuf::from("Widget.java"), start_line: 1, fields: vec![], methods: vec![method], superclass: None }] }
+        SymbolIndex { types: vec![TypeDecl { name: "Widget".to_string(), file: PathBuf::from("Widget.java"), start_line: 1, fields: vec![], methods: vec![method], superclass: None, java: None }] }
     }
 
     #[test]
@@ -302,6 +325,7 @@ mod tests {
             return_type_text: None,
             own_field_accesses,
             foreign_accesses,
+            helper_accesses: Vec::new(),
             chains: vec![],
             is_trivial_body: false,
         }
@@ -363,6 +387,7 @@ mod tests {
             return_type_text: None,
             own_field_accesses: vec![],
             foreign_accesses: vec![],
+            helper_accesses: Vec::new(),
             chains: vec![],
             is_trivial_body: false,
         }
@@ -374,7 +399,7 @@ mod tests {
             if let Some(t) = types.iter_mut().find(|t| t.name == m.owner_type && t.file == m.file) {
                 t.methods.push(m);
             } else {
-                types.push(TypeDecl { name: m.owner_type.clone(), file: m.file.clone(), start_line: 1, fields: vec![], methods: vec![m], superclass: None });
+                types.push(TypeDecl { name: m.owner_type.clone(), file: m.file.clone(), start_line: 1, fields: vec![], methods: vec![m], superclass: None, java: None });
             }
         }
         SymbolIndex { types }
@@ -438,100 +463,5 @@ mod tests {
             method_with_params("C", "c.java", "three", &[("x", "int"), ("y", "int")]),
         ]);
         assert!(find_data_clumps(&index, 3, 3, ClumpScope::WholeIndex).is_empty());
-    }
-
-    fn trivial_method(owner_type: &str, name: &str) -> MethodDecl {
-        MethodDecl {
-            name: name.to_string(),
-            owner_type: owner_type.to_string(),
-            file: PathBuf::from("Sub.java"),
-            start_line: 5,
-            end_line: 6,
-            params: vec![],
-            return_type_text: None,
-            own_field_accesses: vec![],
-            foreign_accesses: vec![],
-            chains: vec![],
-            is_trivial_body: true,
-        }
-    }
-
-    fn real_method(owner_type: &str, name: &str) -> MethodDecl {
-        MethodDecl { is_trivial_body: false, ..trivial_method(owner_type, name) }
-    }
-
-    #[test]
-    fn flags_a_trivial_override_of_a_real_parent_method() {
-        let index = SymbolIndex {
-            types: vec![
-                TypeDecl { name: "Base".to_string(), file: PathBuf::from("Base.java"), start_line: 1, fields: vec![], methods: vec![real_method("Base", "save")], superclass: None },
-                TypeDecl {
-                    name: "Sub".to_string(),
-                    file: PathBuf::from("Sub.java"),
-                    start_line: 1,
-                    fields: vec![],
-                    methods: vec![trivial_method("Sub", "save")],
-                    superclass: Some("Base".to_string()),
-                },
-            ],
-        };
-        let findings = find_refused_bequest(&index);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].owner_type, "Sub");
-        assert_eq!(findings[0].superclass, "Base");
-        assert_eq!(findings[0].method, "save");
-    }
-
-    #[test]
-    fn does_not_flag_a_real_override_with_a_real_body() {
-        let index = SymbolIndex {
-            types: vec![
-                TypeDecl { name: "Base".to_string(), file: PathBuf::from("Base.java"), start_line: 1, fields: vec![], methods: vec![real_method("Base", "save")], superclass: None },
-                TypeDecl {
-                    name: "Sub".to_string(),
-                    file: PathBuf::from("Sub.java"),
-                    start_line: 1,
-                    fields: vec![],
-                    methods: vec![real_method("Sub", "save")],
-                    superclass: Some("Base".to_string()),
-                },
-            ],
-        };
-        assert!(find_refused_bequest(&index).is_empty());
-    }
-
-    #[test]
-    fn does_not_flag_a_trivial_method_that_isnt_actually_an_override() {
-        let index = SymbolIndex {
-            types: vec![
-                TypeDecl { name: "Base".to_string(), file: PathBuf::from("Base.java"), start_line: 1, fields: vec![], methods: vec![real_method("Base", "load")], superclass: None },
-                TypeDecl {
-                    name: "Sub".to_string(),
-                    file: PathBuf::from("Sub.java"),
-                    start_line: 1,
-                    fields: vec![],
-                    methods: vec![trivial_method("Sub", "save")],
-                    superclass: Some("Base".to_string()),
-                },
-            ],
-        };
-        assert!(find_refused_bequest(&index).is_empty());
-    }
-
-    #[test]
-    fn does_not_flag_a_trivial_method_when_the_superclass_isnt_in_the_index() {
-        // The superclass is an external/library type we didn't parse —
-        // can't confirm a real override, so this deliberately under-reports.
-        let index = SymbolIndex {
-            types: vec![TypeDecl {
-                name: "Sub".to_string(),
-                file: PathBuf::from("Sub.java"),
-                start_line: 1,
-                fields: vec![],
-                methods: vec![trivial_method("Sub", "save")],
-                superclass: Some("ExternalBase".to_string()),
-            }],
-        };
-        assert!(find_refused_bequest(&index).is_empty());
     }
 }

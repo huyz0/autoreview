@@ -3,17 +3,105 @@
 This inventory records paths that can make a clean dataflow review incomplete.
 It does not claim that every unsupported construct has been catalogued.
 
+The four Kotlin coroutine pattern rules also report
+`callback_execution_unresolved` when a matched operation occurs inside a
+lambda within a suspend function, except when direct literal invocation or a
+contiguous chain of immutable local aliases followed by `.invoke()` proves it
+immediate, and every enclosing lambda is also proved immediate. The finding is retained with reduced
+confidence because the callback may execute inline or later. Replay and gates
+exclude the affected rule's incomplete scope from verified results. This is
+limited to existing pattern matches: it does not inventory unmatched syntax,
+resolve callback identities, or classify other callback forms as immediate or deferred.
+Alias tracking is limited to 32 subsequent statements, including comments;
+reassignment, control flow, intervening calls, and bare-name invocation remain
+unresolved.
+An immutable local lambda with no other matching identifier in its enclosing
+function is treated as uninvoked, including when it contains nested callbacks.
+This conservative check counts same-named shadowed identifiers as uses and has
+a shared per-file budget of 200,000 syntax nodes; exhaustion remains incomplete.
+
+Result-use analysis checks partial observation for directly tracked local
+results on bounded, acyclic paths with supported simple guards. It preserves
+correlated, stable guards, so `const p = task(); if (flag) await p;` is
+reported while a result both created and observed under the same guard stays
+clean. Path-budget exhaustion is reported as `result_use_path_limit`.
+Other cases, including loops, caught exceptions, closures, helper effects,
+complex or unstable guards, and nonlocal storage, still use the older merged
+liveness analysis and may miss a result observed on only one path. When a
+local source is treated as used but cannot be proved observed before the
+unsupported flow, `result_use_path_unmodeled` reports incomplete analysis.
+The same warning can identify a locally tracked result or a direct result
+passed as an argument to a resolved
+helper that may leave its parameter unobserved, unless subsequent caller paths
+prove the result is used. Helper guard values are not yet mapped to caller
+arguments in general, so this is an incomplete-analysis warning, not a proven defect.
+When a supported helper has one stable parameter guard and the caller passes a
+literal boolean or a directly initialized, unreassigned boolean local, Java,
+Kotlin, JavaScript, TypeScript, TSX, and Rust can
+specialize that guard and report a definite unused result or establish that the
+helper observes it. Go retains the warning because its predeclared boolean
+names can be shadowed and that binding is not yet verified for this check.
+For bounded acyclic callers with supported effects, the same helper guard can
+also be correlated with a stable caller branch or alias. This can report a
+discarded result on a proven path; unknown effects and unstable guards remain
+incomplete. When such a helper returns a tracked result into a local binding,
+supported paths also follow the returned value through copies, observation,
+return, and reassignment. A locally assigned result no longer receives the separate
+partial-observation warning when every reachable path is proved observed;
+unobserved paths and exhausted path budgets do not receive that exemption.
+Stable boolean alias chains are followed for up to 64 bindings. Writes or
+mutable borrows anywhere in the chain prevent specialization, even when they
+occur after an alias is copied. Longer chains and path-dependent assignments
+remain incomplete.
+This check does not cover every storage shape, helper chain, or expression.
+Merely intersecting liveness sets would produce false positives for correlated guards.
+Discarded conditional arms that reference a tracked binding are modeled when
+the conditional test and arms are supported. An unsupported conditional can
+also produce `result_use_path_unmodeled` when it may hide a local result use;
+a call directly in an unsupported arm is reported separately.
+
 | Condition | Current behavior | Evidence to report |
 | --- | --- | --- |
-| Changed or imported source cannot be read or parsed | `ParseCache::get` returns `None`; its callers may skip the file. | Source path, whether it was an entry or dependency, and failure reason. Deleted files need separate treatment. |
+| Changed or imported source cannot be read or parsed | Entry files report `source_unavailable`; cross-file call-sequence dependencies report `dependency_unavailable`. Go and Java/Kotlin candidate helper-summary scans report rule-scoped `summary_dependency_unavailable` or `summary_dependency_syntax_errors`. The Java/Kotlin helper package index parses candidate declarations: unavailable sources or directories produce `package_index_unavailable`, malformed declarations produce `package_index_syntax_errors`, and unsupported package names produce `package_index_unresolved`. Caller and same-directory helper package matching also use syntax; unsupported caller packages produce `entry_package_unresolved`. A file's package cannot safely be inferred from its path. The Git review path excludes absent diff paths only when the snapshot's HEAD confirms they were deleted. A failed Git check remains an entry warning. | Discovery still skips configured excluded directories and symbolic links. Import and other package extraction paths remain text-based, and legacy same-package summaries scan only the current directory. |
 | Cross-file call-sequence discovery reaches its 64-dependency limit | The resolver stops loading sources. | Entry scope, limit, and whether an unvisited dependency remains. Do not warn merely because the queue contains already loaded duplicates. |
 | Keyed lowering exceeds the finally-path copying limit | `keyed_flow` reaches zero and `Plan::new` declines the function. | File, function location, and affected call-sequence analysis. |
 | Rust function contains control flow the lowerer cannot model | The lowerer skips the function body; review reports `unsupported_rust_control_flow` per applicable rule and replay treats the case as incomplete. | File, function location, and affected rule. Entry functions and imported helpers reachable through supported calls are included. |
 | Keyed path exploration exceeds its state budget | The root analysis returns no result. | Root location, rule, and path-budget reason. Distinguish this from unsupported identity or call effects. |
 | Ignored-result helper summaries do not converge within their iteration budget | All helper summaries for that rule are cleared. | Rule and analyzed source scope; ordinary local checking can still run. |
-| Local handles, cleanup identities, closures, calls, or syntax cannot be modeled | Several conservative `None` paths decline a plan, root, or expression. | Precise reason and location where available. Do not label ordinary nonmatches as skipped analysis. |
-| A keyed cleanup argument contains an unsupported nested expression | Direct nested calls such as `root.remove(choose(key))` are followed, but conditional and other complex argument expressions may still be unmodeled. | Track the returned identity through the expression or report that this path was not modeled. |
+| Local handles, cleanup identities, closures, calls, or syntax cannot be modeled | Several conservative `None` paths decline a plan, root, or expression. For must-complete contracts, `unmodeled_contract_handle` reports a matching acquisition in a reachable function declined because of unsupported storage or transfer. This does not prove the acquired handle is what escaped. | Report other declined plans with a precise reason and location where available. Do not label ordinary nonmatches as skipped analysis. |
+| A keyed cleanup call is absent from the lowered graph | Explicit call-sequence and must-complete contract rules report `unmodeled_cleanup_call` for the first matching call in a reachable declined function when a registration is present. Direct nested calls such as `root.remove(choose(key))` are followed. Standalone, returned, and simple local-assignment JavaScript, TypeScript, and TSX conditionals with simple boolean tests and direct calls, identifiers, or literals are lowered into separate paths; destructuring, multiple declarators, and more complex expressions remain unmodeled. | Track the remaining cleanup expressions. Other reasons a plan can be declined still need separate coverage. |
+| A result-producing call is in an unmodeled conditional | Direct calls in the arms of unsupported standalone, returned, or assigned conditional expressions report `unmodeled_conditional_result` for applicable result-use rules. The supported conditional form has bounded, side-effect-free boolean tests and modeled arguments; unsupported tests or arms remain incomplete. | Extend expression modeling without treating unsupported branches as clean. Other result expression shapes still need separate coverage. |
 | External static tool is unavailable or fails | Review reports include structured analyzer-scoped issues for unavailable ast-grep and golangci-lint and for execution errors from ast-grep, golangci-lint, and Clippy. Clippy findings remain available even when another target fails. Cargo audit errors identify the affected lockfile. Existing text warnings remain. | Other tools and partial failures still need structured coverage; do not imply that other analyzers failed. |
+
+On Windows, a static review of the pinned JPlag trim fix reported no
+`summary_dependency_*` limitations, and the selected JPlag and Go tools
+replays retained their prior results. These two cases are too few to estimate
+the frequency of the new warnings across projects.
+Static reviews of the pinned JPlag and RediCloud fixes also reported no
+`package_index_unavailable` limitations; this does not establish their
+frequency across other repositories.
+After parsing unclassified sources, one Windows debug run on each pinned diff
+reported zero `package_index_*` issues. The previous-main and modified builds
+took 7.02 and 6.43 seconds for JPlag, and 9.61 and 8.17 seconds for RediCloud,
+respectively. These sequential single runs include checkout and other analyzers;
+they are not a reliable estimate of typical performance or warning frequency.
+After switching the helper index to parsed package declarations, single
+Windows debug reviews of the same diffs took 7.91/7.62 seconds before/after
+for JPlag and 10.82/10.76 seconds for RediCloud, with no package-index warnings.
+These end-to-end timings include other analyzers and do not establish general
+performance or accuracy.
+After extending syntax-based package matching to callers and same-directory
+helpers, single Windows debug reviews of those diffs took 7.97/7.59 seconds
+before/after for JPlag and 12.41/9.97 seconds for RediCloud. Neither produced
+the new package-resolution warnings. These are end-to-end single runs, not a
+general performance or warning-frequency estimate.
+
+The experimental Go error probe distinguishes package or call-site budget
+exhaustion, package loading, type checking, snapshot mismatches, and rejected
+requests in coverage, scoped to a repository-relative package directory when
+available. Unknown or malformed probe responses and process failures retain
+the generic rule-scoped incomplete-checker reason. These reports do not expose
+raw subprocess errors.
 
 Rust lowering supports non-tail statement matches with a simple scrutinee,
 including supported direct calls, and a final wildcard. Arms can use literals,

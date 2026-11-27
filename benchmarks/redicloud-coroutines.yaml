@@ -1,0 +1,19 @@
+cases:
+  - name: redicloud blocks inside suspend connection methods
+    rule: {tool: ast-grep, id: kotlin-runblocking-in-suspend-function}
+    evidence:
+      kind: historical
+      source: https://github.com/RediCloud/cloud-v2/commit/77c38cb88f1632978cb7fae22cd2093ad166908a
+      license: EUPL-1.2
+      rationale: >-
+        The connect and disconnect suspend functions used runBlocking to update
+        their node. The fix calls the suspending update directly. A separate
+        synchronous password-authentication callback retains runBlocking.
+    before:
+      commit: ddc83b5d138cd4ba4927bd6e6b858e79bc42bb8d
+      path: file-cluster/src/main/kotlin/dev/redicloud/cluster/file/FileCluster.kt
+      lines: [155, 228]
+    after:
+      commit: 77c38cb88f1632978cb7fae22cd2093ad166908a
+      path: file-cluster/src/main/kotlin/dev/redicloud/cluster/file/FileCluster.kt
+      lines: []

@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn batches_fit_both_protocol_bounds_and_keep_completed_results_on_failure() {
         let options = CheckerConfig { node: "node", compiler: "compiler", config: "config", root: Path::new("."), timeout: Duration::from_secs(10) };
-        let calls: Vec<_> = (0..2000).map(|start| TypeScriptCall { path: format!("{}é\n", "x".repeat(160)), start, source_sha256: "a".repeat(64) }).collect();
+        let calls: Vec<_> = (0..2000).map(|start| TypeScriptCall { path: format!("{}é\n", "x".repeat(160)), start, end: None, source_sha256: "a".repeat(64) }).collect();
         let (ranges, skipped) = ranges(&options, &calls).unwrap();
         assert!(!skipped);
         assert!(ranges.len() > 1);
@@ -105,7 +105,7 @@ mod tests {
         let mut invocations = 0;
         let complete = verify(&options, &batch, &mut verified, &mut classified, |_, request, _| {
             invocations += 1;
-            (invocations == 1).then(|| TypeScriptResult { status: "ok".into(), reason: None, calls: Some(request.calls.iter().map(|call| TypeScriptCallResult { path: call.path.clone(), start: call.start, source_sha256: call.source_sha256.clone(), status: "promise_like".into() }).collect()) })
+            (invocations == 1).then(|| TypeScriptResult { status: "ok".into(), reason: None, calls: Some(request.calls.iter().map(|call| TypeScriptCallResult { path: call.path.clone(), start: call.start, end: call.end, source_sha256: call.source_sha256.clone(), status: "promise_like".into() }).collect()) })
         });
         assert_eq!(complete, Err("typescript_checker_incomplete"));
         assert_eq!(verified[&0].len(), first_len);
@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn oversized_call_does_not_discard_other_batches() {
         let options = CheckerConfig { node: "node", compiler: "compiler", config: "config", root: Path::new("."), timeout: Duration::from_secs(10) };
-        let make = |start, length| TypeScriptCall { path: "x".repeat(length), start, source_sha256: "a".repeat(64) };
+        let make = |start, length| TypeScriptCall { path: "x".repeat(length), start, end: None, source_sha256: "a".repeat(64) };
         let calls = vec![make(0, 10), make(1, MAX_BYTES), make(2, 10)];
         let (ranges, skipped) = ranges(&options, &calls).unwrap();
         assert!(skipped);
@@ -125,7 +125,7 @@ mod tests {
         let mut verified = Positions::new();
         let mut classified = Positions::new();
         let complete = verify(&options, &batch, &mut verified, &mut classified, |_, request, _| {
-            Some(TypeScriptResult { status: "ok".into(), reason: None, calls: Some(request.calls.iter().map(|call| TypeScriptCallResult { path: call.path.clone(), start: call.start, source_sha256: call.source_sha256.clone(), status: "promise_like".into() }).collect()) })
+            Some(TypeScriptResult { status: "ok".into(), reason: None, calls: Some(request.calls.iter().map(|call| TypeScriptCallResult { path: call.path.clone(), start: call.start, end: call.end, source_sha256: call.source_sha256.clone(), status: "promise_like".into() }).collect()) })
         });
         assert_eq!(complete, Err("typescript_checker_incomplete"));
         assert_eq!(verified[&0], BTreeSet::from([0, 2]));

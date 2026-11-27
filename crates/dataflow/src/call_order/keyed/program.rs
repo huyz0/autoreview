@@ -8,7 +8,7 @@ mod associated;
 use associated::Associated;
 pub use signature::has_attributes as has_rust_attributes;
 mod exports;
-pub use exports::{resolve_declaration_import, DeclarationResolution, KeyedDeclaration};
+pub use exports::{resolve_declaration_import, DeclarationResolution, KeyedDeclaration, KeyedExport, KeyedImport};
 use signature::{candidate, export, parameters, Export};
 
 use super::{CallOrderSpec, Plan, Values};
@@ -29,26 +29,6 @@ pub struct KeyedUnit<'src, 'tree, 'graph> {
     pub entry: bool,
 }
 
-/// A named export (local or from another unit), or a wildcard re-export.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum KeyedExport {
-    Named { exported: String, local: String, path: Option<String> },
-    Star { path: String },
-    /// An export whose runtime names cannot be enumerated safely.
-    Unknown,
-}
-
-/// Exact local name or namespace prefix mapped to a repository source file.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct KeyedImport {
-    pub local: String,
-    pub path: String,
-    /// None selects a member by stripping the local namespace prefix.
-    pub name: Option<String>,
-    pub owner: Option<String>,
-    pub exported: bool,
-}
-
 pub(in crate::call_order) struct Program<'spec, 'src, 'graph> {
     pub frames: Vec<Frame<'spec, 'src, 'graph>>,
     targets: BTreeMap<(Scope, String, usize), Option<usize>>,
@@ -65,6 +45,8 @@ pub(in crate::call_order) struct Frame<'spec, 'src, 'graph> {
     pub plan: Option<Plan<'spec, 'src>>,
     scope: Scope,
     unsupported_rust_line: Option<u32>,
+    declined_cleanup: Option<(u32, bool)>,
+    declined_contract: Option<u32>,
     rust_match_bindings: Vec<u32>,
     pub(in crate::call_order) params: Vec<String>,
 }
@@ -132,9 +114,14 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             Some(export(node, source, name))
         });
         self.units[unit].frames.push(self.frames.len());
+        let plan = Plan::new(spec, function.graph, node, source, unit);
+        let declined_cleanup = plan.is_none().then(|| Plan::declined_cleanup(spec, function.graph, node, source, unit)).flatten();
+        let declined_contract = plan.is_none().then(|| Plan::declined_contract(spec, function.graph, node, source, unit)).flatten();
         self.frames.push(Frame {
             graph: function.graph,
-            plan: Plan::new(spec, function.graph, node, source, unit),
+            plan,
+            declined_cleanup,
+            declined_contract,
             unit,
             scope,
             unsupported_rust_line: (node.kind() == "function_item" && !crate::lower::rust::supports_function(node))
@@ -208,7 +195,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
     }
 
     pub(in crate::call_order) fn resolution_limitations(&self) -> Vec<super::KeyedLimitation> {
-        if self.unresolved.borrow().is_empty() && self.frames.iter().all(|frame| frame.unsupported_rust_line.is_none() && frame.rust_match_bindings.is_empty()) {
+        if self.unresolved.borrow().is_empty() && self.frames.iter().all(|frame| frame.unsupported_rust_line.is_none() && frame.rust_match_bindings.is_empty() && frame.declined_cleanup.is_none() && frame.declined_contract.is_none()) {
             return Vec::new();
         }
         let mut pending: Vec<_> = self.units.iter().filter(|unit| unit.entry)
@@ -224,6 +211,19 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         let mut limitations: Vec<_> = reachable.iter().filter_map(|&frame| self.frames[frame].unsupported_rust_line.map(|line| super::KeyedLimitation {
             reason: "unsupported_rust_control_flow", path: self.path(self.frames[frame].unit), line: Some(line),
         })).collect();
+        limitations.extend(reachable.iter().filter_map(|&frame| self.frames[frame].declined_contract.map(|line| super::KeyedLimitation {
+            reason: "unmodeled_contract_handle", path: self.path(self.frames[frame].unit), line: Some(line),
+        })));
+        let has_registration = reachable.iter().any(|&frame| {
+            let frame = &self.frames[frame];
+            frame.plan.as_ref().is_some_and(Plan::has_registration)
+                || frame.declined_cleanup.is_some_and(|(_, registered)| registered)
+        });
+        if has_registration {
+            limitations.extend(reachable.iter().filter_map(|&frame| self.frames[frame].declined_cleanup.map(|(line, _)| super::KeyedLimitation {
+                reason: "unmodeled_cleanup_call", path: self.path(self.frames[frame].unit), line: Some(line),
+            })));
+        }
         limitations.extend(reachable.iter().flat_map(|&frame| self.frames[frame].rust_match_bindings.iter().map(move |&line| super::KeyedLimitation {
             reason: "rust_match_binding_projection", path: self.path(self.frames[frame].unit), line: Some(line),
         })));
@@ -243,7 +243,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         from: usize,
         cfg: &Cfg<Stmt>,
         plan: &Plan<'_, '_>,
-    ) -> BTreeSet<(usize, usize)> {
+    ) -> BTreeSet<((usize, usize), usize)> {
         let mut resolved = BTreeSet::new();
         let nodes = reachable_nodes(cfg);
         for call in nodes.iter().filter_map(|node| node.throwing_call.as_ref()) {
@@ -279,14 +279,14 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         name: &str,
         site: &CallSite,
         plan: &Plan<'_, '_>,
-        resolved: &mut BTreeSet<(usize, usize)>,
+        resolved: &mut BTreeSet<((usize, usize), usize)>,
     ) {
         // A verified result source is modeled at its call site, not as an
         // unresolved helper body. Its exception paths remain in the CFG.
-        if plan.extra_sources.contains(&site.start) { return; }
+        if plan.extra_sources.contains(&site.start) || plan.extra_spans.contains(&(site.start, site.end)) { return; }
         if plan.may_throw(name, site.start, &Values::new()) {
             if let Some(callee) = self.target(from, name, site) {
-                resolved.insert((site.start, callee));
+                resolved.insert(((site.start, site.end), callee));
             }
         }
     }

@@ -69,7 +69,7 @@ pub(super) fn checkout_snapshot(repo_root: &Path, head: &str) -> anyhow::Result<
 
     let checkout = snapshot_git()
         .current_dir(snapshot.path())
-        .args(["-c", "core.autocrlf=false", "-c"])
+        .args(["-c", "core.autocrlf=false", "-c", "core.longpaths=true", "-c"])
         .arg(format!("core.hooksPath={}", git_dir.join("disabled-hooks").display()))
         .args(["checkout", "--detach", "--quiet", head, "--"])
         .output()?;

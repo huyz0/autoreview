@@ -11,6 +11,8 @@ See [collection performance and retention](collection-coverage.md) for
 allocation, collection lifetime, and mutation checks by language.
 See [loop and recursion rules](loop-and-recursion-coverage.md) for control
 flow, repeated work, and stack depth.
+See [callback execution evidence](callback-execution-plan.md) for the planned
+handling of immediate, deferred, and unresolved callback execution.
 
 ## Code design and complexity
 
@@ -52,7 +54,7 @@ flow, repeated work, and stack depth.
 | Cancellation leak, detached task | `go-context-cancel-on-all-paths`, `go-http-handler-discards-request-context`, Kotlin cancellation and scope checks, and Rust timeout rules for inline and locally bound join handles. | Track handle reassignment, ownership transfer, and task-set semantics with data flow. |
 | Resource leaks, unreleased locks | JVM resource and lock rules, Go response/rows cleanup, Rust forgotten guards and temporary owners. | Extend existing obligation tracking to well-identified acquisition/release pairs, including exceptions, all-path cleanup, and ownership transfer. |
 | Races, deadlocks, non-atomic updates | Java map check-then-act and static non-thread-safe date fields. | Track lock acquisition order by identity. Shared state plus different call-site orders can justify an advisory; universal deadlock or race detection needs runtime or stronger verification. |
-| Blocking async, sequential work, discarded promises, synchronous thread launch | Kotlin coroutine and JVM Reactor checks, Rust blocking-in-async checks, Java `java-thread-run-directly`, web `*-discarded-promise-combinator`. | The web rule checks standalone built-in combinator calls. General floating calls need type information. Parallelizing sequential awaits needs proof that operations are independent. |
+| Blocking async, sequential work, discarded promises, synchronous thread launch | Kotlin coroutine and JVM Reactor checks, Rust blocking-in-async checks, Java `java-thread-run-directly`, web `*-discarded-promise-combinator`. | The Kotlin suspend checks stop at named and anonymous function boundaries; they do not follow calls into those functions or distinguish deferred callbacks from inline lambdas. The web rule checks standalone built-in combinator calls. General floating calls need type information. Parallelizing sequential awaits needs proof that operations are independent. |
 | Wall-clock timing, mixed units, precision loss | `rust-wall-clock-elapsed-unwrap`, JVM decimal-literal-to-BigDecimal rules, and `go-duration-without-unit` for short integer literals passed to standard timer APIs. | Compare units carried by named values with the receiving API. Use monotonic-time requirements at elapsed-time call sites. |
 | Equality and hash contract violations | JVM equals-without-hashCode and equality misuse checks. | Match equality and hashing over different stable fields when both methods are simple. More complex contracts benefit from property tests. |
 | Unsafe retry, duplicate effects, ordering and lost updates | `java-retry-max-attempts-unbounded` catches a direct Resilience4j builder call with an effectively unbounded attempt cap. | Extend builder and framework config resolution. Business safety needs write/idempotency-key semantics and transactional concurrency tests. |

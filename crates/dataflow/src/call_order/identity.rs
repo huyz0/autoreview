@@ -126,7 +126,7 @@ impl<'src> Syntax<'src> {
                     self.calls.push((node.start_byte(), name));
                 }
             }
-            "if_statement" | "if_expression" => {
+            "if_statement" | "if_expression" | "ternary_expression" => {
                 if let Some((name, _)) = crate::lower::keyed_syntax::condition(node, source) {
                     *self.guards.entry(name).or_default() += 1;
                 }
@@ -159,6 +159,17 @@ impl<'src> Syntax<'src> {
 
     pub(super) fn taken_name(&self, name: &str) -> bool {
         self.bindings.names().any(|binding| binding == name)
+    }
+
+    pub(super) fn stable_boolean(&self, name: &str, at: usize) -> Option<bool> {
+        self.bindings.stable_boolean(name, at)
+    }
+
+    pub(super) fn stable_identity(&self, name: &str, at: usize) -> Option<IdentityOperand> {
+        match self.bindings.stable_identity(name, at)? {
+            IdentityOperand::Binding(name) => Some(IdentityOperand::Scoped { name, owner: self.owner, unit: self.unit }),
+            value => Some(value),
+        }
     }
 
     pub(super) fn local_result_binding(&self, name: &str, start: usize, defining: bool) -> Option<usize> {
@@ -211,6 +222,10 @@ impl<'src> Syntax<'src> {
         self.calls.iter().any(|(_, name)| predicate(name))
     }
 
+    pub(super) fn first_call(&self, predicate: impl Fn(&str) -> bool) -> Option<usize> {
+        self.calls.iter().find_map(|(start, name)| predicate(name).then_some(*start))
+    }
+
     pub(super) fn has_registration(&self, candidates: &[NamePattern]) -> bool {
         self.calls.iter().any(|(_, name)| {
             matches_any(candidates, name)
@@ -223,9 +238,13 @@ impl<'src> Syntax<'src> {
     }
 
     pub(super) fn models_cleanup(&self, cleanup: &[NamePattern], modeled: &HashSet<usize>) -> bool {
+        self.unmodeled_cleanup(cleanup, modeled).is_none()
+    }
+
+    pub(super) fn unmodeled_cleanup(&self, cleanup: &[NamePattern], modeled: &HashSet<usize>) -> Option<usize> {
         let values = Values::new();
-        self.calls.iter().all(|(start, name)| {
-            modeled.contains(start) || !self.may_match_cleanup(cleanup, name, *start, &values)
+        self.calls.iter().find_map(|(start, name)| {
+            (!modeled.contains(start) && self.may_match_cleanup(cleanup, name, *start, &values)).then_some(*start)
         })
     }
 

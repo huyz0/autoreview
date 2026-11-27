@@ -28,6 +28,8 @@ pub(super) fn run(
             parse: &parse,
             persistent: &persistent,
             java_kotlin_packages: Default::default(),
+            summary_issues: Default::default(),
+            entries: paths.iter().map(|path| root.join(path)).collect(),
         },
     };
     let mut findings = Vec::new();
@@ -38,6 +40,7 @@ pub(super) fn run(
             coverage.extend(issue);
         }
     }
+    coverage.extend(std::mem::take(&mut *review.caches.summary_issues.borrow_mut()));
     let (cross_file, limitations) = super::keyed_imports::run(root, paths, &review.call_sequences, &review.caches);
     findings.extend(cross_file);
     coverage.extend(limitations);
@@ -61,10 +64,9 @@ impl DataflowReview<'_> {
         let (extract, lower) = profile(language);
         let parsed = match read_and_parse(self.root, path, language, self.caches.parse) {
             Some(parsed) => parsed,
-            None if self.root.join(path).exists() => return Some((Vec::new(), Some(coverage_issue(
+            None => return Some((Vec::new(), Some(coverage_issue(
                 path, "source_unavailable", "The source could not be read or parsed; dataflow checks skipped this file."
             )))),
-            None => return None,
         };
         let (content, tree) = parsed.as_ref();
         let issue = tree.root_node().has_error().then(|| coverage_issue(

@@ -1,0 +1,387 @@
+//! Caller-provided reports are diagnostic; an opted-in probe may establish a scoped contract.
+use std::collections::HashMap;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+use autoreview_schema::AgentFinding;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tree_sitter::Point;
+
+use super::ParsedSource;
+
+mod runner;
+mod sshd_contract;
+
+const MAX_REPORT: u64 = 1024 * 1024;
+const MAX_SOURCE: usize = 4 * 1024 * 1024;
+const MAX_RECORDS_PER_FILE: usize = 128;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Snapshot { snapshot_version: u32, sources: Vec<Source>, evidence: Report, #[serde(default)] resolved_classes: Vec<sshd_contract::ResolvedClass>, #[serde(default)] runtime_resolved_classes: Vec<sshd_contract::ResolvedClass>, compiled_class_conflicts: Option<Vec<String>> }
+#[derive(Deserialize)]
+struct Source { path: PathBuf, sha256: String }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Report { version: u32, compiler: String, records: Vec<Record>, #[serde(default)] source_classes: Option<Vec<String>> }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Record {
+    path: PathBuf,
+    sha256: String,
+    lambda_start_utf16: usize,
+    lambda_end_utf16: usize,
+    callee: String,
+    parameter: usize,
+    sam_type: String,
+    modality: String,
+    parameter_types: Option<Vec<Option<String>>>,
+    receiver_static_type: Option<String>,
+    receiver_property: Option<String>,
+    observed_setter_callees: Option<Vec<Option<String>>>,
+    observed_setter_details: Option<Vec<Option<SetterDetail>>>,
+    property_source_sha256: Option<String>,
+    property_evidence: Option<PropertyEvidence>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PropertyEvidence {
+    visibility: String,
+    default_getter: bool,
+    default_setter: bool,
+    null_initializer: bool,
+    direct_field_writes: u32,
+    accessor_references: u32,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetterDetail {
+    callee: String,
+    origin: String,
+    dispatch_receiver: bool,
+    parameter_types: Vec<Option<String>>,
+    return_type: Option<String>,
+    type_parameters: usize,
+}
+
+pub(super) struct Evidence { by_file: HashMap<PathBuf, Vec<Record>>, sshd_contract: bool }
+
+pub(super) fn from_environment(root: &Path) -> Result<Option<Evidence>, ()> {
+    if let Some(config) = std::env::var_os("AUTOREVIEW_KOTLIN_CALLBACK_PROBE_CONFIG") {
+        if std::env::var_os("AUTOREVIEW_KOTLIN_CALLBACK_EVIDENCE").is_some() { return Err(()); }
+        let output = runner::run(root, Path::new(&config))?;
+        return parse_with_trust(root, root, &output.bytes, output.complete_roots).map(Some);
+    }
+    from_report_environment(root)
+}
+
+fn from_report_environment(root: &Path) -> Result<Option<Evidence>, ()> {
+    let Some(path) = std::env::var_os("AUTOREVIEW_KOTLIN_CALLBACK_EVIDENCE") else { return Ok(None); };
+    let path = Path::new(&path);
+    if !path.is_absolute() { return Err(()); }
+    let checkout = std::env::var_os("AUTOREVIEW_KOTLIN_CALLBACK_ROOT").ok_or(())?;
+    let checkout = Path::new(&checkout);
+    if !checkout.is_absolute() { return Err(()); }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).map_err(|_| ())?.take(MAX_REPORT + 1).read_to_end(&mut bytes).map_err(|_| ())?;
+    if bytes.len() as u64 > MAX_REPORT { return Err(()); }
+    parse(root, checkout, &bytes).map(Some)
+}
+
+fn parse(root: &Path, checkout: &Path, bytes: &[u8]) -> Result<Evidence, ()> {
+    parse_with_trust(root, checkout, bytes, false)
+}
+
+fn parse_with_trust(root: &Path, checkout: &Path, bytes: &[u8], direct_complete_probe: bool) -> Result<Evidence, ()> {
+    let snapshot: Snapshot = serde_json::from_slice(bytes).map_err(|_| ())?;
+    if snapshot.snapshot_version != 1 || snapshot.evidence.version != 2 || !matches!(snapshot.evidence.compiler.as_str(), "2.2.20" | "2.3.21") || snapshot.sources.len() > 512 { return Err(()); }
+    let root = root.canonicalize().map_err(|_| ())?;
+    let checkout = checkout.canonicalize().map_err(|_| ())?;
+    let sources = map_sources(&root, &checkout, snapshot.sources)?;
+    let contract = direct_complete_probe && sshd_contract::classes_match(&snapshot.resolved_classes, snapshot.evidence.source_classes.as_deref())
+        && sshd_contract::classes_match(&snapshot.runtime_resolved_classes, snapshot.evidence.source_classes.as_deref())
+        && snapshot.compiled_class_conflicts.as_ref().is_some_and(Vec::is_empty);
+    Ok(Evidence { by_file: index_records(&sources, snapshot.evidence.records)?, sshd_contract: contract })
+}
+
+fn map_sources(root: &Path, checkout: &Path, input: Vec<Source>) -> Result<HashMap<PathBuf, (PathBuf, String)>, ()> {
+    let mut sources = HashMap::new();
+    for source in input {
+        let path = source.path.canonicalize().map_err(|_| ())?;
+        let relative = path.strip_prefix(checkout).map_err(|_| ())?;
+        let target = root.join(relative).canonicalize().map_err(|_| ())?;
+        if !target.starts_with(root) || source.sha256.len() != 64 || sources.insert(path, (target, source.sha256)).is_some() { return Err(()); }
+    }
+    Ok(sources)
+}
+
+fn index_records(sources: &HashMap<PathBuf, (PathBuf, String)>, input: Vec<Record>) -> Result<HashMap<PathBuf, Vec<Record>>, ()> {
+    let mut by_file: HashMap<PathBuf, Vec<Record>> = HashMap::new();
+    for record in input {
+        let path = record.path.canonicalize().map_err(|_| ())?;
+        let (target, hash) = sources.get(&path).ok_or(())?;
+        if hash != &record.sha256 || !valid_record(&record)
+            || record.property_source_sha256.as_ref().is_some_and(|hash| !sources.values().any(|(_, source_hash)| source_hash == hash)) { return Err(()); }
+        let records = by_file.entry(target.clone()).or_default();
+        if records.len() >= MAX_RECORDS_PER_FILE { return Err(()); }
+        records.push(record);
+    }
+    Ok(by_file)
+}
+
+fn valid_record(record: &Record) -> bool {
+    record.callee.len() <= 1024 && record.sam_type.len() <= 1024 && record.modality.len() <= 32
+        && record.receiver_static_type.as_ref().is_none_or(|name| name.len() <= 1024)
+        && record.receiver_property.as_ref().is_none_or(|name| name.len() <= 1024)
+        && record.property_evidence.as_ref().is_none_or(|item| item.visibility.len() <= 32)
+        && record.property_source_sha256.as_ref().is_none_or(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        && record.observed_setter_details.as_ref().is_none_or(|items| items.len() <= 512 && items.iter().flatten().all(valid_setter_detail))
+        && record.observed_setter_callees.as_ref().is_none_or(|names| names.len() <= 512 && names.iter().flatten().all(|name| name.len() <= 1024))
+        && setter_lists_agree(record)
+}
+
+fn setter_lists_agree(record: &Record) -> bool {
+    match (&record.observed_setter_callees, &record.observed_setter_details) {
+        (Some(names), Some(details)) => names.len() == details.len() && names.iter().zip(details).all(|(name, detail)| name.as_deref() == detail.as_ref().map(|item| item.callee.as_str())),
+        (_, None) => true,
+        (None, Some(_)) => false,
+    }
+}
+
+fn valid_setter_detail(detail: &SetterDetail) -> bool {
+    detail.callee.len() <= 1024 && detail.origin.len() <= 128 && detail.type_parameters <= 512
+        && detail.parameter_types.len() <= 512 && detail.parameter_types.iter().flatten().all(|name| name.len() <= 1024)
+        && detail.return_type.as_ref().is_none_or(|name| name.len() <= 1024)
+}
+
+impl Evidence {
+    pub(super) fn for_finding(&self, root: &Path, path: &str, parsed: &ParsedSource, finding: &AgentFinding) -> Option<serde_json::Value> {
+        let record = self.matching_record(root, path, parsed, finding)?;
+        Some(serde_json::json!({ "status": "unverified", "callee": record.callee,
+            "parameter": record.parameter, "samType": record.sam_type, "modality": record.modality,
+            "receiverStaticType": record.receiver_static_type, "receiverProperty": record.receiver_property,
+            "observedSetterCallees": record.observed_setter_callees, "propertyEvidence": record.property_evidence,
+            "observedSetterDetails": record.observed_setter_details, "propertySourceSha256": record.property_source_sha256 }))
+    }
+
+    pub(super) fn proves_deferred(&self, root: &Path, path: &str, parsed: &ParsedSource, finding: &AgentFinding) -> bool {
+        self.sshd_contract && self.matching_record(root, path, parsed, finding).is_some_and(sshd_contract::deferred)
+    }
+
+    fn matching_record(&self, root: &Path, path: &str, parsed: &ParsedSource, finding: &AgentFinding) -> Option<&Record> {
+        if parsed.source.len() > MAX_SOURCE { return None; }
+        let file = root.join(path).canonicalize().ok()?;
+        let records = self.by_file.get(&file)?;
+        let hash = format!("{:x}", Sha256::digest(parsed.source.as_bytes()));
+        let position = Point::new(finding.location.range.start_line.checked_sub(1)? as usize,
+            finding.location.range.start_col?.checked_sub(1)? as usize);
+        let node = parsed.tree.root_node().descendant_for_point_range(position, position)?;
+        let spans = lambda_spans(node, &parsed.source);
+        let matched: Vec<_> = records.iter().filter(|record| record.sha256 == hash && spans.contains(&(record.lambda_start_utf16, record.lambda_end_utf16))).collect();
+        let [record] = matched.as_slice() else { return None; };
+        Some(record)
+    }
+}
+
+fn lambda_spans(node: tree_sitter::Node<'_>, source: &str) -> Vec<(usize, usize)> {
+    std::iter::successors(Some(node), |node| node.parent())
+        .take(64)
+        .take_while(|node| !matches!(node.kind(), "function_declaration" | "anonymous_function"))
+        .filter(|node| node.kind() == "lambda_literal")
+        .filter_map(|node| Some((source.get(..node.start_byte())?.encode_utf16().count(), source.get(..node.end_byte())?.encode_utf16().count())))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use autoreview_schema::{FindingSource, FindingSourceKind, Location, LocationRange, Severity, Side};
+
+    fn finding() -> AgentFinding {
+        AgentFinding {
+            source: FindingSource { kind: FindingSourceKind::Analyzer, tool: "ast-grep".into(), rule_id: Some("kotlin-runblocking-in-suspend-function".into()), aspect: None, backend: None },
+            category: "correctness".into(), severity: Severity::Medium, confidence: 1.0, title: "test".into(), message: "test".into(),
+            location: Location { path: "source.kt".into(), range: LocationRange { start_line: 3, start_col: Some(13), end_line: None, end_col: None }, snippet: String::new(), side: Side::New },
+            related_locations: None, suggestion: None, tags: None, meta: None, suggested_patch: None,
+        }
+    }
+
+    fn report(path: &Path, source: &str) -> Vec<u8> {
+        let lambda = "{ runBlocking { work() } }";
+        let start = source.find(lambda).unwrap();
+        let lambda_start = source[..start].encode_utf16().count();
+        let hash = format!("{:x}", Sha256::digest(source.as_bytes()));
+        serde_json::to_vec(&serde_json::json!({
+            "snapshotVersion": 1,
+            "sources": [{"path": path, "sha256": hash}],
+            "evidence": {"version": 2, "compiler": "2.2.20", "records": [{
+                "path": path, "sha256": hash, "lambdaStartUtf16": lambda_start,
+                "lambdaEndUtf16": lambda_start + lambda.encode_utf16().count(),
+                "callee": "example.register", "parameter": 0, "samType": "example.Callback", "modality": "OPEN"
+            }]}
+        })).unwrap()
+    }
+
+    fn report_fixture() -> (tempfile::TempDir, serde_json::Value) {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("source.kt");
+        let source = "// 😀\nsuspend fun run() {\n register { runBlocking { work() } }\n}\n";
+        std::fs::write(&path, source).unwrap();
+        let value = serde_json::from_slice(&report(&path, source)).unwrap();
+        (root, value)
+    }
+
+    #[test]
+    fn matching_evidence_is_diagnostic_only_and_stale_sources_do_not_match() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("source.kt");
+        let source = "// 😀\nsuspend fun run() {\n register { runBlocking { work() } }\n}\n";
+        std::fs::write(&path, source).unwrap();
+        let evidence = parse(root.path(), root.path(), &report(&path, source)).unwrap();
+        let mut findings = vec![finding()];
+        let mut coverage = Vec::new();
+        super::super::annotate_with(root.path(), &mut findings, Some(&evidence), &mut coverage);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].meta.as_ref().unwrap()["experimentalCallbackEvidence"]["status"], "unverified");
+        assert_eq!(findings[0].meta.as_ref().unwrap()["experimentalCallbackEvidence"]["callee"], "example.register");
+        assert!(findings[0].meta.as_ref().unwrap()["experimentalCallbackEvidence"]["receiverStaticType"].is_null());
+        assert_eq!(findings[0].confidence, 0.5);
+        assert!(coverage.iter().any(|issue| issue.reason == "callback_execution_unresolved"));
+        std::fs::write(&path, source.replace("work()", "other()" )).unwrap();
+        let mut findings = vec![finding()];
+        super::super::annotate_with(root.path(), &mut findings, Some(&evidence), &mut Vec::new());
+        assert!(findings[0].meta.is_none());
+    }
+
+    #[test]
+    fn receiver_type_is_unverified_and_bounded() {
+        let (root, mut value) = report_fixture();
+        value["evidence"]["records"][0]["receiverStaticType"] = "example.Server".into();
+        value["evidence"]["records"][0]["receiverProperty"] = "example.Owner.server".into();
+        value["evidence"]["records"][0]["observedSetterCallees"] = serde_json::json!(["example.create", null]);
+        value["evidence"]["records"][0]["observedSetterDetails"] = serde_json::json!([{"callee":"example.create","origin":"DEFINED","dispatchReceiver":false,"parameterTypes":[],"returnType":"example.Server","typeParameters":0}, null]);
+        value["evidence"]["records"][0]["propertySourceSha256"] = value["sources"][0]["sha256"].clone();
+        value["evidence"]["records"][0]["propertyEvidence"] = serde_json::json!({"visibility":"private", "defaultGetter":true, "defaultSetter":true, "nullInitializer":true, "directFieldWrites":0, "accessorReferences":0});
+        let evidence = parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).unwrap();
+        let mut findings = vec![finding()];
+        let mut coverage = Vec::new();
+        super::super::annotate_with(root.path(), &mut findings, Some(&evidence), &mut coverage);
+        let metadata = &findings[0].meta.as_ref().unwrap()["experimentalCallbackEvidence"];
+        assert_eq!(metadata["receiverStaticType"], "example.Server");
+        assert_eq!(metadata["receiverProperty"], "example.Owner.server");
+        assert_eq!(metadata["observedSetterCallees"], serde_json::json!(["example.create", null]));
+        assert_eq!(metadata["observedSetterDetails"][0]["returnType"], "example.Server");
+        assert_eq!(metadata["propertyEvidence"]["defaultGetter"], true);
+        assert_eq!(metadata["status"], "unverified");
+        assert!(coverage.iter().any(|issue| issue.reason == "callback_execution_unresolved"));
+        value["evidence"]["records"][0]["observedSetterDetails"][0]["callee"] = "example.other".into();
+        assert!(parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).is_err());
+        value["evidence"]["records"][0]["observedSetterDetails"][0]["callee"] = "example.create".into();
+        value["evidence"]["records"][0]["propertySourceSha256"] = "0".repeat(64).into();
+        assert!(parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).is_err());
+        value["evidence"]["records"][0]["propertySourceSha256"] = serde_json::Value::Null;
+        value["evidence"]["records"][0]["receiverStaticType"] = "x".repeat(1025).into();
+        assert!(parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).is_err());
+        value["evidence"]["records"][0]["receiverStaticType"] = serde_json::Value::Null;
+        value["evidence"]["records"][0]["observedSetterCallees"] = serde_json::json!(vec!["example.create"; 513]);
+        assert!(parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn rejects_external_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let path = outside.path().join("source.kt");
+        let source = "// 😀\nsuspend fun run() {\n register { runBlocking { work() } }\n}\n";
+        std::fs::write(&path, source).unwrap();
+        assert!(parse(root.path(), root.path(), &report(&path, source)).is_err());
+    }
+
+    #[test]
+    fn maps_checkout_paths_to_analyzed_snapshot() {
+        let checkout = tempfile::tempdir().unwrap();
+        let analyzed = tempfile::tempdir().unwrap();
+        let source = "// 😀\nsuspend fun run() {\n register { runBlocking { work() } }\n}\n";
+        let original = checkout.path().join("source.kt");
+        std::fs::write(&original, source).unwrap();
+        std::fs::write(analyzed.path().join("source.kt"), source).unwrap();
+        let evidence = parse(analyzed.path(), checkout.path(), &report(&original, source)).unwrap();
+        let mut findings = vec![finding()];
+        let mut coverage = Vec::new();
+        super::super::annotate_with(analyzed.path(), &mut findings, Some(&evidence), &mut coverage);
+        assert_eq!(findings[0].meta.as_ref().unwrap()["experimentalCallbackEvidence"]["status"], "unverified");
+        assert!(coverage.iter().any(|issue| issue.reason == "callback_execution_unresolved"));
+    }
+
+    #[test]
+    fn supports_only_tested_compiler_versions() {
+        let (root, mut value) = report_fixture();
+        value["evidence"]["compiler"] = "2.3.21".into();
+        assert!(parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).is_ok());
+        value["evidence"]["compiler"] = "2.3.22".into();
+        assert!(parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn sshd_contract_requires_direct_trusted_probe_and_exact_receiver() {
+        let (root, mut value) = report_fixture();
+        let server = "org.apache.sshd.server.SshServer";
+        let auth = "org.apache.sshd.server.auth.password.PasswordAuthenticator";
+        let factory = format!("{server}.setUpDefaultServer");
+        value["resolvedClasses"] = serde_json::json!(sshd_contract::CLASSES.iter().map(|(name, hash)| serde_json::json!({
+            "name":name, "jarSha256":sshd_contract::JAR, "classSha256":hash
+        })).collect::<Vec<_>>());
+        value["runtimeResolvedClasses"] = value["resolvedClasses"].clone();
+        value["compiledClassConflicts"] = serde_json::json!([]);
+        value["evidence"]["sourceClasses"] = serde_json::json!(["example.Owner"]);
+        let record = &mut value["evidence"]["records"][0];
+        record["callee"] = format!("{server}.setPasswordAuthenticator").into();
+        record["parameter"] = 0.into();
+        record["samType"] = auth.into();
+        record["modality"] = "OPEN".into();
+        record["parameterTypes"] = serde_json::json!([auth]);
+        record["receiverStaticType"] = server.into();
+        record["receiverProperty"] = "example.Owner.server".into();
+        record["propertySourceSha256"] = record["sha256"].clone();
+        record["observedSetterCallees"] = serde_json::json!([factory]);
+        record["observedSetterDetails"] = serde_json::json!([{"callee":factory,"origin":"IR_EXTERNAL_JAVA_DECLARATION_STUB","dispatchReceiver":false,"parameterTypes":[],"returnType":server,"typeParameters":0}]);
+        record["propertyEvidence"] = serde_json::json!({"visibility":"private","defaultGetter":true,"defaultSetter":true,"nullInitializer":true,"directFieldWrites":0,"accessorReferences":0});
+        let bytes = serde_json::to_vec(&value).unwrap();
+        for (trusted, expected) in [(false, 1), (true, 0)] {
+            let evidence = parse_with_trust(root.path(), root.path(), &bytes, trusted).unwrap();
+            let mut findings = vec![finding()];
+            let mut coverage = Vec::new();
+            super::super::annotate_with(root.path(), &mut findings, Some(&evidence), &mut coverage);
+            assert_eq!(findings.len(), expected);
+            assert_eq!(coverage.len(), expected);
+        }
+        value["runtimeResolvedClasses"] = serde_json::json!([]);
+        assert!(!parse_with_trust(root.path(), root.path(), &serde_json::to_vec(&value).unwrap(), true).unwrap().sshd_contract);
+        value["runtimeResolvedClasses"] = value["resolvedClasses"].clone();
+        value["compiledClassConflicts"] = serde_json::json!(["org/apache/sshd/server/SshServer.class"]);
+        assert!(!parse_with_trust(root.path(), root.path(), &serde_json::to_vec(&value).unwrap(), true).unwrap().sshd_contract);
+        value["compiledClassConflicts"] = serde_json::json!([]);
+        value["evidence"]["sourceClasses"] = serde_json::json!(["org.apache.sshd.server.SshServer"]);
+        assert!(!parse_with_trust(root.path(), root.path(), &serde_json::to_vec(&value).unwrap(), true).unwrap().sshd_contract);
+        value["evidence"]["sourceClasses"] = serde_json::json!(["example.Owner"]);
+        value["evidence"]["records"][0]["receiverStaticType"] = "example.Subclass".into();
+        let evidence = parse_with_trust(root.path(), root.path(), &serde_json::to_vec(&value).unwrap(), true).unwrap();
+        let mut findings = vec![finding()];
+        let mut coverage = Vec::new();
+        super::super::annotate_with(root.path(), &mut findings, Some(&evidence), &mut coverage);
+        assert_eq!((findings.len(), coverage.len()), (1, 1));
+    }
+
+    #[test]
+    fn callback_spans_do_not_cross_a_nested_function_boundary() {
+        let source = "suspend fun outer() { register { suspend fun inner() { runBlocking { work() } } } }";
+        let tree = autoreview_langsupport::parser_for(autoreview_langsupport::Language::Kotlin).unwrap().parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        let offset = source.find("runBlocking").unwrap();
+        let node = tree.root_node().descendant_for_byte_range(offset, offset).unwrap();
+        assert!(lambda_spans(node, source).is_empty());
+    }
+}

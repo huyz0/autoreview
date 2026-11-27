@@ -26,7 +26,8 @@ pub mod tier4;
 
 use std::path::{Path, PathBuf};
 
-pub use model::{AccessRef, CallChain, ForeignAccessRef, MethodDecl, NamedSlot, SymbolIndex, TypeDecl};
+pub use model::{AccessRef, CallChain, ForeignAccessRef, HelperAccess, HelperLocation, MethodDecl, NamedSlot, SymbolIndex, TypeDecl};
+pub use extract::java::JavaClass;
 pub use queries::{find_data_clumps, find_feature_envy, find_message_chains, find_refused_bequest, ChainFinding, ClumpMember, ClumpScope, DataClumpFinding, FeatureEnvyFinding, RefusedBequestFinding};
 pub use tier4::{confirm_feature_envy, run_tier4_go, Tier4Access, Tier4Verdict};
 
@@ -77,6 +78,7 @@ pub fn build_index(repo_root: &Path) -> SymbolIndex {
     walk_source_files(repo_root, &mut files);
 
     let mut types = Vec::new();
+    let mut go_packages = extract::go::GoPackageIndex::default();
     for file in &files {
         let Ok(metadata) = std::fs::metadata(file) else { continue };
         if metadata.len() > MAX_FILE_BYTES {
@@ -87,9 +89,15 @@ pub fn build_index(repo_root: &Path) -> SymbolIndex {
         // mapping layer in autoreview-core) compare it against
         // git-diff-relative changed-file paths.
         let rel_file = file.strip_prefix(repo_root).unwrap_or(file);
-        types.extend(extract::extract_file(rel_file, &content));
+        let Some((extension, tree)) = extract::parse_file(rel_file, &content) else { continue };
+        if extension == "go" {
+            go_packages.add_file(tree.root_node(), content.as_bytes(), rel_file, &mut types);
+        } else {
+            types.extend(extract::extract_parsed_file(rel_file, &content, extension, &tree));
+        }
     }
 
+    go_packages.attach(&mut types);
     SymbolIndex { types }
 }
 
@@ -111,6 +119,30 @@ mod tests {
         let index = build_index(dir.path());
         assert!(index.find_type("Widget").is_some());
         assert!(index.find_type("Customer").is_some());
+    }
+
+    #[test]
+    fn go_receiver_attachment_requires_a_unique_visible_package_struct() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "one/owner.go", "package same\ntype Owner[T any] struct { Field T }\n");
+        write_file(dir.path(), "one/method.go", "package same\nfunc (o *Owner[T]) Get() T { return o.Field }\n");
+        write_file(dir.path(), "one/foreign_test.go", "package same_test\ntype TestOwner struct{}\n");
+        write_file(dir.path(), "one/test_owner.go", "package same\nfunc (TestOwner) Foreign() {}\n");
+        write_file(dir.path(), "one/test_only_test.go", "package same\ntype TestOnly struct{}\nfunc (TestOnly) VisibleInTests() {}\n");
+        write_file(dir.path(), "one/test_only.go", "package same\nfunc (TestOnly) HiddenFromProduction() {}\n");
+        write_file(dir.path(), "two/owner.go", "package same\ntype Owner[T any] struct{}\n");
+        write_file(dir.path(), "one/ambiguous_linux.go", "package same\ntype Ambiguous struct{}\n");
+        write_file(dir.path(), "one/ambiguous_windows.go", "package same\ntype Ambiguous struct{}\n");
+        write_file(dir.path(), "one/ambiguous_method.go", "package same\nfunc (Ambiguous) Handle() {}\n");
+
+        let index = build_index(dir.path());
+        let owner = index.types.iter().find(|ty| ty.file == Path::new("one/owner.go")).unwrap();
+        assert_eq!(owner.methods.len(), 1);
+        assert_eq!(owner.methods[0].file, Path::new("one/method.go"));
+        assert_eq!(owner.methods[0].own_field_accesses[0].field_name, "Field");
+        let methods: Vec<_> = index.methods().map(|method| method.name.as_str()).collect();
+        assert_eq!(methods.len(), 2, "{methods:?}");
+        assert!(methods.contains(&"VisibleInTests"));
     }
 
     #[test]

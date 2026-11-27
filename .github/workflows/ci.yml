@@ -22,6 +22,68 @@ concurrency:
 # Clippy (below) already catches the things that actually matter.
 
 jobs:
+  kotlin-callback-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: '2.2.20'
+            sha256: '81f0264c9073b5cbbdb3ff8418cf2c5dac076879fc156fa1a6462f5a5acc4420'
+          - version: '2.3.21'
+            sha256: 'a8cfc1d62cd4d0de4d04f42575e40135bd620588c17d568a20eb9c7c259af14f'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install pinned Kotlin compiler
+        run: |
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/kotlin.zip" https://github.com/JetBrains/kotlin/releases/download/v${{ matrix.version }}/kotlin-compiler-${{ matrix.version }}.zip
+          echo '${{ matrix.sha256 }}  '"$RUNNER_TEMP/kotlin.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/kotlin.zip" -d "$RUNNER_TEMP/kotlin"
+      - name: Install pinned Apache SSHD test artifacts
+        run: |
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/sshd-core.jar" https://repo.maven.apache.org/maven2/org/apache/sshd/sshd-core/2.17.1/sshd-core-2.17.1.jar
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/sshd-common.jar" https://repo.maven.apache.org/maven2/org/apache/sshd/sshd-common/2.17.1/sshd-common-2.17.1.jar
+          echo 'b30769bbc053da28949ed1404abed546598ccf3de9100945b627f5b3a0fe003c  '"$RUNNER_TEMP/sshd-core.jar" | sha256sum --check
+          echo '4be43cffd261eb8138da20f87bd2d5609022df85b67bf8329cee2db488c0a1a4  '"$RUNNER_TEMP/sshd-common.jar" | sha256sum --check
+      - name: Test compiler evidence prototype
+        run: |
+          export AUTOREVIEW_TEST_KOTLINC="$RUNNER_TEMP/kotlin/kotlinc/bin/kotlinc"
+          export AUTOREVIEW_TEST_KOTLIN_COMPILER_JAR="$RUNNER_TEMP/kotlin/kotlinc/lib/kotlin-compiler.jar"
+          export AUTOREVIEW_TEST_KOTLIN_VERSION='${{ matrix.version }}'
+          export AUTOREVIEW_TEST_JAVAC="$(command -v javac)"
+          export AUTOREVIEW_TEST_SSHD_CORE="$RUNNER_TEMP/sshd-core.jar"
+          export AUTOREVIEW_TEST_SSHD_COMMON="$RUNNER_TEMP/sshd-common.jar"
+          python3 tools/kotlin-callback-evidence/test_evidence.py
+
+  kotlin-snapshot-windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install pinned Kotlin compiler
+        shell: pwsh
+        run: |
+          curl.exe --fail --location --retry 3 --output "$env:RUNNER_TEMP\kotlin.zip" https://github.com/JetBrains/kotlin/releases/download/v2.3.21/kotlin-compiler-2.3.21.zip
+          if ((Get-FileHash -Algorithm SHA256 "$env:RUNNER_TEMP\kotlin.zip").Hash -ne 'a8cfc1d62cd4d0de4d04f42575e40135bd620588c17d568a20eb9c7c259af14f') { throw 'Kotlin checksum mismatch' }
+          Expand-Archive -LiteralPath "$env:RUNNER_TEMP\kotlin.zip" -DestinationPath "$env:RUNNER_TEMP\kotlin"
+      - name: Test Windows snapshot paths and JVM target
+        shell: pwsh
+        run: |
+          $env:AUTOREVIEW_TEST_KOTLINC = "$env:RUNNER_TEMP\kotlin\kotlinc\bin\kotlinc.bat"
+          $env:AUTOREVIEW_TEST_KOTLIN_COMPILER_JAR = "$env:RUNNER_TEMP\kotlin\kotlinc\lib\kotlin-compiler.jar"
+          $env:AUTOREVIEW_TEST_KOTLIN_VERSION = '2.3.21'
+          $env:AUTOREVIEW_TEST_JAVAC = (Get-Command javac).Source
+          python tools/kotlin-callback-evidence/test_evidence.py EvidenceTest.test_snapshot_reads_long_windows_source_path EvidenceTest.test_snapshot_compiles_copied_inputs_and_maps_source
+
   test:
     runs-on: ubuntu-latest
     # A hung subprocess (golangci-lint/ast-grep) shouldn't consume a CI

@@ -19,6 +19,7 @@ mod rust;
 mod web;
 mod typed;
 mod go_evidence;
+mod package_coverage;
 mod coverage;
 use coverage::{issue, record_flow_limits, record_rule_limits, scope_coverage};
 use typed::{check_typed_rule, TrustedTypeScript};
@@ -103,9 +104,11 @@ fn run_group(
         .collect();
     if entries.is_empty() { return (Vec::new(), Vec::new()); }
     let (sources, mut coverage) = if limit == UNIT_LIMIT { resolver.load(&entries) } else { resolver.load_with_limit(&entries, limit) };
+    jvm::record_index_coverage(resolver, &sources, &entries, rules, &mut coverage);
     let findings = run_sources(&sources, &entries, rules, root, checker, &mut coverage);
     (findings, scope_coverage(coverage, rules, &entries))
 }
+
 
 
 fn run_sources(
@@ -268,7 +271,7 @@ impl Resolver<'_> {
         };
         let imports = match language {
             Language::Go => input.go(coverage),
-            Language::Java | Language::Kotlin => jvm::imports(self, path, language, node, source),
+            Language::Java | Language::Kotlin => jvm::imports(&input, language, coverage),
             Language::Rust => input.rust(coverage),
             Language::JavaScript | Language::TypeScript | Language::Tsx => input.web(coverage),
         };
@@ -360,7 +363,7 @@ mod budget_tests {
         let root = dir.canonicalize().unwrap();
         let parse = ParseCache::new();
         let persistent = PersistentSummaryCache::load(&root, &root);
-        let caches = SummaryCaches { parse: &parse, persistent: &persistent, java_kotlin_packages: Default::default() };
+        let caches = SummaryCaches { parse: &parse, persistent: &persistent, java_kotlin_packages: Default::default(), summary_issues: Default::default(), entries: Default::default() };
         run(&Resolver { root, cache: &parse, packages: &caches })
     }
 
@@ -381,6 +384,111 @@ mod budget_tests {
         std::fs::write(dir.join("view.tsx"), "declare function uncertain(): unknown;\nexport async function run() { await uncertain(); uncertain(); }\n").unwrap();
         let (_, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
         assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(2)), "{coverage:?}");
+        for path in ["assigned.ts", "assigned.tsx"] {
+            let assigned = "declare function uncertain(): unknown;\nexport async function run() { const value = uncertain(); await value; }\n";
+            std::fs::write(dir.join(path), assigned).unwrap();
+            let paths = [path.to_owned()];
+            let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            assert!(findings.is_empty(), "{path}: {findings:#?}");
+            assert!(!coverage.iter().any(|issue| issue.reason == "promise_type_unresolved"), "{path}: {coverage:?}");
+            std::fs::write(dir.join(path), assigned.replace("await value;", "const alias = value; await alias;")).unwrap();
+            let (_, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            assert!(!coverage.iter().any(|issue| issue.reason == "promise_type_unresolved"), "{path}: {coverage:?}");
+            std::fs::write(dir.join(path), assigned.replace("await value;", "if (Math.random()) await value;")).unwrap();
+            let (_, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved"), "{path}: {coverage:?}");
+            std::fs::remove_file(dir.join(path)).unwrap();
+        }
+    }
+
+    fn assert_conditional_typed_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
+        let source = "declare function pending(): Promise<void>;\ndeclare function check(flag: boolean): boolean;\nexport function run(flag: boolean) { flag ? pending() : null; }\n";
+        let path = dir.join("view.tsx");
+        let paths = ["view.tsx".to_owned()];
+        std::fs::write(&path, source).unwrap();
+        let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+        assert_eq!(findings.len(), 1, "{findings:#?} {coverage:?}");
+        assert!(!coverage.iter().any(|issue| issue.reason == "unmodeled_conditional_result"), "{coverage:?}");
+        std::fs::write(&path, source.replace("flag ?", "check(flag) ?")).unwrap();
+        let (_, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+        assert!(coverage.iter().any(|issue| issue.reason == "unmodeled_conditional_result" && issue.line == Some(3)), "{coverage:?}");
+    }
+
+    fn assert_general_coverage_cases(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
+        assert_awaited_unknown_coverage(dir, checker, rules);
+        assert_conditional_typed_coverage(dir, checker, rules);
+        assert_conditional_assignment_coverage(dir, checker, rules);
+        assert_partial_typed_observation(dir, checker, rules);
+        assert_async_return_unknown_coverage(dir, checker, rules);
+        assert_typed_unresolved_receiver(dir, checker, rules);
+        assert_void_callback_coverage(dir, checker, rules, "view.tsx");
+        assert_nested_call_coverage(dir, checker, rules);
+    }
+
+    fn assert_nested_call_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
+        let source = "declare function factory(): string & (() => Promise<void>);\ndeclare function text(): string;\nexport function run() { factory()();\n text().trim(); }\n";
+        for path in ["nested.ts", "nested.tsx"] {
+            std::fs::write(dir.join(path), source).unwrap();
+            let paths = [path.to_owned()];
+            let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            assert!(findings.iter().any(|finding| finding.location.range.start_line == 3), "{path}: {findings:?} {coverage:?}");
+            assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(3)), "{path}: {coverage:?}");
+            assert!(!coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(4)), "{path}: {coverage:?}");
+            std::fs::write(dir.join(path), source.replace("function run() { factory()();", "async function run() { await factory()();")).unwrap();
+            let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            assert!(findings.is_empty(), "{path}: {findings:?} {coverage:?}");
+            assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(3)), "{path}: {coverage:?}");
+            let helper = "function factory() { return () => Promise.resolve(); }\nexport function run() { factory()(); }\n";
+            std::fs::write(dir.join(path), helper).unwrap();
+            let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            assert!(findings.iter().any(|finding| finding.location.range.start_line == 2), "{path}: {findings:?} {coverage:?}");
+            assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(2)), "{path}: {coverage:?}");
+            let inner = "declare function factory(): Promise<void> & (() => number);\nexport function run() { factory()(); }\n";
+            std::fs::write(dir.join(path), inner).unwrap();
+            let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            assert!(findings.iter().any(|finding| finding.location.range.start_line == 2) || coverage.iter().any(|issue| issue.line == Some(2) && matches!(issue.reason.as_str(), "promise_type_unresolved" | "verified_source_unmodeled" | "unresolved_result_receiver")), "{path}: {findings:?} {coverage:?}");
+            std::fs::remove_file(dir.join(path)).unwrap();
+        }
+    }
+
+    fn assert_partial_typed_observation(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
+        let source = "declare function pending(): Promise<void>;\nexport async function run(flag: boolean) {\n const value = pending();\n if (flag) await value;\n}\n";
+        let fixed = source.replace("if (flag) await value;", "if (flag) await value; else await value;");
+        assert_typed_source_pair(dir, checker, rules, source, &fixed);
+    }
+
+    fn assert_conditional_assignment_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
+        let source = "declare function pending(): Promise<void>;\nexport async function run(flag: boolean) {\n const value = flag ? pending() : null;\n}\n";
+        let fixed = source.replace("\n}\n", "\n await value;\n}\n");
+        assert_typed_source_pair(dir, checker, rules, source, &fixed);
+    }
+
+    fn assert_typed_source_pair(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)], source: &str, fixed: &str) {
+        for path in ["result.ts", "result.tsx"] {
+            std::fs::write(dir.join(path), source).unwrap();
+            let paths = [path.to_owned()];
+            let check = || with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            let (findings, coverage) = check();
+            assert_eq!(findings.len(), 1, "{path}: {findings:#?} {coverage:?}");
+            std::fs::write(dir.join(path), fixed).unwrap();
+            let (findings, coverage) = check();
+            assert!(findings.is_empty(), "{path}: {findings:#?} {coverage:?}");
+            assert!(!coverage.iter().any(|issue| issue.reason == "unmodeled_conditional_result"), "{path}: {coverage:?}");
+            std::fs::remove_file(dir.join(path)).unwrap();
+        }
+    }
+
+    fn assert_async_return_unknown_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
+        let source = "declare function uncertain(): any;\nexport async function direct() { return uncertain(); }\nexport async function branch(flag: boolean) { if (flag) return uncertain(); return 1; }\nexport async function choose(n: number) { switch (n) { case 1: return uncertain(); default: return 1; } }\nexport async function guarded() { try { return uncertain(); } finally { return 1; } }\nexport async function loop() { for (const x of [1]) return uncertain(); return 1; }\nexport async function expression(flag: boolean) { return flag ? uncertain() : 1; }\nexport async function condition() { return uncertain() ? 1 : 2; }\n";
+        for path in ["returned.ts", "returned.tsx"] {
+            std::fs::write(dir.join(path), source).unwrap();
+            let paths = [path.to_owned()];
+            let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+            assert!(findings.is_empty(), "{findings:#?}");
+            for line in [2, 3, 4, 7] { assert!(!coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(line)), "{coverage:?}"); }
+            for line in [5, 6, 8] { assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(line)), "{coverage:?}"); }
+            std::fs::remove_file(dir.join(path)).unwrap();
+        }
     }
 
     #[test]
@@ -456,6 +564,14 @@ mod budget_tests {
         assert!(unsupported.iter().all(|issue| issue.path.as_deref() == Some("main.ts") && issue.rule.as_deref() == Some("test-typed")));
     }
 
+    fn assert_void_callback_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)], path: &str) {
+        std::fs::write(dir.join(path), "const callback: () => void = async () => {};\nconst synchronous: () => void = () => {};\nexport async function run() {\n callback();\n await callback();\n synchronous();\n}\n").unwrap();
+        let paths = [path.to_owned()];
+        let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
+        assert_eq!(findings.iter().map(|finding| finding.location.range.start_line).collect::<Vec<_>>(), vec![4], "{findings:#?}");
+        assert!(!coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && matches!(issue.line, Some(4..=6))), "{coverage:?}");
+    }
+
     #[test]
     fn general_typed_promise_sources_follow_calls_and_ignore_synchronous_results() {
         use autoreview_dataflow::call_order::{CallOrderSpec, ContractLanguage, ContractMode, ResultContract};
@@ -476,6 +592,8 @@ mod budget_tests {
         assert_eq!(findings.iter().map(|finding| finding.location.range.start_line).collect::<BTreeSet<_>>(), BTreeSet::from([4, 5]), "{findings:#?}");
         assert!(coverage.is_empty(), "{coverage:?}");
 
+        assert_void_callback_coverage(dir.path(), &checker, &rules, "main.ts");
+
         let tsx = "declare function pending(): Promise<void>;\ndeclare function uncertain(): unknown;\nexport function run() { pending(); uncertain(); }\n";
         std::fs::write(dir.path().join("view.tsx"), tsx).unwrap();
         std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true,"jsx":"preserve"},"include":["*.ts","*.tsx"]}"#).unwrap();
@@ -488,8 +606,7 @@ mod budget_tests {
         assert!(findings.is_empty());
         assert!(coverage.iter().any(|issue| issue.reason == "typed_promise_source_unavailable"), "{coverage:?}");
 
-        assert_awaited_unknown_coverage(dir.path(), &checker, &rules);
-        assert_typed_unresolved_receiver(dir.path(), &checker, &rules);
+        assert_general_coverage_cases(dir.path(), &checker, &rules);
 
         std::fs::write(dir.path().join("view.tsx"), "declare function pending(): Promise<void>;\nfunction forward() { return pending(); }\nfunction again() { return forward(); }\nexport function run() { again(); }\n").unwrap();
         let (findings, coverage) = with_resolver(dir.path(), |resolver| run_group(resolver, &paths, &rules, dir.path(), (Some(&checker), TYPED_UNIT_LIMIT)));

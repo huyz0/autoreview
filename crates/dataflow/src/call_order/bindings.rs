@@ -12,6 +12,7 @@ use local_values::LocalValues;
 pub(super) struct Bindings<'src> {
     declarations: HashMap<&'src str, Option<Binding<'src>>>,
     writes: HashSet<&'src str>,
+    all_writes: HashSet<&'src str>,
     local_values: LocalValues<'src>,
 }
 
@@ -38,10 +39,37 @@ impl<'src> Bindings<'src> {
 
     pub(super) fn visit(&mut self, node: Node<'_>, source: &'src [u8], modeled_write: bool, track_results: bool) {
         self.record_declarations(node, source, track_results);
-        if !modeled_write {
-            if let Some(target) = write_target(node, source) {
+        if mutable_reference(node) {
+            if let Some(target) = node.child_by_field_name("value") { self.all_writes.extend(names_in(target, source)); }
+        }
+        if let Some(target) = write_target(node, source) {
+            self.all_writes.extend(names_in(target, source));
+            if !modeled_write {
                 self.writes.extend(names_in(target, source));
             }
+        }
+    }
+
+    pub(super) fn stable_identity<'a>(&'a self, mut name: &'a str, mut at: usize) -> Option<IdentityOperand> {
+        let mut seen = HashSet::new();
+        while seen.len() < 64 && seen.insert(name) {
+            (self.can_read(name) && !self.all_writes.contains(name)).then_some(())?;
+            let binding = self.declarations.get(name)?.as_ref()?;
+            (binding.visible_at <= at).then_some(())?;
+            let Some(alias) = binding.alias.as_ref() else { return Some(IdentityOperand::Binding(name.to_owned())); };
+            alias.borrowed_root.is_none().then_some(())?;
+            match &alias.operand {
+                IdentityOperand::Binding(origin) => { name = origin; at = alias.captured_at; }
+                value => return Some(value.clone()),
+            }
+        }
+        None
+    }
+
+    pub(super) fn stable_boolean(&self, name: &str, at: usize) -> Option<bool> {
+        match self.stable_identity(name, at)? {
+            IdentityOperand::Boolean(value) => Some(value),
+            _ => None,
         }
     }
 

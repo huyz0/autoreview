@@ -228,35 +228,58 @@ pub fn import_package(import_path: &str) -> String {
 }
 
 fn walk_java_kotlin_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let Ok(kind) = entry.file_type() else { continue };
+    walk_java_kotlin_files_with_coverage(dir, out, &mut Vec::new());
+}
+
+fn walk_java_kotlin_files_with_coverage(dir: &Path, out: &mut Vec<std::path::PathBuf>, unavailable: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { unavailable.push(dir.to_path_buf()); return };
+    for entry in entries {
+        let Ok(entry) = entry else { unavailable.push(dir.to_path_buf()); continue };
         let path = entry.path();
+        let Ok(kind) = entry.file_type() else { unavailable.push(path); continue };
         if kind.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if SKIP_DIRS.contains(&name) {
                 continue;
             }
-            walk_java_kotlin_files(&path, out);
+            walk_java_kotlin_files_with_coverage(&path, out, unavailable);
         } else if kind.is_file() && matches!(path.extension().and_then(|e| e.to_str()), Some("java") | Some("kt")) {
             out.push(path);
         }
     }
 }
 
+/// A package index and paths whose contents could not be inspected. An
+/// unreadable source can declare any package, irrespective of its directory.
+#[derive(Default)]
+pub struct JavaKotlinPackageIndex {
+    pub packages: HashMap<String, Vec<std::path::PathBuf>>,
+    pub unavailable: Vec<std::path::PathBuf>,
+    /// Readable files with no recognizable package, including valid default-package sources.
+    pub unclassified: Vec<std::path::PathBuf>,
+}
+
+pub fn index_java_kotlin_packages_with_coverage(repo_root: &Path) -> JavaKotlinPackageIndex {
+    let mut files = Vec::new();
+    let mut index = JavaKotlinPackageIndex::default();
+    walk_java_kotlin_files_with_coverage(repo_root, &mut files, &mut index.unavailable);
+    for file in files {
+        let Ok(content) = std::fs::read_to_string(&file) else { index.unavailable.push(file); continue };
+        if let Some(package) = declared_package(&content) {
+            index.packages.entry(package).or_default().push(file);
+        } else {
+            index.unclassified.push(file);
+        }
+    }
+    index.unavailable.sort();
+    index.unavailable.dedup();
+    index
+}
+
 /// Index declared packages once so callers can resolve many imports in a
 /// large repository without re-reading every source file for each import.
 pub fn index_java_kotlin_packages(repo_root: &Path) -> HashMap<String, Vec<std::path::PathBuf>> {
-    let mut files = Vec::new();
-    walk_java_kotlin_files(repo_root, &mut files);
-    let mut packages: HashMap<String, Vec<_>> = HashMap::new();
-    for file in files {
-        let Ok(content) = std::fs::read_to_string(&file) else { continue };
-        if let Some(package) = declared_package(&content) {
-            packages.entry(package).or_default().push(file);
-        }
-    }
-    packages
+    index_java_kotlin_packages_with_coverage(repo_root).packages
 }
 
 /// Every `.java`/`.kt` file in the repo whose own `package` declaration
@@ -643,6 +666,18 @@ mod tests {
         let files = find_java_kotlin_files_declaring_package(dir.path(), "com.example.b");
         assert_eq!(files.len(), 2, "got: {files:#?}");
         assert!(files.iter().all(|p| p.file_name().unwrap() == "B.java" || p.file_name().unwrap() == "BImpl.kt"));
+    }
+
+    #[test]
+    fn package_index_reports_unreadable_sources_without_guessing_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        write_source_file(dir.path(), "src/example/A.java", "package example;\nclass A {}\n");
+        write_source_file(dir.path(), "src/example/Default.java", "class Default {}\n");
+        std::fs::write(dir.path().join("src/example/B.kt"), [0xff, 0xfe]).unwrap();
+        let index = index_java_kotlin_packages_with_coverage(dir.path());
+        assert_eq!(index.packages["example"].len(), 1);
+        assert_eq!(index.unavailable, vec![dir.path().join("src/example/B.kt")]);
+        assert_eq!(index.unclassified, vec![dir.path().join("src/example/Default.java")]);
     }
 
     #[test]

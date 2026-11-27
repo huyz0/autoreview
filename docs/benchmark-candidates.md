@@ -3,6 +3,27 @@
 These candidates need a matching rule and a verified replay before they can
 contribute to accuracy scores. They are not counted as detected findings.
 
+## JavaScript promise used as a synchronous value
+
+- Repository: https://github.com/chickenpoo351/SilphScope, MIT license at both
+  pinned revisions.
+- Before: `888e9e2be27eefec0bb627f124c0bfcc2b38229d`,
+  `src/get-rom-config.js:10`.
+- Fix: `0079a6f5d13e081dc5a26f683047895e6d1b7465`.
+- Evidence: `crypto.subtle.digest` returns a promise, but the earlier code
+  passes that promise to `Uint8Array` as though it were the digest buffer.
+  The fix awaits the digest before constructing the array. In a local Node
+  experiment with `crypto.subtle.digest('SHA-1', new Uint8Array([1, 2]))`,
+  constructing a typed array from the promise produced zero elements; awaiting
+  that promise first produced a 20-byte digest.
+
+This is a promise-as-synchronous-value problem, not an ignored-result finding:
+the promise is passed to a constructor, so a general result-use rule can
+regard it as used. The narrowly scoped Web Crypto rule now detects this pair;
+see `benchmarks/silphscope-digest.yaml` for the full-file replay. It is not a
+general promise type mismatch analysis and does not track arbitrary aliases,
+helpers, reassignments, or dynamically replaced globals.
+
 ## Project-defined Go error returns
 
 - Repository: https://github.com/taigrr/yq, MIT license at the pinned revisions.
@@ -75,9 +96,19 @@ An inspection of the before revision's two labeled files found unproven calls
 at `github-api-helper.ts:39,137` (`Buffer`), and `git-auth-helper.ts:54,56,148`
 (`URL`, `Buffer`, and `RegExpMatchArray | null`). These are structural types;
 the absence of a declared `then` property does not prove that every runtime
-value lacks one. Directly awaited unknown calls can now be recognized as
-observed, but the remaining calls and imported dependencies still require
-sound result-use evidence before this replay can be scored.
+value lacks one. Directly awaited unknown calls and calls directly returned
+from supported async functions can now be recognized as observed. With the
+documented TypeScript 5.6.3 setup, replay of the before revision reported two
+unresolved locations for the deletion case instead of three: the return at
+`github-api-helper.ts:137` is observed by the async function. The other case
+still reported 21 locations. Both cases remain incomplete and unscored; the
+remaining calls and dependencies need sound result-use evidence.
+
+The checker also recognizes an unknown result assigned to a single `const`
+and immediately awaited through up to 31 consecutive immutable aliases.
+It checks binding identities and retains the unresolved warning when an
+intervening operation, mutable alias, conditional await, or longer chain
+prevents that proof. This does not resolve the checkout replay cases above.
 
 For a reproducible source-level observation, first follow the clone, checkout,
 and dependency installation steps for this case in [the benchmark README](../benchmarks/README.md).

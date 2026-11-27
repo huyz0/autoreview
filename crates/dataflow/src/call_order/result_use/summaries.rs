@@ -73,7 +73,7 @@ fn build_with_budget(
 
 struct SummaryGraph {
     summaries: BTreeMap<usize, HelperSummary>,
-    calls: Vec<BTreeSet<(usize, usize)>>,
+    calls: Vec<BTreeSet<((usize, usize), usize)>>,
     callers: Vec<Vec<usize>>,
 }
 
@@ -101,6 +101,8 @@ impl SummaryGraph {
 fn empty_summary(parameters: usize) -> HelperSummary {
     let empty = HelperOutcome {
         parameters: vec![false; parameters],
+        unobserved_parameters: vec![None; parameters],
+        conditional_parameters: None,
         origins: Vec::new(),
         opaque_parameters: vec![false; parameters],
         opaque_origins: Vec::new(),
@@ -116,7 +118,7 @@ fn summarize(
     function: &KeyedFunction<'_, '_>,
     unit: &KeyedUnit<'_, '_, '_>,
     params: &[String],
-    calls: &BTreeMap<usize, HelperSummary>,
+    calls: &BTreeMap<(usize, usize), HelperSummary>,
 ) -> HelperSummary {
     let body_start = function
         .node
@@ -132,7 +134,29 @@ fn summarize(
                 .map(Place::Local)
         })
         .collect();
-    effects::lower(plan, function, unit.source, true, calls).helper_summary(&parameters)
+    let analysis = effects::lower(plan, function, unit.source, true, calls);
+    let mut summary = analysis.helper_summary(&parameters);
+    let syntax = (function.node, unit.source);
+    let guard = (plan.spec.contract.as_ref().is_some_and(|contract| contract.language != crate::call_order::ContractLanguage::Go))
+        .then(|| super::partial::unique_parameter_guard(function.graph, plan, params)).flatten();
+    for (used, outcome) in [(false, &mut summary.when_discarded), (true, &mut summary.when_observed)] {
+        outcome.unobserved_parameters = super::partial::unobserved_parameters(
+            &analysis.owner, function.graph, plan, syntax, super::partial::ParameterQuery {
+                parameters: &parameters, return_used: used, has_closures: !analysis.closures.is_empty(), assumed_guard: None,
+            },
+        );
+        if let Some((guard_index, identity)) = &guard {
+            let specialized = |truth| super::partial::unobserved_parameters(
+                &analysis.owner, function.graph, plan, syntax,
+                super::partial::ParameterQuery { parameters: &parameters, return_used: used,
+                    has_closures: !analysis.closures.is_empty(), assumed_guard: Some((identity.clone(), truth)) },
+            );
+            outcome.conditional_parameters = Some(super::ConditionalParameters {
+                guard_index: *guard_index, when_false: specialized(false), when_true: specialized(true),
+            });
+        }
+    }
+    summary
 }
 
 fn set_origin_paths(summary: &mut HelperSummary, path: &str) {
@@ -154,14 +178,14 @@ pub(super) fn resolved_helpers(
     graph: &Cfg<Stmt>,
     plan: &Plan<'_, '_>,
     summaries: &BTreeMap<usize, HelperSummary>,
-) -> BTreeMap<usize, HelperSummary> {
+) -> BTreeMap<(usize, usize), HelperSummary> {
     select_summaries(&program.resolved_calls(index, graph, plan), summaries)
 }
 
 fn select_summaries(
-    calls: &BTreeSet<(usize, usize)>,
+    calls: &BTreeSet<((usize, usize), usize)>,
     summaries: &BTreeMap<usize, HelperSummary>,
-) -> BTreeMap<usize, HelperSummary> {
+) -> BTreeMap<(usize, usize), HelperSummary> {
     calls
         .iter()
         .filter_map(|(site, target)| {
@@ -178,6 +202,52 @@ mod tests {
     use super::*;
     use crate::call_order::ContractLanguage;
     use autoreview_langsupport::Language;
+
+    #[test]
+    fn helper_summaries_with_shared_start_keep_independent_effects() {
+        let mut inner = empty_summary(1);
+        inner.when_observed.parameters[0] = true;
+        let outer = empty_summary(1);
+        let calls = BTreeSet::from([((10, 15), 0), ((10, 17), 1)]);
+        let summaries = BTreeMap::from([(0, inner), (1, outer)]);
+        let selected = select_summaries(&calls, &summaries);
+        assert!(selected[&(10, 15)].when_observed.parameters[0]);
+        assert!(!selected[&(10, 17)].when_observed.parameters[0]);
+    }
+
+    #[test]
+    fn helper_parameter_paths_distinguish_partial_and_complete_returns() {
+        for (source, expected) in [
+            ("function helper(value, flag) { if (flag) return value; }", true),
+            ("function helper(value, flag) { if (flag) return value; else return value; }", false),
+            ("function helper(value, flag) { if (flag) { if (flag) return value; } else return value; }", false),
+        ] {
+            super::super::test_support::with_program((Language::JavaScript, ContractLanguage::Web), source, ("unused", "missing"), |program, units| {
+                let (summaries, exhausted) = build(program, units);
+                assert!(!exhausted);
+                assert_eq!(summaries[&0].when_observed.unobserved_parameters[0], Some(expected));
+                assert_eq!(summaries[&0].when_discarded.unobserved_parameters[0], Some(true));
+                let conditional = summaries[&0].when_observed.conditional_parameters.as_ref().unwrap();
+                assert_eq!(conditional.guard_index, 1);
+                assert_eq!(conditional.when_true[0], Some(false));
+                assert_eq!(conditional.when_false[0], Some(expected));
+            });
+        }
+    }
+
+    #[test]
+    fn helper_parameter_paths_reject_unstable_or_cyclic_control_flow() {
+        for source in [
+            "function helper(value, flag) { if (flag) { flag = false; } if (flag) return value; }",
+            "function helper(value, flag) { while (flag) { value = value; } return value; }",
+        ] {
+            super::super::test_support::with_program((Language::JavaScript, ContractLanguage::Web), source, ("unused", "missing"), |program, units| {
+                let (summaries, exhausted) = build(program, units);
+                assert!(!exhausted);
+                assert_eq!(summaries[&0].when_observed.unobserved_parameters[0], None, "{source}");
+            });
+        }
+    }
 
     #[test]
     fn reports_summary_budget_exhaustion() {

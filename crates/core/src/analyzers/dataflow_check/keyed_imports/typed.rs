@@ -51,19 +51,19 @@ pub(super) fn check_typed_rule(
 }
 
 fn discover_calls(modules: &[TypeModule<'_>]) -> FactorySourceDiscovery {
-    let mut candidates = BTreeMap::<usize, BTreeSet<usize>>::new();
+    let mut spans = BTreeMap::<usize, BTreeSet<(usize, usize)>>::new();
     let mut limitations = Vec::new();
     for (index, module) in modules.iter().enumerate() {
         let mut pending = vec![module.root];
         while let Some(node) = pending.pop() {
             if node.kind() == "call_expression" {
-                candidates.entry(index).or_default().insert(node.start_byte());
+                spans.entry(index).or_default().insert((node.start_byte(), node.end_byte()));
                 limitations.push(KeyedLimitation { reason: "promise_type_unresolved", path: Some(module.path.to_owned()), line: Some(node.start_position().row as u32 + 1) });
             }
             pending.extend(node.named_children(&mut node.walk()));
         }
     }
-    FactorySourceDiscovery { candidates, limitations }
+    FactorySourceDiscovery { candidates: BTreeMap::new(), spans, limitations }
 }
 
 #[cfg(test)]

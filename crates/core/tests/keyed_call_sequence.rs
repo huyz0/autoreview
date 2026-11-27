@@ -78,6 +78,85 @@ const RECEIVER: &str = "{receiver: true, keyArgument: 0}";
 const ARGUMENT: &str = "{collectionArgument: 0, keyArgument: 2}";
 
 #[test]
+fn conditional_assignment_preserves_collection_identity_per_branch() {
+    let source = "function pending(root, other, key, flag) {\n const chosen = flag ? root : other;\n chosen.register(key);\n root.remove(key);\n}\n";
+    for (language, path) in [("JavaScript", "main.js"), ("TypeScript", "main.ts"), ("TypeScript", "main.tsx")] {
+        assert_eq!(findings(language, path, source, RECEIVER, true).len(), 1, "{path}");
+        let clean = source.replace("root.remove(key)", "chosen.remove(key)");
+        assert!(findings(language, path, &clean, RECEIVER, true).is_empty(), "{path}");
+        let constant = source.replace("flag ?", "true ?");
+        assert!(findings(language, path, &constant, RECEIVER, true).is_empty(), "{path}");
+        let reassigned = source.replace("const chosen = flag ? root : other;", "let chosen = root; chosen = flag ? root : other;");
+        assert_eq!(findings(language, path, &reassigned, RECEIVER, true).len(), 1, "{path}");
+        let keyed = "function pending(root, key, other, flag) {\n const chosen = flag ? key : other;\n root.register(chosen);\n root.remove(key);\n}\n";
+        assert_eq!(findings(language, path, keyed, RECEIVER, true).len(), 1, "{path}");
+        let same_key = keyed.replace("root.remove(key)", "root.remove(chosen)");
+        assert!(findings(language, path, &same_key, RECEIVER, true).is_empty(), "{path}");
+    }
+}
+
+#[test]
+fn conditional_returns_track_cleanup_on_each_branch() {
+    let source = "function pending(root, key, flag) {\n root.register(key);\n return flag ? root.remove(key) : null;\n}\n";
+    for (language, path) in [("JavaScript", "main.js"), ("TypeScript", "main.ts"), ("TypeScript", "main.tsx")] {
+        assert_eq!(findings(language, path, source, RECEIVER, true).len(), 1, "{path}");
+        let both = source.replace(": null", ": root.remove(key)");
+        assert!(findings(language, path, &both, RECEIVER, true).is_empty(), "{path}");
+        let wrong = both.replace(": root.remove(key)", ": root.remove('other')");
+        assert_eq!(findings(language, path, &wrong, RECEIVER, true).len(), 1, "{path}");
+        let finally = source.replace("return flag ? root.remove(key) : null;", "try { return flag ? root.remove(key) : null; } finally { root.remove(key); }");
+        assert!(findings(language, path, &finally, RECEIVER, true).is_empty(), "{path}");
+    }
+}
+
+#[test]
+fn conditional_statement_cleanup_tracks_each_branch() {
+    let source = "function pending(root, key, flag) {\n root.register(key);\n flag ? root.remove(key) : null;\n}\n";
+    for (language, path) in [("JavaScript", "main.js"), ("TypeScript", "main.ts"), ("TypeScript", "main.tsx")] {
+        let hits = findings(language, path, source, RECEIVER, true);
+        assert_eq!(hits.len(), 1, "{path}: {hits:#?}");
+        let both = source.replace(" : null", " : root.remove(key)");
+        assert!(findings(language, path, &both, RECEIVER, true).is_empty());
+        let constant = source.replace("flag ?", "true ?");
+        assert!(findings(language, path, &constant, RECEIVER, true).is_empty());
+        let parenthesized = source.replace("flag ?", "((true)) ?");
+        assert!(findings(language, path, &parenthesized, RECEIVER, true).is_empty());
+        let wrong = both.replace(" : root.remove(key)", " : root.remove('other')");
+        assert_eq!(findings(language, path, &wrong, RECEIVER, true).len(), 1);
+        let correlated = source.replace("}\n", " if (!flag) { root.remove(key); }\n}\n");
+        assert!(findings(language, path, &correlated, RECEIVER, true).is_empty());
+        let reassigned = source.replace("}\n", " flag = true; if (!flag) { root.remove(key); }\n}\n");
+        assert_eq!(findings(language, path, &reassigned, RECEIVER, true).len(), 1);
+        let finally = source.replace(" flag ? root.remove(key) : null;", " try { flag ? root.remove(key) : null; } finally { root.remove(key); }");
+        assert!(findings(language, path, &finally, RECEIVER, true).is_empty());
+    }
+}
+
+#[test]
+fn unlowered_cleanup_reports_incomplete_analysis() {
+    let source = "function pending(root, key, flag) {\n root.register(key);\n const result = flag ? root.remove(key) : undefined;\n return result;\n}\n";
+    let repo = tempfile::tempdir().unwrap();
+    let pack = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("main.js"), source).unwrap();
+    std::fs::write(pack.path().join("pending.yml"), "id: pending-entry\nkind: call-sequence\nlanguage: JavaScript\ncategory: correctness\nseverity: warning\nmessage: Clean up\nafter: [{call: register}]\nunless: [{call: remove}]\ncheckBeforeReturn: true\nidentity: {receiver: true, keyArgument: 0}\n").unwrap();
+    let check = || autoreview_core::run_dataflow_check_with_coverage(repo.path(), repo.path(), &["main.js".into()], &[ResolvedRulePack {
+        id: "entries".into(), local_path: pack.path().into(), trust: RulePackTrust::Full,
+    }]);
+    let result = check();
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_cleanup_call"
+        && issue.rule.as_deref() == Some("pending-entry") && issue.path.as_deref() == Some("main.js") && issue.line == Some(3)), "{:?}", result.coverage);
+    std::fs::write(repo.path().join("main.js"), "function pending(root, key) { root.register(key); root.remove(key); }\n").unwrap();
+    assert!(!check().coverage.iter().any(|issue| issue.reason == "unmodeled_cleanup_call"));
+    std::fs::write(repo.path().join("helper.js"), "export function cleanup(root, key, flag) {\n return flag ? root.remove(key) : undefined;\n}\n").unwrap();
+    std::fs::write(repo.path().join("main.js"), "import { cleanup } from './helper';\nexport function pending(root, key, flag) { root.register(key); cleanup(root, key, flag); }\n").unwrap();
+    let result = check();
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unmodeled_cleanup_call"
+        && issue.path.as_deref() == Some("helper.js") && issue.line == Some(2)), "{:?}", result.coverage);
+    std::fs::write(repo.path().join("main.js"), "import { cleanup } from './helper';\nexport function pending(root, key) { root.register(key); root.remove(key); }\n").unwrap();
+    assert!(!check().coverage.iter().any(|issue| issue.reason == "unmodeled_cleanup_call"));
+}
+
+#[test]
 fn rust_match_bindings_do_not_borrow_outer_key_identity() {
     let same = "fn pending(root: &mut Registry, value: Option<&str>) {\n match value { Some(key) => { root.register(key); root.remove(key); }, _ => {} };\n}\n";
     assert!(findings("Rust", "lib.rs", same, RECEIVER, true).is_empty());

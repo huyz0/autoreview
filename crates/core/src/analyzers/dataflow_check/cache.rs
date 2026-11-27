@@ -207,8 +207,41 @@ pub(super) fn content_hash(content: &str) -> String {
 /// two separate parameters purely to stay under clippy's argument-count
 /// lint on the functions that also take a rule id, package filter, and
 /// summary closure.
+pub(super) struct JvmPackageIndex {
+    pub(super) packages: HashMap<String, Vec<PathBuf>>,
+    pub(super) unavailable: Vec<PathBuf>,
+    pub(super) malformed: Vec<PathBuf>,
+    pub(super) unresolved: Vec<PathBuf>,
+}
+
 pub(super) struct SummaryCaches<'a> {
     pub(super) parse: &'a ParseCache,
     pub(super) persistent: &'a PersistentSummaryCache,
-    pub(super) java_kotlin_packages: OnceCell<HashMap<String, Vec<PathBuf>>>,
+    pub(super) java_kotlin_packages: OnceCell<JvmPackageIndex>,
+    pub(super) summary_issues: RefCell<std::collections::BTreeSet<autoreview_schema::AnalysisCoverageIssue>>,
+    pub(super) entries: std::collections::BTreeSet<PathBuf>,
+}
+
+impl SummaryCaches<'_> {
+    pub(super) fn jvm_index(&self, root: &Path) -> &JvmPackageIndex {
+        self.java_kotlin_packages.get_or_init(|| super::jvm_index::build(root))
+    }
+
+    pub(super) fn report_summary_issue(&self, path: &Path, rule: &str, reason: &str, detail: &str) {
+        if self.entries.contains(path) { return; }
+        let relative = path.strip_prefix(&self.persistent.source_root).ok()
+            .map(|path| path.to_string_lossy().replace('\\', "/"));
+        self.summary_issues.borrow_mut().insert(autoreview_schema::AnalysisCoverageIssue {
+            analyzer: "dataflow".into(), reason: reason.into(), scope: "dependency".into(),
+            path: relative, line: None, rule: Some(rule.into()), detail: detail.into(),
+        });
+    }
+
+    pub(super) fn report_entry_package_issue(&self, path: &str, rule: &str) {
+        self.summary_issues.borrow_mut().insert(autoreview_schema::AnalysisCoverageIssue {
+            analyzer: "dataflow".into(), reason: "entry_package_unresolved".into(), scope: "file".into(),
+            path: Some(path.into()), line: None, rule: Some(rule.into()),
+            detail: "The source package could not be resolved safely; same-package helper summaries may be incomplete.".into(),
+        });
+    }
 }

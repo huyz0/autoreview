@@ -23,7 +23,7 @@ pub use agents::pi::{parse_pi_json_output, PiBackend};
 pub use analyzers::apply_condition::ApplyCondition;
 pub use analyzers::archgraph_check::run_archgraph_check;
 pub use analyzers::architecture::{load_architecture_config, run_architecture_check};
-pub use analyzers::ast_grep::{find_rule_definition, list_builtin_rules, run_ast_grep, semantic_rule_ids, RuleCatalogEntry, RuleDefinition};
+pub use analyzers::ast_grep::{find_rule_definition, list_builtin_rules, run_ast_grep, run_ast_grep_with_coverage, semantic_rule_ids, PatternReviewResult, RuleCatalogEntry, RuleDefinition};
 pub use analyzers::bidi_check::run_bidi_control_character_check;
 pub use analyzers::cargo_audit::run_cargo_audit;
 pub use analyzers::cargo_review::run_cargo_review;

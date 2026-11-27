@@ -7,6 +7,7 @@ mod node_security;
 mod node_tls;
 pub(super) mod outbox;
 mod prisma;
+mod promise_value;
 mod rabbitmq;
 mod react;
 mod web;
@@ -47,7 +48,8 @@ fn rules() -> impl Iterator<Item = &'static Rule> {
         &prisma::RULE,
         &rabbitmq::RULE,
         &go_cancel::JWT_RULE,
-    ].into_iter().chain(fetch::RULES).chain(discarded_strings::RULES).chain(node_security::RULES.iter().copied())
+    ].into_iter().chain(fetch::RULES).chain(discarded_strings::RULES)
+        .chain(promise_value::RULES).chain(node_security::RULES.iter().copied())
 }
 
 pub(super) fn semantic_ids() -> impl Iterator<Item = String> {
@@ -92,6 +94,7 @@ pub fn run_framework_checks(root: &Path, changed: &[String]) -> Vec<AgentFinding
         web_findings.extend(node_security::inspect(path, source, file));
         web_findings.extend(node_tls::inspect(path, source, file));
         web_findings.extend(fetch::inspect(path, source, file));
+        web_findings.extend(promise_value::inspect(path, source, file));
         web_findings
     }));
     findings

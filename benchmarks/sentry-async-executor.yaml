@@ -1,0 +1,18 @@
+cases:
+  - name: sentry organization loaders use async promise executors
+    rule: {tool: ast-grep, id: ts-async-promise-executor}
+    evidence:
+      kind: historical
+      source: https://github.com/getsentry/sentry/commit/40041a2c736a0a07085aeeb649ea60b0ca3ccfbc
+      license: FSL-1.1-Apache-2.0
+      rationale: >-
+        Two TSX organization loaders used async Promise executors. The fix
+        changes them to async functions and propagates failures directly.
+    before:
+      commit: 87fe647d77ac78735307e40fef6dfe39bf6c0407
+      path: static/app/actionCreators/organization.tsx
+      lines: [158, 187]
+    after:
+      commit: 40041a2c736a0a07085aeeb649ea60b0ca3ccfbc
+      path: static/app/actionCreators/organization.tsx
+      lines: []

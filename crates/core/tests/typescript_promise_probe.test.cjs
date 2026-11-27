@@ -16,6 +16,15 @@ function removeTemporaryDirectory(directory) {
   fs.rmSync(target, { recursive: true, force: true });
 }
 
+function probeFixture(t) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'autoreview-ts-probe-'));
+  t.after(() => removeTemporaryDirectory(directory));
+  const file = path.join(directory, 'sample.ts');
+  const config = path.join(directory, 'tsconfig.json');
+  fs.writeFileSync(config, JSON.stringify({ compilerOptions: { target: 'ES2020', strict: true }, files: ['sample.ts'] }));
+  return { file, config };
+}
+
 test('distinguishes an unsupported compiler API from a missing module', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'autoreview-ts-probe-'));
   try {
@@ -37,6 +46,63 @@ test('distinguishes an unsupported compiler API from a missing module', () => {
   }
 });
 
+test('proves return values only for immutable local synchronous function literals', { skip: !compiler }, t => {
+  const { file, config } = probeFixture(t);
+  const source = [
+    'const sync: () => void = () => { if (Math.random()) return; const nested = async () => 1; };',
+    'const explicit: () => void = () => { try { return; } finally { return void 1; } };',
+    'const expression: () => void = () => void 1;',
+    'const asynchronous: () => void = async () => {};',
+    'const asyncExpression: () => void = async function () {};',
+    'const generator: () => void = async function* () { yield 1; };',
+    'const hidden: () => void = () => Promise.resolve();',
+    'const guarded: () => void = () => { try { return; } finally { return Promise.resolve(); } };',
+    'let mutable: () => void = () => {}; mutable = async () => {};',
+    `const large: () => void = () => { ${'void 0;'.repeat(10001)} };`,
+    'function shadow(sync: () => void) { sync(); }',
+    'sync(); explicit(); expression(); asynchronous(); asyncExpression(); generator(); hidden(); guarded(); mutable(); large();',
+  ].join('\n');
+  fs.writeFileSync(file, source);
+  const names = ['sync()', 'explicit()', 'expression()', 'asynchronous()', 'asyncExpression()', 'generator()', 'hidden()', 'guarded()', 'mutable()', 'large()'];
+  const digest = createHash('sha256').update(source, 'utf8').digest('hex');
+  const calls = names.map(name => ({ path: file, start: Buffer.byteLength(source.slice(0, source.lastIndexOf(name))), source_sha256: digest }));
+  calls.push({ path: file, start: Buffer.byteLength(source.slice(0, source.indexOf('sync();'))), source_sha256: digest });
+  const child = spawnSync(process.execPath, [probe], { input: JSON.stringify({ typescriptModule: compiler, config, calls }), encoding: 'utf8' });
+  assert.equal(child.status, 0, child.stderr);
+  const result = JSON.parse(child.stdout);
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.calls.map(call => call.status), ['not_promise', 'not_promise', 'not_promise', 'promise_like', 'promise_like', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven']);
+});
+
+test('classifies shared offsets only when every call is safe', { skip: !compiler }, t => {
+  const { file, config } = probeFixture(t);
+  const source = [
+    'declare function outerPromise(): string & (() => Promise<void>);',
+    'declare function innerPromise(): Promise<void> & (() => number);',
+    'declare function bothSynchronous(): string;',
+    'declare function unknownOuter(): string & (() => any);',
+    'declare function ordinary(): number;',
+    "const prefix = '😀'; outerPromise()(); innerPromise()(); bothSynchronous().trim(); unknownOuter()(); ordinary();",
+  ].join('\n');
+  fs.writeFileSync(file, source);
+  const digest = createHash('sha256').update(source, 'utf8').digest('hex');
+  const calls = ['outerPromise()()', 'innerPromise()()', 'bothSynchronous().trim()', 'unknownOuter()()', 'ordinary()'].map(name => ({
+    path: file, start: Buffer.byteLength(source.slice(0, source.lastIndexOf(name))), source_sha256: digest,
+  }));
+  const child = spawnSync(process.execPath, [probe], { input: JSON.stringify({ typescriptModule: compiler, config, calls }), encoding: 'utf8' });
+  assert.equal(child.status, 0, child.stderr);
+  const result = JSON.parse(child.stdout);
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.calls.map(call => call.status), ['not_proven', 'not_proven', 'observed', 'not_proven', 'not_promise']);
+  const start = Buffer.byteLength(source.slice(0, source.lastIndexOf('outerPromise()()')));
+  const explicit = ['outerPromise()', 'outerPromise()()', 'outerPromise()()x'].map(text => ({
+    path: file, start, end: start + Buffer.byteLength(text), source_sha256: digest,
+  }));
+  const exactChild = spawnSync(process.execPath, [probe], { input: JSON.stringify({ typescriptModule: compiler, config, calls: explicit }), encoding: 'utf8' });
+  assert.equal(exactChild.status, 0, exactChild.stderr);
+  assert.deepEqual(JSON.parse(exactChild.stdout).calls.map(call => call.status), ['not_proven', 'promise_like', 'unavailable']);
+});
+
 test('checks concrete call types and fails closed on project errors', { skip: !compiler }, () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'autoreview-ts-probe-'));
   try {
@@ -45,7 +111,7 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
     const types = path.join(directory, 'node_modules', '@types', 'local');
     fs.mkdirSync(types, { recursive: true });
     fs.writeFileSync(path.join(types, 'index.d.ts'), 'declare const LOCAL_GLOBAL: number;');
-    fs.writeFileSync(config, JSON.stringify({ compilerOptions: { target: 'ES2022', strict: true }, files: ['sample.ts'] }));
+    fs.writeFileSync(config, JSON.stringify({ compilerOptions: { target: 'ES2020', strict: true }, files: ['sample.ts'] }));
     const source = [
       'declare function promise(): Promise<void>;',
       'declare function sync(): string;',
@@ -78,6 +144,79 @@ test('checks concrete call types and fails closed on project errors', { skip: !c
     calls = [...awaiting.matchAll(/\b(?:unknownValue|knownPromise)\(\)/g)].slice(2)
       .map(match => ({ path: file, start: Buffer.byteLength(awaiting.slice(0, match.index)), source_sha256: hash(awaiting) }));
     assert.deepEqual(invoke().calls.map(call => call.status), ['observed', 'not_proven', 'promise_like', 'not_proven']);
+    const bindings = [
+      'declare function unknownValue(): any;',
+      'async function direct() { const value = unknownValue(); await value; }',
+      'async function wrapped() { const value = ((unknownValue())); await ((value)); }',
+      'async function aliases() { const value = unknownValue(); const alias = value; const other = (alias); await other; }',
+      'async function later() { const value = unknownValue(); log(); await value; }',
+      'async function conditional(flag: boolean) { const value = unknownValue(); if (flag) await value; }',
+      'async function reassigned() { let value = unknownValue(); value = 1; await value; }',
+      'async function multi() { const value = unknownValue(), other = 1; await value; }',
+      'async function property() { const value = unknownValue(); await value.item; }',
+      'async function different() { const value = unknownValue(); const other = 1; await other; }',
+      'async function embedded() { const value = [unknownValue()]; await value; }',
+      'async function mutableAlias() { const value = unknownValue(); let alias = value; await alias; }',
+      'async function unrelatedAlias() { const value = unknownValue(); const alias = 1; await alias; }',
+      `async function atLimit() { const v0 = unknownValue(); ${Array.from({ length: 31 }, (_, i) => `const v${i + 1} = v${i};`).join(' ')} await v31; }`,
+      `async function overLimit() { const v0 = unknownValue(); ${Array.from({ length: 32 }, (_, i) => `const v${i + 1} = v${i};`).join(' ')} await v32; }`,
+      'declare function log(): void;',
+    ].join('\n');
+    fs.writeFileSync(file, bindings);
+    calls = [...bindings.matchAll(/\bunknownValue\(\)/g)].slice(1)
+      .map(match => ({ path: file, start: Buffer.byteLength(bindings.slice(0, match.index)), source_sha256: hash(bindings) }));
+    assert.deepEqual(invoke().calls.map(call => call.status), ['observed', 'observed', 'observed', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'observed', 'not_proven']);
+    const returns = [
+      'declare function unknownValue(): any;',
+      'async function direct() { return ((unknownValue())); }',
+      'const arrow = async () => (unknownValue());',
+      'class Example { async method() { return unknownValue(); } }',
+      'async function branch(flag: boolean) { if (flag) { return unknownValue(); } else return unknownValue(); }',
+      'async function choose(value: number) { switch (value) { case 1: return unknownValue(); default: return unknownValue(); } }',
+      'async function guarded() { try { return unknownValue(); } finally { return 1; } }',
+      'async function nestedGuard(flag: boolean) { try { if (flag) return unknownValue(); } finally { return 1; } }',
+      'async function loop() { for (const value of [1]) { return unknownValue(); } return 1; }',
+      'function syncReturn() { return unknownValue(); }',
+      'async function outer() { function inner() { return unknownValue(); } return inner(); }',
+      'async function* generator() { return unknownValue(); }',
+      'async function property() { return unknownValue().value; }',
+    ].join('\n');
+    fs.writeFileSync(file, returns);
+    calls = [...returns.matchAll(/\bunknownValue\(\)/g)].slice(1)
+      .map(match => ({ path: file, start: Buffer.byteLength(returns.slice(0, match.index)), source_sha256: hash(returns) }));
+    assert.deepEqual(invoke().calls.map(call => call.status), ['observed', 'observed', 'observed', 'observed', 'observed', 'observed', 'observed', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven']);
+    const expressions = [
+      'declare function unknownValue(): any;',
+      'async function branch(flag: boolean) { return flag ? unknownValue() : unknownValue(); }',
+      'async function awaited(flag: boolean) { await (flag ? unknownValue() : unknownValue()); }',
+      'async function logical(flag: boolean) { return flag && unknownValue() || unknownValue(); }',
+      'async function nullish(flag: boolean) { return flag ?? unknownValue(); }',
+      'async function condition() { return unknownValue() ? 1 : 2; }',
+      'async function left() { return unknownValue() || 1; }',
+      'async function guarded(flag: boolean) { try { return flag ? unknownValue() : 1; } finally { return 1; } }',
+      'function sync(flag: boolean) { return flag ? unknownValue() : 1; }',
+      'async function property(flag: boolean) { return (flag ? unknownValue() : 1).value; }',
+    ].join('\n');
+    fs.writeFileSync(file, expressions);
+    calls = [...expressions.matchAll(/\bunknownValue\(\)/g)].slice(1)
+      .map(match => ({ path: file, start: Buffer.byteLength(expressions.slice(0, match.index)), source_sha256: hash(expressions) }));
+    assert.deepEqual(invoke().calls.map(call => call.status), ['observed', 'observed', 'observed', 'observed', 'not_proven', 'observed', 'observed', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven']);
+    if (require(compiler).NodeFlags.Using) {
+      const resources = [
+        'declare function unknownValue(): any;',
+        'declare const resource: { [Symbol.dispose](): void };',
+        'async function work() { using item = resource; return unknownValue(); }',
+        'async function outer() { function inner() { using item = resource; } return unknownValue(); }',
+        'async function awaitUsingSource() { await using value = unknownValue(); await value; }',
+        'async function awaitUsingAlias() { const value = unknownValue(); await using alias = value; await alias; }',
+      ].join('\n');
+      fs.writeFileSync(config, JSON.stringify({ compilerOptions: { target: 'ES2020', lib: ['ES2020', 'ESNext.Disposable'], strict: true }, files: ['sample.ts'] }));
+      fs.writeFileSync(file, resources);
+      calls = [...resources.matchAll(/\bunknownValue\(\)/g)].slice(1)
+        .map(match => ({ path: file, start: Buffer.byteLength(resources.slice(0, match.index)), source_sha256: hash(resources) }));
+      assert.deepEqual(invoke().calls.map(call => call.status), ['not_proven', 'observed', 'not_proven', 'not_proven']);
+      fs.writeFileSync(config, JSON.stringify({ compilerOptions: { target: 'ES2020', strict: true }, files: ['sample.ts'] }));
+    }
     fs.writeFileSync(file, source);
     calls = names.map(name => ({ path: file, start: Buffer.byteLength(source.slice(0, source.lastIndexOf(name))), source_sha256: hash(source) }));
     calls = [calls[1], calls[0], calls[1], { ...calls[0], source_sha256: 'wrong' }, { ...calls[0], path: path.join(directory, 'missing.ts') }];

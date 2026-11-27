@@ -28,8 +28,10 @@ pub(super) fn record_flow_limits(
 pub(super) fn record_rule_limits(coverage: &mut Vec<AnalysisCoverageIssue>, rule_id: &str, limitations: Vec<autoreview_dataflow::call_order::KeyedLimitation>) {
     for limitation in limitations {
         let detail = limitation_detail(limitation.reason);
-        let mut record = issue(limitation.path.as_deref(), limitation.reason,
-            if limitation.path.is_some() { "function" } else { "rule" }, detail);
+        let scope = if limitation.path.is_none() { "rule" }
+            else if super::package_coverage::is_package_reason(limitation.reason) { "package" }
+            else { "function" };
+        let mut record = issue(limitation.path.as_deref(), limitation.reason, scope, detail);
         record.line = limitation.line.filter(|line| *line > 0);
         record.rule = Some(rule_id.to_owned());
         coverage.push(record);
@@ -37,8 +39,9 @@ pub(super) fn record_rule_limits(coverage: &mut Vec<AnalysisCoverageIssue>, rule
 }
 
 fn limitation_detail(reason: &str) -> &'static str {
-    verified_detail(reason).or_else(|| typed_detail(reason)).unwrap_or(match reason {
+    verified_detail(reason).or_else(|| typed_detail(reason)).or_else(|| result_path_detail(reason)).unwrap_or(match reason {
             "path_budget" => "The path-state budget was exhausted; this rule skipped the affected root.",
+            "unmodeled_cleanup_call" => "A possible cleanup call was not represented in the control-flow graph; this rule skipped the affected function.",
             "helper_summary_limit" => "Helper summaries did not converge within the analysis budget; cross-file result tracking was skipped.",
             "unsupported_rust_control_flow" => "Rust control flow in this function could not be lowered; call-sequence analysis was skipped.",
             "rust_match_binding_projection" => "Rust match pattern names are tracked as distinct local identities; their relationship to the matched value and whether they denote constants are not resolved.",
@@ -50,14 +53,42 @@ fn limitation_detail(reason: &str) -> &'static str {
     })
 }
 
-fn verified_detail(reason: &str) -> Option<&'static str> {
+fn result_path_detail(reason: &str) -> Option<&'static str> {
     Some(match reason {
+        "result_use_path_limit" => "The path-sensitive result-use budget was exhausted; partial observations could not be checked completely.",
+        "result_use_path_unmodeled" => "This function uses control flow or result effects that the partial-observation check cannot model; a result may be used on only some paths.",
+        _ => return None,
+    })
+}
+
+fn verified_detail(reason: &str) -> Option<&'static str> {
+    go_detail(reason).or_else(|| Some(match reason {
+            "unmodeled_contract_handle" => "A matching resource or task acquisition occurs in a function with unsupported handle storage or transfer; this rule skipped the function.",
+            "unmodeled_conditional_result" => "A result-producing call occurs in a conditional expression whose branches could not be modeled; result-use analysis may be incomplete.",
             "verified_source_unmodeled" => "A verified result source is outside modeled function flow; result-use analysis skipped this call.",
-            "typed_go_error_source_unavailable" => "Go error type verification is not configured; this rule was skipped.",
             "invalid_result_components" => "Verified result component information was invalid; analysis skipped the affected call.",
+            _ => return None,
+    }))
+}
+
+fn go_detail(reason: &str) -> Option<&'static str> {
+    go_probe_detail(reason).or_else(|| Some(match reason {
+            "typed_go_error_source_unavailable" => "Go error type verification is not configured; this rule was skipped.",
             "go_multi_result_unmodeled" => "A multi-result Go call with an error occurs in an unsupported context; result-use analysis skipped this call.",
-            "go_error_checker_incomplete" => "Go error type verification could not complete for this package; result-use analysis may be incomplete.",
             "go_dependency_evidence_incomplete" => "Requested Go dependency error-origin evidence could not be verified; summaries are incomplete.",
+            _ => return None,
+    }))
+}
+
+fn go_probe_detail(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+            "go_error_checker_incomplete" => "Go error type verification could not complete for this package; result-use analysis may be incomplete.",
+            "go_error_package_limit" => "The Go error checker package limit was reached; remaining packages were not verified.",
+            "go_error_call_limit" => "The Go error checker call-site limit was exceeded; this package was not verified.",
+            "go_error_package_load_incomplete" => "The Go error checker could not load the complete package and its dependencies; result-use analysis may be incomplete.",
+            "go_error_typecheck_incomplete" => "The Go error checker could not parse or type-check the selected sources; result-use analysis may be incomplete.",
+            "go_error_source_mismatch" => "The Go error checker sources did not match the reviewed snapshot; result-use analysis was skipped.",
+            "go_error_probe_invalid_request" => "The Go error checker rejected the package configuration or request; result-use analysis was skipped.",
             _ => return None,
     })
 }
@@ -96,9 +127,13 @@ pub(super) fn scope_coverage(
     let applicable: Vec<_> = rules.iter().filter(|(_, declared)| {
         entries.iter().any(|path| language_for_path(Path::new(path)).is_some_and(|language| language.matches_rule_language(*declared)))
     }).map(|(rule, _)| rule.id.as_str()).collect();
+    let jvm_applicable: Vec<_> = rules.iter().filter(|(_, declared)| matches!(declared, Language::Java | Language::Kotlin)
+        && entries.iter().any(|path| language_for_path(Path::new(path)).is_some_and(|language| language.matches_rule_language(*declared))))
+        .map(|(rule, _)| rule.id.as_str()).collect();
     coverage.into_iter().flat_map(|issue| {
-        if issue.rule.is_some() || issue.reason != "dependency_limit" { return vec![issue]; }
-        applicable.iter().map(|rule| {
+        if issue.rule.is_some() || !matches!(issue.reason.as_str(), "dependency_limit" | "entry_package_unresolved") { return vec![issue]; }
+        let relevant = if issue.reason == "entry_package_unresolved" { &jvm_applicable } else { &applicable };
+        relevant.iter().map(|rule| {
             let mut scoped = issue.clone();
             scoped.rule = Some((*rule).to_owned());
             scoped
@@ -111,6 +146,25 @@ pub(super) fn issue(path: Option<&str>, reason: &str, scope: &str, detail: &str)
     AnalysisCoverageIssue {
         analyzer: "call-sequence".into(), reason: reason.into(), scope: scope.into(),
         path: path.map(str::to_owned), line: None, rule: None, detail: detail.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use autoreview_dataflow::call_order::KeyedLimitation;
+
+    #[test]
+    fn go_package_issues_keep_package_scope_and_rule() {
+        let mut coverage = Vec::new();
+        record_rule_limits(&mut coverage, "rule", vec![
+            KeyedLimitation { reason: "go_error_package_load_incomplete", path: Some("pkg/worker".into()), line: None },
+            KeyedLimitation { reason: "go_error_checker_incomplete", path: None, line: None },
+        ]);
+        assert_eq!(coverage[0].scope, "package");
+        assert_eq!(coverage[0].path.as_deref(), Some("pkg/worker"));
+        assert_eq!(coverage[0].rule.as_deref(), Some("rule"));
+        assert_eq!(coverage[1].scope, "rule");
     }
 }
 

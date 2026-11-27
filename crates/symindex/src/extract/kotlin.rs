@@ -149,7 +149,7 @@ fn extract_class(node: Node, source: &[u8], file: &Path) -> Option<TypeDecl> {
         }
     }
 
-    Some(TypeDecl { name, file: file.to_path_buf(), start_line: line_of(node), fields, methods, superclass })
+    Some(TypeDecl { name, file: file.to_path_buf(), start_line: line_of(node), fields, methods, superclass, java: None })
 }
 
 fn extract_method(node: Node, source: &[u8], file: &Path, owner_type: &str, fields: &[NamedSlot]) -> Option<MethodDecl> {
@@ -193,6 +193,7 @@ fn extract_method(node: Node, source: &[u8], file: &Path, owner_type: &str, fiel
         return_type_text,
         own_field_accesses,
         foreign_accesses,
+        helper_accesses: Vec::new(),
         chains,
         is_trivial_body: trivial_body,
     })

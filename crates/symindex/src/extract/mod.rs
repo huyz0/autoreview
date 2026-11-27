@@ -36,20 +36,24 @@ fn language_for_extension(extension: &str) -> Option<tree_sitter::Language> {
 /// Stage 1 analyzer treats an unreadable/irrelevant file: skip, don't fail
 /// the run.
 pub fn extract_file(file: &Path, content: &str) -> Vec<TypeDecl> {
-    let Some(extension) = file.extension().and_then(|e| e.to_str()) else { return Vec::new() };
-    let Some(language) = language_for_extension(extension) else { return Vec::new() };
+    let Some((extension, tree)) = parse_file(file, content) else { return Vec::new() };
+    extract_parsed_file(file, content, extension, &tree)
+}
 
+pub(crate) fn parse_file<'a>(file: &'a Path, content: &str) -> Option<(&'a str, tree_sitter::Tree)> {
+    let extension = file.extension()?.to_str()?;
+    let language = language_for_extension(extension)?;
     let mut parser = tree_sitter::Parser::new();
-    if parser.set_language(&language).is_err() {
-        return Vec::new();
-    }
-    let Some(tree) = parser.parse(content, None) else { return Vec::new() };
+    parser.set_language(&language).ok()?;
+    Some((extension, parser.parse(content, None)?))
+}
 
+pub(crate) fn extract_parsed_file(file: &Path, content: &str, extension: &str, tree: &tree_sitter::Tree) -> Vec<TypeDecl> {
     match extension {
-        "go" => go::extract_types(&tree, content.as_bytes(), file),
-        "java" => java::extract_types(&tree, content.as_bytes(), file),
-        "kt" | "kts" => kotlin::extract_types(&tree, content.as_bytes(), file),
-        "ts" | "mts" | "cts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => typescript::extract_types(&tree, content.as_bytes(), file),
+        "go" => go::extract_types(tree, content.as_bytes(), file),
+        "java" => java::extract_types(tree, content.as_bytes(), file),
+        "kt" | "kts" => kotlin::extract_types(tree, content.as_bytes(), file),
+        "ts" | "mts" | "cts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => typescript::extract_types(tree, content.as_bytes(), file),
         _ => Vec::new(),
     }
 }

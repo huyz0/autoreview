@@ -8,6 +8,7 @@ use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, check_key
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use super::Source;
+use super::package_coverage::package_limitation;
 
 const PACKAGE_LIMIT: usize = 8;
 const CALL_LIMIT: usize = 2048;
@@ -172,11 +173,12 @@ fn check_with_probe_and_callees(
     spec: &CallOrderSpec, units: &[KeyedUnit<'_, '_, '_>], sources: &BTreeMap<String, Source>, options: ProbeOptions<'_>,
 ) -> (KeyedCheckResult, CalleeEvidence) {
     let ProbeOptions { root, checker, include_callees, include_error_origins, dependencies } = options;
-    let mut verified = Verified { discovery: FactorySourceDiscovery { candidates: BTreeMap::new(), limitations: Vec::new() }, components: BTreeMap::new(), callees: BTreeMap::new() };
+    let mut verified = Verified { discovery: FactorySourceDiscovery { spans: BTreeMap::new(), candidates: BTreeMap::new(), limitations: Vec::new() }, components: BTreeMap::new(), callees: BTreeMap::new() };
     let groups = collect_groups(units, sources, root, &mut verified.discovery.limitations);
     for (index, (dir, group)) in groups.into_iter().filter(|(_, group)| !group.calls.is_empty()).enumerate() {
         if index >= PACKAGE_LIMIT || group.calls.len() > CALL_LIMIT {
-            verified.discovery.limitations.push(limitation(None));
+            let reason = if index >= PACKAGE_LIMIT { "go_error_package_limit" } else { "go_error_call_limit" };
+            verified.discovery.limitations.push(package_limitation(root, &dir, reason));
             continue;
         }
         let package_sources = (include_callees || include_error_origins).then(|| package_source_hashes(&dir)).flatten();
@@ -184,10 +186,10 @@ fn check_with_probe_and_callees(
         let results = verify_with_fallback(&checker.probe, &mut request);
         if dependencies.is_some() && request.dependency_sources.is_none() { verified.discovery.limitations.push(dependency_limitation()); }
         match results {
-            Some(results) => for ((unit, start), result) in group.indices.into_iter().zip(results) {
+            Ok(results) => for ((unit, start), result) in group.indices.into_iter().zip(results) {
                 record_result(&mut verified, units, sources, &request, (unit, start, result));
             },
-            None => verified.discovery.limitations.push(limitation(None)),
+            Err(reason) => verified.discovery.limitations.push(package_limitation(root, &dir, reason)),
         }
     }
     (check_keyed_units_with_verified_components(spec, units, verified.discovery, &verified.components), verified.callees)
@@ -200,15 +202,15 @@ fn record_result(verified: &mut Verified, units: &[KeyedUnit<'_, '_, '_>], sourc
     verified.record(&units[unit], &sources[units[unit].path], (unit, start), result);
 }
 
-fn verify_with_fallback(probe: &Path, request: &mut Request<'_>) -> Option<Vec<CallResult>> {
-    verify(probe, request).or_else(|| {
-        if !request.include_error_origins { return None; }
+fn verify_with_fallback(probe: &Path, request: &mut Request<'_>) -> Result<Vec<CallResult>, &'static str> {
+    verify(probe, request).or_else(|reason| {
+        if !request.include_error_origins { return Err(reason); }
         request.include_error_origins = false;
         request.dependency_sources = None;
         if !request.include_callees { request.package_sources = None; }
         verify(probe, request)
-    }).or_else(|| {
-        if !request.include_callees { return None; }
+    }).or_else(|reason| {
+        if !request.include_callees { return Err(reason); }
         request.include_callees = false;
         request.package_sources = None;
         verify(probe, request)
@@ -291,18 +293,32 @@ fn collect_unit(unit: &KeyedUnit<'_, '_, '_>, sources: &BTreeMap<String, Source>
     Some((dir, name, calls))
 }
 
-fn verify(probe: &Path, request: &Request<'_>) -> Option<Vec<CallResult>> {
-    let input = serde_json::to_vec(request).ok()?;
+fn verify(probe: &Path, request: &Request<'_>) -> Result<Vec<CallResult>, &'static str> {
+    const INCOMPLETE: &str = "go_error_checker_incomplete";
+    let input = serde_json::to_vec(request).map_err(|_| INCOMPLETE)?;
     let mut command = Command::new(probe);
-    let output = crate::analyzers::typescript_checker::run_bounded(&mut command, input, Duration::from_secs(75))?;
-    let result: Response = serde_json::from_slice(&output).ok()?;
-    if result.version != 2 || result.status != "ok" || result.reason.is_some() { return None; }
-    let calls = result.calls?;
-    if calls.len() != request.calls.len() { return None; }
+    let output = crate::analyzers::typescript_checker::run_bounded(&mut command, input, Duration::from_secs(75)).ok_or(INCOMPLETE)?;
+    let result: Response = serde_json::from_slice(&output).map_err(|_| INCOMPLETE)?;
+    if result.version == 2 && result.status == "incomplete" && result.calls.is_none() {
+        return Err(probe_reason(result.reason.as_deref()));
+    }
+    if result.version != 2 || result.status != "ok" || result.reason.is_some() { return Err(INCOMPLETE); }
+    let calls = result.calls.ok_or(INCOMPLETE)?;
+    if calls.len() != request.calls.len() { return Err(INCOMPLETE); }
     calls.into_iter().zip(&request.calls).map(|(actual, expected)| {
         (actual.path == expected.path && actual.start == expected.start && valid_call_result(&actual))
-            .then_some(actual)
+            .then_some(actual).ok_or(INCOMPLETE)
     }).collect()
+}
+
+fn probe_reason(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("package_load_failed" | "package_load_incomplete" | "package_sources_unavailable") => "go_error_package_load_incomplete",
+        Some("type_errors" | "dependency_type_errors" | "syntax_errors") => "go_error_typecheck_incomplete",
+        Some("source_mismatch" | "dependency_source_mismatch") => "go_error_source_mismatch",
+        Some("invalid_package_config" | "invalid_module_mode" | "invalid_request" | "no_files" | "invalid_files") => "go_error_probe_invalid_request",
+        _ => "go_error_checker_incomplete",
+    }
 }
 
 fn multi_supported(file: &Source, start: usize, count: usize) -> bool {
@@ -384,6 +400,30 @@ mod tests {
         assert!(!valid_call_result(&item(3, vec![1, 1])));
         assert!(!valid_call_result(&item(3, vec![2, 1])));
         assert!(serde_json::from_str::<Response>(r#"{"status":"ok","calls":[]}"#).is_err());
+    }
+
+    #[test]
+    fn probe_failure_reasons_are_bounded_and_unknown_reasons_remain_generic() {
+        assert_eq!(probe_reason(Some("package_load_failed")), "go_error_package_load_incomplete");
+        assert_eq!(probe_reason(Some("type_errors")), "go_error_typecheck_incomplete");
+        assert_eq!(probe_reason(Some("source_mismatch")), "go_error_source_mismatch");
+        assert_eq!(probe_reason(Some("invalid_module_mode")), "go_error_probe_invalid_request");
+        assert_eq!(probe_reason(Some("unrecognized private details")), "go_error_checker_incomplete");
+        assert_eq!(probe_reason(None), "go_error_checker_incomplete");
+    }
+
+    #[test]
+    fn go_probe_reports_package_load_and_configuration_failures() {
+        let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
+        let source = "package sample\nfunc operation() error { return nil }\nfunc use() { operation() }\n";
+        let invalid = TrustedGo { probe: probe.clone().into(), go: go.into(), module_mode: Some("invalid".into()) };
+        let result = analyze_source(source, &invalid);
+        assert!(result.hits.is_empty());
+        assert!(result.limitations.iter().any(|item| item.reason == "go_error_probe_invalid_request"));
+        let missing = TrustedGo { probe: probe.into(), go: std::env::temp_dir().join("autoreview-missing-go-binary"), module_mode: None };
+        let result = analyze_source(source, &missing);
+        assert!(result.hits.is_empty());
+        assert!(result.limitations.iter().any(|item| item.reason == "go_error_package_load_incomplete"));
     }
 
     #[test]
@@ -503,6 +543,33 @@ mod tests {
         let (result, evidence) = analyze_dependency_fixture(&checker);
         assert!(result.limitations.is_empty());
         assert_wrapper_origin(&result, &evidence);
+    }
+
+    #[test]
+    fn specialized_dependency_evidence_reaches_result_finding() {
+        let (Ok(probe), Ok(go)) = (std::env::var("AUTOREVIEW_TEST_GO_PROBE"), std::env::var("AUTOREVIEW_TEST_GO_BINARY")) else { return };
+        let checker = TrustedGo { probe: probe.into(), go: go.into(), module_mode: None };
+        let source = "package sample\nimport (\"context\"; \"example.test/probe/dep\")\nfunc use(ctx context.Context) {\n dep.Guarded(ctx, 1)\n dep.Guarded(ctx, 2)\n}\n";
+        let files = [("dep/dep.go", "package dep\nimport (\"context\"; \"errors\")\nfunc Guarded(ctx context.Context, n int) error { if n > 1 { return errors.New(\"other\") }; return ctx.Err() }\n")];
+        let (result, evidence) = analyze_source_with_config(source, &checker, &files, (false, true, Some(r#"{"example.test/probe/dep":"dep"}"#)));
+        assert!(result.limitations.is_empty());
+        assert_eq!(result.hits.len(), 2);
+        let rules = crate::analyzers::call_order_rules::load_call_order_rules(&[]);
+        let rule = rules.iter().find(|rule| rule.id == "go-project-error-result-unobserved").unwrap();
+        for (index, expression) in ["dep.Guarded(ctx, 1)", "dep.Guarded(ctx, 2)"].iter().enumerate() {
+            let start = source.find(expression).unwrap();
+            let hit = result.hits.iter().find(|hit| hit.source_start == Some(start)).unwrap();
+            let finding = super::finding("main.go", Some(source), rule, hit, &evidence);
+            let origin = finding.meta.as_ref().and_then(|meta| meta.get("goErrorOrigin"));
+            if index == 0 {
+                let origin = origin.unwrap();
+                assert_eq!(origin["contextParameter"], 0);
+                assert_eq!(origin["specialized"]["parameter"], 1);
+                assert_eq!(origin["specialized"]["value"], "1");
+            } else {
+                assert!(origin.is_none());
+            }
+        }
     }
 
     #[test]

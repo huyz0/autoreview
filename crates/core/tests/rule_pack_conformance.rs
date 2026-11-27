@@ -189,6 +189,140 @@ fn every_builtin_rule_fires_on_its_positive_fixture_and_stays_silent_on_its_nega
     assert!(failures.is_empty(), "rule conformance failures ({} rule(s) checked):\n{}", rules.len(), failures.join("\n"));
 }
 
+const KOTLIN_COROUTINE_RULES: &[&str] = &["kotlin-runblocking-in-suspend-function", "kotlin-thread-sleep-in-suspend", "kotlin-suspend-swallowed-by-runcatching", "kotlin-suspend-call-in-finally-without-noncancellable"];
+const KOTLIN_COROUTINE_CHECKS: &str = "runBlocking { work() }; Thread.sleep(1); runCatching { work() }; try { work() } finally { cleanup() }";
+
+fn kotlin_test_repo(source: &str) -> tempfile::TempDir {
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("example.kt"), source).unwrap();
+    repo
+}
+
+#[test]
+fn kotlin_suspend_checks_use_the_nearest_function_modifiers() {
+    if !ast_grep_available() {
+        return;
+    }
+    let checks = KOTLIN_COROUTINE_CHECKS;
+    let source = format!("suspend fun outer() {{\n fun callback() {{ {checks} }}\n val anonymous = fun() {{ {checks} }}\n {checks}\n listOf(1).map {{ {checks} }}\n}}\nfun ordinary() {{\n suspend fun nested() {{ {checks} }}\n {checks}\n}}\n");
+    let repo = kotlin_test_repo(&source);
+    let findings = run_ast_grep(repo.path(), &["example.kt".into()], &[]).unwrap();
+    for &rule in KOTLIN_COROUTINE_RULES {
+        let lines: Vec<_> = findings.iter()
+            .filter(|finding| finding.source.rule_id.as_deref() == Some(rule))
+            .map(|finding| finding.location.range.start_line)
+            .collect();
+        assert_eq!(lines, [4, 5, 8], "{rule}");
+    }
+}
+
+#[test]
+fn kotlin_callback_findings_report_unresolved_execution() {
+    if !ast_grep_available() {
+        return;
+    }
+    let checks = KOTLIN_COROUTINE_CHECKS;
+    let source = format!("suspend fun run() {{\n {checks}\n callbacks.register {{ {checks} }}\n listOf(1).map {{ {checks} }}\n}}\n");
+    let repo = kotlin_test_repo(&source);
+    let result = autoreview_core::run_ast_grep_with_coverage(repo.path(), &["example.kt".into()], &[]).unwrap();
+    for &rule in KOTLIN_COROUTINE_RULES {
+        let findings: Vec<_> = result.findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some(rule)).collect();
+        assert_eq!(findings.len(), 3, "{rule}");
+        assert_eq!(findings[0].confidence, 1.0, "{rule}");
+        assert!(findings[1..].iter().all(|finding| finding.confidence < 1.0 && finding.message.contains("unresolved")), "{rule}");
+        let lines: Vec<_> = result.coverage.iter().filter(|issue| issue.rule.as_deref() == Some(rule) && issue.reason == "callback_execution_unresolved").map(|issue| issue.line.unwrap()).collect();
+        assert_eq!(lines, [3, 4], "{rule}");
+    }
+}
+
+#[test]
+fn kotlin_direct_lambda_invocation_preserves_outer_uncertainty() {
+    if !ast_grep_available() { return; }
+    let checks = KOTLIN_COROUTINE_CHECKS;
+    let source = format!("suspend fun run() {{\n ({{ {checks} }})()\n ((({{ {checks} }})))()\n register {{ ({{ {checks} }})() }}\n val action = {{ {checks} }}\n action()\n ({{ {checks} }}).invoke()\n}}\n");
+    let repo = kotlin_test_repo(&source);
+    let result = autoreview_core::run_ast_grep_with_coverage(repo.path(), &["example.kt".into()], &[]).unwrap();
+    for &rule in KOTLIN_COROUTINE_RULES {
+        let findings: Vec<_> = result.findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some(rule)).collect();
+        let lines: Vec<_> = findings.iter().map(|finding| finding.location.range.start_line).collect();
+        assert_eq!(lines, [2, 3, 4, 5, 7], "{rule}");
+        assert!(findings[..2].iter().all(|finding| finding.confidence == 1.0), "{rule}");
+        assert!(findings[2].confidence < 1.0, "{rule}");
+        assert_eq!(findings[3].confidence, 1.0, "{rule}");
+        assert_eq!(findings[4].confidence, 1.0, "{rule}");
+        let incomplete: Vec<_> = result.coverage.iter().filter(|issue| issue.rule.as_deref() == Some(rule)).map(|issue| issue.line.unwrap()).collect();
+        assert_eq!(incomplete, [4], "{rule}");
+    }
+}
+
+#[test]
+fn kotlin_local_callback_aliases_require_contiguous_immutable_execution() {
+    if !ast_grep_available() { return; }
+    let checks = KOTLIN_COROUTINE_CHECKS;
+    let source = format!("suspend fun run(flag: Boolean) {{\n val first = {{ {checks} }}\n val copy = first\n copy.invoke()\n val delayed = {{ {checks} }}\n work()\n delayed.invoke()\n var mutable = {{ {checks} }}\n mutable = {{ }}\n mutable.invoke()\n register {{ val nested = {{ {checks} }}; nested.invoke() }}\n val bare = {{ {checks} }}\n bare()\n val branch = {{ {checks} }}\n if (flag) branch.invoke()\n val escaped = {{ {checks} }}\n register(escaped)\n}}\n");
+    let repo = kotlin_test_repo(&source);
+    let result = autoreview_core::run_ast_grep_with_coverage(repo.path(), &["example.kt".into()], &[]).unwrap();
+    for &rule in KOTLIN_COROUTINE_RULES {
+        let findings: Vec<_> = result.findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some(rule)).collect();
+        assert_eq!(findings.iter().map(|finding| finding.location.range.start_line).collect::<Vec<_>>(), [2, 5, 8, 11, 12, 14, 16], "{rule}");
+        assert_eq!(findings[0].confidence, 1.0, "{rule}");
+        assert!(findings[1..4].iter().all(|finding| finding.confidence < 1.0), "{rule}");
+        assert_eq!(findings[4].confidence, 1.0, "{rule}");
+        assert!(findings[5..].iter().all(|finding| finding.confidence < 1.0), "{rule}");
+        let incomplete: Vec<_> = result.coverage.iter().filter(|issue| issue.rule.as_deref() == Some(rule)).map(|issue| issue.line.unwrap()).collect();
+        assert_eq!(incomplete, [5, 8, 11, 14, 16], "{rule}");
+    }
+}
+
+#[test]
+fn kotlin_unused_local_callbacks_do_not_inherit_suspend_execution() {
+    if !ast_grep_available() { return; }
+    let checks = KOTLIN_COROUTINE_CHECKS;
+    let source = format!("suspend fun run() {{\n val unused = {{ {checks} }}\n val called = {{ {checks} }}\n `called`.invoke()\n val passed = {{ {checks} }}\n register(passed)\n val nested = {{ register {{ {checks} }} }}\n val shadow = {{ {checks} }}\n val other = {{ val shadow = 1 }}\n val template = {{ {checks} }}\n println(\"${{template()}}\")\n}}\n");
+    let repo = kotlin_test_repo(&source);
+    let result = autoreview_core::run_ast_grep_with_coverage(repo.path(), &["example.kt".into()], &[]).unwrap();
+    for &rule in KOTLIN_COROUTINE_RULES {
+        let findings: Vec<_> = result.findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some(rule)).collect();
+        assert_eq!(findings.iter().map(|finding| finding.location.range.start_line).collect::<Vec<_>>(), [3, 5, 8, 10], "{rule}");
+        assert!(findings.iter().all(|finding| finding.confidence < 1.0), "{rule}");
+        let incomplete: Vec<_> = result.coverage.iter().filter(|issue| issue.rule.as_deref() == Some(rule)).map(|issue| issue.line.unwrap()).collect();
+        assert_eq!(incomplete, [3, 5, 8, 10], "{rule}");
+    }
+}
+
+#[test]
+fn kotlin_callback_alias_budget_remains_incomplete() {
+    if !ast_grep_available() { return; }
+    for method in [".invoke()", "()"] {
+        for count in [31, 32] {
+            let mut source = String::from("suspend fun run() {\n val a0 = { runBlocking { work() } }\n");
+            for index in 1..=count { source.push_str(&format!(" val a{index} = a{}\n", index - 1)); }
+            source.push_str(&format!(" a{count}{method}\n}}\n"));
+            let repo = kotlin_test_repo(&source);
+            let result = autoreview_core::run_ast_grep_with_coverage(repo.path(), &["example.kt".into()], &[]).unwrap();
+            let incomplete = result.coverage.iter().any(|issue| issue.rule.as_deref() == Some("kotlin-runblocking-in-suspend-function") && issue.reason == "callback_execution_unresolved");
+            assert_eq!(incomplete, count == 32, "{:?}", result.coverage);
+        }
+    }
+}
+
+#[test]
+fn kotlin_bare_local_invocation_requires_unambiguous_zero_argument_lambda() {
+    if !ast_grep_available() { return; }
+    let checks = KOTLIN_COROUTINE_CHECKS;
+    let source = format!("fun parameter() {{}}\nfun fallback(n: Int) {{}}\nsuspend fun run() {{\n val direct = {{ {checks} }}\n direct()\n val original = {{ {checks} }}\n val alias = original\n alias()\n fun collision() {{}}\n val collision = {{ {checks} }}\n collision()\n val parameter = {{ n: Int -> {checks} }}\n parameter()\n val fallback = {{ {checks} }}\n fallback(1)\n register {{ val nested = {{ {checks} }}; nested() }}\n}}\n");
+    let repo = kotlin_test_repo(&source);
+    let result = autoreview_core::run_ast_grep_with_coverage(repo.path(), &["example.kt".into()], &[]).unwrap();
+    for &rule in KOTLIN_COROUTINE_RULES {
+        let findings: Vec<_> = result.findings.iter().filter(|finding| finding.source.rule_id.as_deref() == Some(rule)).collect();
+        assert_eq!(findings.iter().map(|finding| finding.location.range.start_line).collect::<Vec<_>>(), [4, 6, 10, 12, 14, 16], "{rule}");
+        assert!(findings[..2].iter().all(|finding| finding.confidence == 1.0), "{rule}");
+        assert!(findings[2..].iter().all(|finding| finding.confidence < 1.0), "{rule}");
+        let incomplete: Vec<_> = result.coverage.iter().filter(|issue| issue.rule.as_deref() == Some(rule)).map(|issue| issue.line.unwrap()).collect();
+        assert_eq!(incomplete, [10, 12, 14, 16], "{rule}");
+    }
+}
+
 #[test]
 fn typescript_pattern_catalog_has_tsx_parity() {
     if !ast_grep_available() {
