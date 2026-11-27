@@ -62,3 +62,8 @@ paths for trusted tools, then run:
 ```sh
 python3 tools/kotlin-callback-evidence/test_evidence.py
 ```
+
+To include the Apache SSHD API regression, set `AUTOREVIEW_TEST_SSHD_CORE` and
+`AUTOREVIEW_TEST_SSHD_COMMON` to trusted 2.17.1 JARs. CI downloads and checks
+the pinned artifacts. The test compiles a small representative Kotlin source;
+it does not build RediCloud or verify runtime dispatch or callback timing.
