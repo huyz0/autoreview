@@ -441,8 +441,11 @@ fn java_kotlin_imported_package_summaries(
     let mut summaries = HashMap::new();
     for import in autoreview_archgraph::extract_java_kotlin_imports(own_content) {
         let pkg = autoreview_archgraph::import_package(&import);
-        let packages = caches.java_kotlin_packages.get_or_init(|| autoreview_archgraph::index_java_kotlin_packages(repo_root));
-        for path in packages.get(&pkg).into_iter().flatten() {
+        let index = caches.java_kotlin_packages.get_or_init(|| autoreview_archgraph::index_java_kotlin_packages_with_coverage(repo_root));
+        for path in &index.unavailable {
+            caches.report_summary_issue(path, rule_id, "package_index_unavailable", "A source or directory could not be inspected during Java/Kotlin package discovery; imported helper summaries may be incomplete.");
+        }
+        for path in index.packages.get(&pkg).into_iter().flatten() {
             add_java_kotlin_summaries_from_file(path, &mut summaries, compute_summary, rule_id, caches);
         }
     }
@@ -568,6 +571,29 @@ mod tests {
         std::fs::remove_file(dir.path().join("broken.go")).unwrap();
         let clean = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["main.go".into()], &[]);
         assert!(!clean.coverage.iter().any(|issue| issue.reason.starts_with("summary_dependency_")), "{:?}", clean.coverage);
+    }
+
+    #[test]
+    fn unreadable_jvm_package_candidates_affect_only_jvm_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("unknown")).unwrap();
+        std::fs::write(dir.path().join("unknown/Hidden.java"), [0xff, 0xfe]).unwrap();
+        std::fs::write(dir.path().join("Main.java"), "package caller;\nimport target.Helper;\nclass Main { void run() {} }\n").unwrap();
+        std::fs::write(dir.path().join("Main.kt"), "package kcaller\nimport target.helper\nfun run() {}\n").unwrap();
+        std::fs::write(dir.path().join("main.go"), "package example\nfunc main() {}\n").unwrap();
+        std::fs::write(pack.path().join("java.yml"), "id: java-resource-test\nkind: call-sequence\nlanguage: Java\ncategory: correctness\nseverity: warning\nmessage: cleanup\nafter: [{call: open}]\nunless: [{call: close}]\ncheckBeforeReturn: true\nidentity: {receiver: true, keyArgument: 0}\n").unwrap();
+        std::fs::write(pack.path().join("kotlin.yml"), "id: kotlin-resource-test\nkind: call-sequence\nlanguage: Kotlin\ncategory: correctness\nseverity: warning\nmessage: cleanup\nafter: [{call: open}]\nunless: [{call: close}]\ncheckBeforeReturn: true\nidentity: {receiver: true, keyArgument: 0}\n").unwrap();
+        let packs = [ResolvedRulePack { id: "test".into(), local_path: pack.path().into(), trust: autoreview_schema::RulePackTrust::Full }];
+        let paths = ["Main.java".to_owned(), "Main.kt".to_owned(), "main.go".to_owned()];
+        let result = run_dataflow_check_with_coverage(dir.path(), dir.path(), &paths, &packs);
+        for rule in ["npe-risk-from-helper-return", "java-resource-test", "kotlin-resource-test"] {
+            assert!(result.coverage.iter().any(|issue| issue.reason == "package_index_unavailable" && issue.rule.as_deref() == Some(rule) && issue.path.as_deref() == Some("unknown/Hidden.java")), "{rule}: {:?}", result.coverage);
+        }
+        assert!(!result.coverage.iter().any(|issue| issue.reason == "package_index_unavailable" && issue.rule.as_deref() == Some("typed-nil-interface-return")), "{:?}", result.coverage);
+        std::fs::remove_file(dir.path().join("unknown/Hidden.java")).unwrap();
+        let clean = run_dataflow_check_with_coverage(dir.path(), dir.path(), &paths, &packs);
+        assert!(!clean.coverage.iter().any(|issue| issue.reason == "package_index_unavailable"), "{:?}", clean.coverage);
     }
 
     #[test]

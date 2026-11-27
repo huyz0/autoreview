@@ -62,7 +62,7 @@ a call directly in an unsupported arm is reported separately.
 
 | Condition | Current behavior | Evidence to report |
 | --- | --- | --- |
-| Changed or imported source cannot be read or parsed | Entry files report `source_unavailable`; cross-file call-sequence dependencies report `dependency_unavailable`. Go and Java/Kotlin candidate helper-summary scans report rule-scoped `summary_dependency_unavailable` or `summary_dependency_syntax_errors`, including candidates whose package cannot be established. The Git review path excludes absent diff paths only when the snapshot's HEAD confirms they were deleted. A failed Git check remains an entry warning. | Java/Kotlin whole-repository package discovery can still miss unreadable files before they become candidates; report precise failure reasons where available. |
+| Changed or imported source cannot be read or parsed | Entry files report `source_unavailable`; cross-file call-sequence dependencies report `dependency_unavailable`. Go and Java/Kotlin candidate helper-summary scans report rule-scoped `summary_dependency_unavailable` or `summary_dependency_syntax_errors`. When the Java/Kotlin package index is used, unavailable sources or directories produce `package_index_unavailable`: a file's package cannot safely be inferred from its path. The Git review path excludes absent diff paths only when the snapshot's HEAD confirms they were deleted. A failed Git check remains an entry warning. | Discovery still skips configured excluded directories and symbolic links, and cannot identify every malformed file with no recognizable package. Legacy same-package summaries scan only the current directory; report precise failure reasons where available. |
 | Cross-file call-sequence discovery reaches its 64-dependency limit | The resolver stops loading sources. | Entry scope, limit, and whether an unvisited dependency remains. Do not warn merely because the queue contains already loaded duplicates. |
 | Keyed lowering exceeds the finally-path copying limit | `keyed_flow` reaches zero and `Plan::new` declines the function. | File, function location, and affected call-sequence analysis. |
 | Rust function contains control flow the lowerer cannot model | The lowerer skips the function body; review reports `unsupported_rust_control_flow` per applicable rule and replay treats the case as incomplete. | File, function location, and affected rule. Entry functions and imported helpers reachable through supported calls are included. |
@@ -77,6 +77,9 @@ On Windows, a static review of the pinned JPlag trim fix reported no
 `summary_dependency_*` limitations, and the selected JPlag and Go tools
 replays retained their prior results. These two cases are too few to estimate
 the frequency of the new warnings across projects.
+Static reviews of the pinned JPlag and RediCloud fixes also reported no
+`package_index_unavailable` limitations; this does not establish their
+frequency across other repositories.
 
 The experimental Go error probe distinguishes package or call-site budget
 exhaustion, package loading, type checking, snapshot mismatches, and rejected
