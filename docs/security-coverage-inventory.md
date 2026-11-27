@@ -2,8 +2,8 @@
 
 This inventory records which security mistakes Autoreview can report from a
 review snapshot and which additional checks have a concrete source signal.
-The baseline is `b2e5b44` on `origin/main`. The Node.js process environment row
-also records the first batch included with this inventory.
+The baseline is `b2e5b44` on `origin/main`. The transport rows record the
+subsequent Node.js, Go, and Rust changes.
 
 Weakness IDs come from the [CWE catalog](https://cwe.mitre.org/data/) and
 [CWE Top 25](https://cwe.mitre.org/top25/). The [OWASP Top 10](https://owasp.org/Top10/2025/)
@@ -80,10 +80,10 @@ with local doubles or fixture configuration.
 | Unsafe cipher modes (CWE-327) | Gap for explicit insecure mode selection. | A literal selects ECB or another policy-disallowed mode in a known encryption constructor. | Fixed test vectors, legacy data migration with limited scope. | Symbol and literal resolution plus a declared policy when compatibility varies. High. | Compare ECB and authenticated mode literals in fixtures without generating ciphertext. |
 | Signature or digest comparison (CWE-208) | Gap. Generic equality rules are unrelated. | Ordinary comparison of a computed secret-bound tag to a request-provided tag in a verification path. Go, Node, JVM, Rust. | Public checksum equality, constant-time compare with correct width checks. | Identify cryptographic tag provenance, comparison and caller intent. Medium. | Compare fixed-time API and equality under the same synthetic verification stub. |
 | Node TLS process environment (CWE-295) | Gap at baseline. This batch adds `node-tls-verification-disabled-by-environment`. | Direct assignment of string literal `0` to ambient Node.js `process.env.NODE_TLS_REJECT_UNAUTHORIZED` in JS/TS/TSX, using dot or quoted bracket access. | Reads, other keys or values, ordinary object data, and a locally bound or imported `process`. An intentionally insecure test can still disable verification. | Builtin framework AST plus local bindings. High for the literal setting when the runtime is Node's process. | Framework fixtures assert exact locations, both access forms, all three source languages, and negative controls. [Node.js environment variable](https://nodejs.org/api/cli.html#node_tls_reject_unauthorizedvalue) |
-| Node TLS per client (CWE-295) | Partial. JS/TS `tls-verification-disabled` matches an unquoted property set to `false` by spelling. | Resolve option to `node:https` or `node:tls` client construction, including quoted keys and local option objects. | Unrelated objects, server options whose effect depends on client-certificate mode, reviewed local test clients. | Resolve module and receiver, option property and overwrite order. High for a resolved client. | Compare literal options for a known agent with same-spelled unrelated objects and enabled verification. [Node.js TLS](https://nodejs.org/api/tls.html) |
-| Go TLS client config (CWE-295) | Partial. `go-tls-verification-disabled` matches keyed composite literals by field spelling. | Resolve `crypto/tls.Config` and direct literal field updates, including import aliases. | Unrelated structs, server-only settings, separately implemented certificate checks. | Resolve receiver and final config for client use. High for the setting, medium with custom verification. | Compare field assignment, verified callback and unrelated struct in parse-only fixtures. [Go crypto/tls](https://pkg.go.dev/crypto/tls#Config) |
+| Node TLS per client (CWE-295) | Covered for the resolved client forms below by the existing JS/TS `tls-verification-disabled` IDs, now native checks. | A final literal `rejectUnauthorized: false` in an options object passed to a resolved `https.Agent`, `https.get`, `https.request`, or `tls.connect`. | Unrelated objects and servers, enabled verification, later option overrides. | Import and local binding evidence with property order. High for the supported client signatures. | Verify aliased imports, quoted keys, local constants, third-party lookalikes, and spread/duplicate property order. [Node.js TLS](https://nodejs.org/api/tls.html) |
+| Go TLS client config (CWE-295) | Partial. `go-tls-verification-disabled` still matches keyed composite literals by spelling. `go-tls-verification-disabled-by-assignment` covers typed field writes. | A literal `true` written to a receiver evidenced as a standard-library `crypto/tls.Config` or pointer, including aliased imports. | Unrelated structs, server-only settings, separately implemented certificate checks. | Resolve the import and binding locally. High for the setting, medium for exposure with custom verification. | Verify typed parameters, local literals and declarations, a same-spelled struct, and shadowed `true`. [Go crypto/tls](https://pkg.go.dev/crypto/tls#Config) |
 | JVM TLS verifiers (CWE-295, CWE-297) | Partial. Java/Kotlin patterns for trust manager and hostname verifier shapes. | Resolve JVM trust manager or OkHttp hostname verifier and identify an unconditional accept, including builder and constant forms. | Same-spelled methods, callbacks delegating to platform checks, test transport stubs. | Resolve interface/member, inspect all exits and delegation. High for proven unconditional acceptance. | Include a verifier that delegates or throws, an unrelated method and an unconditional test callback. |
-| Rust TLS builders (CWE-295, CWE-297) | Partial. Separate reqwest/native-tls certificate and hostname rules for short chains, plus a rustls accept-all rule. | Resolve supported builder instances through other setters and locals, evaluate the final flag at build. | Verification restored before build, custom trusted root, unrelated lookalike. | Builder identity and last-write ordering, versioned API names. High for known call on finalized builder. | Compare both flag orders, blocking and async reqwest, native-tls and unrelated builder. [Reqwest ClientBuilder](https://docs.rs/reqwest/latest/reqwest/struct.ClientBuilder.html) |
+| Rust TLS builders (CWE-295, CWE-297) | Covered for the builder forms below by `rust-tls-invalid-certificates` and `rust-tls-invalid-hostnames`. The rustls accept-all rule still covers its separate API. | Resolved reqwest and native-tls builders whose last certificate or hostname setter before `build()` has a literal `true`. | Verification restored before build, unrelated lookalike, externally configured TLS backend. | Native Rust import evidence and bounded builder ordering. High for the recognized constructors and setters. | Verify both flag orders, async and blocking reqwest, mutable native-tls, and opaque builder mutations. [reqwest ClientBuilder](https://docs.rs/reqwest/latest/reqwest/struct.ClientBuilder.html) · [native-tls TlsConnectorBuilder](https://docs.rs/native-tls/latest/native_tls/struct.TlsConnectorBuilder.html) |
 | Plaintext credentials (CWE-319) | Partial. `rust-reqwest-plaintext-auth` for selected reqwest constructions. | Literal HTTP destination receives auth header or credential method in Go, JVM and web clients. | Explicit loopback test server, approved transport termination with a documented trust boundary. | URI scheme and credential flow on same request. High for the source pattern, medium for deployed exposure. | Compare equivalent HTTP/HTTPS fixture requests through a transport stub. |
 | Legacy TLS protocol floor (CWE-326, CWE-327) | Gap. TLS opt-out patterns cover verification behavior. | Explicit lower protocol floor at a resolved client/server TLS config in Go, JVM, Node or Rust. | Compatibility profile approved for bounded endpoints, runtime raises the configured floor. | Literal/enum resolution and version-aware protocol policy. High for a policy mismatch. | Accept exact policy floor and reject a lower value in parser fixtures. |
 
@@ -93,10 +93,28 @@ unescaped single- and double-quoted string values. Numeric coercion, aliases,
 explicit imports of the Node process module, computed or escaped values, compound
 assignments, environment files, deployment configuration, and shell commands
 remain outside its scope. Local binding detection covers common parameters,
-declarations, and imports. Loop-header bindings and TypeScript-specific
-declarations can remain unresolved. The check does not infer whether a
+declarations, loop bindings, and imports. TypeScript-specific declarations
+can remain unresolved. The check does not infer whether a
 particular connection overrides the process default or whether a browser
 supplies a different global `process`.
+
+The resolved transport batch has these bounds:
+
+- Node resolves default, namespace, and named client imports, along with direct
+  CommonJS loads and const namespace bindings. It checks literal options and
+  same-block const objects with no earlier use. It handles options-first HTTPS
+  and TLS calls, HTTPS requests with a literal URL followed by options, and
+  TLS connections with a literal port or socket path followed by options.
+  A later spread or computed key can obscure the final value. Dynamic require,
+  module patching, and other overloads are outside this analysis.
+- Go recognizes same-block declarations with an explicit TLS type or a
+  TLS config literal and directly declared parameters in the function body.
+  It reports the write itself. Proving client use, custom verification, or
+  later resets requires further flow analysis.
+- Rust follows fluent calls and same-block builder locals. It also recognizes
+  standalone native-tls setters in that block. A later false or dynamic setting
+  masks an earlier true. Opaque methods, backend replacement, and unresolved
+  mutations end the proof.
 
 ## Build, deployment, and source integrity
 
@@ -141,8 +159,7 @@ supplies a different global `process`.
 
 ## Further implementation batches
 
-1. **Transport settings with known identities.** Add resolved Node client options, Go TLS field assignment, and Rust builder ordering in separate fixtures. Keep certificate chain and hostname findings distinct.
-2. **Explicit security downgrades.** Add versioned JWT claim options, Spring/Express cookie flags, and crypto mode or password-cost policy checks. Prefer registered API settings with safe defaults as controls.
-3. **Output and dataflow boundaries.** Add DOM/React raw HTML and archive extraction sinks. Extend query/command/URL coverage one resolved framework API at a time, including guard and sanitizer tests.
-4. **Workflow and dependency policy.** Add structured workflow shell interpolation and job permission checks. Evaluate one offline advisory adapter at a time with affected-range boundaries and missing-feed diagnostics.
-5. **Project-defined authorization and resource policy.** Start with explicit route/entity policies and registered verifier results. Add workload limits and race checks after the project can describe trusted resources and required invariants.
+1. **Explicit security downgrades.** Add versioned JWT claim options, Spring/Express cookie flags, and crypto mode or password-cost policy checks. Prefer registered API settings with safe defaults as controls.
+2. **Output and dataflow boundaries.** Add DOM/React raw HTML and archive extraction sinks. Extend query/command/URL coverage one resolved framework API at a time, including guard and sanitizer tests.
+3. **Workflow and dependency policy.** Add structured workflow shell interpolation and job permission checks. Evaluate one offline advisory adapter at a time with affected-range boundaries and missing-feed diagnostics.
+4. **Project-defined authorization and resource policy.** Start with explicit route/entity policies and registered verifier results. Add workload limits and race checks after the project can describe trusted resources and required invariants.

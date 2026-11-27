@@ -309,6 +309,7 @@ fn known_crate(name: &str) -> bool {
             | "rusqlite"
             | "mockall"
             | "reqwest"
+            | "native_tls"
             | "tracing"
             | "tempfile"
             | "rustls"

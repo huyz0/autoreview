@@ -16,6 +16,21 @@ pub(super) struct File {
     context: HashSet<String>,
 }
 
+pub(super) fn package_alias<'a>(file: &'a File, path: &str, default: &'a str) -> Option<&'a str> {
+    descendants(file.root())
+        .filter(|node| node.kind() == "import_spec")
+        .find_map(|import| {
+            let value = text(import.child_by_field_name("path")?, &file.source);
+            if value.trim_matches(['"', '`']) != path {
+                return None;
+            }
+            let alias = import
+                .child_by_field_name("name")
+                .map_or(default, |name| text(name, &file.source));
+            (!matches!(alias, "." | "_")).then_some(alias)
+        })
+}
+
 pub(super) fn load(root: &Path, directory: &Path) -> Vec<File> {
     let Ok(entries) = std::fs::read_dir(root.join(directory)) else {
         return Vec::new();

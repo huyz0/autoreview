@@ -1519,6 +1519,40 @@ fn rust_design_and_performance_findings_follow_aspect_filters() {
 }
 
 #[test]
+fn tls_report_keeps_distinct_verification_checks() {
+    let source = r#"
+fn client() {
+    reqwest::Client::builder().danger_accept_invalid_certs(true).danger_accept_invalid_hostnames(true).build();
+    reqwest::Client::builder().danger_accept_invalid_certs(true).danger_accept_invalid_certs(false).build();
+}
+"#;
+    let node = r#"import https from 'node:https';
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+https.get({ rejectUnauthorized: false });
+"#;
+    let repo = init_repo_with_diff(
+        &[("client.rs", "fn client() {}\n")],
+        &[("client.rs", source), ("client.js", node)],
+        "add TLS builder fixture",
+    );
+    let report = static_review_report(&repo, "main~1", None);
+    let mut findings: Vec<_> = report["findings"].as_array().unwrap().iter()
+        .filter_map(|finding| {
+            let id = finding["source"]["ruleId"].as_str()?;
+            (id.contains("tls-invalid") || id.contains("tls-verification-disabled"))
+                .then(|| (id, finding["location"]["range"]["startLine"].as_u64().unwrap()))
+        })
+        .collect();
+    findings.sort_unstable();
+    assert_eq!(findings, [
+        ("javascript-tls-verification-disabled", 3),
+        ("node-tls-verification-disabled-by-environment", 2),
+        ("rust-tls-invalid-certificates", 3),
+        ("rust-tls-invalid-hostnames", 3),
+    ]);
+}
+
+#[test]
 fn scoped_rust_rules_report_explain_and_replay_historical_commits() {
     let repo = init_repo(&[("lib.rs", "fn now() {}\n")]);
     let base = current_commit(repo.path());
