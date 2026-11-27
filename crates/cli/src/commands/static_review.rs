@@ -301,10 +301,11 @@ fn cross_file(
         changed_files,
         tier4_go,
     ));
+    let dataflow_files: Vec<_> = changed_files.iter().filter(|path| !deleted_in_snapshot(source_root, path)).cloned().collect();
     let dataflow = autoreview_core::run_dataflow_check_with_coverage(
         repo_root,
         source_root,
-        changed_files,
+        &dataflow_files,
         registered_packs,
     );
     findings.extend(dataflow.findings);
@@ -325,4 +326,31 @@ fn cross_file(
         changed_files,
     ));
     findings
+}
+
+// `changed_files` comes from a Git diff, which includes deleted paths. Only
+// exclude a missing path when the review snapshot's own HEAD confirms that
+// it is absent; an unavailable Git state must not silently hide a skip.
+fn deleted_in_snapshot(root: &Path, path: &str) -> bool {
+    if root.join(path).symlink_metadata().is_ok() || !root.join(".git").exists() { return false; }
+    Command::new("git").current_dir(root)
+        .args(["--literal-pathspecs", "ls-tree", "-z", "HEAD", "--", path])
+        .output().is_ok_and(|result| result.status.success() && result.stdout.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deleted_in_snapshot;
+
+    #[test]
+    fn deleted_snapshot_paths_are_distinguished_from_missing_tracked_sources() {
+        let repo = autoreview_test_support::init_repo(&[("tracked.go", "package example\n"), ("present.go", "package example\n")]);
+        assert!(!deleted_in_snapshot(repo.path(), "present.go"));
+        std::fs::remove_file(repo.path().join("tracked.go")).unwrap();
+        assert!(!deleted_in_snapshot(repo.path(), "tracked.go"));
+        assert!(deleted_in_snapshot(repo.path(), "deleted.go"));
+        let invalid = tempfile::tempdir().unwrap();
+        std::fs::create_dir(invalid.path().join(".git")).unwrap();
+        assert!(!deleted_in_snapshot(invalid.path(), "missing.go"));
+    }
 }
