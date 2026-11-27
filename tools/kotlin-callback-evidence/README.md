@@ -90,6 +90,14 @@ files at 512, individual files at 4 MiB, total source at 16 MiB, records at
 20,000, and output at 1 MiB; exceeding a limit fails compilation. It refuses
 to overwrite an existing output file.
 
+When the dispatch receiver is a direct property getter, optionally wrapped by
+the compiler's null check, the record includes `receiverProperty` and the
+`observedSetterCallees` from setter calls in the supplied compilation inputs.
+An unknown setter argument is `null`. These observations exclude direct field
+writes, initializers, reflection, and sources outside the supplied inputs;
+they do not prove that all writes or runtime receiver types are known. The
+probe caps observed setter calls at 512 per property and 20,000 in total.
+
 Only direct SAM conversions represented in compiler IR as call arguments are
 recorded. Absence of a record does not establish absence of a callback. A
 callee name, parameter index, and SAM type do not uniquely identify an

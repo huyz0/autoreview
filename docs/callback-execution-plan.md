@@ -48,6 +48,10 @@ RediCloud revisions it is `org.apache.sshd.server.SshServer`; a compiler
 fixture with an overriding subclass shows why this does not establish the runtime class
 or whether the callback runs in the setter. This metadata remains unverified
 and does not affect findings or replay coverage.
+For both pinned revisions the probe also observes the `FileCluster.sshd`
+property and a setter call whose argument is `SshServer.setUpDefaultServer`.
+That list excludes field initializers, direct field writes, reflection and
+omitted sources; it is not yet proof of the property's complete value flow.
 The project also pins Kotlin 2.3.21. The experimental probe supports that
 version and 2.2.20 using separately built version-specific registrars; this
 does not by itself provide the project's complete source or classpath.
