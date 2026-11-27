@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 mod guards;
+mod go_guard;
 mod helper_coverage;
 mod parameters;
 
@@ -151,33 +152,10 @@ fn observed_before_branch(
     });
     straight_line(body, cfg, syntax, node, ignore_initial_hidden, |current, effects, hidden| {
         if hidden {
-            return Some(go_guard_observes(cfg, plan, syntax, current, effects, origin, &mut state));
+            return Some(go_guard::observes((cfg, plan, syntax, current), effects, origin, &mut state));
         }
         observe_straight_line(effects, origin, &mut state)
     })
-}
-
-fn go_guard_observes(cfg: &Cfg<Stmt>, plan: &Plan<'_, '_>, syntax: (Node<'_>, &[u8]), node: NodeId, effects: &[Effect], origin: &Origin, state: &mut State) -> bool {
-    if plan.spec.contract.as_ref().map(|contract| contract.language) != Some(super::super::ContractLanguage::Go) { return false; }
-    let mut conditional = cfg.nodes[node].evaluations.iter().filter_map(|range| super::effects::evaluation(syntax.0, range))
-        .filter(|value| has_conditional(*value, syntax.1, false));
-    let Some(value) = conditional.next() else { return false; };
-    if conditional.next().is_some() || value.kind() != "binary_expression" { return false; }
-    let Some(operator) = value.child_by_field_name("operator") else { return false; };
-    if !matches!(operator.kind(), "&&" | "||") { return false; }
-    let Some(left) = value.child_by_field_name("left").filter(|left| left.kind() == "binary_expression") else { return false; };
-    if !left.child_by_field_name("operator").is_some_and(|op| matches!(op.kind(), "==" | "!=")) { return false; }
-    let (Some(identifier), Some(nil)) = (left.child_by_field_name("left"), left.child_by_field_name("right")) else { return false; };
-    if identifier.kind() != "identifier" || nil.kind() != "nil" { return false; }
-    let Some(binding) = identifier.utf8_text(syntax.1).ok().and_then(|name| plan.syntax.local_result_binding(name, identifier.start_byte(), false)) else { return false; };
-    let place = Place::Local(binding);
-    for effect in effects {
-        if state.active && !supported_effect(effect) { return false; }
-        if matches!(effect, Effect::Read(read) if *read == place && state.active && state.aliases.contains(read)) { return true; }
-        if let Effect::Write(writes) = effect { update_aliases(writes, origin, state); }
-        if state.active && state.aliases.is_empty() { return false; }
-    }
-    false
 }
 
 fn observe_straight_line(effects: &[Effect], origin: &Origin, state: &mut State) -> Option<bool> {

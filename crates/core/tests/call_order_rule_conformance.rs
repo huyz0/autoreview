@@ -262,34 +262,28 @@ fn assert_partial_helper_coverage(root: &tempfile::TempDir, path: &str, rule: &s
     assert!(result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{path}: {:?} {:?}", result.findings, result.coverage);
 }
 
-#[test]
-fn go_result_observed_after_callback_argument() {
+fn assert_go_observed_and_conditional(source: &str, conditional: &str) {
     let path = "main.go";
     let rule = "go-os-rename-discarded-error";
-    let source = "package main\nimport \"os\"\nfunc run(a, b string, flag bool) error {\n err := os.Rename(func() string { if flag { return a }; return b }(), b)\n return err\n}\n";
     let root = write_single_file(path, source);
     let result = conditional_test_result(&root, path);
     assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{:?}", result.findings);
     assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{:?}", result.coverage);
-    let conditional = source.replace("return err", "if flag { return err }; return nil");
     std::fs::write(root.path().join(path), conditional).unwrap();
     let result = conditional_test_result(&root, path);
     assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)) || result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{:?} {:?}", result.findings, result.coverage);
 }
 
 #[test]
+fn go_result_observed_after_callback_argument() {
+    let source = "package main\nimport \"os\"\nfunc run(a, b string, flag bool) error {\n err := os.Rename(func() string { if flag { return a }; return b }(), b)\n return err\n}\n";
+    assert_go_observed_and_conditional(source, &source.replace("return err", "if flag { return err }; return nil"));
+}
+
+#[test]
 fn go_short_circuit_guard_observes_only_the_left_operand() {
-    let path = "main.go";
-    let rule = "go-os-rename-discarded-error";
     let source = "package main\nimport \"os\"\nfunc run(a, b string, flag bool) error {\n err := os.Rename(a, b)\n if err != nil && flag { return err }; return nil\n}\n";
-    let root = write_single_file(path, source);
-    let result = conditional_test_result(&root, path);
-    assert!(!result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)), "{:?}", result.findings);
-    assert!(!result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{:?}", result.coverage);
-    let conditional = source.replace("err != nil && flag", "flag && err != nil");
-    std::fs::write(root.path().join(path), conditional).unwrap();
-    let result = conditional_test_result(&root, path);
-    assert!(result.findings.iter().any(|hit| hit.source.rule_id.as_deref() == Some(rule)) || result.coverage.iter().any(|issue| issue.reason == "result_use_path_unmodeled" && issue.rule.as_deref() == Some(rule)), "{:?} {:?}", result.findings, result.coverage);
+    assert_go_observed_and_conditional(source, &source.replace("err != nil && flag", "flag && err != nil"));
 }
 
 fn assert_partial_helper_source(path: &str, rule: &str, source: &str) {
