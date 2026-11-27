@@ -10,9 +10,16 @@ import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
 import org.jetbrains.kotlin.config.KotlinCompilerVersion
 import org.jetbrains.kotlin.ir.IrElement
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
+import org.jetbrains.kotlin.ir.declarations.IrFunction
+import org.jetbrains.kotlin.ir.declarations.IrSimpleFunction
+import org.jetbrains.kotlin.ir.declarations.IrDeclarationOrigin
 import org.jetbrains.kotlin.ir.declarations.IrParameterKind
 import org.jetbrains.kotlin.ir.expressions.IrCall
 import org.jetbrains.kotlin.ir.expressions.IrFunctionExpression
+import org.jetbrains.kotlin.ir.expressions.IrFunctionReference
+import org.jetbrains.kotlin.ir.expressions.IrPropertyReference
+import org.jetbrains.kotlin.ir.expressions.IrSetField
+import org.jetbrains.kotlin.ir.expressions.IrConst
 import org.jetbrains.kotlin.ir.expressions.IrTypeOperator
 import org.jetbrains.kotlin.ir.expressions.IrTypeOperatorCall
 import org.jetbrains.kotlin.ir.symbols.UnsafeDuringIrConstructionAPI
@@ -46,6 +53,22 @@ private data class Record(
     val receiverStaticType: String?,
     val receiverProperty: String?,
     val observedSetterCallees: List<String?>?,
+    val propertyEvidence: PropertyEvidence?,
+)
+
+private data class PropertyEvidence(
+    val visibility: String,
+    val defaultGetter: Boolean,
+    val defaultSetter: Boolean,
+    val nullInitializer: Boolean,
+    val directFieldWrites: Int,
+    val accessorReferences: Int,
+)
+
+private data class PropertyObservations(
+    val setters: Map<IrPropertySymbol, List<String?>>,
+    val directWrites: Map<IrPropertySymbol, Int>,
+    val references: Map<IrPropertySymbol, Int>,
 )
 
 @OptIn(UnsafeDuringIrConstructionAPI::class)
@@ -68,16 +91,40 @@ internal class EvidenceExtension : IrGenerationExtension {
             }
         })
         val setters = mutableMapOf<IrPropertySymbol, MutableList<String?>>()
+        val fields = properties.mapNotNull { property -> property.owner.backingField?.symbol?.let { it to property } }.toMap()
+        val directWrites = mutableMapOf<IrPropertySymbol, Int>()
+        val references = mutableMapOf<IrPropertySymbol, Int>()
         var setterCount = 0
         moduleFragment.acceptChildrenVoid(object : IrVisitorVoid() {
+            private var function: IrFunction? = null
+            override fun visitFunction(declaration: IrFunction) {
+                val previous = function
+                function = declaration
+                declaration.acceptChildrenVoid(this)
+                function = previous
+            }
             override fun visitElement(element: IrElement) {
                 if (element is IrCall && collectSetter(element, properties, setters)) {
                     setterCount++
                     require(setterCount <= MAX_RECORDS) { "too many property setter calls" }
                 }
+                if (element is IrSetField) {
+                    val property = fields[element.symbol]
+                    if (property != null && (function?.symbol != property.owner.setter?.symbol || function?.origin != IrDeclarationOrigin.DEFAULT_PROPERTY_ACCESSOR)) {
+                        directWrites[property] = (directWrites[property] ?: 0) + 1
+                    }
+                }
+                if (element is IrFunctionReference) {
+                    val property = (element.symbol.owner as? IrSimpleFunction)?.correspondingPropertySymbol
+                    if (property != null && property in properties) references[property] = (references[property] ?: 0) + 1
+                }
+                if (element is IrPropertyReference && element.symbol in properties) {
+                    references[element.symbol] = (references[element.symbol] ?: 0) + 1
+                }
                 element.acceptChildrenVoid(this)
             }
         })
+        val observations = PropertyObservations(setters = setters, directWrites = directWrites, references = references)
         var totalSourceBytes = 0
         val digest = MessageDigest.getInstance("SHA-256")
         for (file in moduleFragment.files) {
@@ -89,7 +136,7 @@ internal class EvidenceExtension : IrGenerationExtension {
             val hash = digest.digest(bytes).joinToString("") { "%02x".format(it) }
             file.acceptChildrenVoid(object : IrVisitorVoid() {
                 override fun visitElement(element: IrElement) {
-                    if (element is IrCall) collect(call = element, path = path.toString(), hash = hash, records = records, setters = setters)
+                    if (element is IrCall) collect(call = element, path = path.toString(), hash = hash, records = records, observations = observations)
                     element.acceptChildrenVoid(this)
                 }
             })
@@ -102,7 +149,7 @@ internal class EvidenceExtension : IrGenerationExtension {
 }
 
 @OptIn(UnsafeDuringIrConstructionAPI::class)
-private fun collect(call: IrCall, path: String, hash: String, records: MutableList<Record>, setters: Map<IrPropertySymbol, List<String?>>) {
+private fun collect(call: IrCall, path: String, hash: String, records: MutableList<Record>, observations: PropertyObservations) {
     val owner = call.symbol.owner
     val callee = owner.fqNameWhenAvailable?.asString() ?: return
     if (call.startOffset < 0 || call.endOffset < call.startOffset) return
@@ -131,9 +178,24 @@ private fun collect(call: IrCall, path: String, hash: String, records: MutableLi
             },
             receiverStaticType = receiverStaticType,
             receiverProperty = property?.owner?.fqNameWhenAvailable?.asString(),
-            observedSetterCallees = property?.let { setters[it]?.toList() ?: emptyList() },
+            observedSetterCallees = property?.let { observations.setters[it]?.toList() ?: emptyList() },
+            propertyEvidence = property?.let { propertyEvidence(it, observations) },
         ))
     }
+}
+
+@OptIn(UnsafeDuringIrConstructionAPI::class)
+private fun propertyEvidence(symbol: IrPropertySymbol, observations: PropertyObservations): PropertyEvidence {
+    val property = symbol.owner
+    val initializer = property.backingField?.initializer?.expression as? IrConst
+    return PropertyEvidence(
+        visibility = property.visibility.toString(),
+        defaultGetter = property.getter?.origin == IrDeclarationOrigin.DEFAULT_PROPERTY_ACCESSOR,
+        defaultSetter = property.setter?.origin == IrDeclarationOrigin.DEFAULT_PROPERTY_ACCESSOR,
+        nullInitializer = initializer != null && initializer.value == null,
+        directFieldWrites = observations.directWrites[symbol] ?: 0,
+        accessorReferences = observations.references[symbol] ?: 0,
+    )
 }
 
 @OptIn(UnsafeDuringIrConstructionAPI::class)
@@ -185,6 +247,16 @@ private fun encode(records: List<Record>): String = buildString {
                 append(callee?.let(::quote) ?: JSON_NULL)
             }
             append(']')
+        }
+        append(",\"propertyEvidence\":")
+        val property = record.propertyEvidence
+        if (property == null) append(JSON_NULL) else {
+            append("{\"visibility\":").append(quote(property.visibility))
+            append(",\"defaultGetter\":").append(property.defaultGetter)
+            append(",\"defaultSetter\":").append(property.defaultSetter)
+            append(",\"nullInitializer\":").append(property.nullInitializer)
+            append(",\"directFieldWrites\":").append(property.directFieldWrites)
+            append(",\"accessorReferences\":").append(property.accessorReferences).append('}')
         }
         append(",\"parameterTypes\":[")
         record.parameterTypes.forEachIndexed { typeIndex, type ->

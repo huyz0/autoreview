@@ -97,6 +97,13 @@ An unknown setter argument is `null`. These observations exclude direct field
 writes, initializers, reflection, and sources outside the supplied inputs;
 they do not prove that all writes or runtime receiver types are known. The
 probe caps observed setter calls at 512 per property and 20,000 in total.
+`propertyEvidence` additionally records visibility, whether the getter and
+setter are default accessors, whether the field initializer is `null`, and
+counts of direct field writes and callable references observed in the supplied
+IR. The default setter's own field write is excluded from the direct-write
+count. Custom accessors, unknown setter inputs, omitted inputs, reflection,
+and runtime mutation must not be treated as verified value flow. These fields
+remain unverified diagnostics and never determine replay scoring.
 
 Only direct SAM conversions represented in compiler IR as call arguments are
 recorded. Absence of a record does not establish absence of a callback. A

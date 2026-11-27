@@ -4,7 +4,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use autoreview_schema::AgentFinding;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tree_sitter::Point;
 
@@ -35,6 +35,18 @@ struct Record {
     receiver_static_type: Option<String>,
     receiver_property: Option<String>,
     observed_setter_callees: Option<Vec<Option<String>>>,
+    property_evidence: Option<PropertyEvidence>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PropertyEvidence {
+    visibility: String,
+    default_getter: bool,
+    default_setter: bool,
+    null_initializer: bool,
+    direct_field_writes: u32,
+    accessor_references: u32,
 }
 
 pub(super) struct Evidence { by_file: HashMap<PathBuf, Vec<Record>> }
@@ -77,15 +89,20 @@ fn index_records(sources: &HashMap<PathBuf, (PathBuf, String)>, input: Vec<Recor
     for record in input {
         let path = record.path.canonicalize().map_err(|_| ())?;
         let (target, hash) = sources.get(&path).ok_or(())?;
-        if hash != &record.sha256 || record.callee.len() > 1024 || record.sam_type.len() > 1024 || record.modality.len() > 32
-            || record.receiver_static_type.as_ref().is_some_and(|name| name.len() > 1024)
-            || record.receiver_property.as_ref().is_some_and(|name| name.len() > 1024)
-            || record.observed_setter_callees.as_ref().is_some_and(|names| names.len() > 512 || names.iter().flatten().any(|name| name.len() > 1024)) { return Err(()); }
+        if hash != &record.sha256 || !valid_record(&record) { return Err(()); }
         let records = by_file.entry(target.clone()).or_default();
         if records.len() >= MAX_RECORDS_PER_FILE { return Err(()); }
         records.push(record);
     }
     Ok(by_file)
+}
+
+fn valid_record(record: &Record) -> bool {
+    record.callee.len() <= 1024 && record.sam_type.len() <= 1024 && record.modality.len() <= 32
+        && record.receiver_static_type.as_ref().is_none_or(|name| name.len() <= 1024)
+        && record.receiver_property.as_ref().is_none_or(|name| name.len() <= 1024)
+        && record.property_evidence.as_ref().is_none_or(|item| item.visibility.len() <= 32)
+        && record.observed_setter_callees.as_ref().is_none_or(|names| names.len() <= 512 && names.iter().flatten().all(|name| name.len() <= 1024))
 }
 
 impl Evidence {
@@ -103,7 +120,7 @@ impl Evidence {
         Some(serde_json::json!({ "status": "unverified", "callee": record.callee,
             "parameter": record.parameter, "samType": record.sam_type, "modality": record.modality,
             "receiverStaticType": record.receiver_static_type, "receiverProperty": record.receiver_property,
-            "observedSetterCallees": record.observed_setter_callees }))
+            "observedSetterCallees": record.observed_setter_callees, "propertyEvidence": record.property_evidence }))
     }
 }
 
@@ -182,6 +199,7 @@ mod tests {
         value["evidence"]["records"][0]["receiverStaticType"] = "example.Server".into();
         value["evidence"]["records"][0]["receiverProperty"] = "example.Owner.server".into();
         value["evidence"]["records"][0]["observedSetterCallees"] = serde_json::json!(["example.create", null]);
+        value["evidence"]["records"][0]["propertyEvidence"] = serde_json::json!({"visibility":"private", "defaultGetter":true, "defaultSetter":true, "nullInitializer":true, "directFieldWrites":0, "accessorReferences":0});
         let evidence = parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).unwrap();
         let mut findings = vec![finding()];
         let mut coverage = Vec::new();
@@ -190,6 +208,7 @@ mod tests {
         assert_eq!(metadata["receiverStaticType"], "example.Server");
         assert_eq!(metadata["receiverProperty"], "example.Owner.server");
         assert_eq!(metadata["observedSetterCallees"], serde_json::json!(["example.create", null]));
+        assert_eq!(metadata["propertyEvidence"]["defaultGetter"], true);
         assert_eq!(metadata["status"], "unverified");
         assert!(coverage.iter().any(|issue| issue.reason == "callback_execution_unresolved"));
         value["evidence"]["records"][0]["receiverStaticType"] = "x".repeat(1025).into();
