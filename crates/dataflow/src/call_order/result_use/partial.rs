@@ -114,6 +114,7 @@ fn find_unobserved(
 pub(super) fn has_observed_origin(
     body: &Body,
     cfg: &Cfg<Stmt>,
+    plan: &Plan<'_, '_>,
     syntax: (Node<'_>, &[u8]),
     unused: &[(NodeId, Origin)],
 ) -> bool {
@@ -125,7 +126,7 @@ pub(super) fn has_observed_origin(
                     .any(|write| match (&write.value, write.target) {
                         (Value::Source(origin), Some(Place::Local(_))) => {
                             !unused.iter().any(|(_, other)| other == origin)
-                                && !observed_before_branch(body, cfg, syntax, node, origin)
+                                && !observed_before_branch(body, cfg, plan, syntax, node, origin)
                         }
                         _ => false,
                     })
@@ -138,14 +139,45 @@ pub(super) fn has_observed_origin(
 fn observed_before_branch(
     body: &Body,
     cfg: &Cfg<Stmt>,
+    plan: &Plan<'_, '_>,
     syntax: (Node<'_>, &[u8]),
     node: NodeId,
     origin: &Origin,
 ) -> bool {
     let mut state = State::default();
-    straight_line(body, cfg, syntax, node, |effects| {
+    let ignore_initial_hidden = cfg.nodes[node].evaluations.iter().all(|range| {
+        super::effects::evaluation(syntax.0, range)
+            .is_some_and(|value| !has_conditional(value, syntax.1, true))
+    });
+    straight_line(body, cfg, syntax, node, ignore_initial_hidden, |current, effects, hidden| {
+        if hidden {
+            return Some(go_guard_observes(cfg, plan, syntax, current, effects, origin, &mut state));
+        }
         observe_straight_line(effects, origin, &mut state)
     })
+}
+
+fn go_guard_observes(cfg: &Cfg<Stmt>, plan: &Plan<'_, '_>, syntax: (Node<'_>, &[u8]), node: NodeId, effects: &[Effect], origin: &Origin, state: &mut State) -> bool {
+    if plan.spec.contract.as_ref().map(|contract| contract.language) != Some(super::super::ContractLanguage::Go) { return false; }
+    let mut conditional = cfg.nodes[node].evaluations.iter().filter_map(|range| super::effects::evaluation(syntax.0, range))
+        .filter(|value| has_conditional(*value, syntax.1, false));
+    let Some(value) = conditional.next() else { return false; };
+    if conditional.next().is_some() || value.kind() != "binary_expression" { return false; }
+    let Some(operator) = value.child_by_field_name("operator") else { return false; };
+    if !matches!(operator.kind(), "&&" | "||") { return false; }
+    let Some(left) = value.child_by_field_name("left").filter(|left| left.kind() == "binary_expression") else { return false; };
+    if !left.child_by_field_name("operator").is_some_and(|op| matches!(op.kind(), "==" | "!=")) { return false; }
+    let (Some(identifier), Some(nil)) = (left.child_by_field_name("left"), left.child_by_field_name("right")) else { return false; };
+    if identifier.kind() != "identifier" || nil.kind() != "nil" { return false; }
+    let Some(binding) = identifier.utf8_text(syntax.1).ok().and_then(|name| plan.syntax.local_result_binding(name, identifier.start_byte(), false)) else { return false; };
+    let place = Place::Local(binding);
+    for effect in effects {
+        if state.active && !supported_effect(effect) { return false; }
+        if matches!(effect, Effect::Read(read) if *read == place && state.active && state.aliases.contains(read)) { return true; }
+        if let Effect::Write(writes) = effect { update_aliases(writes, origin, state); }
+        if state.active && state.aliases.is_empty() { return false; }
+    }
+    false
 }
 
 fn observe_straight_line(effects: &[Effect], origin: &Origin, state: &mut State) -> Option<bool> {
@@ -163,9 +195,12 @@ fn observe_straight_line(effects: &[Effect], origin: &Origin, state: &mut State)
     None
 }
 
-fn has_conditional(node: Node<'_>, source: &[u8]) -> bool {
+fn has_conditional(node: Node<'_>, source: &[u8], skip_go_literals: bool) -> bool {
     let mut pending = vec![node];
     while let Some(node) = pending.pop() {
+        // A callback used to compute the result runs before the result exists.
+        // This exception is only used for the node creating that result.
+        if skip_go_literals && node.kind() == "func_literal" { continue; }
         if matches!(
             node.kind(),
             "ternary_expression"

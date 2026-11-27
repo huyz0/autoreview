@@ -25,16 +25,18 @@ pub(super) fn straight_line(
     cfg: &Cfg<Stmt>,
     syntax: (Node<'_>, &[u8]),
     mut node: NodeId,
-    mut check: impl FnMut(&[Effect]) -> Option<bool>,
+    ignore_initial_hidden: bool,
+    mut check: impl FnMut(NodeId, &[Effect], bool) -> Option<bool>,
 ) -> bool {
     let mut seen = BTreeSet::new();
+    let mut first = true;
     while seen.insert(node) {
-        if hidden_at(cfg, node, syntax) {
-            return false;
-        }
-        if let Some(result) = check(&body.effects[node]) {
+        let hidden = hidden_at(cfg, node, syntax) && !(first && ignore_initial_hidden);
+        first = false;
+        if let Some(result) = check(node, &body.effects[node], hidden) {
             return result;
         }
+        if hidden { return false; }
         let [next] = body.flow.successors[node].as_slice() else {
             return false;
         };
@@ -107,7 +109,7 @@ pub(super) fn guard(plan: &Plan<'_, '_>, name: &str) -> Option<IdentityOperand> 
 pub(super) fn hidden_at(cfg: &Cfg<Stmt>, node: NodeId, syntax: (Node<'_>, &[u8])) -> bool {
     cfg.nodes[node].evaluations.iter().any(|range| {
         super::super::effects::evaluation(syntax.0, range)
-            .is_some_and(|value| has_conditional(value, syntax.1))
+            .is_some_and(|value| has_conditional(value, syntax.1, false))
     })
 }
 
