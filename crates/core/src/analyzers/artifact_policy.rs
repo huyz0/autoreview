@@ -74,6 +74,9 @@ pub(super) fn rules() -> impl Iterator<Item = &'static Rule> {
         &super::protobuf_schema::UNRESERVED_TAG,
         &super::protobuf_schema::INCOMPATIBLE_FIELD,
         &super::framework_checks::outbox::RULE,
+        &super::framework_checks::route_policy::AUTHORIZATION,
+        &super::framework_checks::route_policy::LIMIT,
+        &super::framework_checks::route_policy::RACE,
     ].into_iter()
 }
 

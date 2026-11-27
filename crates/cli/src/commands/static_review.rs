@@ -109,6 +109,10 @@ fn artifact_findings(
     let mut findings = Vec::new();
     if input.wants("security") {
         findings.extend(autoreview_core::run_spring_session_policy(root, paths));
+        match autoreview_core::run_express_route_policy(root, paths, &checks.express_route_policies) {
+            Ok(items) => findings.extend(items),
+            Err(error) => record_warning(warnings, format!("Express route policy failed: {error}")),
+        }
         if checks.immutable_github_action_refs {
             findings.extend(autoreview_core::run_workflow_policy(root, paths));
         }

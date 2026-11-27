@@ -9,6 +9,7 @@ use autoreview_schema::{AgentFinding, OutboxOperationConfig};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use super::super::artifact_policy::Rule;
+use super::web::imported_operations::FileCalls;
 use super::web::is_function;
 use super::{descendants, location, web, Node};
 
@@ -66,7 +67,7 @@ fn inspect(path: &str, source: &str, file: Node<'_>, policies: &[Policy<'_>]) ->
     let Some(language) = language_for_path(Path::new(path)) else {
         return Vec::new();
     };
-    let file_calls = calls::FileCalls::new(file, source);
+    let file_calls = FileCalls::new(file, source);
     let functions: Vec<_> = descendants(file)
         .filter(|node| {
             is_function(*node)
@@ -78,7 +79,7 @@ fn inspect(path: &str, source: &str, file: Node<'_>, policies: &[Policy<'_>]) ->
 
     let mut pairs = BTreeMap::new();
     for policy in policies.iter().filter(|policy| policy.paths.is_match(path)) {
-        let Some(endpoints) = file_calls.resolve(policy.operation) else {
+        let Some(endpoints) = calls::resolve(&file_calls, policy.operation) else {
             continue;
         };
         for &function in &functions {
