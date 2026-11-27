@@ -60,7 +60,7 @@ def argument(value: str) -> str:
 
 def verified_report(report_path: pathlib.Path, sources: list[dict], inputs: list[dict]) -> dict:
     report = json.loads(read_limited(report_path, OUTPUT_LIMIT))
-    if report.get("version") != 2 or report.get("compiler") != "2.2.20" or not isinstance(report.get("records"), list):
+    if report.get("version") != 2 or report.get("compiler") not in ("2.2.20", "2.3.21") or not isinstance(report.get("records"), list):
         raise ValueError("invalid compiler evidence")
     for item in inputs:
         if digest(read_limited(item["original"], item["limit"])) != item["sha256"] or digest(read_limited(item["snapshot"], item["limit"])) != item["sha256"]:

@@ -7,9 +7,6 @@ import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
 import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
-import org.jetbrains.kotlin.compiler.plugin.CompilerPluginRegistrar
-import org.jetbrains.kotlin.compiler.plugin.ExperimentalCompilerApi
-import org.jetbrains.kotlin.config.CompilerConfiguration
 import org.jetbrains.kotlin.config.KotlinCompilerVersion
 import org.jetbrains.kotlin.ir.IrElement
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
@@ -31,15 +28,6 @@ private const val MAX_FILES = 512
 private const val MAX_RECORDS = 20_000
 private const val MAX_OUTPUT_BYTES = 1024 * 1024
 
-@OptIn(ExperimentalCompilerApi::class)
-class Registrar : CompilerPluginRegistrar() {
-    override val supportsK2 = true
-
-    override fun ExtensionStorage.registerExtensions(configuration: CompilerConfiguration) {
-        IrGenerationExtension.registerExtension(EvidenceExtension())
-    }
-}
-
 private data class Record(
     val path: String,
     val sha256: String,
@@ -55,9 +43,9 @@ private data class Record(
 )
 
 @OptIn(UnsafeDuringIrConstructionAPI::class)
-private class EvidenceExtension : IrGenerationExtension {
+internal class EvidenceExtension : IrGenerationExtension {
     override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
-        check(KotlinCompilerVersion.VERSION == "2.2.20") { "unsupported Kotlin compiler version" }
+        check(KotlinCompilerVersion.VERSION in setOf("2.2.20", "2.3.21")) { "unsupported Kotlin compiler version" }
         val output = System.getenv("AUTOREVIEW_CALLBACK_EVIDENCE_OUTPUT")
             ?: error("AUTOREVIEW_CALLBACK_EVIDENCE_OUTPUT is required")
         val records = mutableListOf<Record>()
@@ -114,7 +102,7 @@ private fun collect(call: IrCall, path: String, hash: String, records: MutableLi
 }
 
 private fun encode(records: List<Record>): String = buildString {
-    append("{\"version\":2,\"compiler\":\"2.2.20\",\"records\":[")
+    append("{\"version\":2,\"compiler\":").append(quote(KotlinCompilerVersion.VERSION)).append(",\"records\":[")
     records.forEachIndexed { index, record ->
         if (index != 0) append(',')
         append("{\"path\":").append(quote(record.path))
