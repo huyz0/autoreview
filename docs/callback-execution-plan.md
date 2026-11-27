@@ -52,6 +52,11 @@ For both pinned revisions the probe also observes the `FileCluster.sshd`
 property and a setter call whose argument is `SshServer.setUpDefaultServer`.
 That list excludes field initializers, direct field writes, reflection and
 omitted sources; it is not yet proof of the property's complete value flow.
+The compiler reports a private property with default accessors, a null field
+initializer, and no other observed direct field writes or accessor references
+in either compiled snapshot. The supplied source subset and external report
+are not independently authenticated by the review engine, so these facts
+still do not justify suppressing the finding.
 The project also pins Kotlin 2.3.21. The experimental probe supports that
 version and 2.2.20 using separately built version-specific registrars; this
 does not by itself provide the project's complete source or classpath.
