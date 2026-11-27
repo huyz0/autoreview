@@ -577,17 +577,13 @@ fn malformed_unknown_package_source_reaches_review_and_blocks_replay() {
     assert_jvm_dependency_coverage(&repo, changed, "package_index_syntax_errors", "unknown/Broken.kt");
 }
 
-#[test]
-fn commented_package_helper_is_resolved_in_review_and_replay() {
-    let bad = "package app\nimport support.risky\nfun run() {\n val value = risky()\n value.hashCode()\n}\n";
-    let fixed = "package app\nimport support.risky\nfun run() {\n val value = risky()\n if (value != null) { value.hashCode() }\n}\n";
-    let helper = "/*\npackage misleading.comment\n*/\npackage support\nfun risky(): String? {\n val value: String? = null\n return value\n}\n";
-    let repo = init_repo(&[("app/Main.kt", bad), ("support/Helper.kt", helper)]);
+fn assert_kotlin_npe_review_replay(bad: &str, fixed: &str, helper_path: &str, helper: &str, line: u32) {
+    let repo = init_repo(&[("app/Main.kt", bad), (helper_path, helper)]);
     let before = current_commit(repo.path());
     repo.commit(&[("app/Main.kt", fixed)], "guard result");
     let after = current_commit(repo.path());
     let suite = serde_json::json!({"cases": [{"name":"commented package helper", "rule":{"tool":"autoreview-dataflow","id":"npe-risk-from-helper-return"},
-        "before":{"commit":before,"path":"app/Main.kt","lines":[5]}, "after":{"commit":after,"path":"app/Main.kt","lines":[]}}]});
+        "before":{"commit":before,"path":"app/Main.kt","lines":[line]}, "after":{"commit":after,"path":"app/Main.kt","lines":[]}}]});
     let replay = successful_replay_report(repo.path(), &suite);
     assert_eq!(replay["coverage"][0]["completed"], 1, "{replay}");
     assert_eq!(replay["rules"][0]["truePositives"], 1, "{replay}");
@@ -597,6 +593,22 @@ fn commented_package_helper_is_resolved_in_review_and_replay() {
     let report = report_path_from_stdout(&String::from_utf8_lossy(&output.get_output().stdout));
     let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
     assert!(report["findings"].as_array().unwrap().iter().any(|finding| finding["source"]["ruleId"] == "npe-risk-from-helper-return" && finding["location"]["path"] == "app/Main.kt"), "{report}");
+}
+
+#[test]
+fn commented_package_helper_is_resolved_in_review_and_replay() {
+    let bad = "package app\nimport support.risky\nfun run() {\n val value = risky()\n value.hashCode()\n}\n";
+    let fixed = "package app\nimport support.risky\nfun run() {\n val value = risky()\n if (value != null) { value.hashCode() }\n}\n";
+    let helper = "/*\npackage misleading.comment\n*/\npackage support\nfun risky(): String? {\n val value: String? = null\n return value\n}\n";
+    assert_kotlin_npe_review_replay(bad, fixed, "support/Helper.kt", helper, 5);
+}
+
+#[test]
+fn commented_caller_package_resolves_same_package_helper_in_review_and_replay() {
+    let bad = "/*\npackage fake\n*/\npackage app\nfun run() {\n val value = risky()\n value.hashCode()\n}\n";
+    let fixed = "/*\npackage fake\n*/\npackage app\nfun run() {\n val value = risky()\n if (value != null) { value.hashCode() }\n}\n";
+    let helper = "/*\npackage misleading\n*/\npackage app\nfun risky(): String? {\n val value: String? = null\n return value\n}\n";
+    assert_kotlin_npe_review_replay(bad, fixed, "app/Helper.kt", helper, 7);
 }
 
 #[test]

@@ -236,4 +236,12 @@ impl SummaryCaches<'_> {
             path: relative, line: None, rule: Some(rule.into()), detail: detail.into(),
         });
     }
+
+    pub(super) fn report_entry_package_issue(&self, path: &str, rule: &str) {
+        self.summary_issues.borrow_mut().insert(autoreview_schema::AnalysisCoverageIssue {
+            analyzer: "dataflow".into(), reason: "entry_package_unresolved".into(), scope: "file".into(),
+            path: Some(path.into()), line: None, rule: Some(rule.into()),
+            detail: "The source package could not be resolved safely; same-package helper summaries may be incomplete.".into(),
+        });
+    }
 }
