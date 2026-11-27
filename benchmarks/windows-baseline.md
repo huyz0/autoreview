@@ -1,6 +1,29 @@
 # Windows historical replay baseline
 
-## Current run: main 340d40c
+## Current run: main 52ef6a3
+
+On Windows, the debug CLI built from the code merged as main commit
+`52ef6a3d70bae35380e7b5599a8ba583ca71b75f` replayed the pinned manifests
+below. The Go evidence probe source is unchanged from the previous baseline;
+its cached executable and isolated module caches were used with downloads off.
+The checkout and SFTPresso cases used their documented installed TypeScript
+versions and snapshot directories under their respective checkouts. The
+ast-grep cases used version 0.51.3.
+
+All 15 manifests have the same completed, incomplete, failed, and scored
+counts as the [earlier 340d40c run](#earlier-run-main-340d40c) below.
+
+The scored results match the previous baseline. Checkout reports 13 and 58
+`promise_type_unresolved` locations, respectively, in its before revisions;
+RediCloud reports one `callback_execution_unresolved` location. Replay stops
+an incomplete case at the first failing revision, so its after revision is not
+scored. The two Cilium false positives are the same unchanged line across the
+two snapshots. These counts describe selected examples and cannot establish
+population-wide accuracy. They continue to prioritize promise resolution,
+callback execution evidence, and call-specific error paths; expanding the
+historical corpus is also necessary to evaluate other rule families.
+
+## Earlier run: main 340d40c
 
 On Windows, the debug CLI and Go evidence probe built from main commit
 `340d40c60f1288088e312c77cf00ef9129158001` replayed the pinned manifests
