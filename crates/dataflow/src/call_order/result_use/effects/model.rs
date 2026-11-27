@@ -4,6 +4,7 @@ use super::super::{Live, Place};
 pub(in crate::call_order::result_use) struct Origin {
     pub(in crate::call_order::result_use) call: String,
     pub(in crate::call_order::result_use) start: usize,
+    pub(in crate::call_order::result_use) end: usize,
     pub(in crate::call_order::result_use) component: Option<usize>,
     pub(in crate::call_order::result_use) line: u32,
     pub(in crate::call_order::result_use) path: Option<String>,

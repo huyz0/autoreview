@@ -35,7 +35,7 @@ pub(in crate::call_order::result_use) fn helper_paths(
     for (node, origin) in source_origins(body, |place| {
         matches!(
             place,
-            Place::Local(_) | Place::CallResult(_) | Place::CallComponent(_, _)
+            Place::Local(_) | Place::CallResult(_, _) | Place::CallComponent(_, _)
         )
     }) {
         if unused.iter().any(|(_, other)| *other == origin) {
@@ -77,14 +77,14 @@ fn precise_effect(effect: &Effect) -> bool {
     match effect {
         Effect::Read(place) => matches!(
             place,
-            Place::Local(_) | Place::CallResult(_) | Place::CallComponent(_, _)
+            Place::Local(_) | Place::CallResult(_, _) | Place::CallComponent(_, _)
         ),
         Effect::Write(writes) => writes.iter().all(|write| {
             write.target.is_none_or(|place| {
                 matches!(
                     place,
                     Place::Local(_)
-                        | Place::CallResult(_)
+                        | Place::CallResult(_, _)
                         | Place::CallComponent(_, _)
                         | Place::Return
                 )
@@ -92,7 +92,7 @@ fn precise_effect(effect: &Effect) -> bool {
                 write.value,
                 Value::Source(_)
                     | Value::Copy(
-                        Place::Local(_) | Place::CallResult(_) | Place::CallComponent(_, _)
+                        Place::Local(_) | Place::CallResult(_, _) | Place::CallComponent(_, _)
                     )
                     | Value::Other
             )

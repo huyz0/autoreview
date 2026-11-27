@@ -265,7 +265,7 @@ impl Lower<'_, '_, '_> {
             return Value::Copy(binding);
         }
         if self.closure_call(value).is_some() || self.helper_call(value).is_some() {
-            let output = Place::CallResult(value.start_byte());
+            let output = Place::CallResult(value.start_byte(), value.end_byte());
             self.reads_with(value, effects, Demand::Slot(output));
             return Value::Copy(output);
         }
@@ -354,6 +354,7 @@ impl Lower<'_, '_, '_> {
         Some(Origin {
             call,
             start: node.start_byte(),
+            end: node.end_byte(),
             component: None,
             line: node.start_position().row as u32 + 1,
             path: None,

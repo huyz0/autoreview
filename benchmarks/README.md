@@ -294,6 +294,10 @@ promise sources in both calls requires a call-site identity that also includes
 their ending offset. The TypeScript probe accepts an optional ending byte
 offset and validates an exact call, but review and replay still pass only
 starting offsets; the probe support alone does not resolve these cases.
+The result-use engine keeps temporary call results and origins distinct by
+their full spans. Source discovery, helper resolution, and reporting still need
+to carry those identities before nested promise sources can be analyzed
+independently end to end.
 With shared offsets handled conservatively, the same Windows setup reported 13
 and 60 unresolved locations in the respective before revisions, down from 14
 and 63 when all shared offsets were left unresolved. These are coverage
