@@ -63,6 +63,8 @@ pub(super) fn rule_metadata(reference: &str, subcategories: &[&str]) -> std::col
 pub(super) fn rules() -> impl Iterator<Item = &'static Rule> {
     [
         &super::workflow_policy::RULE,
+        &super::workflow_security::SCRIPT_INPUT,
+        &super::workflow_security::WRITE_ALL,
         &super::spring_session_policy::SECURE,
         &super::spring_session_policy::HTTP_ONLY,
         &super::postgres_migrations::RULE,

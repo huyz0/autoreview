@@ -6,6 +6,11 @@ pub struct ArtifactChecksConfig {
     #[serde(default)]
     pub immutable_github_action_refs: bool,
     #[serde(default)]
+    pub github_actions_script_inputs: bool,
+    #[serde(default)]
+    pub github_actions_least_privilege: bool,
+    pub npm_advisory_snapshot: Option<String>,
+    #[serde(default)]
     pub transactional_postgres_migrations: Vec<String>,
     #[serde(default)]
     pub locale_catalogs: Vec<LocaleCatalogConfig>,

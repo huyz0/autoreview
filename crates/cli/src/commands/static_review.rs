@@ -47,6 +47,11 @@ pub(super) fn collect(
             &mut coverage,
         ));
     }
+    if let Some(snapshot) = input.artifact_checks.npm_advisory_snapshot.as_deref()
+        .filter(|_| input.wants("security"))
+    {
+        findings.extend(audit_npm(&input, changed_files, snapshot, &mut warnings, &mut coverage));
+    }
     findings.extend(artifact_findings(&input, changed_files, &mut warnings));
     findings.extend(structural(
         input.source_root,
@@ -75,10 +80,22 @@ fn record_tool_issue(
     warnings: &mut Vec<String>, coverage: &mut Vec<AnalysisCoverageIssue>,
     tool: &str, reason: &str, message: String,
 ) {
+    record_coverage_issue(warnings, coverage, (tool, reason), None, message);
+}
+
+fn record_coverage_issue(
+    warnings: &mut Vec<String>,
+    coverage: &mut Vec<AnalysisCoverageIssue>,
+    tool_and_reason: (&str, &str),
+    path: Option<&str>,
+    message: String,
+) {
     record_warning(warnings, message.clone());
+    let (tool, reason) = tool_and_reason;
     coverage.push(AnalysisCoverageIssue {
-        analyzer: tool.into(), reason: reason.into(), scope: "analyzer".into(),
-        path: None, line: None, rule: None, detail: message,
+        analyzer: tool.into(), reason: reason.into(),
+        scope: if path.is_some() { "file" } else { "analyzer" }.into(),
+        path: path.map(str::to_owned), line: None, rule: None, detail: message,
     });
 }
 
@@ -95,6 +112,7 @@ fn artifact_findings(
         if checks.immutable_github_action_refs {
             findings.extend(autoreview_core::run_workflow_policy(root, paths));
         }
+        findings.extend(autoreview_core::run_workflow_security(root, paths, checks));
     }
     if !input.wants("correctness") {
         return findings;
@@ -182,13 +200,41 @@ fn audit_dependencies(
     }) {
         match autoreview_core::run_cargo_audit(root, path) {
             Ok(items) => findings.extend(items),
-            Err(err) => {
-                record_tool_issue(warnings, coverage, "cargo-audit", "tool_failed", format!("cargo audit failed for {path}: {err:#}"));
-                if let Some(issue) = coverage.last_mut() {
-                    issue.scope = "file".into();
-                    issue.path = Some(path.clone());
-                }
-            }
+            Err(err) => record_coverage_issue(warnings, coverage, ("cargo-audit", "tool_failed"),
+                Some(path), format!("cargo audit failed for {path}: {err:#}")),
+        }
+    }
+    findings
+}
+
+fn audit_npm(
+    input: &ReviewInput<'_>,
+    paths: &[String],
+    snapshot: &str,
+    warnings: &mut Vec<String>,
+    coverage: &mut Vec<AnalysisCoverageIssue>,
+) -> Vec<AgentFinding> {
+    let tool = "autoreview-npm-osv";
+    let paths: Vec<_> = paths.iter().filter(|path| {
+        Path::new(path).file_name().is_some_and(|name| name == "package-lock.json")
+    }).collect();
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    let advisories = match autoreview_core::NpmAdvisories::load(&input.repo_root.join(snapshot)) {
+        Ok(advisories) => advisories,
+        Err(error) => {
+            record_tool_issue(warnings, coverage, tool, "advisory_snapshot_unavailable",
+                format!("npm advisory coverage unavailable: {error:#}"));
+            return Vec::new();
+        }
+    };
+    let mut findings = Vec::new();
+    for path in paths {
+        match autoreview_core::audit_npm_lock(input.source_root, path, &advisories) {
+            Ok(items) => findings.extend(items),
+            Err(error) => record_coverage_issue(warnings, coverage, (tool, "lockfile_unavailable"),
+                Some(path), format!("npm advisory coverage unavailable for {path}: {error:#}")),
         }
     }
     findings

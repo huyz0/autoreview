@@ -17,10 +17,20 @@ pub(super) const RULE: Rule = Rule {
 };
 
 pub fn run_workflow_policy(root: &Path, files: &[String]) -> Vec<AgentFinding> {
+    review_workflows(root, files, check_workflow)
+}
+
+pub(super) fn review_workflows(
+    root: &Path,
+    files: &[String],
+    analyze: impl Fn(&str, &str) -> Vec<AgentFinding>,
+) -> Vec<AgentFinding> {
     let Ok(root) = root.canonicalize() else { return Vec::new() };
     files.iter().filter(|path| workflow_path(Path::new(path))).flat_map(|path| {
-        read_snapshot_file(&root, Path::new(path))
-            .map_or_else(Vec::new, |source| check_workflow(path, &source))
+        let Some(source) = read_snapshot_file(&root, Path::new(path)) else { return Vec::new() };
+        let mut findings = analyze(path, &source);
+        findings.sort_by_key(|finding| finding.location.range.start_line);
+        findings
     }).collect()
 }
 
@@ -54,7 +64,6 @@ fn check_workflow(path: &str, source: &str) -> Vec<AgentFinding> {
         }
         findings.extend(locations.into_iter().map(|(line, source)| finding(path, &reference, line, source)));
     }
-    findings.sort_by_key(|finding| finding.location.range.start_line);
     findings
 }
 

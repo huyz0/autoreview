@@ -123,16 +123,32 @@ pattern, flow, threshold, framework, Rust-specific, and artifact rules.
 React interval cleanup now traces aliases through direct setup and
 cleanup branches. The Prisma check resolves the outer client through
 module-level aliases and distinguishes unrelated clients. The GitHub
-Actions pack checks external references in changed workflow files when
-the repository opts in:
+Actions policies and the npm advisory scan are opt-in artifact checks.
 
 ```yaml
 artifactChecks:
   immutableGithubActionRefs: true
+  githubActionsScriptInputs: true
+  githubActionsLeastPrivilege: true
+  npmAdvisorySnapshot: ../review-data/npm-osv
 ```
 
-It reports unpinned action steps and reusable workflows with a
-single-line `uses` value. Local actions and full commit SHAs pass.
+`immutableGithubActionRefs` reports unpinned external action steps and
+reusable workflows. `githubActionsScriptInputs` checks direct expressions
+for selected event fields in a step's `run` value. Use an environment
+variable to pass those values as data. `githubActionsLeastPrivilege`
+checks explicit `write-all` at the job level and workflow grants that at
+least one job inherits. Jobs with their own narrow grants pass. [GitHub script injections](https://docs.github.com/en/actions/concepts/security/script-injections) [GitHub permissions](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#permissions)
+
+`npmAdvisorySnapshot` names a local directory of OSV JSON records, such as
+an extracted npm ecosystem export prepared by the reviewer. Paths can
+be absolute or relative to the working checkout. Autoreview scans changed
+`package-lock.json` version 2 and 3 files for exact locked versions from
+`registry.npmjs.org`. It reads explicit versions and SemVer or ecosystem
+ranges, and skips withdrawn advisories and Git commit ranges. A missing,
+empty or invalid snapshot appears under `analysisCoverage` in the report.
+Snapshot freshness and which lockfiles changed determine scan coverage.
+[OSV data](https://google.github.io/osv.dev/data/) [npm lockfile](https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/)
 
 Additional local checks report an ignored Node writable-stream
 backpressure signal in a recognized producer loop, use of a fresh
