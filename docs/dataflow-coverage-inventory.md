@@ -62,7 +62,7 @@ a call directly in an unsupported arm is reported separately.
 
 | Condition | Current behavior | Evidence to report |
 | --- | --- | --- |
-| Changed or imported source cannot be read or parsed | Entry files report `source_unavailable`; cross-file call-sequence dependencies report `dependency_unavailable`. Go and Java/Kotlin candidate helper-summary scans report rule-scoped `summary_dependency_unavailable` or `summary_dependency_syntax_errors`. When the Java/Kotlin package index is used, unavailable sources or directories produce `package_index_unavailable`; readable files with no recognizable package are parsed, and malformed ones produce `package_index_syntax_errors`. A file's package cannot safely be inferred from its path. The Git review path excludes absent diff paths only when the snapshot's HEAD confirms they were deleted. A failed Git check remains an entry warning. | Discovery still skips configured excluded directories and symbolic links. Text-based package extraction can misclassify malformed or commented package declarations. Legacy same-package summaries scan only the current directory; report precise failure reasons where available. |
+| Changed or imported source cannot be read or parsed | Entry files report `source_unavailable`; cross-file call-sequence dependencies report `dependency_unavailable`. Go and Java/Kotlin candidate helper-summary scans report rule-scoped `summary_dependency_unavailable` or `summary_dependency_syntax_errors`. The Java/Kotlin helper package index parses candidate declarations: unavailable sources or directories produce `package_index_unavailable`, malformed declarations produce `package_index_syntax_errors`, and unsupported package names produce `package_index_unresolved`. A file's package cannot safely be inferred from its path. The Git review path excludes absent diff paths only when the snapshot's HEAD confirms they were deleted. A failed Git check remains an entry warning. | Discovery still skips configured excluded directories and symbolic links. Other package and import extraction paths remain text-based, and legacy same-package summaries scan only the current directory. |
 | Cross-file call-sequence discovery reaches its 64-dependency limit | The resolver stops loading sources. | Entry scope, limit, and whether an unvisited dependency remains. Do not warn merely because the queue contains already loaded duplicates. |
 | Keyed lowering exceeds the finally-path copying limit | `keyed_flow` reaches zero and `Plan::new` declines the function. | File, function location, and affected call-sequence analysis. |
 | Rust function contains control flow the lowerer cannot model | The lowerer skips the function body; review reports `unsupported_rust_control_flow` per applicable rule and replay treats the case as incomplete. | File, function location, and affected rule. Entry functions and imported helpers reachable through supported calls are included. |
@@ -85,6 +85,11 @@ reported zero `package_index_*` issues. The previous-main and modified builds
 took 7.02 and 6.43 seconds for JPlag, and 9.61 and 8.17 seconds for RediCloud,
 respectively. These sequential single runs include checkout and other analyzers;
 they are not a reliable estimate of typical performance or warning frequency.
+After switching the helper index to parsed package declarations, single
+Windows debug reviews of the same diffs took 7.91/7.62 seconds before/after
+for JPlag and 10.82/10.76 seconds for RediCloud, with no package-index warnings.
+These end-to-end timings include other analyzers and do not establish general
+performance or accuracy.
 
 The experimental Go error probe distinguishes package or call-site budget
 exhaustion, package loading, type checking, snapshot mismatches, and rejected
