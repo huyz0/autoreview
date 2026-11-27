@@ -150,8 +150,14 @@ jobs:
 
       - name: Install TypeScript for checker tests
         run: |
-          npm install --prefix "$RUNNER_TEMP/autoreview-typescript" --no-save --no-audit --no-fund typescript@5.9.3
+          npm install --prefix "$RUNNER_TEMP/autoreview-typescript" --no-save --no-audit --no-fund typescript@5.9.3 @actions/core@1.1.3 @types/node@12.7.12
           echo "AUTOREVIEW_TEST_TYPESCRIPT=$RUNNER_TEMP/autoreview-typescript/node_modules/typescript" >> "$GITHUB_ENV"
+          echo "AUTOREVIEW_TEST_ACTIONS_CORE=$RUNNER_TEMP/autoreview-typescript/node_modules/@actions/core" >> "$GITHUB_ENV"
+          echo "AUTOREVIEW_TEST_NODE12_TYPES=$RUNNER_TEMP/autoreview-typescript/node_modules/@types/node" >> "$GITHUB_ENV"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/node12.tar.xz" https://nodejs.org/dist/v12.22.12/node-v12.22.12-linux-x64.tar.xz
+          echo 'e6d052364bfa2c17da92cf31794100cfd709ba147415ddaeed2222eec9ca1469  '"$RUNNER_TEMP/node12.tar.xz" | sha256sum --check
+          tar -xJf "$RUNNER_TEMP/node12.tar.xz" -C "$RUNNER_TEMP" node-v12.22.12-linux-x64/bin/node
+          echo "AUTOREVIEW_TEST_NODE12_BINARY=$RUNNER_TEMP/node-v12.22.12-linux-x64/bin/node" >> "$GITHUB_ENV"
 
       - name: Test TypeScript checker
         run: node --test crates/core/tests/typescript_promise_probe.test.cjs

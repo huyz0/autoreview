@@ -164,9 +164,39 @@ mutable bindings, returned values, and exhausted walks remain unresolved.
 Nested function returns do not describe the outer function. A directly called
 immutable local async function literal is instead verified as a promise source
 even when its contextual type says `void`; async generators remain unresolved.
-This
-observation does not classify the return type, and an unresolved call on the
-same line still retains its warning. Unavailable sources, project errors,
+This observation does not classify the return type, and an unresolved call on
+the same line still retains its warning.
+An additional opt-in, `AUTOREVIEW_TYPESCRIPT_TRUST_ACTIONS_CORE_1_1_3=1`,
+certifies that the deployed `@actions/core` module and its exports are not
+replaced or mutated at runtime. Under that assumption, the checker can use
+audited synchronous implementations from version 1.1.3. It requires exact
+declaration and implementation hashes, matching runtime module resolution,
+CommonJS output, and namespace imports with no visible mutation or escape in
+the TypeScript program. Unknown packages, source mutations, changed files, and
+other module forms remain incomplete. The check does not establish absence of
+mutations inside dependencies, dynamic loading hooks, or runtime instrumentation;
+the opt-in must only be used when those are excluded by the deployment context.
+`AUTOREVIEW_TYPESCRIPT_TRUST_NODE_12_22_12` can point to an absolute, audited
+Node 12.22.12 executable when that exact runtime is deployed and its built-ins
+are not replaced or mutated. The checker verifies an approved executable hash,
+the exact Node 12.7.12 declaration files, symbol identity, and visible uses in
+the TypeScript program before recognizing `Buffer.from`, `setTimeout`,
+`assert.ok`, `fs.statSync`, `Object.keys`, and limited literal-argument string
+`match` and `split` calls as synchronous. The executable path is an explicit deployment
+attestation; the checker cannot verify loader hooks, mutations in dependencies,
+or the identity of a remote runtime. Unknown runtimes, aliases, augmented
+declarations, and visible mutations remain incomplete.
+`AUTOREVIEW_TYPESCRIPT_TRUST_EMITTED_GRAPH=1` additionally certifies a closed
+deployment: TypeScript's configured CommonJS emit describes runtime imports,
+external code does not dynamically load omitted project modules or mutate
+project exports, and methods are not rebound through unmodeled indirect calls.
+The analyzer can then exclude modules reached only through erased imports and
+follow a bounded subset of unmodified functions, constructor assignments,
+awaited factories, and narrowed values. It still rejects unknown or dynamic
+edges, alternative concrete classes, visible field or method mutations,
+detached methods, and incomplete compiler evidence. When graph construction
+fails, it analyzes the original broader set and preserves coverage gaps.
+Unavailable sources, project errors,
 and unmodeled verified calls remain coverage limitations. Direct synchronous
 helpers whose sole return forwards a verified call preserve that call's origin,
 including simple multi-hop chains. It also follows a single `if`/`else` tree

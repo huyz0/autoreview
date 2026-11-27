@@ -16,6 +16,7 @@ pub struct CheckerConfig<'a> {
     pub config: &'a str,
     pub root: &'a Path,
     pub timeout: Duration,
+    pub graph_evidence: Option<&'a super::TypeScriptGraphEvidence>,
 }
 
 struct CallBatch {
