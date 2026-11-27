@@ -535,12 +535,12 @@ mod budget_tests {
     }
 
     fn assert_void_callback_coverage(dir: &Path, checker: &TrustedTypeScript, rules: &[(&CallOrderRuleDef, Language)]) {
-        std::fs::write(dir.join("main.ts"), "const callback: () => void = async () => {};\nexport async function run() {\n callback();\n await callback();\n}\n").unwrap();
+        std::fs::write(dir.join("main.ts"), "const callback: () => void = async () => {};\nconst synchronous: () => void = () => {};\nexport async function run() {\n callback();\n await callback();\n synchronous();\n}\n").unwrap();
         let paths = ["main.ts".to_owned()];
         let (findings, coverage) = with_resolver(dir, |resolver| run_group(resolver, &paths, rules, dir, (Some(checker), TYPED_UNIT_LIMIT)));
         assert!(findings.is_empty(), "{findings:#?}");
-        assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(3)), "{coverage:?}");
-        assert!(!coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(4)), "{coverage:?}");
+        assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && issue.line == Some(4)), "{coverage:?}");
+        assert!(!coverage.iter().any(|issue| issue.reason == "promise_type_unresolved" && matches!(issue.line, Some(5 | 6))), "{coverage:?}");
     }
 
     #[test]
