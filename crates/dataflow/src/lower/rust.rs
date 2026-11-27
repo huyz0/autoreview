@@ -4,6 +4,11 @@
 mod values;
 mod match_flow;
 mod let_else;
+mod support;
+
+use support::{simple_binding, supported};
+pub use support::{match_arm_bindings, match_binding_lines, supports_function, supports_match};
+pub(crate) use support::{discards_match, let_else_bindings, pattern_projection_sites};
 
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -44,11 +49,6 @@ fn lower_function_with(cfg: Cfg<Stmt>, source: &[u8], function: Node<'_>) -> Cfg
         }
     }
     lower.cfg
-}
-
-/// Whether this function's body can be lowered without skipping it entirely.
-pub fn supports_function(function: Node<'_>) -> bool {
-    function.child_by_field_name("body").is_some_and(supported)
 }
 
 type Bindings = HashMap<String, String>;
@@ -286,76 +286,4 @@ impl Lower<'_> {
         self.serial += 1;
         format!("{name}#{}", self.serial)
     }
-}
-
-fn supported(node: Node<'_>) -> bool {
-    match node.kind() {
-        "function_item" | "closure_expression" | "async_block" | "macro_invocation" => return true,
-        "let_chain" | "let_condition" | "label" | "unsafe_block" => {
-            return false
-        }
-        "let_declaration" if !simple_binding(node) && !let_else::supports(node) => return false,
-        "for_expression" if !simple_binding(node) => return false,
-        "if_expression"
-        | "while_expression"
-        | "for_expression"
-        | "loop_expression"
-        | "return_expression"
-        | "break_expression"
-        | "continue_expression"
-            if !statement_position(node) =>
-        {
-            return false
-        }
-        _ => {}
-    }
-    (node.kind() != "match_expression" || supports_match(node))
-        && node.named_children(&mut node.walk()).all(supported)
-}
-
-/// Whether this match can be represented without pattern binding or guards.
-pub fn supports_match(node: Node<'_>) -> bool {
-    match_flow::supports(node)
-}
-
-pub(crate) fn discards_match(node: Node<'_>) -> bool {
-    supports_match(node) && !match_flow::returns_match(node)
-}
-
-/// Simple arm-local bindings in a supported Rust match pattern.
-pub fn match_arm_bindings(arm: Node<'_>) -> Vec<Node<'_>> {
-    match_flow::arm_bindings(arm)
-}
-
-/// Lines where a supported match projects one or more arm-local values.
-pub fn match_binding_lines(function: Node<'_>) -> Vec<u32> {
-    match_flow::binding_lines(function, match_flow::has_bindings)
-}
-
-pub(crate) use let_else::bindings as let_else_bindings;
-
-pub(crate) fn pattern_projection_sites(function: Node<'_>) -> Vec<(&'static str, u32)> {
-    let match_sites = match_binding_lines(function);
-    let let_else_sites = match_flow::binding_lines(function, |node| {
-        let_else_bindings(node).is_some_and(|names| !names.is_empty())
-    });
-    match_sites.into_iter().map(|line| ("rust_match_binding_projection", line))
-        .chain(let_else_sites.into_iter().map(|line| ("rust_let_else_binding_projection", line)))
-        .collect()
-}
-
-fn statement_position(node: Node<'_>) -> bool {
-    node.parent().is_some_and(|parent| {
-        matches!(
-            parent.kind(),
-            "block" | "expression_statement" | "else_clause"
-        )
-    })
-}
-
-fn simple_binding(node: Node<'_>) -> bool {
-    node.child_by_field_name("alternative").is_none()
-        && node
-            .child_by_field_name("pattern")
-            .is_none_or(|pattern| matches!(pattern.kind(), "identifier" | "_"))
 }

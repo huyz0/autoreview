@@ -128,10 +128,7 @@ pub fn check(spec: &CallOrderSpec, cfg: &Cfg<Stmt>) -> Vec<CallOrderHit> {
     });
 
     let mut hits = Vec::new();
-    for (node_id, node) in cfg.nodes.iter().enumerate() {
-        if !reachable[node_id] {
-            continue;
-        }
+    for (node_id, node) in cfg.nodes.iter().enumerate().filter(|(id, _)| reachable[*id]) {
         let preds = cfg.predecessors(node_id);
         let mut pending = preds.iter().any(|&p| out_facts[p].0);
         for (index, stmt) in node.stmts.iter().enumerate() {
