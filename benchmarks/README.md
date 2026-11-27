@@ -176,7 +176,7 @@ sources with Kotlin 2.3.21 and JVM target 21, using seven exact Git-blob source
 files and 50 classpath JARs. The probe reported the `PasswordAuthenticator`
 argument of `org.apache.sshd.server.SshServer.setPasswordAuthenticator`, whose
 declaration is open. The `FileCluster.kt` input hash was
-`e731be100e841140a07e0830bd28fca14ad7285ec267a7c`.
+`e731be100e841140a07e0830bd28fca14c804d76bd6a008c14ad7285ec267a7c`.
 
 The classpath came from an isolated Gradle 9.5.1 compile using public
 `libloader` and `libloader-bootstrap` 1.8.1 release JARs. Their GitHub Packages
