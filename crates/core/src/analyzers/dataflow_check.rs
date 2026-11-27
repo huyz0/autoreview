@@ -496,6 +496,8 @@ mod tests {
         std::fs::write(dir.path().join("invalid.go"), [0xff, 0xfe]).unwrap();
         let unreadable = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["invalid.go".into()], &[]);
         assert!(unreadable.coverage.iter().any(|item| item.reason == "source_unavailable" && item.path.as_deref() == Some("invalid.go")));
+        let missing = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["missing.go".into()], &[]);
+        assert!(missing.coverage.iter().any(|item| item.reason == "source_unavailable" && item.path.as_deref() == Some("missing.go")));
         std::fs::write(dir.path().join("main.ts"), "import { helper } from './dep';\nexport function run() { helper(); }\n").unwrap();
         std::fs::write(dir.path().join("dep.ts"), "export function helper( {\n").unwrap();
         let imported = run_dataflow_check_with_coverage(dir.path(), dir.path(), &["main.ts".into()], &[]);

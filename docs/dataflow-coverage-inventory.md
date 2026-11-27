@@ -62,7 +62,7 @@ a call directly in an unsupported arm is reported separately.
 
 | Condition | Current behavior | Evidence to report |
 | --- | --- | --- |
-| Changed or imported source cannot be read or parsed | `ParseCache::get` returns `None`; its callers may skip the file. | Source path, whether it was an entry or dependency, and failure reason. Deleted files need separate treatment. |
+| Changed or imported source cannot be read or parsed | Entry files report `source_unavailable`; cross-file call-sequence dependencies report `dependency_unavailable`. The Git review path excludes absent diff paths only when the snapshot's HEAD confirms they were deleted. A failed Git check remains an entry warning. | Other interprocedural summary paths still need an audit for unavailable dependencies; report precise failure reasons where available. |
 | Cross-file call-sequence discovery reaches its 64-dependency limit | The resolver stops loading sources. | Entry scope, limit, and whether an unvisited dependency remains. Do not warn merely because the queue contains already loaded duplicates. |
 | Keyed lowering exceeds the finally-path copying limit | `keyed_flow` reaches zero and `Plan::new` declines the function. | File, function location, and affected call-sequence analysis. |
 | Rust function contains control flow the lowerer cannot model | The lowerer skips the function body; review reports `unsupported_rust_control_flow` per applicable rule and replay treats the case as incomplete. | File, function location, and affected rule. Entry functions and imported helpers reachable through supported calls are included. |

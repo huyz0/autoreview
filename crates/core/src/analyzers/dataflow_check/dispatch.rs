@@ -61,10 +61,9 @@ impl DataflowReview<'_> {
         let (extract, lower) = profile(language);
         let parsed = match read_and_parse(self.root, path, language, self.caches.parse) {
             Some(parsed) => parsed,
-            None if self.root.join(path).exists() => return Some((Vec::new(), Some(coverage_issue(
+            None => return Some((Vec::new(), Some(coverage_issue(
                 path, "source_unavailable", "The source could not be read or parsed; dataflow checks skipped this file."
             )))),
-            None => return None,
         };
         let (content, tree) = parsed.as_ref();
         let issue = tree.root_node().has_error().then(|| coverage_issue(

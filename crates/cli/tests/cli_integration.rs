@@ -521,6 +521,20 @@ fn report_path_from_stdout(stdout: &str) -> PathBuf {
 }
 
 #[test]
+fn review_excludes_deleted_files_from_missing_source_coverage() {
+    let repo = init_repo(&[("removed.go", "package example\n"), ("keep.go", "package example\n")]);
+    let base = current_commit(repo.path());
+    std::fs::remove_file(repo.path().join("removed.go")).unwrap();
+    repo.commit(&[("keep.go", "package example\n\nfunc keep() {}\n")], "delete source");
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["diff", "--base", &base, "--head", "HEAD", "--static-only"]).assert().success();
+    let report = report_path_from_stdout(&String::from_utf8_lossy(&output.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    assert!(!report["analysisCoverage"].as_array().is_some_and(|issues| issues.iter().any(|issue|
+        issue["reason"] == "source_unavailable" && issue["path"] == "removed.go")), "{report}");
+}
+
+#[test]
 fn unresolved_kotlin_callback_reaches_review_and_blocks_replay() {
     if !ast_grep_available() { return; }
     let clean = "suspend fun run() {\n work()\n}\n";
