@@ -28,6 +28,29 @@ On Windows use `kotlinc.bat` and set the environment variable in the shell.
 Only use trusted compilers and inputs. This tool invokes the compiler; it is
 not a sandbox for a malicious compiler, compiler plugins, or dependencies.
 
+For an experimental copied-input run, use `snapshot.py` with every Kotlin
+source and classpath JAR supplied explicitly, including the Kotlin standard
+library. The output path must not already exist:
+
+```sh
+python3 tools/kotlin-callback-evidence/snapshot.py \
+  --kotlinc /path/to/kotlinc/bin/kotlinc --plugin /path/to/evidence-plugin.jar \
+  --source /path/to/source.kt --jar /path/to/kotlinc/lib/kotlin-stdlib.jar \
+  --jar /path/to/dependency.jar --output /path/to/new-snapshot-report.json
+```
+
+This copies inputs into a temporary directory, disables the compiler's default
+stdlib and reflection JARs, runs the compiler with a 120-second timeout, and
+publishes evidence only after a successful exit and matching hashes for the
+originals and copies. It maps evidence paths back to original source files.
+Inputs are limited to `.kt` files and JARs, so callers must explicitly provide
+the complete compilation inputs. It does not run a project build or discover
+classpath configuration. Trusted compiler and plugin executables are still
+required. The JDK and compiler installation are not snapshotted; before/after
+hashes do not defend against adversarial mutation and restoration; and the
+timeout does not guarantee termination of descendant processes. The snapshot
+report is experimental and is not consumed by review or replay.
+
 The JSON records the compiler version, source path and SHA-256, call and
 lambda spans in UTF-16 code units, statically resolved callee name, regular
 parameter index, SAM type name, and declaration modality. The call span is
@@ -46,7 +69,7 @@ types, type arguments, nullability, return types and module identity, so even
 an all-non-null list is not a complete signature. The source
 hash covers bytes read by the plugin, not necessarily the bytes previously
 parsed by the compiler. Dependencies, classpaths and other source files are
-not snapshot-verified. An output file can exist even if a later compiler
+not snapshot-verified in direct plugin mode. An output file can exist even if a later compiler
 phase fails; never use it when the compiler exits unsuccessfully.
 
 Before evidence can inform rule decisions, verify immutable source and

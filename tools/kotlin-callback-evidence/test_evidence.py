@@ -5,12 +5,15 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 from build import build
+import snapshot
 
 
 def utf16_slice(source: str, start: int, end: int) -> str:
@@ -133,6 +136,77 @@ class EvidenceTest(unittest.TestCase):
         result = self.compile("existing", "fun valid() {}\n", output)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(output.read_text(encoding="utf-8"), "sentinel")
+
+    def snapshot_dependencies(self) -> list[pathlib.Path]:
+        fixture = self.root / "fixture data.jar"
+        if not fixture.exists():
+            with zipfile.ZipFile(fixture, "w") as archive:
+                for entry in self.classes.rglob("*.class"):
+                    archive.write(entry, entry.relative_to(self.classes).as_posix())
+        return [fixture, self.compiler_jar.parent / "kotlin-stdlib.jar"]
+
+    def test_snapshot_compiles_copied_inputs_and_maps_source(self) -> None:
+        source = self.root / "snapshot name.kt"
+        text = "package demo\nimport vendor.Auth\nimport vendor.Server\nfun install(s: Server) { s.authenticator = Auth { true } }\n"
+        source.write_text(text, encoding="utf-8", newline="\n")
+        output = self.root / "snapshot-report.json"
+        snapshot.run(self.kotlinc, self.plugin, [source], self.snapshot_dependencies(), output)
+        report = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(report["snapshotVersion"], 1)
+        self.assertEqual(report["sources"][0], {"path": str(source.resolve()), "sha256": hashlib.sha256(text.encode()).hexdigest()})
+        self.assertEqual(report["evidence"]["records"][0]["path"], str(source.resolve()))
+        self.assertEqual(report["evidence"]["records"][0]["callee"], "vendor.Server.setAuthenticator")
+        self.assertEqual(len(report["dependencies"]), 2)
+        with self.assertRaises(FileExistsError):
+            snapshot.run(self.kotlinc, self.plugin, [source], self.snapshot_dependencies(), output)
+
+    def test_snapshot_rejects_source_changes_and_compile_failure(self) -> None:
+        source = self.root / "changed.kt"
+        source.write_text("fun valid() {}\n", encoding="utf-8")
+        output = self.root / "changed-report.json"
+        original_run = subprocess.run
+        def change_source(*args, **kwargs):
+            result = original_run(*args, **kwargs)
+            source.write_text("fun changed() {}\n", encoding="utf-8")
+            return result
+        with mock.patch.object(snapshot.subprocess, "run", side_effect=change_source):
+            with self.assertRaisesRegex(ValueError, "changed"):
+                snapshot.run(self.kotlinc, self.plugin, [source], self.snapshot_dependencies(), output)
+        self.assertFalse(output.exists())
+        source.write_text("fun invalid() { missing() }\n", encoding="utf-8")
+        with self.assertRaises(subprocess.CalledProcessError):
+            snapshot.run(self.kotlinc, self.plugin, [source], self.snapshot_dependencies(), output)
+        self.assertFalse(output.exists())
+
+    def test_snapshot_rejects_changed_dependency(self) -> None:
+        source = self.root / "dependency.kt"
+        source.write_text("fun valid() {}\n", encoding="utf-8")
+        output = self.root / "dependency-report.json"
+        jar = self.root / "changing.jar"
+        shutil.copyfile(self.snapshot_dependencies()[0], jar)
+        original_run = subprocess.run
+        def change_jar(*args, **kwargs):
+            result = original_run(*args, **kwargs)
+            with jar.open("ab") as destination:
+                destination.write(b"changed")
+            return result
+        with mock.patch.object(snapshot.subprocess, "run", side_effect=change_jar):
+            with self.assertRaisesRegex(ValueError, "changed"):
+                snapshot.run(self.kotlinc, self.plugin, [source], [jar, self.snapshot_dependencies()[1]], output)
+        self.assertFalse(output.exists())
+
+    def test_snapshot_rejects_invalid_evidence_spans(self) -> None:
+        source = self.root / "span.kt"
+        source.write_text("fun x() {}\n", encoding="utf-8")
+        copied = self.root / "copied.kt"
+        shutil.copyfile(source, copied)
+        item = {"original": source, "snapshot": copied, "sha256": hashlib.sha256(source.read_bytes()).hexdigest(), "limit": snapshot.SOURCE_LIMIT}
+        output = self.root / "bad-span.json"
+        record = {"path": str(copied), "sha256": item["sha256"], "callStartUtf16": 0,
+                  "lambdaStartUtf16": 1, "lambdaEndUtf16": 2, "callEndUtf16": 999}
+        output.write_text(json.dumps({"version": 2, "compiler": "2.2.20", "records": [record]}), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "span"):
+            snapshot.verified_report(output, [item], [item])
 
 
 if __name__ == "__main__":
