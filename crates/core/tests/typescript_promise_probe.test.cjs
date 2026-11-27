@@ -16,6 +16,15 @@ function removeTemporaryDirectory(directory) {
   fs.rmSync(target, { recursive: true, force: true });
 }
 
+function probeFixture(t) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'autoreview-ts-probe-'));
+  t.after(() => removeTemporaryDirectory(directory));
+  const file = path.join(directory, 'sample.ts');
+  const config = path.join(directory, 'tsconfig.json');
+  fs.writeFileSync(config, JSON.stringify({ compilerOptions: { target: 'ES2020', strict: true }, files: ['sample.ts'] }));
+  return { file, config };
+}
+
 test('distinguishes an unsupported compiler API from a missing module', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'autoreview-ts-probe-'));
   try {
@@ -38,11 +47,7 @@ test('distinguishes an unsupported compiler API from a missing module', () => {
 });
 
 test('proves return values only for immutable local synchronous function literals', { skip: !compiler }, t => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'autoreview-ts-probe-'));
-  t.after(() => removeTemporaryDirectory(directory));
-  const file = path.join(directory, 'sample.ts');
-  const config = path.join(directory, 'tsconfig.json');
-  fs.writeFileSync(config, JSON.stringify({ compilerOptions: { target: 'ES2020', strict: true }, files: ['sample.ts'] }));
+  const { file, config } = probeFixture(t);
   const source = [
     'const sync: () => void = () => { if (Math.random()) return; const nested = async () => 1; };',
     'const explicit: () => void = () => { try { return; } finally { return void 1; } };',
@@ -67,6 +72,26 @@ test('proves return values only for immutable local synchronous function literal
   const result = JSON.parse(child.stdout);
   assert.equal(result.status, 'ok');
   assert.deepEqual(result.calls.map(call => call.status), ['not_promise', 'not_promise', 'not_promise', 'promise_like', 'promise_like', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven']);
+});
+
+test('does not classify nested calls that share a start offset', { skip: !compiler }, t => {
+  const { file, config } = probeFixture(t);
+  const source = [
+    'declare function outerPromise(): string & (() => Promise<void>);',
+    'declare function innerPromise(): Promise<void> & (() => number);',
+    'declare function ordinary(): number;',
+    'outerPromise()(); innerPromise()(); ordinary();',
+  ].join('\n');
+  fs.writeFileSync(file, source);
+  const digest = createHash('sha256').update(source, 'utf8').digest('hex');
+  const calls = ['outerPromise()()', 'innerPromise()()', 'ordinary()'].map(name => ({
+    path: file, start: Buffer.byteLength(source.slice(0, source.lastIndexOf(name))), source_sha256: digest,
+  }));
+  const child = spawnSync(process.execPath, [probe], { input: JSON.stringify({ typescriptModule: compiler, config, calls }), encoding: 'utf8' });
+  assert.equal(child.status, 0, child.stderr);
+  const result = JSON.parse(child.stdout);
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.calls.map(call => call.status), ['not_proven', 'not_proven', 'not_promise']);
 });
 
 test('checks concrete call types and fails closed on project errors', { skip: !compiler }, () => {
