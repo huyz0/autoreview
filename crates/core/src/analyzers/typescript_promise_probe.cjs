@@ -192,15 +192,16 @@ function run(request) {
     }
     visit(file);
     // Accumulate UTF-8 offsets in source order instead of encoding the whole
-    // prefix for every call. Multiple calls can share a start offset; the
-    // request cannot identify which one was lowered, so leave it unresolved.
+    // prefix for every call. Keep all calls with the same starting offset:
+    // a request without an end offset cannot distinguish them.
     nodes.sort((a, b) => a.start - b.start || a.order - b.order);
     const index = new Map();
     let previous = 0;
     let bytes = 0;
     for (const entry of nodes) {
       bytes += Buffer.byteLength(file.text.slice(previous, entry.start), 'utf8');
-      index.set(bytes, index.has(bytes) ? null : entry.node);
+      if (!index.has(bytes)) index.set(bytes, []);
+      index.get(bytes).push(entry.node);
       previous = entry.start;
     }
     return index;
@@ -215,11 +216,15 @@ function run(request) {
     if (cached.digest !== call.source_sha256) return { ...call, status: 'source_changed' };
     if (!cached.calls) cached.calls = indexCalls(file);
     const selected = cached.calls.get(call.start);
-    if (selected === null) return { ...call, status: 'not_proven' };
     if (!selected) return { ...call, status: 'unavailable' };
-    const type = checker.getTypeAtLocation(selected);
-    const local = localFunctionLiteral(selected);
-    return { ...call, status: promiseLike(type) || local && asyncFunction(local) ? 'promise_like' : definitelyNotPromise(type) || localReturnsNoValue(local) ? 'not_promise' : directlyAwaited(selected) || immediatelyAwaitedBinding(selected) || returnedFromAsync(selected) ? 'observed' : 'not_proven' };
+    const statuses = selected.map(node => {
+      const type = checker.getTypeAtLocation(node);
+      const local = localFunctionLiteral(node);
+      return promiseLike(type) || local && asyncFunction(local) ? 'promise_like' : definitelyNotPromise(type) || localReturnsNoValue(local) ? 'not_promise' : directlyAwaited(node) || immediatelyAwaitedBinding(node) || returnedFromAsync(node) ? 'observed' : 'not_proven';
+    });
+    const status = statuses.length === 1 ? statuses[0] :
+      statuses.every(item => item === 'not_promise' || item === 'observed') ? 'observed' : 'not_proven';
+    return { ...call, status };
   });
   return { status: 'ok', calls };
 }
