@@ -40,6 +40,7 @@ private data class Record(
     val samType: String,
     val modality: String,
     val parameterTypes: List<String?>,
+    val receiverStaticType: String?,
 )
 
 @OptIn(UnsafeDuringIrConstructionAPI::class)
@@ -79,6 +80,8 @@ private fun collect(call: IrCall, path: String, hash: String, records: MutableLi
     val callee = owner.fqNameWhenAvailable?.asString() ?: return
     if (call.startOffset < 0 || call.endOffset < call.startOffset) return
     if (call.arguments.size != owner.parameters.size) return
+    val receiverIndex = owner.parameters.indexOfFirst { it.kind == IrParameterKind.DispatchReceiver }
+    val receiverStaticType = call.arguments.getOrNull(receiverIndex)?.type?.classFqName?.asString()
     var regularIndex = 0
     for ((parameter, argument) in owner.parameters.zip(call.arguments)) {
         if (parameter.kind != IrParameterKind.Regular) continue
@@ -97,6 +100,7 @@ private fun collect(call: IrCall, path: String, hash: String, records: MutableLi
                 val type = it.type as? IrSimpleType
                 if (type == null || type.arguments.isNotEmpty()) null else type.classFqName?.asString()
             },
+            receiverStaticType = receiverStaticType,
         ))
     }
 }
@@ -115,6 +119,7 @@ private fun encode(records: List<Record>): String = buildString {
         append(",\"parameter\":").append(record.parameter)
         append(",\"samType\":").append(quote(record.samType))
         append(",\"modality\":").append(quote(record.modality))
+        append(",\"receiverStaticType\":").append(record.receiverStaticType?.let(::quote) ?: "null")
         append(",\"parameterTypes\":[")
         record.parameterTypes.forEachIndexed { typeIndex, type ->
             if (typeIndex != 0) append(',')

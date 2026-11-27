@@ -32,6 +32,7 @@ struct Record {
     parameter: usize,
     sam_type: String,
     modality: String,
+    receiver_static_type: Option<String>,
 }
 
 pub(super) struct Evidence { by_file: HashMap<PathBuf, Vec<Record>> }
@@ -74,7 +75,8 @@ fn index_records(sources: &HashMap<PathBuf, (PathBuf, String)>, input: Vec<Recor
     for record in input {
         let path = record.path.canonicalize().map_err(|_| ())?;
         let (target, hash) = sources.get(&path).ok_or(())?;
-        if hash != &record.sha256 || record.callee.len() > 1024 || record.sam_type.len() > 1024 || record.modality.len() > 32 { return Err(()); }
+        if hash != &record.sha256 || record.callee.len() > 1024 || record.sam_type.len() > 1024 || record.modality.len() > 32
+            || record.receiver_static_type.as_ref().is_some_and(|name| name.len() > 1024) { return Err(()); }
         let records = by_file.entry(target.clone()).or_default();
         if records.len() >= MAX_RECORDS_PER_FILE { return Err(()); }
         records.push(record);
@@ -95,7 +97,8 @@ impl Evidence {
         let matched: Vec<_> = records.iter().filter(|record| record.sha256 == hash && spans.contains(&(record.lambda_start_utf16, record.lambda_end_utf16))).collect();
         let [record] = matched.as_slice() else { return None; };
         Some(serde_json::json!({ "status": "unverified", "callee": record.callee,
-            "parameter": record.parameter, "samType": record.sam_type, "modality": record.modality }))
+            "parameter": record.parameter, "samType": record.sam_type, "modality": record.modality,
+            "receiverStaticType": record.receiver_static_type }))
     }
 }
 
@@ -137,6 +140,15 @@ mod tests {
         })).unwrap()
     }
 
+    fn report_fixture() -> (tempfile::TempDir, serde_json::Value) {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("source.kt");
+        let source = "// 😀\nsuspend fun run() {\n register { runBlocking { work() } }\n}\n";
+        std::fs::write(&path, source).unwrap();
+        let value = serde_json::from_slice(&report(&path, source)).unwrap();
+        (root, value)
+    }
+
     #[test]
     fn matching_evidence_is_diagnostic_only_and_stale_sources_do_not_match() {
         let root = tempfile::tempdir().unwrap();
@@ -150,12 +162,29 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].meta.as_ref().unwrap()["experimentalCallbackEvidence"]["status"], "unverified");
         assert_eq!(findings[0].meta.as_ref().unwrap()["experimentalCallbackEvidence"]["callee"], "example.register");
+        assert!(findings[0].meta.as_ref().unwrap()["experimentalCallbackEvidence"]["receiverStaticType"].is_null());
         assert_eq!(findings[0].confidence, 0.5);
         assert!(coverage.iter().any(|issue| issue.reason == "callback_execution_unresolved"));
         std::fs::write(&path, source.replace("work()", "other()" )).unwrap();
         let mut findings = vec![finding()];
         super::super::annotate_with(root.path(), &mut findings, Some(&evidence), &mut Vec::new());
         assert!(findings[0].meta.is_none());
+    }
+
+    #[test]
+    fn receiver_type_is_unverified_and_bounded() {
+        let (root, mut value) = report_fixture();
+        value["evidence"]["records"][0]["receiverStaticType"] = "example.Server".into();
+        let evidence = parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).unwrap();
+        let mut findings = vec![finding()];
+        let mut coverage = Vec::new();
+        super::super::annotate_with(root.path(), &mut findings, Some(&evidence), &mut coverage);
+        let metadata = &findings[0].meta.as_ref().unwrap()["experimentalCallbackEvidence"];
+        assert_eq!(metadata["receiverStaticType"], "example.Server");
+        assert_eq!(metadata["status"], "unverified");
+        assert!(coverage.iter().any(|issue| issue.reason == "callback_execution_unresolved"));
+        value["evidence"]["records"][0]["receiverStaticType"] = "x".repeat(1025).into();
+        assert!(parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).is_err());
     }
 
     #[test]
@@ -186,11 +215,7 @@ mod tests {
 
     #[test]
     fn supports_only_tested_compiler_versions() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("source.kt");
-        let source = "// 😀\nsuspend fun run() {\n register { runBlocking { work() } }\n}\n";
-        std::fs::write(&path, source).unwrap();
-        let mut value: serde_json::Value = serde_json::from_slice(&report(&path, source)).unwrap();
+        let (root, mut value) = report_fixture();
         value["evidence"]["compiler"] = "2.3.21".into();
         assert!(parse(root.path(), root.path(), &serde_json::to_vec(&value).unwrap()).is_ok());
         value["evidence"]["compiler"] = "2.3.22".into();

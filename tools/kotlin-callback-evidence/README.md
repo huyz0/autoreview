@@ -80,7 +80,11 @@ establish execution evidence or make an incomplete case scorable.
 
 The JSON records the compiler version, source path and SHA-256, call and
 lambda spans in UTF-16 code units, statically resolved callee name, regular
-parameter index, SAM type name, and declaration modality. The call span is
+parameter index, SAM type name, declaration modality, and the dispatch
+receiver's static classifier when available. A missing receiver is `null`.
+The receiver type is diagnostic evidence only: an open method can dispatch to
+a subclass with different callback behavior, and the record does not prove the
+concrete runtime object. The call span is
 compiler-provided and can omit a property receiver. The probe caps source
 files at 512, individual files at 4 MiB, total source at 16 MiB, records at
 20,000, and output at 1 MiB; exceeding a limit fails compilation. It refuses
@@ -92,7 +96,7 @@ callee name, parameter index, and SAM type do not uniquely identify an
 overload or establish the runtime target under dynamic dispatch. Version 2
 also records declared regular parameter classifiers in order; generic or
 otherwise unrepresentable types are `null`. This deliberately omits receiver
-types, type arguments, nullability, return types and module identity, so even
+type arguments, nullability, return types and module identity, so even
 an all-non-null list is not a complete signature. The source
 hash covers bytes read by the plugin, not necessarily the bytes previously
 parsed by the compiler. Dependencies, classpaths and other source files are
