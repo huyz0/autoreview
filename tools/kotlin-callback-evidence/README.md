@@ -104,6 +104,13 @@ IR. The default setter's own field write is excluded from the direct-write
 count. Custom accessors, unknown setter inputs, omitted inputs, reflection,
 and runtime mutation must not be treated as verified value flow. These fields
 remain unverified diagnostics and never determine replay scoring.
+For an observed setter argument that is a resolved call, the probe also
+records its declaration origin, receiver presence, parameter classifiers,
+return classifier, and type-parameter count. `propertySourceSha256` identifies
+the compiled source containing the receiver property when available. These
+details help distinguish a library factory from an overload or a source
+declaration, but they do not identify the supplying JAR or authenticate a
+caller-provided report.
 
 Only direct SAM conversions represented in compiler IR as call arguments are
 recorded. Absence of a record does not establish absence of a callback. A
@@ -137,3 +144,8 @@ To include the Apache SSHD API regression, set `AUTOREVIEW_TEST_SSHD_CORE` and
 `AUTOREVIEW_TEST_SSHD_COMMON` to trusted 2.17.1 JARs. CI downloads and checks
 the pinned artifacts. The test compiles a small representative Kotlin source;
 it does not build RediCloud or verify runtime dispatch or callback timing.
+The snapshot runner can optionally hash uniquely occurring class entries with
+`--require-class org/example/Type.class`. It rejects duplicate and versioned
+copies of requested classes. This identifies entries in the supplied JARs only;
+it does not establish classloader behavior, rule out source shadowing, or make
+the compiler, dependencies, or report trusted.
