@@ -180,19 +180,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("tsconfig.json");
         let file = dir.path().join("sample.ts");
-        let source = "const callback: () => void = async () => {};\nasync function run() { callback(); await callback(); }\n";
+        let source = "const callback: () => void = async () => {};\ndeclare const externalCallback: () => void;\nasync function run() { callback(); await callback(); externalCallback(); await externalCallback(); }\n";
         std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true},"files":["sample.ts"]}"#).unwrap();
         std::fs::write(&file, source).unwrap();
         let digest = format!("{:x}", Sha256::digest(source.as_bytes()));
-        let calls: Vec<_> = source.match_indices("callback()").map(|(start, _)| TypeScriptCall {
+        let calls: Vec<_> = ["callback();", "await callback();", "externalCallback();", "await externalCallback();"].iter().map(|needle| {
+            let start = source.find(needle).unwrap() + if needle.starts_with("await ") { 6 } else { 0 };
+            TypeScriptCall {
             path: file.to_string_lossy().into_owned(), start, source_sha256: digest.clone(),
-        }).collect();
+        }}).collect();
         let config = config.to_string_lossy();
         let request = TypeScriptRequest { typescript_module: &compiler, config: &config, calls: &calls };
         let result = check("node", &request, Duration::from_secs(20)).unwrap();
         assert_eq!(result.status, "ok");
         let statuses: Vec<_> = result.calls.unwrap().into_iter().map(|call| call.status).collect();
-        assert_eq!(statuses, ["not_proven", "observed"]);
+        assert_eq!(statuses, ["promise_like", "promise_like", "not_proven", "observed"]);
     }
 
     #[test]
