@@ -70,13 +70,22 @@ struct Timeline(Vec<Event>);
 
 impl Timeline {
     fn parse(range: Range) -> anyhow::Result<Self> {
-        let mut events = range.events.into_iter().map(Event::parse)
+        let mut events = range
+            .events
+            .into_iter()
+            .map(Event::parse)
             .collect::<anyhow::Result<Vec<_>>>()?;
-        ensure!(events.iter().any(|event| matches!(event, Event::Introduced(_))),
-            "OSV range has no introduced event");
+        ensure!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Introduced(_))),
+            "OSV range has no introduced event"
+        );
         ensure!(
             !(events.iter().any(|event| matches!(event, Event::Fixed(_)))
-                && events.iter().any(|event| matches!(event, Event::LastAffected(_)))),
+                && events
+                    .iter()
+                    .any(|event| matches!(event, Event::LastAffected(_)))),
             "OSV range mixes fixed and last_affected events"
         );
         events.sort_by(|left, right| match (left.boundary(), right.boundary()) {
@@ -87,10 +96,14 @@ impl Timeline {
     }
 
     fn contains(&self, version: &Version) -> bool {
-        let mut limits = self.0.iter().filter_map(|event| match event {
-            Event::Limit(limit) => Some(limit.as_ref()),
-            _ => None,
-        }).peekable();
+        let mut limits = self
+            .0
+            .iter()
+            .filter_map(|event| match event {
+                Event::Limit(limit) => Some(limit.as_ref()),
+                _ => None,
+            })
+            .peekable();
         if limits.peek().is_some()
             && !limits.any(|limit| limit.is_none_or(|limit| version.cmp_precedence(limit).is_lt()))
         {
@@ -100,7 +113,9 @@ impl Timeline {
         for event in &self.0 {
             match event {
                 Event::Introduced(start)
-                    if start.as_ref().is_none_or(|start| !version.cmp_precedence(start).is_lt()) =>
+                    if start
+                        .as_ref()
+                        .is_none_or(|start| !version.cmp_precedence(start).is_lt()) =>
                 {
                     affected = true;
                 }
@@ -124,25 +139,44 @@ pub struct NpmAdvisories(BTreeMap<String, Vec<Advisory>>);
 impl NpmAdvisories {
     pub fn load(directory: &Path) -> anyhow::Result<Self> {
         let mut files = Vec::new();
-        for entry in std::fs::read_dir(directory).context("could not open the local OSV snapshot")? {
+        for entry in
+            std::fs::read_dir(directory).context("could not open the local OSV snapshot")?
+        {
             let entry = entry?;
             if entry.file_type()?.is_file()
-                && entry.path().extension().is_some_and(|extension| extension == "json")
+                && entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
             {
                 files.push(entry.path());
             }
         }
         files.sort();
-        ensure!(!files.is_empty(), "the local OSV snapshot contains no JSON records");
+        ensure!(
+            !files.is_empty(),
+            "the local OSV snapshot contains no JSON records"
+        );
         let mut advisories = BTreeMap::new();
         let mut seen = HashSet::new();
         for file in files {
             let record: Record = serde_json::from_reader(std::fs::File::open(&file)?)
                 .with_context(|| format!("invalid OSV record {}", file.display()))?;
-            ensure!(!record.id.is_empty() && !record.modified.is_empty()
-                && record.id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
-                "invalid OSV identity in {}", file.display());
-            ensure!(seen.insert(record.id.clone()), "duplicate OSV record {}", record.id);
+            ensure!(
+                !record.id.is_empty()
+                    && !record.modified.is_empty()
+                    && record
+                        .id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+                "invalid OSV identity in {}",
+                file.display()
+            );
+            ensure!(
+                seen.insert(record.id.clone()),
+                "duplicate OSV record {}",
+                record.id
+            );
             if record.withdrawn.is_some() {
                 continue;
             }
@@ -152,18 +186,35 @@ impl NpmAdvisories {
         Ok(Self(advisories))
     }
 
-    pub(super) fn affected_ids<'a>(&'a self, name: &str, version: &'a Version) -> impl Iterator<Item = &'a str> {
-        self.0.get(name).into_iter().flatten().filter_map(move |advisory| {
-            (advisory.versions.iter().any(|known| known.cmp_precedence(version).is_eq())
-                || advisory.timelines.iter().any(|timeline| timeline.contains(version)))
+    pub(super) fn affected_ids<'a>(
+        &'a self,
+        name: &str,
+        version: &'a Version,
+    ) -> impl Iterator<Item = &'a str> {
+        self.0
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter_map(move |advisory| {
+                (advisory
+                    .versions
+                    .iter()
+                    .any(|known| known.cmp_precedence(version).is_eq())
+                    || advisory
+                        .timelines
+                        .iter()
+                        .any(|timeline| timeline.contains(version)))
                 .then_some(advisory.id.as_str())
-        })
+            })
     }
 }
 
 fn add_record(index: &mut BTreeMap<String, Vec<Advisory>>, record: Record) -> anyhow::Result<()> {
     for affected in record.affected {
-        let Some(package) = affected.package.filter(|package| package.ecosystem == "npm") else {
+        let Some(package) = affected
+            .package
+            .filter(|package| package.ecosystem == "npm")
+        else {
             continue;
         };
         ensure!(!package.name.is_empty(), "empty npm package name");
@@ -175,10 +226,15 @@ fn add_record(index: &mut BTreeMap<String, Vec<Advisory>>, record: Record) -> an
                 kind => bail!("unsupported OSV range type {kind}"),
             }
         }
-        let versions = affected.versions.iter().map(|version| Version::parse(version))
+        let versions = affected
+            .versions
+            .iter()
+            .map(|version| Version::parse(version))
             .collect::<Result<Vec<_>, _>>()?;
         index.entry(package.name).or_default().push(Advisory {
-            id: record.id.clone(), versions, timelines,
+            id: record.id.clone(),
+            versions,
+            timelines,
         });
     }
     Ok(())
@@ -192,22 +248,33 @@ mod tests {
         Timeline::parse(Range {
             kind: "SEMVER".into(),
             events: serde_json::from_str(events).unwrap(),
-        }).unwrap()
+        })
+        .unwrap()
     }
 
     #[test]
     fn sorts_unsorted_events_and_preserves_fixed_and_introduced_boundaries() {
-        let timeline = timeline(r#"[
+        let timeline = timeline(
+            r#"[
             {"fixed":"3.0.1"},
             {"introduced":"3.0.0-rc.1"},
             {"fixed":"1.0.2"},
             {"introduced":"0"}
-        ]"#);
+        ]"#,
+        );
         for (version, affected) in [
-            ("0.1.0", true), ("1.0.2", false), ("3.0.0-rc.0", false),
-            ("3.0.0-rc.1+package.1", true), ("3.0.0", true), ("3.0.1", false),
+            ("0.1.0", true),
+            ("1.0.2", false),
+            ("3.0.0-rc.0", false),
+            ("3.0.0-rc.1+package.1", true),
+            ("3.0.0", true),
+            ("3.0.1", false),
         ] {
-            assert_eq!(timeline.contains(&Version::parse(version).unwrap()), affected, "{version}");
+            assert_eq!(
+                timeline.contains(&Version::parse(version).unwrap()),
+                affected,
+                "{version}"
+            );
         }
     }
 

@@ -80,10 +80,22 @@ fn record_tool_issue(
     warnings: &mut Vec<String>, coverage: &mut Vec<AnalysisCoverageIssue>,
     tool: &str, reason: &str, message: String,
 ) {
+    record_coverage_issue(warnings, coverage, (tool, reason), None, message);
+}
+
+fn record_coverage_issue(
+    warnings: &mut Vec<String>,
+    coverage: &mut Vec<AnalysisCoverageIssue>,
+    tool_and_reason: (&str, &str),
+    path: Option<&str>,
+    message: String,
+) {
     record_warning(warnings, message.clone());
+    let (tool, reason) = tool_and_reason;
     coverage.push(AnalysisCoverageIssue {
-        analyzer: tool.into(), reason: reason.into(), scope: "analyzer".into(),
-        path: None, line: None, rule: None, detail: message,
+        analyzer: tool.into(), reason: reason.into(),
+        scope: if path.is_some() { "file" } else { "analyzer" }.into(),
+        path: path.map(str::to_owned), line: None, rule: None, detail: message,
     });
 }
 
@@ -188,13 +200,8 @@ fn audit_dependencies(
     }) {
         match autoreview_core::run_cargo_audit(root, path) {
             Ok(items) => findings.extend(items),
-            Err(err) => {
-                record_tool_issue(warnings, coverage, "cargo-audit", "tool_failed", format!("cargo audit failed for {path}: {err:#}"));
-                if let Some(issue) = coverage.last_mut() {
-                    issue.scope = "file".into();
-                    issue.path = Some(path.clone());
-                }
-            }
+            Err(err) => record_coverage_issue(warnings, coverage, ("cargo-audit", "tool_failed"),
+                Some(path), format!("cargo audit failed for {path}: {err:#}")),
         }
     }
     findings
@@ -226,14 +233,8 @@ fn audit_npm(
     for path in paths {
         match autoreview_core::audit_npm_lock(input.source_root, path, &advisories) {
             Ok(items) => findings.extend(items),
-            Err(error) => {
-                record_tool_issue(warnings, coverage, tool, "lockfile_unavailable",
-                    format!("npm advisory coverage unavailable for {path}: {error:#}"));
-                if let Some(issue) = coverage.last_mut() {
-                    issue.scope = "file".into();
-                    issue.path = Some(path.clone());
-                }
-            }
+            Err(error) => record_coverage_issue(warnings, coverage, (tool, "lockfile_unavailable"),
+                Some(path), format!("npm advisory coverage unavailable for {path}: {error:#}")),
         }
     }
     findings

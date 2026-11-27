@@ -17,14 +17,22 @@ pub(super) const RULE: Rule = Rule {
 };
 
 pub fn run_workflow_policy(root: &Path, files: &[String]) -> Vec<AgentFinding> {
+    review_workflows(root, files, check_workflow)
+}
+
+pub(super) fn review_workflows(
+    root: &Path,
+    files: &[String],
+    analyze: impl Fn(&str, &str) -> Vec<AgentFinding>,
+) -> Vec<AgentFinding> {
     let Ok(root) = root.canonicalize() else { return Vec::new() };
     files.iter().filter(|path| workflow_path(Path::new(path))).flat_map(|path| {
         read_snapshot_file(&root, Path::new(path))
-            .map_or_else(Vec::new, |source| check_workflow(path, &source))
+            .map_or_else(Vec::new, |source| analyze(path, &source))
     }).collect()
 }
 
-pub(super) fn workflow_path(path: &Path) -> bool {
+fn workflow_path(path: &Path) -> bool {
     path.parent() == Some(Path::new(".github/workflows"))
         && matches!(path.extension().and_then(|ext| ext.to_str()), Some("yml" | "yaml"))
 }
