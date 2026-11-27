@@ -9,7 +9,7 @@ pub(super) const SECURE: Rule = Rule {
     category: "security",
     subcategory: "auth.session-cookie",
     tool: "autoreview-spring-session-policy",
-    title: "Spring session cookie can travel over HTTP",
+    title: "Spring session cookie does not require HTTPS",
     reference: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html#application-properties.server.server.servlet.session.cookie.secure",
     enabled_by: "detected Spring Boot properties path",
 };
@@ -61,13 +61,13 @@ fn check_properties(path: &str, source: &str) -> Vec<AgentFinding> {
     [
         (
             &SECURE,
-            secure,
+            secure.disabled_at(),
             "CWE-614",
             "Use Secure for session cookies in HTTPS deployments.",
         ),
         (
             &HTTP_ONLY,
-            http_only,
+            http_only.disabled_at(),
             "CWE-1004",
             "Keep HttpOnly enabled to prevent scripts from directly reading the session cookie.",
         ),
@@ -89,8 +89,31 @@ fn check_properties(path: &str, source: &str) -> Vec<AgentFinding> {
     .collect()
 }
 
-fn disabled_flags(source: &str) -> Option<[Option<(usize, &str)>; 2]> {
-    let mut settings = [None, None];
+#[derive(Default)]
+struct PropertySetting<'s> {
+    spelling: Option<&'s str>,
+    conflicting_spellings: bool,
+    disabled: Option<(usize, &'s str)>,
+}
+
+impl<'s> PropertySetting<'s> {
+    fn record(&mut self, key: &'s str, value: &str, site: (usize, &'s str)) {
+        self.conflicting_spellings |= self.spelling.is_some_and(|previous| previous != key);
+        self.spelling = Some(key);
+        self.disabled = value.eq_ignore_ascii_case("false").then_some(site);
+    }
+
+    fn disabled_at(self) -> Option<(usize, &'s str)> {
+        if self.conflicting_spellings {
+            None
+        } else {
+            self.disabled
+        }
+    }
+}
+
+fn disabled_flags(source: &str) -> Option<[PropertySetting<'_>; 2]> {
+    let mut settings = [PropertySetting::default(), PropertySetting::default()];
     for (line, raw) in source.lines().enumerate() {
         let text = raw.trim_start_matches(property_space);
         if matches!(text, "#---" | "!---") {
@@ -106,7 +129,7 @@ fn disabled_flags(source: &str) -> Option<[Option<(usize, &str)>; 2]> {
             return None;
         }
         if let Some(index) = flag_index(key) {
-            settings[index] = value.eq_ignore_ascii_case("false").then_some((line, text));
+            settings[index].record(key, value, (line, text));
         }
     }
     Some(settings)
@@ -188,6 +211,13 @@ server.servlet.session.cookie.secure false
         }
         assert!(check_properties("app", "server.servlet.session.cookie.http-only=false\nserver.servlet.session.cookie.httpOnly=${SESSION_HTTP_ONLY}").is_empty());
         assert!(check_properties("app", "server.servlet.session.cookie.http-only=false\nserver.servlet.session.cookie.http_only=true").is_empty());
+        let conflicting = "server.servlet.session.cookie.http-only=true\nserver.servlet.session.cookie.httpOnly=false\nserver.servlet.session.cookie.secure=false";
+        let findings = check_properties("app", conflicting);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].source.rule_id.as_deref(),
+            Some("spring-session-cookie-without-secure")
+        );
         assert!(check_properties("app", "server.servlet.session.cookie.secure=false\n#---\nserver.servlet.session.cookie.secure=true").is_empty());
         assert!(check_properties("app", "server.servlet.session.cookie.secure=false\nserver.servlet.session.cookie.sec\\ure=true").is_empty());
     }

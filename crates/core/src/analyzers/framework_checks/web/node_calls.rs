@@ -53,10 +53,7 @@ impl<'t, 's> NodeCalls<'t, 's> {
             return None;
         }
         if let Some(scope) = self.scopes.visible(local, target) {
-            return self
-                .const_required_module(scope, local, target, modules)
-                .map(|module| (module, "default"))
-                .or_else(|| self.destructured_require(scope, local, target, modules));
+            return self.local_require(target, scope, modules);
         }
         modules.iter().find_map(|&module| {
             self.runtime_imports(module)
@@ -66,19 +63,16 @@ impl<'t, 's> NodeCalls<'t, 's> {
         })
     }
 
-    fn destructured_require<'m>(
+    fn local_require<'m>(
         &self,
-        scope: Node<'t>,
-        name: &str,
         use_site: Node<'t>,
+        scope: Node<'t>,
         modules: &[&'m str],
     ) -> Option<(&'m str, &'s str)> {
+        let name = text(use_site, self.source);
         let mut bindings = const_declarations(scope).filter_map(|decl| {
-            let pattern = decl
-                .child_by_field_name("name")
-                .filter(|part| part.kind() == "object_pattern")?;
-            let member =
-                children(pattern).find_map(|part| destructured_member(part, name, self.source))?;
+            let pattern = decl.child_by_field_name("name")?;
+            let member = require_binding(pattern, name, self.source)?;
             let value = decl.child_by_field_name("value")?;
             (value.end_byte() <= use_site.start_byte()).then_some((member, value))
         });
@@ -96,7 +90,8 @@ impl<'t, 's> NodeCalls<'t, 's> {
             return None;
         }
         if let Some(scope) = self.scopes.visible(local, object) {
-            return self.const_required_module(scope, local, object, modules);
+            let (module, member) = self.local_require(object, scope, modules)?;
+            return (member == "default").then_some(module);
         }
         modules.iter().find_map(|&module| {
             self.runtime_imports(module)
@@ -109,18 +104,6 @@ impl<'t, 's> NodeCalls<'t, 's> {
                 })
                 .then_some(module)
         })
-    }
-
-    fn const_required_module<'m>(
-        &self,
-        scope: Node<'t>,
-        name: &str,
-        use_site: Node<'t>,
-        modules: &[&'m str],
-    ) -> Option<&'m str> {
-        let (_, value) = const_value(scope, name, self.source)?;
-        (value.end_byte() <= use_site.start_byte()).then_some(())?;
-        self.required_module(value, modules)
     }
 
     fn required_module<'m>(&self, call: Node<'t>, modules: &[&'m str]) -> Option<&'m str> {
@@ -245,6 +228,16 @@ fn destructured_member<'s>(pattern: Node<'_>, binding: &str, source: &'s str) ->
         Some(text(key, source))
     } else {
         string_literal(key, source)
+    }
+}
+
+fn require_binding<'s>(pattern: Node<'_>, name: &str, source: &'s str) -> Option<&'s str> {
+    match pattern.kind() {
+        "identifier" if text(pattern, source) == name => Some("default"),
+        "object_pattern" => children(pattern)
+            .find_map(|part| destructured_member(part, name, source))
+            .filter(|member| *member != "default"),
+        _ => None,
     }
 }
 

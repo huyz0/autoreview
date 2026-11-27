@@ -173,11 +173,11 @@ createCipheriv('aes-256-ecb', key, null);
     let sources = [("settings.js", js), ("settings.tsx", ts)];
     let findings = scan(&sources, &["settings.js", "settings.tsx"]);
     let mut actual: Vec<_> = findings.iter().filter(|finding| finding.category == "security")
-        .map(|finding| (
-            finding.location.path.as_str(),
-            finding.location.range.start_line,
-            finding.source.rule_id.as_deref().unwrap(),
-        )).collect();
+        .map(|finding| {
+            let id = finding.source.rule_id.as_deref().unwrap();
+            let site = &finding.location;
+            (site.path.as_str(), site.range.start_line, id)
+        }).collect();
     actual.sort_unstable();
     assert_eq!(actual, [
         ("settings.js", 4, "node-jwt-ignores-expiration"),

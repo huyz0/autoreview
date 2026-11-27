@@ -144,6 +144,24 @@ The resolved transport batch has these bounds:
 | Race in a security-sensitive check-then-act (CWE-362, CWE-367) | Partial. JVM map check-then-act and transaction checks cover adjacent patterns. | Visible authorization, filesystem validation or reservation check followed by mutation without atomicity on a declared shared resource. | A transaction or lock spanning both actions at appropriate scope, atomic operation. | Track resource identity, guard lifetime and transactional semantics. Medium. | Compare atomic API, separate check and action, and a lock covering both in a fixture. |
 | Data publication before commit (CWE-362, CWE-703) | Partial. Opt-in outbox policy and transaction ownership checks. | Known broker publication follows a protected data write before its commit or despite failure. Go/JVM/web/Rust adapters. | Transactional outbox or a documented atomic broker operation, idempotent background delivery after commit. | Registered policy, cross-resource order and exceptional exits. Medium. | Simulate successful commit and rollback in a local harness and verify publication ordering. |
 
+## Explicit settings coverage bounds
+
+- JS, TS, and TSX checks resolve supported named and default imports, namespace
+  calls, and direct or const CommonJS loads. Options may be inline objects or
+  first-use same-block const objects. Later spreads or unknown computed keys
+  can obscure an earlier setting. Dynamic bindings and defaults are outside
+  the check.
+- Go resolves direct golang-jwt v5 options on `NewParser`, `Parse`, and
+  `ParseWithClaims`. It does not infer whether a later validator compensates
+  for the parser option.
+- Spring checks conventional `src/main/resources[/config]/application*.properties`
+  files, including profile-specific names. It uses the final recognized value
+  within one document when the key has a single spelling. YAML, continuations, escaped keys, multi-document
+  files, and runtime profile precedence are outside this check.
+- The ECB check covers literal AES-128, AES-192, and AES-256 encryption
+  variants in Node. It leaves legacy decryption, dynamic transformations, and
+  configurable password-hashing costs outside this batch.
+
 ## Evidence outside the source snapshot
 
 | Question | Evidence needed |
@@ -162,21 +180,3 @@ The resolved transport batch has these bounds:
 1. **Output and dataflow boundaries.** Add DOM/React raw HTML and archive extraction sinks. Extend query/command/URL coverage one resolved framework API at a time, including guard and sanitizer tests.
 2. **Workflow and dependency policy.** Add structured workflow shell interpolation and job permission checks. Evaluate one offline advisory adapter at a time with affected-range boundaries and missing-feed diagnostics.
 3. **Project-defined authorization and resource policy.** Start with explicit route/entity policies and registered verifier results. Add workload limits and race checks after the project can describe trusted resources and required invariants.
-
-### Bounds of the explicit settings checks
-
-- JS, TS, and TSX checks resolve supported named and default imports, namespace
-  calls, and direct or const CommonJS loads. Options may be inline objects or
-  first-use same-block const objects. Later spreads or unknown computed keys
-  can obscure an earlier setting. Dynamic bindings and defaults are outside
-  the check.
-- Go resolves direct golang-jwt v5 options on `NewParser`, `Parse`, and
-  `ParseWithClaims`. It does not infer whether a later validator compensates
-  for the parser option.
-- Spring checks conventional `src/main/resources[/config]/application*.properties`
-  files, including profile-specific names. It uses the final recognized value
-  within one document. YAML, continuations, escaped keys, multi-document
-  files, and runtime profile precedence are outside this check.
-- The ECB check covers literal AES-128, AES-192, and AES-256 encryption
-  variants in Node. It leaves legacy decryption, dynamic transformations, and
-  configurable password-hashing costs outside this batch.

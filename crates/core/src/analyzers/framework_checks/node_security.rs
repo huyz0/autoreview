@@ -67,6 +67,7 @@ pub(super) fn inspect(path: &str, source: &str, root: Node<'_>) -> Vec<AgentFind
         let Some(api) = calls.resolve(call, MODULES) else {
             continue;
         };
+        let site = CallSite { path, source, call };
         match api {
             ("jsonwebtoken", "verify") => {
                 let Some(options) =
@@ -74,11 +75,8 @@ pub(super) fn inspect(path: &str, source: &str, root: Node<'_>) -> Vec<AgentFind
                 else {
                     continue;
                 };
-                report_flags(
-                    path,
-                    source,
+                site.report_flags(
                     options,
-                    call,
                     "true",
                     &[
                         ("ignoreExpiration", &VERIFY_EXPIRATION, "CWE-613"),
@@ -91,11 +89,8 @@ pub(super) fn inspect(path: &str, source: &str, root: Node<'_>) -> Vec<AgentFind
                 let Some(cookie) = session_options(&calls, call, api.0, source) else {
                     continue;
                 };
-                report_flags(
-                    path,
-                    source,
+                site.report_flags(
                     cookie,
-                    call,
                     "false",
                     &[
                         ("secure", &COOKIE_SECURE, "CWE-614"),
@@ -107,7 +102,7 @@ pub(super) fn inspect(path: &str, source: &str, root: Node<'_>) -> Vec<AgentFind
             ("node:crypto" | "crypto", "createCipheriv") => {
                 if let Some(algorithm) = argument(call, 0).filter(|node| is_aes_ecb(*node, source))
                 {
-                    findings.push(finding(&ECB, path, algorithm, call, source, "CWE-327"));
+                    findings.push(site.finding(&ECB, algorithm, "CWE-327"));
                 }
             }
             _ => {}
@@ -145,36 +140,35 @@ fn is_aes_ecb(node: Node<'_>, source: &str) -> bool {
     })
 }
 
-fn report_flags(
-    path: &str,
-    source: &str,
-    object: Node<'_>,
-    call: Node<'_>,
-    expected: &str,
-    flags: &[(&str, &Rule, &str)],
-    findings: &mut Vec<AgentFinding>,
-) {
-    findings.extend(flags.iter().filter_map(|(name, rule, cwe)| {
-        let (setting, value) = property(object, name, source)?;
-        (value.kind() == expected).then(|| finding(rule, path, setting, call, source, cwe))
-    }));
+struct CallSite<'tree, 'source> {
+    path: &'source str,
+    source: &'source str,
+    call: Node<'tree>,
 }
 
-fn finding(
-    rule: &Rule,
-    path: &str,
-    setting: Node<'_>,
-    call: Node<'_>,
-    source: &str,
-    cwe: &str,
-) -> AgentFinding {
-    let mut finding = rule.finding(
-        location(path, setting, source),
-        vec![location(path, call, source)],
-    );
-    finding
-        .meta
-        .get_or_insert_with(Default::default)
-        .insert("cwe".into(), serde_json::json!([cwe]));
-    finding
+impl CallSite<'_, '_> {
+    fn report_flags(
+        &self,
+        object: Node<'_>,
+        expected: &str,
+        flags: &[(&str, &Rule, &str)],
+        findings: &mut Vec<AgentFinding>,
+    ) {
+        findings.extend(flags.iter().filter_map(|(name, rule, cwe)| {
+            let (setting, value) = property(object, name, self.source)?;
+            (value.kind() == expected).then(|| self.finding(rule, setting, cwe))
+        }));
+    }
+
+    fn finding(&self, rule: &Rule, setting: Node<'_>, cwe: &str) -> AgentFinding {
+        let mut finding = rule.finding(
+            location(self.path, setting, self.source),
+            vec![location(self.path, self.call, self.source)],
+        );
+        finding
+            .meta
+            .get_or_insert_with(Default::default)
+            .insert("cwe".into(), serde_json::json!([cwe]));
+        finding
+    }
 }
