@@ -127,7 +127,7 @@ fn extract_class(node: Node, source: &[u8], file: &Path) -> Option<TypeDecl> {
         }
     }
 
-    Some(TypeDecl { name, file: file.to_path_buf(), start_line: line_of(node), fields, methods, superclass })
+    Some(TypeDecl { name, file: file.to_path_buf(), start_line: line_of(node), fields, methods, superclass, java: None })
 }
 
 fn extract_params(params_node: Node, source: &[u8]) -> Vec<NamedSlot> {

@@ -1,11 +1,11 @@
 //! Whole-repo symbol index data model — deliberately unresolved, name-based,
-//! raw syntactic text throughout. A field's or parameter's "type" is
+//! raw syntactic text for common fields. A field's or parameter's "type" is
 //! whatever token sequence appeared in source (`"int"`, `"*Widget"`,
 //! `"List<String>"`), never normalized or resolved against imports. This
 //! mirrors `autoreview-archgraph`'s own restraint (package identity is "a
 //! plain `String`", not a resolved module) — real type resolution is
-//! explicitly deferred future work (a "Tier 4" compiler-frontend backend),
-//! not attempted here.
+//! left to compiler-backed analyses. Java stores additional scope and
+//! signature facts for the Refused Bequest query.
 
 use std::path::PathBuf;
 
@@ -30,6 +30,7 @@ pub struct TypeDecl {
     /// name, unresolved against imports. `None` for Go types and for Java
     /// classes with no explicit superclass.
     pub superclass: Option<String>,
+    pub java: Option<crate::extract::java::JavaClass>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

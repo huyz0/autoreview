@@ -636,6 +636,7 @@ func two(customer *Customer) int { return customer.Balance + customer.Fee }
         SymbolIndex { types: vec![autoreview_symindex::TypeDecl {
             name: "Other".to_string(), file: "other.go".into(), start_line: 1,
             fields: vec![], methods: vec![], superclass: None,
+            java: None,
         }] }
     }
 
