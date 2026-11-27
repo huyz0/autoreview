@@ -124,7 +124,7 @@ function run(request) {
         if (!valid || --remaining < 0) { valid = false; return; }
         if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
           let resolved;
-          try { resolved = fs.realpathSync(require.resolve(node.moduleSpecifier.text, { paths: [path.dirname(file.fileName)] })); } catch (_) {}
+          try { resolved = fs.realpathSync(require.resolve(node.moduleSpecifier.text, { paths: [path.dirname(file.fileName)] })); } catch (_) { /* Type-only and local imports need not resolve through Node. */ }
           if (resolved === implementation || node.moduleSpecifier.text === moduleName || node.moduleSpecifier.text === `node:${moduleName}`) {
             if (!ts.isImportDeclaration(node)) { valid = false; return; }
             const namespace = node.importClause?.namedBindings;
@@ -140,7 +140,7 @@ function run(request) {
           if (node.arguments.length !== 1 || !ts.isStringLiteral(node.arguments[0])) { valid = false; return; }
           const name = node.arguments[0].text;
           let resolved;
-          try { resolved = fs.realpathSync(require.resolve(name, { paths: [path.dirname(file.fileName)] })); } catch (_) {}
+          try { resolved = fs.realpathSync(require.resolve(name, { paths: [path.dirname(file.fileName)] })); } catch (_) { /* A nonmatching unresolved module cannot alias the audited file. */ }
           if (name === moduleName || name === `node:${moduleName}` || /^@actions\/core(?:\/|$)/.test(name) || resolved === implementation) { valid = false; return; }
         }
         ts.forEachChild(node, visit);
@@ -168,7 +168,7 @@ function run(request) {
     const key = `${call.getSourceFile().fileName}\0${binding.name}\0${actual}`;
     if (!actionsCache.has(key)) {
       let valid = false;
-      try { valid = proofFile(declaration.fileName, contract.declaration) && proofFile(actual, contract.implementation) && proofProjectSources() && actionsProjectUnmodified(binding.name, actual); } catch (_) {}
+      try { valid = proofFile(declaration.fileName, contract.declaration) && proofFile(actual, contract.implementation) && proofProjectSources() && actionsProjectUnmodified(binding.name, actual); } catch (_) { valid = false; }
       actionsCache.set(key, valid);
     }
     return actionsCache.get(key);
@@ -191,7 +191,7 @@ function run(request) {
     try {
       const actual = fileHash(binary, 64 * 1024 * 1024);
       if (node12Binaries.has(actual) && proofFile(binary, actual, 64 * 1024 * 1024)) node12Runtime = true;
-    } catch (_) {}
+    } catch (_) { node12Runtime = false; }
     return node12Runtime;
   }
   function declarationHash(declaration, expected) {
