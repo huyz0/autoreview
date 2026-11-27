@@ -48,15 +48,17 @@ test('proves return values only for immutable local synchronous function literal
     'const explicit: () => void = () => { try { return; } finally { return void 1; } };',
     'const expression: () => void = () => void 1;',
     'const asynchronous: () => void = async () => {};',
+    'const asyncExpression: () => void = async function () {};',
+    'const generator: () => void = async function* () { yield 1; };',
     'const hidden: () => void = () => Promise.resolve();',
     'const guarded: () => void = () => { try { return; } finally { return Promise.resolve(); } };',
     'let mutable: () => void = () => {}; mutable = async () => {};',
     `const large: () => void = () => { ${'void 0;'.repeat(10001)} };`,
     'function shadow(sync: () => void) { sync(); }',
-    'sync(); explicit(); expression(); asynchronous(); hidden(); guarded(); mutable(); large();',
+    'sync(); explicit(); expression(); asynchronous(); asyncExpression(); generator(); hidden(); guarded(); mutable(); large();',
   ].join('\n');
   fs.writeFileSync(file, source);
-  const names = ['sync()', 'explicit()', 'expression()', 'asynchronous()', 'hidden()', 'guarded()', 'mutable()', 'large()'];
+  const names = ['sync()', 'explicit()', 'expression()', 'asynchronous()', 'asyncExpression()', 'generator()', 'hidden()', 'guarded()', 'mutable()', 'large()'];
   const digest = createHash('sha256').update(source, 'utf8').digest('hex');
   const calls = names.map(name => ({ path: file, start: Buffer.byteLength(source.slice(0, source.lastIndexOf(name))), source_sha256: digest }));
   calls.push({ path: file, start: Buffer.byteLength(source.slice(0, source.indexOf('sync();'))), source_sha256: digest });
@@ -64,7 +66,7 @@ test('proves return values only for immutable local synchronous function literal
   assert.equal(child.status, 0, child.stderr);
   const result = JSON.parse(child.stdout);
   assert.equal(result.status, 'ok');
-  assert.deepEqual(result.calls.map(call => call.status), ['not_promise', 'not_promise', 'not_promise', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven']);
+  assert.deepEqual(result.calls.map(call => call.status), ['not_promise', 'not_promise', 'not_promise', 'promise_like', 'promise_like', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven', 'not_proven']);
 });
 
 test('checks concrete call types and fails closed on project errors', { skip: !compiler }, () => {

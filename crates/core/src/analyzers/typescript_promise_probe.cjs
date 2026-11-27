@@ -118,16 +118,20 @@ function run(request) {
   // Only a directly called, immutable local function literal can prove its
   // actual return here. A void signature alone permits async implementations.
   const localReturnCache = new WeakMap();
-  function localReturnsNoValue(call) {
-    if (!ts.isIdentifier(call.expression) || call.questionDotToken) return false;
+  function localFunctionLiteral(call) {
+    if (!ts.isIdentifier(call.expression) || call.questionDotToken) return null;
     const symbol = checker.getSymbolAtLocation(call.expression);
-    if (!symbol || symbol.declarations?.length !== 1) return false;
+    if (!symbol || symbol.declarations?.length !== 1) return null;
     const declaration = symbol.declarations[0];
     if (!ts.isVariableDeclaration(declaration) || declaration.getSourceFile() !== call.getSourceFile() ||
-        !ts.isVariableDeclarationList(declaration.parent) || !ordinaryConst(declaration.parent)) return false;
+        !ts.isVariableDeclarationList(declaration.parent) || !ordinaryConst(declaration.parent)) return null;
     const fn = declaration.initializer;
     if (!fn || !(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) || !fn.body ||
-        fn.asteriskToken || asyncFunction(fn)) return false;
+        fn.asteriskToken) return null;
+    return fn;
+  }
+  function localReturnsNoValue(fn) {
+    if (!fn || asyncFunction(fn)) return false;
     if (localReturnCache.has(fn)) return localReturnCache.get(fn);
     if (!ts.isBlock(fn.body)) return ts.isVoidExpression(fn.body);
     const pending = [fn.body];
@@ -213,7 +217,8 @@ function run(request) {
     const selected = cached.calls.get(call.start);
     if (!selected) return { ...call, status: 'unavailable' };
     const type = checker.getTypeAtLocation(selected);
-    return { ...call, status: promiseLike(type) ? 'promise_like' : definitelyNotPromise(type) || localReturnsNoValue(selected) ? 'not_promise' : directlyAwaited(selected) || immediatelyAwaitedBinding(selected) || returnedFromAsync(selected) ? 'observed' : 'not_proven' };
+    const local = localFunctionLiteral(selected);
+    return { ...call, status: promiseLike(type) || local && asyncFunction(local) ? 'promise_like' : definitelyNotPromise(type) || localReturnsNoValue(local) ? 'not_promise' : directlyAwaited(selected) || immediatelyAwaitedBinding(selected) || returnedFromAsync(selected) ? 'observed' : 'not_proven' };
   });
   return { status: 'ok', calls };
 }
