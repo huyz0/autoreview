@@ -24,7 +24,7 @@ pub fn run_workflow_policy(root: &Path, files: &[String]) -> Vec<AgentFinding> {
     }).collect()
 }
 
-fn workflow_path(path: &Path) -> bool {
+pub(super) fn workflow_path(path: &Path) -> bool {
     path.parent() == Some(Path::new(".github/workflows"))
         && matches!(path.extension().and_then(|ext| ext.to_str()), Some("yml" | "yaml"))
 }

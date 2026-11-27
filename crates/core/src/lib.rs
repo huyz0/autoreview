@@ -26,8 +26,10 @@ pub use analyzers::architecture::{load_architecture_config, run_architecture_che
 pub use analyzers::ast_grep::{find_rule_definition, list_builtin_rules, run_ast_grep, run_ast_grep_with_coverage, semantic_rule_ids, PatternReviewResult, RuleCatalogEntry, RuleDefinition};
 pub use analyzers::bidi_check::run_bidi_control_character_check;
 pub use analyzers::cargo_audit::run_cargo_audit;
+pub use analyzers::npm_audit::{audit_npm_lock, NpmAdvisories};
 pub use analyzers::cargo_review::run_cargo_review;
 pub use analyzers::workflow_policy::run_workflow_policy;
+pub use analyzers::workflow_security::run_workflow_security;
 pub use analyzers::spring_session_policy::run_spring_session_policy;
 pub use analyzers::postgres_migrations::run_postgres_migration_policy;
 pub use analyzers::protobuf_schema::run_protobuf_policy;

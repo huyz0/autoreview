@@ -2502,6 +2502,126 @@ fn workflow_pinning_policy_is_opt_in_and_points_to_the_changed_steps() {
 }
 
 #[test]
+fn workflow_security_policies_audit_script_values_and_effective_permissions() {
+    let path = ".github/workflows/checks.yml";
+    let before = "permissions: read-all\njobs: {}\n";
+    let after = r#"permissions: write-all
+jobs:
+  write:
+    permissions: write-all
+    steps:
+      - run: |
+          printf '%s\n' "${{ github.event.issue.title }}"
+      - env:
+          TITLE: ${{ github.event.issue.title }}
+        run: printf '%s\n' "$TITLE"
+      - run: printf '%s\n' "${{ github.repository_id }}"
+  read:
+    permissions: {contents: read}
+    steps: [{run: echo ok}]
+  inherited:
+    steps: [{run: echo ok}]
+"#;
+    let repo = init_repo(&[(path, before)]);
+    repo.commit(&[(path, after), ("example.yaml", after)], "configure workflow jobs");
+    let script = |repo| scoped_static_diff(repo, "build.script-injection");
+    let permissions = |repo| scoped_static_diff(repo, "build.least-privilege");
+    assert!(script(repo.path()).findings.is_empty());
+    assert!(permissions(repo.path()).findings.is_empty());
+    write_artifact_config(repo.path(),
+        "artifactChecks:\n  githubActionsScriptInputs: true\n  githubActionsLeastPrivilege: true\n");
+    let scripts = script(repo.path()).findings;
+    assert_eq!(scripts.len(), 1);
+    assert_eq!(scripts[0].source.rule_id.as_deref(), Some("github-actions-script-input"));
+    assert_eq!(scripts[0].location.path, path);
+    assert_eq!(scripts[0].location.range.start_line, 6);
+    assert_eq!(scripts[0].location.range.end_line, Some(7));
+    let privileges = permissions(repo.path()).findings;
+    assert_eq!(privileges.len(), 2);
+    assert!(privileges.iter().all(|finding| {
+        finding.source.rule_id.as_deref() == Some("github-actions-write-all")
+            && finding.location.path == path
+    }));
+    assert_eq!(privileges.iter().map(|finding| finding.location.range.start_line)
+        .collect::<std::collections::BTreeSet<_>>(), [1, 4].into());
+
+    let fixed = after.replace("  inherited:\n    steps:", "  inherited:\n    permissions: {}\n    steps:");
+    repo.commit(&[(path, &fixed)], "restrict inherited token");
+    assert!(permissions(repo.path()).findings.is_empty());
+    let added = format!("{fixed}  new-job:\n    steps: [{{run: echo ok}}]\n");
+    repo.commit(&[(path, &added)], "add a job inheriting the workflow grant");
+    let report = permissions(repo.path());
+    assert_eq!(report.findings.len(), 1);
+    assert_eq!(report.findings[0].location.range.start_line, 1);
+    assert_eq!(report.findings[0].related_locations.as_ref().unwrap()[0].snippet, "new-job");
+}
+
+#[test]
+fn npm_advisory_snapshot_reports_affected_lock_entries_and_unavailable_coverage() {
+    let path = "app/package-lock.json";
+    let before = r#"{"lockfileVersion":3,"packages":{}}"#;
+    let after = r#"{
+  "lockfileVersion": 3,
+  "packages": {
+    "node_modules/example-package": {
+      "version": "2.1.0",
+      "resolved": "https://registry.npmjs.org/example-package/-/example-package-2.1.0.tgz"
+    },
+    "node_modules/parent/node_modules/example-package": {
+      "version": "2.2.0",
+      "resolved": "https://registry.npmjs.org/example-package/-/example-package-2.2.0.tgz"
+    },
+    "node_modules/private/node_modules/example-package": {
+      "version": "2.1.0",
+      "resolved": "https://registry.example.test/example-package/-/example-package-2.1.0.tgz"
+    }
+  }
+}"#;
+    let advisory = r#"{
+      "id": "TEST-100",
+      "modified": "2025-01-01T00:00:00Z",
+      "affected": [{
+        "package": {"ecosystem": "npm", "name": "example-package"},
+        "ranges": [{"type": "SEMVER", "events": [
+          {"introduced": "2.1.0"}, {"fixed": "2.2.0"}
+        ]}]
+      }]
+    }"#;
+    let repo = init_repo(&[(path, before)]);
+    repo.commit(&[(path, after)], "lock example dependencies");
+    write_artifact_config(repo.path(), "artifactChecks:\n  npmAdvisorySnapshot: offline-advisories\n");
+    let scan = || {
+        let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+            .args(["diff", "--base", "HEAD~1", "--static-only", "--changed-lines", "--aspects", "security"])
+            .assert().success().get_output().stdout.clone();
+        let report_path = report_path_from_stdout(&String::from_utf8(output).unwrap());
+        serde_json::from_slice::<autoreview_schema::ReviewReport>(&std::fs::read(report_path).unwrap()).unwrap()
+    };
+    let unavailable = |report: autoreview_schema::ReviewReport| {
+        assert!(report.findings.iter().all(|finding| finding.source.tool != "autoreview-npm-osv"));
+        assert!(report.analysis_coverage.iter().any(|issue| {
+            issue.analyzer == "autoreview-npm-osv" && issue.reason == "advisory_snapshot_unavailable"
+        }));
+    };
+    unavailable(scan());
+    let snapshot = repo.path().join("offline-advisories");
+    std::fs::create_dir(&snapshot).unwrap();
+    unavailable(scan());
+    std::fs::write(snapshot.join("TEST-100.json"), "{}").unwrap();
+    unavailable(scan());
+    std::fs::write(snapshot.join("TEST-100.json"), advisory).unwrap();
+    let report = scan();
+    assert!(report.analysis_coverage.iter().all(|issue| issue.analyzer != "autoreview-npm-osv"));
+    let matches: Vec<_> = report.findings.iter().filter(|finding| finding.source.tool == "autoreview-npm-osv").collect();
+    assert_eq!(matches.len(), 1);
+    let finding = matches[0];
+    assert_eq!(finding.source.rule_id.as_deref(), Some("TEST-100"));
+    assert_eq!(finding.location.path, path);
+    assert_eq!(finding.location.range.start_line, 4);
+    assert_eq!(finding.location.range.end_line, Some(7));
+}
+
+#[test]
 fn rules_packs_refresh_reports_a_freshly_cloned_git_pack() {
     let remote = tempfile::tempdir().unwrap();
     run_git(remote.path(), &["init", "-q"]);
