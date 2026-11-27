@@ -1,6 +1,50 @@
 # Windows historical replay baseline
 
-## Current run: main 340d331
+## Current run: main 340d40c
+
+On Windows, the debug CLI and Go evidence probe built from main commit
+`340d40c60f1288088e312c77cf00ef9129158001` replayed the pinned manifests
+below. Git was 2.56.0.windows.1, Rust 1.99.1, ast-grep 0.51.3, Go 1.27.4,
+and Node 26.12.1. SFTPresso used TypeScript 5.9.3; checkout used TypeScript
+5.6.3 with the documented legacy-catch adapter and benchmark rule pack.
+The yq runs used their separate cached dependency sets with downloads disabled.
+Git long-path support was enabled for this run.
+
+| Manifest | Completed / attempted | Incomplete | Failed | TP | FP | FN |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `azure-iot-matches.yaml` | 1 / 1 | 0 | 0 | 6 | 0 | 0 |
+| `iceberg-go.yaml` | 1 / 1 | 0 | 0 | 1 | 0 | 0 |
+| `jplag-trim.yaml` | 1 / 1 | 0 | 0 | 1 | 0 | 0 |
+| `go-tools.yaml` | 1 / 1 | 0 | 0 | 0 | 0 | 0 |
+| `uwas-rename.yaml` | 1 / 1 | 0 | 0 | 1 | 0 | 0 |
+| `niverwizard-msw-delay.yaml` | 3 / 3 | 0 | 0 | 4 | 0 | 0 |
+| `syzkaller-swallowed-error.yaml` | 1 / 1 | 0 | 0 | 1 | 0 | 0 |
+| `cilium-swallowed-error.yaml` | 2 / 2 | 0 | 0 | 1 | 2 | 0 |
+| `silphscope-digest.yaml` | 1 / 1 | 0 | 0 | 1 | 0 | 0 |
+| `yq-error.yaml` | 1 / 1 | 0 | 0 | 3 | 0 | 0 |
+| `yq-multi-error.yaml` | 1 / 1 | 0 | 0 | 5 | 0 | 0 |
+| `sftp-promise.yaml` | 1 / 1 | 0 | 0 | 2 | 0 | 0 |
+| `checkout-promise.yaml` | 0 / 2 | 2 | 0 | — | — | — |
+| `redicloud-coroutines.yaml` | 0 / 1 | 1 | 0 | — | — | — |
+| `sentry-async-executor.yaml` | 1 / 1 | 0 | 0 | 2 | 0 | 0 |
+
+The yq multi-result case completes on this revision. Cilium still reports the
+same cancellation-handling line in both revisions, accounting for the two
+false positives; these are not independent defects. Checkout reports two and
+21 `promise_type_unresolved` locations in its respective before revisions.
+RediCloud reports `callback_execution_unresolved` at line 120 of its before
+revision. Replay stops each incomplete case before evaluating its after
+revision, so none of these three cases contributes to accuracy scores.
+
+These results suggest prioritizing promise type resolution and callback
+execution evidence, followed by call-specific error-path analysis for the
+Cilium mismatch. They also expose a measurement gap: this small, selected
+corpus does not cover most rule families, and multiple findings in the same
+fix pair or repeated revisions are not independent samples. Add independent
+fixes and clean examples before drawing conclusions about general precision
+or recall. See [the benchmark README](README.md) for setup and reproduction.
+
+## Earlier run: main 340d331
 
 On Windows, the debug CLI built from main commit
 `340d3315518e605aa04f86f5ca73a5683ce4a4a0` replayed the pinned manifests
