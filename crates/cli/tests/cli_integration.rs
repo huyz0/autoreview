@@ -578,6 +578,28 @@ fn malformed_unknown_package_source_reaches_review_and_blocks_replay() {
 }
 
 #[test]
+fn commented_package_helper_is_resolved_in_review_and_replay() {
+    let bad = "package app\nimport support.risky\nfun run() {\n val value = risky()\n value.hashCode()\n}\n";
+    let fixed = "package app\nimport support.risky\nfun run() {\n val value = risky()\n if (value != null) { value.hashCode() }\n}\n";
+    let helper = "/*\npackage misleading.comment\n*/\npackage support\nfun risky(): String? {\n val value: String? = null\n return value\n}\n";
+    let repo = init_repo(&[("app/Main.kt", bad), ("support/Helper.kt", helper)]);
+    let before = current_commit(repo.path());
+    repo.commit(&[("app/Main.kt", fixed)], "guard result");
+    let after = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"commented package helper", "rule":{"tool":"autoreview-dataflow","id":"npe-risk-from-helper-return"},
+        "before":{"commit":before,"path":"app/Main.kt","lines":[5]}, "after":{"commit":after,"path":"app/Main.kt","lines":[]}}]});
+    let replay = successful_replay_report(repo.path(), &suite);
+    assert_eq!(replay["coverage"][0]["completed"], 1, "{replay}");
+    assert_eq!(replay["rules"][0]["truePositives"], 1, "{replay}");
+    repo.commit(&[("app/Main.kt", bad)], "restore issue");
+    let output = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path())
+        .args(["diff", "--base", &after, "--head", "HEAD", "--static-only"]).assert().success();
+    let report = report_path_from_stdout(&String::from_utf8_lossy(&output.get_output().stdout));
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    assert!(report["findings"].as_array().unwrap().iter().any(|finding| finding["source"]["ruleId"] == "npe-risk-from-helper-return" && finding["location"]["path"] == "app/Main.kt"), "{report}");
+}
+
+#[test]
 fn unresolved_kotlin_callback_reaches_review_and_blocks_replay() {
     if !ast_grep_available() { return; }
     let clean = "suspend fun run() {\n work()\n}\n";

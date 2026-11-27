@@ -147,7 +147,8 @@ pub(super) fn record_index_coverage(
     let Some(index) = resolver.packages.java_kotlin_packages.get().filter(|_| uses_index) else { return };
     let unavailable = index.unavailable.iter().map(|path| (path, "package_index_unavailable", "A source or directory could not be inspected during Java/Kotlin package discovery; cross-file call-sequence analysis may be incomplete."));
     let malformed = index.malformed.iter().map(|path| (path, "package_index_syntax_errors", "A source has syntax errors and no recognizable package; cross-file call-sequence analysis may be incomplete."));
-    for (path, reason, detail) in unavailable.chain(malformed) {
+    let unresolved = index.unresolved.iter().map(|path| (path, "package_index_unresolved", "A package declaration could not be resolved safely; cross-file call-sequence analysis may be incomplete."));
+    for (path, reason, detail) in unavailable.chain(malformed).chain(unresolved) {
         let relative = resolver.relative(path);
         if relative.as_ref().is_some_and(|path| entries.contains(path)) { continue; }
         for (rule, language) in rules.iter().filter(|(_, language)| matches!(language, Language::Java | Language::Kotlin)) {

@@ -211,6 +211,7 @@ pub(super) struct JvmPackageIndex {
     pub(super) packages: HashMap<String, Vec<PathBuf>>,
     pub(super) unavailable: Vec<PathBuf>,
     pub(super) malformed: Vec<PathBuf>,
+    pub(super) unresolved: Vec<PathBuf>,
 }
 
 pub(super) struct SummaryCaches<'a> {
@@ -223,23 +224,7 @@ pub(super) struct SummaryCaches<'a> {
 
 impl SummaryCaches<'_> {
     pub(super) fn jvm_index(&self, root: &Path) -> &JvmPackageIndex {
-        self.java_kotlin_packages.get_or_init(|| {
-            let raw = autoreview_archgraph::index_java_kotlin_packages_with_coverage(root);
-            let mut index = JvmPackageIndex { packages: raw.packages, unavailable: raw.unavailable, malformed: Vec::new() };
-            for path in raw.unclassified {
-                let Some(language) = autoreview_langsupport::language_for_path(&path) else { continue };
-                match self.parse.get(&path, language) {
-                    None => index.unavailable.push(path),
-                    Some(parsed) if parsed.1.root_node().has_error() => index.malformed.push(path),
-                    Some(_) => {}
-                }
-            }
-            index.unavailable.sort();
-            index.unavailable.dedup();
-            index.malformed.sort();
-            index.malformed.dedup();
-            index
-        })
+        self.java_kotlin_packages.get_or_init(|| super::jvm_index::build(root))
     }
 
     pub(super) fn report_summary_issue(&self, path: &Path, rule: &str, reason: &str, detail: &str) {

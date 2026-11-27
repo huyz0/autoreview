@@ -1173,7 +1173,10 @@ fn imported_jvm_helpers_preserve_result_usage() {
     let cases = [
         (
             "Java", "java-discarded-objects-comparison", "app/Worker.java", "support/Checks.java",
-            r#"package support;
+            r#"/*
+package misleading.comment;
+*/
+package support;
 import java.util.Objects;
 public class Checks {
     public static void discard(boolean value) {}
@@ -1196,11 +1199,14 @@ class Worker {
     void dropped(Object a, Object b) { Checks.compare(a, b); }
 }
 "#,
-            6, 6,
+            6, 9,
         ),
         (
             "Kotlin", "kotlin-discarded-run-catching-result", "app/Worker.kt", "support/Checks.kt",
-            r#"package support
+            r#"/*
+package misleading.comment
+*/
+package support
 import kotlin.runCatching
 fun discard(value: Result<Int>) {}
 fun forward(value: Result<Int>): Result<Int> = value
@@ -1221,7 +1227,7 @@ fun used(text: String): Result<Int> {
 }
 fun dropped(text: String) { parse(text) }
 "#,
-            7, 5,
+            7, 8,
         ),
     ];
     for (_language, rule, caller, helper, helper_source, caller_source, caller_line, helper_line) in cases {

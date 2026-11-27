@@ -45,6 +45,7 @@ mod dispatch;
 mod dsl;
 mod functions;
 mod keyed_imports;
+mod jvm_index;
 mod go_practices;
 mod source;
 
@@ -448,6 +449,9 @@ fn java_kotlin_imported_package_summaries(
         for path in &index.malformed {
             caches.report_summary_issue(path, rule_id, "package_index_syntax_errors", "A source has syntax errors and no recognizable package; imported helper summaries may be incomplete.");
         }
+        for path in &index.unresolved {
+            caches.report_summary_issue(path, rule_id, "package_index_unresolved", "A package declaration could not be resolved safely; imported helper summaries may be incomplete.");
+        }
         for path in index.packages.get(&pkg).into_iter().flatten() {
             add_java_kotlin_summaries_from_file(path, &mut summaries, compute_summary, rule_id, caches);
         }
@@ -583,6 +587,7 @@ mod tests {
         std::fs::create_dir(dir.path().join("unknown")).unwrap();
         std::fs::write(dir.path().join("unknown/Hidden.java"), [0xff, 0xfe]).unwrap();
         std::fs::write(dir.path().join("unknown/Broken.kt"), "fun broken( {\n").unwrap();
+        std::fs::write(dir.path().join("unknown/Escaped.kt"), "package `when`\nclass Escaped\n").unwrap();
         std::fs::write(dir.path().join("unknown/Default.java"), "class Default {}\n").unwrap();
         std::fs::write(dir.path().join("Main.java"), "package caller;\nimport target.Helper;\nclass Main { void run() {} }\n").unwrap();
         std::fs::write(dir.path().join("Main.kt"), "package kcaller\nimport target.helper\nfun run() {}\n").unwrap();
@@ -595,11 +600,13 @@ mod tests {
         for rule in ["npe-risk-from-helper-return", "java-resource-test", "kotlin-resource-test"] {
             assert!(result.coverage.iter().any(|issue| issue.reason == "package_index_unavailable" && issue.rule.as_deref() == Some(rule) && issue.path.as_deref() == Some("unknown/Hidden.java")), "{rule}: {:?}", result.coverage);
             assert!(result.coverage.iter().any(|issue| issue.reason == "package_index_syntax_errors" && issue.rule.as_deref() == Some(rule) && issue.path.as_deref() == Some("unknown/Broken.kt")), "{rule}: {:?}", result.coverage);
+            assert!(result.coverage.iter().any(|issue| issue.reason == "package_index_unresolved" && issue.rule.as_deref() == Some(rule) && issue.path.as_deref() == Some("unknown/Escaped.kt")), "{rule}: {:?}", result.coverage);
         }
         assert!(!result.coverage.iter().any(|issue| issue.path.as_deref() == Some("unknown/Default.java") && issue.reason.starts_with("package_index_")), "{:?}", result.coverage);
         assert!(!result.coverage.iter().any(|issue| issue.reason == "package_index_unavailable" && issue.rule.as_deref() == Some("typed-nil-interface-return")), "{:?}", result.coverage);
         std::fs::remove_file(dir.path().join("unknown/Hidden.java")).unwrap();
         std::fs::remove_file(dir.path().join("unknown/Broken.kt")).unwrap();
+        std::fs::remove_file(dir.path().join("unknown/Escaped.kt")).unwrap();
         let clean = run_dataflow_check_with_coverage(dir.path(), dir.path(), &paths, &packs);
         assert!(!clean.coverage.iter().any(|issue| issue.reason.starts_with("package_index_")), "{:?}", clean.coverage);
     }
@@ -1102,7 +1109,7 @@ export function run() { helper(); missing(); absent(); external(); }
     fn flags_an_interprocedural_kotlin_npe_risk_across_two_different_packages() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("com/example/helper")).unwrap();
-        std::fs::write(dir.path().join("com/example/helper/Helper.kt"), "package com.example.helper\n\nfun risky(): String? {\n    val e: String? = null\n    return e\n}\n").unwrap();
+        std::fs::write(dir.path().join("com/example/helper/Helper.kt"), "/*\npackage misleading.comment\n*/\npackage com.example.helper\n\nfun risky(): String? {\n    val e: String? = null\n    return e\n}\n").unwrap();
         std::fs::create_dir_all(dir.path().join("com/example/app")).unwrap();
         std::fs::write(
             dir.path().join("com/example/app/Caller.kt"),
@@ -1114,6 +1121,10 @@ export function run() { helper(); missing(); absent(); external(); }
             findings.iter().any(|f| f.source.rule_id.as_deref() == Some("npe-risk-from-helper-return")),
             "got: {findings:#?} — same-package-only resolution couldn't have caught this, risky() is declared in a different package entirely"
         );
+        let caller = dir.path().join("com/example/app/Caller.kt");
+        std::fs::write(caller, "package com.example.app\n\nimport misleading.comment.risky\n\nfun f() {\n    val e = risky()\n    e.hashCode()\n}\n").unwrap();
+        let findings = run_dataflow_check(dir.path(), &["com/example/app/Caller.kt".to_string()], &[]);
+        assert!(!findings.iter().any(|f| f.source.rule_id.as_deref() == Some("npe-risk-from-helper-return")), "commented package was treated as real: {findings:#?}");
     }
 
     #[test]
