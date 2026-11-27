@@ -6,6 +6,7 @@ mod jest;
 mod node_security;
 mod node_tls;
 mod request_sinks;
+pub(super) mod route_policy;
 pub(super) mod outbox;
 mod prisma;
 mod promise_value;
@@ -15,6 +16,7 @@ mod web;
 mod web_markup;
 
 pub use outbox::run_outbox_policy;
+pub use route_policy::run_express_route_policy;
 pub use java::run_nullability_regressions;
 
 use std::path::Path;

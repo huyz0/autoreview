@@ -150,6 +150,49 @@ empty or invalid snapshot appears under `analysisCoverage` in the report.
 Snapshot freshness and which lockfiles changed determine scan coverage.
 [OSV data](https://google.github.io/osv.dev/data/) [npm lockfile](https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/)
 
+Express route policies let a project declare the verifier and resource
+operations it expects in a specific route handler. This example registers
+source operations for one route.
+
+```yaml
+artifactChecks:
+  expressRoutePolicies:
+    - paths: ['src/routes/projects.ts']
+      method: POST
+      route: /projects/:slug/reservations
+      authorization:
+        entity: project
+        verifier: {module: '@example/project-access', export: canReserve}
+        verifierKeyArgument: 1
+        protectedOperation: {module: '@example/reservations', export: reserve}
+      workload:
+        operation: {module: '@example/reservations', export: listAvailable}
+        limitField: pageSize
+        maximum: 50
+      sharedResource:
+        resource: project reservation
+        check: {module: '@example/reservations', export: available}
+        mutation: {module: '@example/reservations', export: reserve}
+```
+
+Each section is optional. Operations match ES module imports by module,
+export, and optional `members` and `firstArgument` criteria. Argument
+indexes are zero-based and default to the first argument. Use
+`verifierKeyArgument` and `operationKeyArgument` for entity keys,
+`checkKeyArgument` and `mutationKeyArgument` for shared resource keys,
+and `optionsArgument` for workload options.
+
+The authorization and shared-resource checks recognize a negated awaited
+boolean result that immediately returns or throws on denial. They
+compare the same literal string or handler-local `const` key. The workload
+check reads plain inline option objects and checks decimal integers from
+1 through the configured maximum. Register the check and mutation
+pair only for operations that run independently and must be atomic for
+that resource. The checks apply to inline handlers on a directly
+initialized Express app. Mounted routers, middleware stacks, named
+handlers, transactions and deployment controls still require their own
+verification. [Express routing](https://expressjs.com/en/guide/routing/) [OWASP authorization](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html) [OWASP resource consumption](https://owasp.org/API-Security/editions/2023/en/0xa4-unrestricted-resource-consumption/) [CWE-362](https://cwe.mitre.org/data/definitions/362.html)
+
 Additional local checks report an ignored Node writable-stream
 backpressure signal in a recognized producer loop, use of a fresh
 context when a Go tracer has a parent parameter, and a Rust vector

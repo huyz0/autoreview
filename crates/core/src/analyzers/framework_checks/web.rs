@@ -1,5 +1,8 @@
 mod bindings;
+pub(super) mod express;
+pub(super) mod imported_operations;
 pub(super) mod node_calls;
+pub(super) mod scoped_policy;
 pub(super) mod string_flow;
 
 pub(super) use bindings::BindingScopes;

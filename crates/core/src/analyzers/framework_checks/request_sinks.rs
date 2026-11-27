@@ -1,6 +1,7 @@
 use autoreview_schema::AgentFinding;
 use tree_sitter::Node;
 
+use super::web::express::inline_route;
 use super::web::node_calls::{property, string_literal, NodeCalls};
 use super::web::{first_argument, is_function, string_flow};
 use super::{descendants, location, text, Rule};
@@ -47,7 +48,7 @@ pub(super) fn inspect(path: &str, source: &str, root: Node<'_>) -> Vec<AgentFind
         calls: NodeCalls::new(root, source),
     };
     descendants(root)
-        .filter_map(|call| review.handler(call))
+        .filter_map(|call| inline_route(call, &review.calls, source).map(|route| route.handler))
         .flat_map(|handler| review.inspect_handler(handler))
         .collect()
 }
@@ -59,27 +60,6 @@ struct Review<'t, 's> {
 }
 
 impl<'t> Review<'t, '_> {
-    fn handler(&self, route: Node<'t>) -> Option<Node<'t>> {
-        let (receiver, method) = self.calls.member(route.child_by_field_name("function")?)?;
-        if route.kind() != "call_expression"
-            || !matches!(method, "get" | "post" | "put" | "patch" | "delete" | "all")
-        {
-            return None;
-        }
-        let app = self.calls.const_initializer(receiver)?;
-        if self.calls.resolve(app, &["express"]) != Some(("express", "default"))
-            || app.kind() != "call_expression"
-        {
-            return None;
-        }
-        let mut args = string_flow::meaningful_children(route.child_by_field_name("arguments")?);
-        string_literal(args.next()?, self.source)?;
-        let callback = args.next()?;
-        (args.next().is_none()
-            && matches!(callback.kind(), "arrow_function" | "function_expression"))
-        .then_some(callback)
-    }
-
     fn inspect_handler(&self, handler: Node<'t>) -> Vec<AgentFinding> {
         let Some((request, body)) =
             request_parameter(handler).zip(handler.child_by_field_name("body"))

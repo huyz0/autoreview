@@ -39,7 +39,9 @@ pub use analyzers::rust_review::{run_rust_review, rust_review_rule, rust_review_
 pub use analyzers::churn::{detect_shotgun_surgery, run_divergent_change_check};
 pub use analyzers::complexity::run_complexity_check;
 pub use analyzers::practices::run_practices_check;
-pub use analyzers::framework_checks::{run_framework_checks, run_nullability_regressions, run_outbox_policy};
+pub use analyzers::framework_checks::{
+    run_express_route_policy, run_framework_checks, run_nullability_regressions, run_outbox_policy,
+};
 pub use analyzers::shadow_rules::{discover_shadow_rule_files, run_shadow_rules, run_shadow_rules_for_snapshot, ShadowFinding, ShadowRuleFile};
 pub use analyzers::duplication::{run_cross_file_duplication_check, run_duplication_check};
 pub use analyzers::golangci_lint::run_golangci_lint;
