@@ -56,6 +56,7 @@ fn annotate_with(root: &Path, findings: &mut Vec<AgentFinding>, evidence: Option
             Some(Execution::Unknown) | None => {}
         }
         if let (Some(evidence), Some(parsed)) = (evidence, tree.as_ref()) {
+            if evidence.proves_deferred(root, &finding.location.path, parsed, finding) { return false; }
             if let Some(value) = evidence.for_finding(root, &finding.location.path, parsed, finding) {
                 finding.meta.get_or_insert_with(HashMap::new).insert("experimentalCallbackEvidence".into(), value);
             }

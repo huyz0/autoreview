@@ -101,6 +101,13 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual(utf16_slice(source, record["lambdaStartUtf16"], record["lambdaEndUtf16"]), "{ value -> value.isNotEmpty() }")
         self.assertIn("authenticator =", utf16_slice(source, record["callStartUtf16"], record["callEndUtf16"]))
 
+    def test_reports_source_classes_for_shadow_detection(self) -> None:
+        result = self.compile("source_classes", "package demo\nclass Outer { class Inner }\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads((self.root / "source_classes.json").read_text(encoding="utf-8"))
+        self.assertIn("demo.Outer", report["sourceClasses"])
+        self.assertIn("demo.Outer.Inner", report["sourceClasses"])
+
     def test_same_name_function_is_not_sam_evidence(self) -> None:
         source = "package demo\nimport vendor.Auth\nimport vendor.Server\nfun Auth(f: () -> Boolean): Auth = vendor.Auth { f() }\nfun install(s: Server) { s.authenticator = Auth(f = { true }) }\n"
         result = self.compile("shadowed", source)
@@ -265,6 +272,23 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual(record["parameterTypes"], ["org.apache.sshd.server.auth.password.PasswordAuthenticator"])
         self.assertEqual(record["samType"], "org.apache.sshd.server.auth.password.PasswordAuthenticator")
         self.assertEqual(record["modality"], "OPEN")
+        private_source = (
+            "package demo\nimport org.apache.sshd.server.SshServer\n"
+            "import org.apache.sshd.server.auth.password.PasswordAuthenticator\n"
+            "class Holder { private var server: SshServer? = null\n"
+            "fun install() { server = SshServer.setUpDefaultServer(); "
+            "server!!.passwordAuthenticator = PasswordAuthenticator { _, _, _ -> true } } }\n"
+        )
+        result = self.compile("sshd_factory", private_source, classpath=[classes])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads((self.root / "sshd_factory.json").read_text(encoding="utf-8"))
+        record = report["records"][0]
+        self.assertIn("demo.Holder", report["sourceClasses"])
+        self.assertNotIn("org.apache.sshd.server.SshServer", report["sourceClasses"])
+        self.assertEqual(record["receiverProperty"], "demo.Holder.server")
+        self.assertEqual(record["observedSetterDetails"][0]["callee"], "org.apache.sshd.server.SshServer.setUpDefaultServer")
+        self.assertEqual(record["propertyEvidence"], {"visibility":"private", "defaultGetter":True, "defaultSetter":True,
+                         "nullInitializer":True, "directFieldWrites":0, "accessorReferences":0})
 
     def test_existing_output_is_not_overwritten(self) -> None:
         output = self.root / "existing.json"
@@ -280,6 +304,28 @@ class EvidenceTest(unittest.TestCase):
                 for entry in self.classes.rglob("*.class"):
                     archive.write(entry, entry.relative_to(self.classes).as_posix())
         return [fixture, self.compiler_jar.parent / "kotlin-stdlib.jar"]
+
+    def test_snapshot_rejects_duplicate_runtime_classes(self) -> None:
+        source = self.root / "runtime-duplicate.kt"
+        source.write_text("fun example() {}\n", encoding="utf-8")
+        dependencies = self.snapshot_dependencies()
+        duplicate = self.root / "duplicate-runtime.jar"
+        shutil.copyfile(dependencies[0], duplicate)
+        output = self.root / "duplicate-runtime.json"
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            snapshot.run(self.kotlinc, self.plugin, [source], dependencies, output,
+                         required_classes=["vendor/Server.class"], runtime_jars=[dependencies[0], duplicate])
+        self.assertFalse(output.exists())
+
+    def test_snapshot_reports_compiled_file_facade_collision(self) -> None:
+        source = self.root / "facade.kt"
+        source.write_text('@file:JvmName("Server")\npackage vendor\nfun example() {}\n', encoding="utf-8")
+        dependencies = self.snapshot_dependencies()
+        output = self.root / "facade.json"
+        snapshot.run(self.kotlinc, self.plugin, [source], dependencies, output,
+                     required_classes=["vendor/Server.class"], runtime_jars=dependencies)
+        report = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(report["compiledClassConflicts"], ["vendor/Server.class"])
 
     def test_snapshot_compiles_copied_inputs_and_maps_source(self) -> None:
         source = self.root / "snapshot name.kt"
