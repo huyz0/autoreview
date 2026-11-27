@@ -27,7 +27,7 @@ pub(super) fn findings(
             let limit = limit_value(options, review.source, &policy.limit_field)?;
             let description = match limit {
                 None => format!("omits {}", policy.limit_field),
-                Some(limit) if limit == 0 || limit > policy.maximum => {
+                Some(limit) if limit < 1 || limit > i128::from(policy.maximum) => {
                     format!("sets {} to {limit}", policy.limit_field)
                 }
                 _ => return None,
@@ -44,7 +44,7 @@ pub(super) fn findings(
         .collect()
 }
 
-fn limit_value(options: Node<'_>, source: &str, field: &str) -> Option<Option<u64>> {
+fn limit_value(options: Node<'_>, source: &str, field: &str) -> Option<Option<i128>> {
     let mut limit = None;
     for property in meaningful_children(options) {
         let key = property.child_by_field_name("key")?;
@@ -59,9 +59,24 @@ fn limit_value(options: Node<'_>, source: &str, field: &str) -> Option<Option<u6
     }
     match limit {
         None => Some(None),
-        Some(node) if node.kind() == "number" => {
-            text(node, source).replace('_', "").parse().ok().map(Some)
-        }
-        _ => None,
+        Some(node) => decimal_integer(node, source).map(Some),
     }
+}
+
+fn decimal_integer(node: Node<'_>, source: &str) -> Option<i128> {
+    let (number, sign) = match node.kind() {
+        "number" => (node, 1),
+        "unary_expression" if text(node.child_by_field_name("operator")?, source) == "-" => {
+            (node.child_by_field_name("argument")?, -1)
+        }
+        _ => return None,
+    };
+    if number.kind() != "number" {
+        return None;
+    }
+    text(number, source)
+        .replace('_', "")
+        .parse::<i128>()
+        .ok()
+        .and_then(|number| number.checked_mul(sign))
 }

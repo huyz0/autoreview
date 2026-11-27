@@ -6,12 +6,12 @@ use std::path::Path;
 
 use autoreview_langsupport::language_for_path;
 use autoreview_schema::{AgentFinding, OutboxOperationConfig};
-use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use super::super::artifact_policy::Rule;
 use super::web::imported_operations::FileCalls;
+use super::web::scoped_policy::{self, Scope};
 use super::web::is_function;
-use super::{descendants, location, web, Node};
+use super::{descendants, location, Node};
 
 pub(in crate::analyzers) const RULE: Rule = Rule {
     id: "outbox-direct-database-and-broker-write",
@@ -28,42 +28,10 @@ pub fn run_outbox_policy(
     changed: &[String],
     configs: &[OutboxOperationConfig],
 ) -> anyhow::Result<Vec<AgentFinding>> {
-    if configs.is_empty() {
-        return Ok(Vec::new());
-    }
-    let policies = configs
-        .iter()
-        .map(Policy::compile)
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let paths: Vec<_> = changed
-        .iter()
-        .filter(|path| policies.iter().any(|policy| policy.paths.is_match(path)))
-        .cloned()
-        .collect();
-    Ok(web::run(root, &paths, |path, source, file| {
-        inspect(path, source, file, &policies)
-    }))
+    scoped_policy::run(root, changed, configs.iter().map(|config| Scope::new(&config.paths, config)), inspect)
 }
 
-struct Policy<'a> {
-    paths: GlobSet,
-    operation: &'a OutboxOperationConfig,
-}
-
-impl<'a> Policy<'a> {
-    fn compile(config: &'a OutboxOperationConfig) -> anyhow::Result<Self> {
-        let mut paths = GlobSetBuilder::new();
-        for path in &config.paths {
-            paths.add(Glob::new(path)?);
-        }
-        Ok(Self {
-            paths: paths.build()?,
-            operation: config,
-        })
-    }
-}
-
-fn inspect(path: &str, source: &str, file: Node<'_>, policies: &[Policy<'_>]) -> Vec<AgentFinding> {
+fn inspect(path: &str, source: &str, file: Node<'_>, policies: &[Scope<'_, OutboxOperationConfig>]) -> Vec<AgentFinding> {
     let Some(language) = language_for_path(Path::new(path)) else {
         return Vec::new();
     };
@@ -78,8 +46,8 @@ fn inspect(path: &str, source: &str, file: Node<'_>, policies: &[Policy<'_>]) ->
         .collect();
 
     let mut pairs = BTreeMap::new();
-    for policy in policies.iter().filter(|policy| policy.paths.is_match(path)) {
-        let Some(endpoints) = calls::resolve(&file_calls, policy.operation) else {
+    for policy in policies.iter().filter(|policy| policy.matches(path)) {
+        let Some(endpoints) = calls::resolve(&file_calls, policy.config) else {
             continue;
         };
         for &function in &functions {

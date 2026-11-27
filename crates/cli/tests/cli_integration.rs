@@ -2621,10 +2621,7 @@ fn npm_advisory_snapshot_reports_affected_lock_entries_and_unavailable_coverage(
     assert_eq!(finding.location.range.end_line, Some(7));
 }
 
-#[test]
-fn express_route_policies_check_registered_guards_limits_and_shared_resources() {
-    let path = "routes/records.ts";
-    let baseline = "import express from 'express';\nconst app = express();\n";
+fn express_route_policy_fixture() -> (&'static str, &'static str) {
     let current = r#"
 import express from 'express';
 import { permit as verify, open, inspectSlot, reserveSlot, reserveAtomically, list } from '@example/records';
@@ -2633,14 +2630,15 @@ const app = express();
 app.get('/records/:id', async (req, res) => {
     const id = req.params.id;
     const other = req.params.other;
-    await verify(id);
+    await verify(req, id);
     await open(id); // discarded verifier
-    const allowed = await verify(id);
+    const allowed = await verify(req, id);
     if (!allowed) return res.sendStatus(403);
     await open(id); // same guarded key
     await open(other); // different key
     await list({ limit: 25 }); // boundary
     await list({ limit: 50 }); // over the limit
+    await list({ limit: -1 }); // negative limit
     await list({ sort: 'date' }); // missing the limit
     await list({ ...req.query }); // unresolved options
     if (!(await inspectSlot(id))) { return res.sendStatus(409); }
@@ -2665,6 +2663,7 @@ artifactChecks:
       authorization:
         entity: record
         verifier: {module: '@example/records', export: permit}
+        verifierKeyArgument: 1
         protectedOperation: {module: '@example/records', export: open}
       workload:
         operation: {module: '@example/records', export: list}
@@ -2675,6 +2674,14 @@ artifactChecks:
         check: {module: '@example/records', export: inspectSlot}
         mutation: {module: '@example/records', export: reserveSlot}
 "#;
+    (current, config)
+}
+
+#[test]
+fn express_route_policies_check_registered_guards_limits_and_shared_resources() {
+    let path = "routes/records.ts";
+    let baseline = "import express from 'express';\nconst app = express();\n";
+    let (current, config) = express_route_policy_fixture();
     let repo = init_repo(&[(path, baseline)]);
     repo.commit(&[(path, current), ("examples/records.ts", current)], "add record handlers");
     assert!(scoped_static_diff(repo.path(), "authorization.object-scope").findings.is_empty());
@@ -2689,14 +2696,15 @@ artifactChecks:
     let unchecked = authorization.findings.iter().find(|finding| {
         finding.location.range.start_line == line("discarded verifier")
     }).unwrap();
-    assert_eq!(unchecked.related_locations.as_ref().unwrap()[0].range.start_line, line("await verify(id);"));
+    assert_eq!(unchecked.related_locations.as_ref().unwrap()[0].range.start_line, line("await verify(req, id);"));
     assert!(authorization.findings.iter().any(|finding| {
         finding.location.range.start_line == line("await open(other)")
     }));
     let workload = scoped_static_diff(repo.path(), "resources.workload-limit");
-    assert_eq!(workload.findings.len(), 2);
+    assert_eq!(workload.findings.len(), 3);
     assert_eq!(workload.findings.iter().map(|finding| finding.location.range.start_line)
-        .collect::<std::collections::BTreeSet<_>>(), [line("over the limit"), line("missing the limit")].into());
+        .collect::<std::collections::BTreeSet<_>>(),
+        [line("over the limit"), line("negative limit"), line("missing the limit")].into());
     let race = scoped_static_diff(repo.path(), "concurrency.shared-resource");
     assert_eq!(race.findings.len(), 1);
     assert_eq!(race.findings[0].source.rule_id.as_deref(), Some("express-route-shared-resource-check-then-act"));

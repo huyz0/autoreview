@@ -10,6 +10,16 @@ pub(super) enum Key<'s> {
     Binding(usize),
 }
 
+pub(super) struct Check<'a, 't> {
+    pub calls: &'a BTreeMap<usize, Node<'t>>,
+    pub key_argument: usize,
+}
+
+pub(super) enum ResultUse {
+    DenialGuard,
+    DirectCall,
+}
+
 pub(super) struct Handler<'a, 't, 's> {
     body: Node<'t>,
     calls: &'a NodeCalls<'t, 's>,
@@ -45,32 +55,22 @@ impl<'a, 't, 's> Handler<'a, 't, 's> {
             .then_some(Key::Binding(declaration.start_byte()))
     }
 
-    pub(super) fn prior_guard(
+    pub(super) fn prior_check(
         &self,
         target: Node<'t>,
         key: Key<'s>,
-        registered: &BTreeMap<usize, Node<'t>>,
-        index: usize,
+        check: &Check<'_, 't>,
+        result_use: ResultUse,
     ) -> Option<Node<'t>> {
         children(self.body)
             .take_while(|statement| statement.end_byte() <= target.start_byte())
-            .filter_map(|statement| self.negated_guard(statement))
-            .find(|call| {
-                registered.contains_key(&call.start_byte()) && self.key(*call, index) == Some(key)
+            .filter_map(|statement| match result_use {
+                ResultUse::DenialGuard => self.negated_guard(statement),
+                ResultUse::DirectCall => direct_call(statement),
             })
-    }
-
-    pub(super) fn prior_direct_call(
-        &self,
-        target: Node<'t>,
-        key: Key<'s>,
-        registered: &BTreeMap<usize, Node<'t>>,
-        index: usize,
-    ) -> Option<Node<'t>> {
-        self.direct_calls()
-            .take_while(|call| call.end_byte() <= target.start_byte())
             .find(|call| {
-                registered.contains_key(&call.start_byte()) && self.key(*call, index) == Some(key)
+                check.calls.contains_key(&call.start_byte())
+                    && self.key(*call, check.key_argument) == Some(key)
             })
     }
 

@@ -52,7 +52,7 @@ pub(super) fn collect(
     {
         findings.extend(audit_npm(&input, changed_files, snapshot, &mut warnings, &mut coverage));
     }
-    findings.extend(artifact_findings(&input, changed_files, &mut warnings));
+    findings.extend(artifact_findings(&input, changed_files, &mut warnings, &mut coverage));
     findings.extend(structural(
         input.source_root,
         changed_files,
@@ -103,6 +103,7 @@ fn artifact_findings(
     input: &ReviewInput<'_>,
     paths: &[String],
     warnings: &mut Vec<String>,
+    coverage: &mut Vec<AnalysisCoverageIssue>,
 ) -> Vec<AgentFinding> {
     let checks = input.artifact_checks;
     let root = input.source_root;
@@ -111,7 +112,8 @@ fn artifact_findings(
         findings.extend(autoreview_core::run_spring_session_policy(root, paths));
         match autoreview_core::run_express_route_policy(root, paths, &checks.express_route_policies) {
             Ok(items) => findings.extend(items),
-            Err(error) => record_warning(warnings, format!("Express route policy failed: {error}")),
+            Err(error) => record_tool_issue(warnings, coverage, "autoreview-express-route-policy",
+                "policy_invalid", format!("Express route policy failed: {error}")),
         }
         if checks.immutable_github_action_refs {
             findings.extend(autoreview_core::run_workflow_policy(root, paths));

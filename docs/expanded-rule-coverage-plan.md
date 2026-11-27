@@ -157,21 +157,22 @@ source operations for one route.
 ```yaml
 artifactChecks:
   expressRoutePolicies:
-    - paths: ['routes/*.ts']
-      method: GET
-      route: /records/:id
+    - paths: ['src/routes/projects.ts']
+      method: POST
+      route: /projects/:slug/reservations
       authorization:
-        entity: record
-        verifier: {module: '@example/records', export: canOpen}
-        protectedOperation: {module: '@example/records', export: open}
+        entity: project
+        verifier: {module: '@example/project-access', export: canReserve}
+        verifierKeyArgument: 1
+        protectedOperation: {module: '@example/reservations', export: reserve}
       workload:
-        operation: {module: '@example/records', export: list}
-        limitField: limit
-        maximum: 25
+        operation: {module: '@example/reservations', export: listAvailable}
+        limitField: pageSize
+        maximum: 50
       sharedResource:
-        resource: record slot
-        check: {module: '@example/records', export: slotAvailable}
-        mutation: {module: '@example/records', export: reserve}
+        resource: project reservation
+        check: {module: '@example/reservations', export: available}
+        mutation: {module: '@example/reservations', export: reserve}
 ```
 
 Each section is optional. Operations match ES module imports by module,
