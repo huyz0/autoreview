@@ -23,6 +23,8 @@ pub struct TypeScriptRequest<'a> {
 pub struct TypeScriptCall {
     pub path: String,
     pub start: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<usize>,
     pub source_sha256: String,
 }
 
@@ -37,6 +39,7 @@ pub struct TypeScriptResult {
 pub struct TypeScriptCallResult {
     pub path: String,
     pub start: usize,
+    pub end: Option<usize>,
     pub source_sha256: String,
     pub status: String,
 }
@@ -86,7 +89,7 @@ fn valid_response(result: &TypeScriptResult, request: &TypeScriptRequest<'_>) ->
         "incomplete" if result.reason.is_some() && result.calls.is_none() => true,
         "ok" if result.reason.is_none() && result.calls.as_ref().is_some_and(|calls| {
             calls.len() == request.calls.len() && calls.iter().zip(request.calls).all(|(actual, expected)| {
-                actual.path == expected.path && actual.start == expected.start && actual.source_sha256 == expected.source_sha256
+                actual.path == expected.path && actual.start == expected.start && actual.end == expected.end && actual.source_sha256 == expected.source_sha256
                     && matches!(actual.status.as_str(), "promise_like" | "not_promise" | "observed" | "not_proven" | "unavailable" | "source_changed")
             })
         }) => true,
@@ -134,7 +137,7 @@ mod tests {
         let source = "declare function f(): Promise<void>;\nf();\n";
         std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true},"files":["sample.ts"]}"#).unwrap();
         std::fs::write(&file, source).unwrap();
-                let calls = [TypeScriptCall { path: file.to_string_lossy().into_owned(), start: source.rfind("f()").unwrap(), source_sha256: format!("{:x}", Sha256::digest(source.as_bytes())) }];
+                let calls = [TypeScriptCall { path: file.to_string_lossy().into_owned(), start: source.rfind("f()").unwrap(), end: None, source_sha256: format!("{:x}", Sha256::digest(source.as_bytes())) }];
         let config = config.to_string_lossy();
         let request = TypeScriptRequest { typescript_module: &compiler, config: &config, calls: &calls };
         let result = check("node", &request, Duration::from_secs(20)).unwrap();
@@ -155,6 +158,39 @@ mod tests {
     }
 
     #[test]
+    fn checker_validates_exact_nested_call_bounds() {
+        let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sample.ts");
+        let config = dir.path().join("tsconfig.json");
+        let source = "declare function factory(): string & (() => Promise<void>);\nconst prefix = '😀'; factory()();\n";
+        std::fs::write(&file, source).unwrap();
+        std::fs::write(&config, r#"{"compilerOptions":{"target":"ES2022","strict":true},"files":["sample.ts"]}"#).unwrap();
+        let start = source.rfind("factory()()").unwrap();
+        let digest = format!("{:x}", Sha256::digest(source.as_bytes()));
+        let calls: Vec<_> = ["factory()", "factory()()", "factory()()x"].iter().map(|text| TypeScriptCall {
+            path: file.to_string_lossy().into_owned(), start, end: Some(start + text.len()), source_sha256: digest.clone(),
+        }).collect();
+        let request = TypeScriptRequest { typescript_module: &compiler, config: config.to_str().unwrap(), calls: &calls };
+        let result = check("node", &request, Duration::from_secs(20)).unwrap();
+        assert_eq!(result.calls.unwrap().into_iter().map(|call| call.status).collect::<Vec<_>>(), ["not_proven", "promise_like", "unavailable"]);
+    }
+
+    #[test]
+    fn response_cannot_replace_requested_end_offset() {
+        let calls = [TypeScriptCall { path: "file.ts".into(), start: 4, end: Some(12), source_sha256: "digest".into() }];
+        let request = TypeScriptRequest { typescript_module: "compiler", config: "config", calls: &calls };
+        let mut result = TypeScriptResult { status: "ok".into(), reason: None, calls: Some(vec![TypeScriptCallResult {
+            path: "file.ts".into(), start: 4, end: Some(12), source_sha256: "digest".into(), status: "promise_like".into(),
+        }]) };
+        assert!(valid_response(&result, &request));
+        result.calls.as_mut().unwrap()[0].end = Some(10);
+        assert!(!valid_response(&result, &request));
+        result.calls.as_mut().unwrap()[0].end = None;
+        assert!(!valid_response(&result, &request));
+    }
+
+    #[test]
     fn checker_distinguishes_known_primitive_results_from_unknown_types() {
         let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
         let dir = tempfile::tempdir().unwrap();
@@ -165,7 +201,7 @@ mod tests {
         std::fs::write(&file, source).unwrap();
         let digest = format!("{:x}", Sha256::digest(source.as_bytes()));
         let calls: Vec<_> = ["text()", "number()", "uncertain()"].into_iter().map(|name| TypeScriptCall {
-            path: file.to_string_lossy().into_owned(), start: source.rfind(name).unwrap(), source_sha256: digest.clone(),
+            path: file.to_string_lossy().into_owned(), start: source.rfind(name).unwrap(), end: None, source_sha256: digest.clone(),
         }).collect();
         let config = config.to_string_lossy();
         let request = TypeScriptRequest { typescript_module: &compiler, config: &config, calls: &calls };
@@ -187,7 +223,7 @@ mod tests {
         let calls: Vec<_> = ["callback();", "await callback();", "externalCallback();", "await externalCallback();"].iter().map(|needle| {
             let start = source.find(needle).unwrap() + if needle.starts_with("await ") { 6 } else { 0 };
             TypeScriptCall {
-            path: file.to_string_lossy().into_owned(), start, source_sha256: digest.clone(),
+            path: file.to_string_lossy().into_owned(), start, end: None, source_sha256: digest.clone(),
         }}).collect();
         let config = config.to_string_lossy();
         let request = TypeScriptRequest { typescript_module: &compiler, config: &config, calls: &calls };
@@ -208,7 +244,7 @@ mod tests {
         std::fs::write(&file, &source).unwrap();
         std::fs::write(&config, serde_json::json!({"compilerOptions":{"target":"ES2022","strict":true},"files":[name]}).to_string()).unwrap();
         let offsets: BTreeSet<_> = source.match_indices("pending();").map(|(start, _)| start).collect();
-        let calls: Vec<_> = offsets.iter().map(|&start| TypeScriptCall { path: file.to_string_lossy().into_owned(), start, source_sha256: format!("{:x}", Sha256::digest(source.as_bytes())) }).collect();
+        let calls: Vec<_> = offsets.iter().map(|&start| TypeScriptCall { path: file.to_string_lossy().into_owned(), start, end: None, source_sha256: format!("{:x}", Sha256::digest(source.as_bytes())) }).collect();
         let config_path = config.to_str().unwrap();
         let request = TypeScriptRequest { typescript_module: &compiler, config: config_path, calls: &calls };
         assert!(serde_json::to_vec(&request).unwrap().len() > MAX_BYTES);

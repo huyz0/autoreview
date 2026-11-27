@@ -82,7 +82,7 @@ test('classifies shared offsets only when every call is safe', { skip: !compiler
     'declare function bothSynchronous(): string;',
     'declare function unknownOuter(): string & (() => any);',
     'declare function ordinary(): number;',
-    'outerPromise()(); innerPromise()(); bothSynchronous().trim(); unknownOuter()(); ordinary();',
+    "const prefix = '😀'; outerPromise()(); innerPromise()(); bothSynchronous().trim(); unknownOuter()(); ordinary();",
   ].join('\n');
   fs.writeFileSync(file, source);
   const digest = createHash('sha256').update(source, 'utf8').digest('hex');
@@ -94,6 +94,13 @@ test('classifies shared offsets only when every call is safe', { skip: !compiler
   const result = JSON.parse(child.stdout);
   assert.equal(result.status, 'ok');
   assert.deepEqual(result.calls.map(call => call.status), ['not_proven', 'not_proven', 'observed', 'not_proven', 'not_promise']);
+  const start = Buffer.byteLength(source.slice(0, source.lastIndexOf('outerPromise()()')));
+  const explicit = ['outerPromise()', 'outerPromise()()', 'outerPromise()()x'].map(text => ({
+    path: file, start, end: start + Buffer.byteLength(text), source_sha256: digest,
+  }));
+  const exactChild = spawnSync(process.execPath, [probe], { input: JSON.stringify({ typescriptModule: compiler, config, calls: explicit }), encoding: 'utf8' });
+  assert.equal(exactChild.status, 0, exactChild.stderr);
+  assert.deepEqual(JSON.parse(exactChild.stdout).calls.map(call => call.status), ['not_proven', 'promise_like', 'unavailable']);
 });
 
 test('checks concrete call types and fails closed on project errors', { skip: !compiler }, () => {

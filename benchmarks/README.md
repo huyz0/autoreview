@@ -291,7 +291,9 @@ such as `factory()()` can share that offset. The checker clears the limitation
 only when every call sharing it is independently proved non-promise or
 observed; other combinations remain unresolved. Distinguishing and tracking
 promise sources in both calls requires a call-site identity that also includes
-their ending offset.
+their ending offset. The TypeScript probe accepts an optional ending byte
+offset and validates an exact call, but review and replay still pass only
+starting offsets; the probe support alone does not resolve these cases.
 With shared offsets handled conservatively, the same Windows setup reported 13
 and 60 unresolved locations in the respective before revisions, down from 14
 and 63 when all shared offsets were left unresolved. These are coverage

@@ -56,7 +56,7 @@ fn collect_calls(
         for &start in offsets {
             if start >= unit.source.len() { continue; }
             positions.push((*unit_index, start));
-            calls.push(TypeScriptCall { path: path.to_owned(), start, source_sha256: digest.clone() });
+            calls.push(TypeScriptCall { path: path.to_owned(), start, end: None, source_sha256: digest.clone() });
         }
     }
     Some(CallBatch { positions, calls })
