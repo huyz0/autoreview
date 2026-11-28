@@ -61,6 +61,11 @@ impl Lower<'_> {
         self.cfg.edges.iter().any(|(_, to, _)| *to == target)
     }
 
+    pub(super) fn close_loop(&mut self, after: NodeId) -> Option<NodeId> {
+        self.loops.pop();
+        self.has_incoming(after).then_some(after)
+    }
+
     pub(super) fn push_loop(&mut self, owner: Node<'_>, head: NodeId, after: NodeId) {
         let label = label(owner).map(|node| self.text(node).to_owned());
         self.loops.push(JumpTarget { label, head: Some(head), after });

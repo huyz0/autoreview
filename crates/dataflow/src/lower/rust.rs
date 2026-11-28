@@ -236,8 +236,7 @@ impl Lower<'_> {
                 self.edge(end, head, EdgeKind::Loop);
             }
         }
-        self.loops.pop();
-        self.has_incoming(after).then_some(after)
+        self.close_loop(after)
     }
 
     fn variable(&self, expr: Node<'_>, names: &Bindings) -> Option<String> {

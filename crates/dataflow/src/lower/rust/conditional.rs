@@ -143,8 +143,7 @@ impl Lower<'_> {
         if let Some(end) = self.block(body, start, &success_names) {
             self.edge(end, head, EdgeKind::Loop);
         }
-        self.loops.pop();
-        self.has_incoming(after).then_some(after)
+        self.close_loop(after)
     }
 
     pub(super) fn lower_pattern_test(

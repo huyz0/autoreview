@@ -88,16 +88,21 @@ fn within_lowered_blocks(call: Node<'_>) -> bool {
     std::iter::successors(call.parent(), |node| node.parent())
         .take_while(|node| node.kind() != "function_item")
         .filter(|node| node.kind() == "block")
-        .all(|block| block.parent().is_some_and(|owner| match owner.kind() {
-            "function_item" | "for_expression" | "loop_expression" => owner.child_by_field_name("body") == Some(block),
-            "while_expression" => owner.child_by_field_name("body") == Some(block)
-                || owner.child_by_field_name("condition") == Some(block),
-            "if_expression" => owner.child_by_field_name("consequence") == Some(block),
-            "match_arm" => owner.child_by_field_name("value") == Some(block),
-            "let_declaration" => owner.child_by_field_name("alternative") == Some(block),
-            "block" | "expression_statement" | "else_clause" => true,
-            _ => false,
-        }))
+        .all(|block| {
+            if super::is_labeled_block(block) {
+                return evaluated_position(block);
+            }
+            block.parent().is_some_and(|owner| match owner.kind() {
+                "function_item" | "for_expression" | "loop_expression" => owner.child_by_field_name("body") == Some(block),
+                "while_expression" => owner.child_by_field_name("body") == Some(block)
+                    || owner.child_by_field_name("condition") == Some(block),
+                "if_expression" => owner.child_by_field_name("consequence") == Some(block),
+                "match_arm" => owner.child_by_field_name("value") == Some(block),
+                "let_declaration" => owner.child_by_field_name("alternative") == Some(block),
+                "block" | "expression_statement" | "else_clause" => true,
+                _ => false,
+            })
+        })
 }
 
 impl Lower<'_> {

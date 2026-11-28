@@ -2079,6 +2079,18 @@ fn rust_conditional_literal_with_a_constant_keeps_the_failure_path() {
     assert!(report.coverage.iter().any(|issue| issue.reason == "rust_conditional_binding_projection"), "{:?}", report.coverage);
 }
 
+fn assert_rust_results_with_full_coverage(source: &str, expected: &[u32]) {
+    let root = write_single_file("lib.rs", source);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    let mut lines: Vec<_> = report.findings.iter()
+        .filter(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result"))
+        .map(|finding| finding.location.range.start_line)
+        .collect();
+    lines.sort_unstable();
+    assert_eq!(lines, expected, "{:?}", report.findings);
+    assert!(report.coverage.is_empty(), "{:?}", report.coverage);
+}
+
 #[test]
 fn rust_loop_condition_jumps_skip_body_and_reach_named_exit() {
     let source = r#"use std::fs::remove_file;
@@ -2104,10 +2116,7 @@ fn continuing() {
     remove_file("unreachable after");
 }
 "#;
-    let root = write_single_file("lib.rs", source);
-    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 6), ("lib.rs", 15)]);
-    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
-    assert!(report.coverage.is_empty(), "{:?}", report.coverage);
+    assert_rust_results_with_full_coverage(source, &[6, 15]);
 }
 
 #[test]
@@ -2128,15 +2137,12 @@ fn ignored(flag: bool) {
 }
 fn nested() -> std::io::Result<()> {
     'out: {
-        'inner: { break 'inner; }
-        loop { break 'out remove_file("outer"); }
+        let value = 'inner: { break 'inner remove_file("inner"); };
+        loop { break 'out value; }
     }
 }
 "#;
-    let root = write_single_file("lib.rs", source);
-    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 11), ("lib.rs", 12)]);
-    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
-    assert!(report.coverage.is_empty(), "{:?}", report.coverage);
+    assert_rust_results_with_full_coverage(source, &[11, 12]);
 }
 
 #[test]
@@ -2159,14 +2165,7 @@ fn conditional() -> Removal {
     Ok(())
 }
 "#;
-    let root = write_single_file("lib.rs", source);
-    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
-    let origins: Vec<_> = report.findings.iter()
-        .filter(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result"))
-        .map(|finding| finding.location.range.start_line)
-        .collect();
-    assert_eq!(origins, [5, 9, 13], "{:?}", report.findings);
-    assert!(report.coverage.is_empty(), "{:?}", report.coverage);
+    assert_rust_results_with_full_coverage(source, &[5, 9, 13]);
 }
 
 #[test]
@@ -2179,10 +2178,7 @@ fn chosen() -> std::io::Result<()> {
     kept
 }
 "#;
-    let root = write_single_file("lib.rs", source);
-    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 5)]);
-    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
-    assert!(report.coverage.is_empty(), "{:?}", report.coverage);
+    assert_rust_results_with_full_coverage(source, &[5]);
 }
 
 #[test]

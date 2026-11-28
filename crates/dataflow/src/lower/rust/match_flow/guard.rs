@@ -10,21 +10,16 @@ enum Predicate<'a> {
     Value(Node<'a>),
 }
 
-fn predicate(mut node: Node<'_>) -> Predicate<'_> {
-    while node.kind() == "parenthesized_expression" {
-        let Some(inner) = crate::lower::site::children(node).next() else {
-            break;
-        };
-        node = inner;
-    }
-    if node.kind() == "unary_expression"
-        && node
-            .children(&mut node.walk())
-            .any(|child| child.kind() == "!")
-    {
-        if let Some(value) = crate::lower::site::children(node).next() {
-            return Predicate::Not(value);
-        }
+fn negated(node: Node<'_>) -> Option<Node<'_>> {
+    let negation = node.kind() == "unary_expression"
+        && node.children(&mut node.walk()).any(|child| child.kind() == "!");
+    negation.then(|| crate::lower::site::children(node).next()).flatten()
+}
+
+fn predicate(node: Node<'_>) -> Predicate<'_> {
+    let node = crate::lower::rust::branch_value::ungroup_value(node);
+    if let Some(value) = negated(node) {
+        return Predicate::Not(value);
     }
     if let Some((left, right)) = node
         .child_by_field_name("left")

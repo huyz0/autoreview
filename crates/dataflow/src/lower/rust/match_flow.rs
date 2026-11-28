@@ -57,8 +57,7 @@ pub(super) fn simple_arm(node: Node<'_>, source: &[u8]) -> bool {
     let simple_arm = |child| simple_arm(child, source);
     let simple_value = |child| simple_value(child, source);
     match node.kind() {
-        "block" if super::is_labeled_block(node) => super::branch_value::supports_block_tail(node, source),
-        "block" => children(node).all(simple_arm),
+        "block" => simple_block(node, source),
         "empty_statement" => true,
         "expression_statement" => children(node).next().is_some_and(simple_arm),
         "return_expression" | "break_expression" | "continue_expression" => {
@@ -71,6 +70,14 @@ pub(super) fn simple_arm(node: Node<'_>, source: &[u8]) -> bool {
                 && node.child_by_field_name("right").is_some_and(|value| simple_operand(value, source))
         }
         _ => simple_value(node),
+    }
+}
+
+fn simple_block(node: Node<'_>, source: &[u8]) -> bool {
+    if super::is_labeled_block(node) {
+        branch_value::supports_block_tail(node, source)
+    } else {
+        children(node).all(|statement| simple_arm(statement, source))
     }
 }
 
