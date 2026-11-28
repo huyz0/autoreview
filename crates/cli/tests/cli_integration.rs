@@ -1205,8 +1205,8 @@ fn rust_branch_initializer_reaches_review_and_replay() {
 
 #[test]
 fn rust_match_guard_let_chain_reaches_review_and_replay() {
-    let before = "use std::fs::remove_file;\nfn run(value: Option<u8>, gate: bool) {\n    match 1 { _ if gate && let Some(_) = value => { remove_file(\"example.txt\"); }, _ => {} };\n}\n";
-    let after = before.replace("remove_file(\"example.txt\");", "assert!(remove_file(\"example.txt\").is_ok());");
+    let before = "use std::fs::remove_file;\nfn run(value: Option<u8>, gate: bool) -> std::io::Result<()> {\n    match 1 { _ if gate && let Some(_) = value => { remove_file(\"example.txt\"); }, _ => {} };\n    Ok(())\n}\n";
+    let after = before.replace("remove_file(\"example.txt\");", "return remove_file(\"example.txt\");");
     assert_rust_result_replays("Rust match guard let chain", before, &after);
 }
 
