@@ -1619,7 +1619,7 @@ fn shadowed() -> (std::io::Result<()>, std::io::Result<()>) {
 "#;
     let root = write_single_file("lib.rs", source);
     assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result",
-        &[("lib.rs", 5), ("lib.rs", 10), ("lib.rs", 15), ("lib.rs", 21), ("lib.rs", 33), ("lib.rs", 37)]);
+        &[("lib.rs", 5), ("lib.rs", 10), ("lib.rs", 15), ("lib.rs", 21), ("lib.rs", 32), ("lib.rs", 36)]);
     let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
     assert!(!report.coverage.iter().any(|issue| matches!(issue.reason.as_str(),
         "unsupported_rust_control_flow" | "rust_aggregate_element_projection")), "{:?}", report.coverage);
@@ -1650,11 +1650,7 @@ fn mutated(flag: bool) -> bool {
 "#;
     let root = write_single_file("lib.rs", source);
     assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[]);
-    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
-    for line in [3, 7, 12, 17] {
-        assert!(report.coverage.iter().any(|issue| issue.reason == "rust_aggregate_element_projection"
-            && issue.line == Some(line)), "{:?}", report.coverage);
-    }
+    assert_rust_projection_limits(root.path(), "rust_aggregate_element_projection", &[3, 7, 12, 17]);
 }
 
 #[test]
@@ -1777,10 +1773,13 @@ fn rust_tuple_branch_results_evaluate_operands_in_order() {
     );
     assert_rust_match_cleanup("rust-tuple-operand-order", source);
     let root = write_single_file("lib.rs", source);
-    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
-    for line in [2, 5] {
-        assert!(report.coverage.iter().any(|issue| issue.reason == "rust_destructuring_binding_projection"
-            && issue.line == Some(line)), "{:?}", report.coverage);
+    assert_rust_projection_limits(root.path(), "rust_destructuring_binding_projection", &[2, 5]);
+}
+
+fn assert_rust_projection_limits(root: &std::path::Path, reason: &str, lines: &[u32]) {
+    let report = run_dataflow_check_with_coverage(root, root, &["lib.rs".into()], &[]);
+    for &line in lines {
+        assert!(report.coverage.iter().any(|issue| issue.reason == reason && issue.line == Some(line)), "{:?}", report.coverage);
     }
 }
 

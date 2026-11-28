@@ -46,6 +46,7 @@ pub(crate) fn local_aggregate(node: Node<'_>) -> Option<Node<'_>> {
         || declaration.child_by_field_name("alternative").is_some()
         || !simple_binding(declaration)
         || children(declaration).any(|child| child.kind() == "mutable_specifier")
+        || !argument_flow::can_evaluate(node)
     {
         return None;
     }
@@ -56,11 +57,12 @@ pub(crate) fn direct_projection<'tree>(aggregate: Node<'tree>, source: &[u8]) ->
     if !matches!(aggregate.kind(), "array_expression" | "tuple_expression") { return None; }
     let access = branch_value::outermost_group(aggregate).parent()?;
     let (base, index) = projection(access, source)?;
-    if base != aggregate || !read_only(access) || !argument_flow::can_evaluate(access) { return None; }
+    if base != aggregate || !read_only(access) { return None; }
     Some((access, element_slot(aggregate, access, index, source)?))
 }
 
 pub(crate) fn read_only(access: Node<'_>) -> bool {
+    if !argument_flow::can_evaluate(access) { return false; }
     let access = branch_value::outermost_group(access);
     let Some(parent) = access.parent() else { return false };
     match parent.kind() {

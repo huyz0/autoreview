@@ -21,32 +21,38 @@ impl RustElements {
     pub(in crate::call_order) fn scan(function: Node<'_>, source: &[u8], syntax: &Syntax<'_>) -> Self {
         let Some(body) = function.child_by_field_name("body") else { return Self::default() };
         let mut projections = Self::default();
+        let locals = projections.scan_literals(body, source);
+        if !locals.is_empty() {
+            projections.scan_local_reads(body, source, syntax, &locals);
+        }
+        projections
+    }
+
+    fn scan_literals<'tree>(&mut self, body: Node<'tree>, source: &[u8]) -> HashMap<usize, Node<'tree>> {
         let mut locals = HashMap::new();
         for node in descendants(body)
             .filter(|node| matches!(node.kind(), "array_expression" | "tuple_expression") && in_body(*node, body))
         {
             if let Some((access, slot)) = element_access::direct_projection(node, source) {
-                projections.record(node, access, slot);
+                self.record(node, access, slot);
             }
             if let Some(binding) = element_access::local_aggregate(node) {
                 locals.insert(binding.start_byte(), node);
             }
         }
-        if locals.is_empty() { return projections; }
+        locals
+    }
 
+    fn scan_local_reads(&mut self, body: Node<'_>, source: &[u8], syntax: &Syntax<'_>, locals: &HashMap<usize, Node<'_>>) {
         let mut pending = Vec::new();
         let mut rejected = HashSet::new();
-        let binding = |name, start| syntax.local_result_binding(name, start, false);
         for node in descendants(body) {
             string_references(node, source, ContractLanguage::Rust, |name| {
-                if let Some(binding) = binding(name, node.start_byte()) {
+                if let Some(binding) = syntax.local_result_binding(name, node.start_byte(), false) {
                     rejected.insert(binding);
                 }
             });
-            if !reference(node, source) { continue; }
-            let Ok(name) = node.utf8_text(source) else { continue };
-            if syntax.local_result_binding(name, node.start_byte(), true) == Some(node.start_byte()) { continue; }
-            let Some(id) = binding(name, node.start_byte()) else { continue };
+            let Some(id) = referenced_binding(syntax, node, source) else { continue };
             let Some(&aggregate) = locals.get(&id) else { continue };
             if let Some((access, slot)) = local_projection(node, aggregate, body, source) {
                 pending.push((id, aggregate, access, slot));
@@ -54,13 +60,10 @@ impl RustElements {
                 rejected.insert(id);
             }
         }
-        for (binding, aggregate, access, slot) in pending {
-            if !rejected.contains(&binding) {
-                // A read can use the initializer's slot only while the binding has no other uses.
-                projections.record(aggregate, access, slot);
-            }
+        // A read can use the initializer's slot only while the binding has no other uses.
+        for (_, aggregate, access, slot) in pending.into_iter().filter(|(id, ..)| !rejected.contains(id)) {
+            self.record(aggregate, access, slot);
         }
-        projections
     }
 
     pub(in crate::call_order) fn tracks_aggregate(&self, start: usize) -> bool {
@@ -75,6 +78,14 @@ impl RustElements {
         self.aggregates.insert(aggregate.start_byte());
         self.reads.insert((access.start_byte(), access.end_byte()), operand_slot(slot));
     }
+}
+
+fn referenced_binding(syntax: &Syntax<'_>, node: Node<'_>, source: &[u8]) -> Option<usize> {
+    if !reference(node, source) { return None; }
+    let name = node.utf8_text(source).ok()?;
+    let start = node.start_byte();
+    if syntax.local_result_binding(name, start, true) == Some(start) { return None; }
+    syntax.local_result_binding(name, start, false)
 }
 
 fn local_projection<'tree>(node: Node<'tree>, aggregate: Node<'tree>, body: Node<'_>, source: &[u8]) -> Option<(Node<'tree>, Node<'tree>)> {
