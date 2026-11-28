@@ -18,7 +18,7 @@ pub(super) fn verify(
     for range in ranges {
         let remaining = options.timeout.saturating_sub(started.elapsed());
         if remaining.is_zero() { return Err("typescript_checker_incomplete"); }
-        let request = TypeScriptRequest { typescript_module: options.compiler, config: options.config, calls: &batch.calls[range.clone()] };
+        let request = TypeScriptRequest { typescript_module: options.compiler, config: options.config, calls: &batch.calls[range.clone()], graph_evidence: options.graph_evidence };
         let Some(result) = check(options.node, &request, remaining) else { return Err("typescript_checker_incomplete") };
         if result.status != "ok" { return Err(limitation_reason(result.reason.as_deref())); }
         record_classifications(&batch.positions[range], result, verified, classified);
@@ -44,7 +44,7 @@ fn limitation_reason(reason: Option<&str>) -> &'static str {
 }
 
 fn ranges(options: &CheckerConfig<'_>, calls: &[TypeScriptCall]) -> Option<(Vec<Range<usize>>, bool)> {
-    let header = TypeScriptRequest { typescript_module: options.compiler, config: options.config, calls: &[] };
+    let header = TypeScriptRequest { typescript_module: options.compiler, config: options.config, calls: &[], graph_evidence: options.graph_evidence };
     let limit = MAX_BYTES.checked_sub(1024 + serde_json::to_vec(&header).ok()?.len())?;
     let mut ranges = Vec::new();
     let mut first = 0;
@@ -87,13 +87,13 @@ mod tests {
 
     #[test]
     fn batches_fit_both_protocol_bounds_and_keep_completed_results_on_failure() {
-        let options = CheckerConfig { node: "node", compiler: "compiler", config: "config", root: Path::new("."), timeout: Duration::from_secs(10) };
+        let options = CheckerConfig { node: "node", compiler: "compiler", config: "config", root: Path::new("."), timeout: Duration::from_secs(10), graph_evidence: None };
         let calls: Vec<_> = (0..2000).map(|start| TypeScriptCall { path: format!("{}é\n", "x".repeat(160)), start, end: None, source_sha256: "a".repeat(64) }).collect();
         let (ranges, skipped) = ranges(&options, &calls).unwrap();
         assert!(!skipped);
         assert!(ranges.len() > 1);
         for range in &ranges {
-            let request = TypeScriptRequest { typescript_module: options.compiler, config: options.config, calls: &calls[range.clone()] };
+            let request = TypeScriptRequest { typescript_module: options.compiler, config: options.config, calls: &calls[range.clone()], graph_evidence: options.graph_evidence };
             assert!(serde_json::to_vec(&request).unwrap().len() <= MAX_BYTES);
             let response = serde_json::json!({"status":"ok","calls":calls[range.clone()].iter().map(|call| serde_json::json!({"path":call.path,"start":call.start,"source_sha256":call.source_sha256,"status":"source_changed"})).collect::<Vec<_>>()});
             assert!(serde_json::to_vec(&response).unwrap().len() <= MAX_BYTES);
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn oversized_call_does_not_discard_other_batches() {
-        let options = CheckerConfig { node: "node", compiler: "compiler", config: "config", root: Path::new("."), timeout: Duration::from_secs(10) };
+        let options = CheckerConfig { node: "node", compiler: "compiler", config: "config", root: Path::new("."), timeout: Duration::from_secs(10), graph_evidence: None };
         let make = |start, length| TypeScriptCall { path: "x".repeat(length), start, end: None, source_sha256: "a".repeat(64) };
         let calls = vec![make(0, 10), make(1, MAX_BYTES), make(2, 10)];
         let (ranges, skipped) = ranges(&options, &calls).unwrap();

@@ -17,7 +17,15 @@ pub struct TypeScriptRequest<'a> {
     pub typescript_module: &'a str,
     pub config: &'a str,
     pub calls: &'a [TypeScriptCall],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_evidence: Option<&'a TypeScriptGraphEvidence>,
 }
+
+#[derive(Deserialize, Serialize)]
+pub struct TypeScriptGraphSource { pub path: String, pub sha256: String }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypeScriptGraphEvidence { pub sources: Vec<TypeScriptGraphSource>, pub options_sha256: String }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TypeScriptCall {
@@ -48,7 +56,9 @@ pub struct TypeScriptCallResult {
 /// Any failure returns `None` and must be reported as incomplete analysis.
 pub fn check(node: &str, request: &TypeScriptRequest<'_>, timeout: Duration) -> Option<TypeScriptResult> {
     let input = serde_json::to_vec(request).ok()?;
-    let output = run_bounded(Command::new(node).args(["-e", SCRIPT]), input, timeout)?;
+    let mut script = tempfile::Builder::new().prefix("autoreview-typescript-").suffix(".cjs").tempfile().ok()?;
+    script.write_all(SCRIPT.as_bytes()).ok()?;
+    let output = run_bounded(Command::new(node).arg(script.path()), input, timeout)?;
     let result: TypeScriptResult = serde_json::from_slice(&output).ok()?;
     valid_response(&result, request).then_some(result)
 }
@@ -98,6 +108,7 @@ fn valid_response(result: &TypeScriptResult, request: &TypeScriptRequest<'_>) ->
 }
 
 mod verification;
+pub(super) mod runtime_graph;
 pub use verification::{verify_candidates, CheckerConfig};
 
 #[cfg(test)]
@@ -121,7 +132,7 @@ mod tests {
         let units = [KeyedUnit { path: "sample.ts", source: source.as_bytes(), functions: &[], imports: &[], exports: &[], entry: true }];
         let discovery = FactorySourceDiscovery { spans: BTreeMap::new(), candidates: BTreeMap::from([(0, BTreeSet::from([0]))]),
             limitations: vec![KeyedLimitation { reason: "promise_type_unresolved", path: Some("sample.ts".into()), line: Some(1) }] };
-        let options = CheckerConfig { node: "node", compiler: package.to_str().unwrap(), config: config.to_str().unwrap(), root: dir.path(), timeout: Duration::from_secs(10) };
+        let options = CheckerConfig { node: "node", compiler: package.to_str().unwrap(), config: config.to_str().unwrap(), root: dir.path(), timeout: Duration::from_secs(10), graph_evidence: None };
         let result = verify_candidates(&options, &units, discovery);
         assert!(result.candidates.is_empty());
         assert!(result.limitations.iter().any(|issue| issue.reason == "typescript_compiler_api_unsupported"));
@@ -139,7 +150,7 @@ mod tests {
         std::fs::write(&file, source).unwrap();
                 let calls = [TypeScriptCall { path: file.to_string_lossy().into_owned(), start: source.rfind("f()").unwrap(), end: None, source_sha256: format!("{:x}", Sha256::digest(source.as_bytes())) }];
         let config = config.to_string_lossy();
-        let request = TypeScriptRequest { typescript_module: &compiler, config: &config, calls: &calls };
+        let request = TypeScriptRequest { typescript_module: &compiler, config: &config, calls: &calls, graph_evidence: None };
         let result = check("node", &request, Duration::from_secs(20)).unwrap();
         assert_eq!(result.status, "ok");
         assert_eq!(result.calls.unwrap()[0].status, "promise_like");
@@ -171,7 +182,7 @@ mod tests {
         let calls: Vec<_> = ["factory()", "factory()()", "factory()()x"].iter().map(|text| TypeScriptCall {
             path: file.to_string_lossy().into_owned(), start, end: Some(start + text.len()), source_sha256: digest.clone(),
         }).collect();
-        let request = TypeScriptRequest { typescript_module: &compiler, config: config.to_str().unwrap(), calls: &calls };
+        let request = TypeScriptRequest { typescript_module: &compiler, config: config.to_str().unwrap(), calls: &calls, graph_evidence: None };
         let result = check("node", &request, Duration::from_secs(20)).unwrap();
         assert_eq!(result.calls.unwrap().into_iter().map(|call| call.status).collect::<Vec<_>>(), ["not_proven", "promise_like", "unavailable"]);
     }
@@ -179,7 +190,7 @@ mod tests {
     #[test]
     fn response_cannot_replace_requested_end_offset() {
         let calls = [TypeScriptCall { path: "file.ts".into(), start: 4, end: Some(12), source_sha256: "digest".into() }];
-        let request = TypeScriptRequest { typescript_module: "compiler", config: "config", calls: &calls };
+        let request = TypeScriptRequest { typescript_module: "compiler", config: "config", calls: &calls, graph_evidence: None };
         let mut result = TypeScriptResult { status: "ok".into(), reason: None, calls: Some(vec![TypeScriptCallResult {
             path: "file.ts".into(), start: 4, end: Some(12), source_sha256: "digest".into(), status: "promise_like".into(),
         }]) };
@@ -204,7 +215,7 @@ mod tests {
             path: file.to_string_lossy().into_owned(), start: source.rfind(name).unwrap(), end: None, source_sha256: digest.clone(),
         }).collect();
         let config = config.to_string_lossy();
-        let request = TypeScriptRequest { typescript_module: &compiler, config: &config, calls: &calls };
+        let request = TypeScriptRequest { typescript_module: &compiler, config: &config, calls: &calls, graph_evidence: None };
         let result = check("node", &request, Duration::from_secs(20)).unwrap();
         let statuses: Vec<_> = result.calls.unwrap().into_iter().map(|call| call.status).collect();
         assert_eq!(statuses, ["not_proven", "not_promise", "not_proven"]);
@@ -226,7 +237,7 @@ mod tests {
             path: file.to_string_lossy().into_owned(), start, end: None, source_sha256: digest.clone(),
         }}).collect();
         let config = config.to_string_lossy();
-        let request = TypeScriptRequest { typescript_module: &compiler, config: &config, calls: &calls };
+        let request = TypeScriptRequest { typescript_module: &compiler, config: &config, calls: &calls, graph_evidence: None };
         let result = check("node", &request, Duration::from_secs(20)).unwrap();
         assert_eq!(result.status, "ok");
         let statuses: Vec<_> = result.calls.unwrap().into_iter().map(|call| call.status).collect();
@@ -246,12 +257,12 @@ mod tests {
         let offsets: BTreeSet<_> = source.match_indices("pending();").map(|(start, _)| start).collect();
         let calls: Vec<_> = offsets.iter().map(|&start| TypeScriptCall { path: file.to_string_lossy().into_owned(), start, end: None, source_sha256: format!("{:x}", Sha256::digest(source.as_bytes())) }).collect();
         let config_path = config.to_str().unwrap();
-        let request = TypeScriptRequest { typescript_module: &compiler, config: config_path, calls: &calls };
+        let request = TypeScriptRequest { typescript_module: &compiler, config: config_path, calls: &calls, graph_evidence: None };
         assert!(serde_json::to_vec(&request).unwrap().len() > MAX_BYTES);
         let units = [KeyedUnit { path: &name, source: source.as_bytes(), functions: &[], imports: &[], exports: &[], entry: true }];
         let limitations = offsets.iter().map(|&start| KeyedLimitation { reason: "promise_type_unresolved", path: Some(name.clone()), line: Some(source[..start].bytes().filter(|byte| *byte == b'\n').count() as u32 + 1) }).collect();
         let discovery = FactorySourceDiscovery { spans: BTreeMap::new(), candidates: BTreeMap::from([(0, offsets)]), limitations };
-        let options = CheckerConfig { node: "node", compiler: &compiler, config: config_path, root: dir.path(), timeout: Duration::from_secs(60) };
+        let options = CheckerConfig { node: "node", compiler: &compiler, config: config_path, root: dir.path(), timeout: Duration::from_secs(60), graph_evidence: None };
         let verified = verify_candidates(&options, &units, discovery);
         assert_eq!(verified.candidates[&0].len(), 2000);
         assert!(verified.limitations.is_empty(), "{:?}", verified.limitations.iter().map(|item| item.reason).collect::<Vec<_>>());
@@ -278,7 +289,7 @@ mod tests {
             ],
         };
         let config = config.to_str().unwrap();
-        let options = CheckerConfig { node: "node", compiler: &compiler, config, root: dir.path(), timeout: Duration::from_secs(20) };
+        let options = CheckerConfig { node: "node", compiler: &compiler, config, root: dir.path(), timeout: Duration::from_secs(20), graph_evidence: None };
         let result = verify_candidates(&options, &units, discovery());
         assert_eq!(result.candidates[&0], BTreeSet::from([pending]));
         assert_eq!(result.limitations.len(), 1);
@@ -322,7 +333,7 @@ mod tests {
         let config = config_path.to_str().unwrap();
         let candidates = discover_factory_sources(&spec, &modules, &units);
         assert_eq!(candidates.candidates[&0].len(), 1);
-        let options = CheckerConfig { node: "node", compiler: &compiler, config, root: dir.path(), timeout: Duration::from_secs(20) };
+        let options = CheckerConfig { node: "node", compiler: &compiler, config, root: dir.path(), timeout: Duration::from_secs(20), graph_evidence: None };
         let verified = verify_candidates(&options, &units, candidates);
         assert!(verified.limitations.is_empty());
         let outcome = check_keyed_units_with_verified_sources(&spec, &units, verified);

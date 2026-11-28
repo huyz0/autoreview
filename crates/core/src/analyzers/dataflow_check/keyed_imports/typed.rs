@@ -42,18 +42,19 @@ pub(super) fn check_typed_rule(
     if modules.len() != units.len() || modules.iter().zip(units).any(|(module, unit)| module.path != unit.path || module.source != unit.source) {
         return KeyedCheckResult { hits: Vec::new(), limitations: vec![KeyedLimitation { reason: "factory_module_graph_incomplete", path: None, line: None }] };
     }
-    let candidates = if spec.contract.as_ref().is_some_and(|contract| contract.typed_promise) {
-        discover_calls(&modules)
-    } else { discover_factory_sources(spec, &modules, units) };
-    let options = crate::analyzers::typescript_checker::CheckerConfig { node: &checker.node, compiler: &checker.compiler, config: &checker.config, root, timeout: std::time::Duration::from_secs(30) };
+    let general = spec.contract.as_ref().is_some_and(|contract| contract.typed_promise);
+    let graph = general.then(|| crate::analyzers::typescript_checker::runtime_graph::reachable(root, units, &checker.node, &checker.compiler, &checker.config)).flatten();
+    let candidates = if general { discover_calls(&modules, graph.as_ref().map(|graph| &graph.reachable)) } else { discover_factory_sources(spec, &modules, units) };
+    let options = crate::analyzers::typescript_checker::CheckerConfig { node: &checker.node, compiler: &checker.compiler, config: &checker.config, root, timeout: std::time::Duration::from_secs(30), graph_evidence: graph.as_ref().map(|graph| &graph.evidence) };
     let verified = crate::analyzers::typescript_checker::verify_candidates(&options, units, candidates);
     check_keyed_units_with_verified_sources(spec, units, verified)
 }
 
-fn discover_calls(modules: &[TypeModule<'_>]) -> FactorySourceDiscovery {
+fn discover_calls(modules: &[TypeModule<'_>], reachable: Option<&BTreeSet<usize>>) -> FactorySourceDiscovery {
     let mut spans = BTreeMap::<usize, BTreeSet<(usize, usize)>>::new();
     let mut limitations = Vec::new();
     for (index, module) in modules.iter().enumerate() {
+        if reachable.is_some_and(|reachable| !reachable.contains(&index)) { continue; }
         let mut pending = vec![module.root];
         while let Some(node) = pending.pop() {
             if node.kind() == "call_expression" {
