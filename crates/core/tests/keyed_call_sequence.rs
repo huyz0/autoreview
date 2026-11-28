@@ -195,14 +195,12 @@ fn rust_match_guard_and_let_else_bindings_keep_the_outer_key() {
         "value: Option<(&str, u8)>, choice: Option<&str>",
         r#"    match value {
         Some((key, _)) if let Some(other) = choice && allowed(other) => {
-            root.register(key);
             root.remove(key);
         }
         _ => {}
     };
     {
         let Some(key) = choice else { root.remove(key); return; };
-        root.register(key);
         root.remove(key);
     }"#,
     );
