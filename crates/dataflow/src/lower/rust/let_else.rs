@@ -19,20 +19,33 @@ pub(super) fn supports(node: Node<'_>) -> bool {
             .is_some_and(match_flow::simple_value)
         && node
             .child_by_field_name("alternative")
-            .and_then(|block| children(block).last())
-            .and_then(|statement| {
-                if statement.kind() == "expression_statement" {
-                    children(statement).next()
-                } else {
-                    Some(statement)
-                }
-            })
-            .is_some_and(|tail| {
-                matches!(
-                    tail.kind(),
-                    "return_expression" | "break_expression" | "continue_expression"
-                )
-            })
+            .is_some_and(diverges)
+}
+
+pub(super) fn is_fallback(block: Node<'_>) -> bool {
+    block.parent().is_some_and(|owner| {
+        owner.kind() == "let_declaration" && owner.child_by_field_name("alternative") == Some(block)
+    })
+}
+
+fn diverges(node: Node<'_>) -> bool {
+    match node.kind() {
+        "return_expression" | "break_expression" | "continue_expression" => true,
+        "block" => children(node).last().is_some_and(diverges),
+        "expression_statement" | "else_clause" => children(node).next().is_some_and(diverges),
+        "if_expression" => {
+            node.child_by_field_name("consequence").is_some_and(diverges)
+                && node.child_by_field_name("alternative").is_some_and(diverges)
+        }
+        "match_expression" => diverging_match(node),
+        _ => false,
+    }
+}
+
+fn diverging_match(node: Node<'_>) -> bool {
+    match_flow::supports(node) && node.child_by_field_name("body").is_some_and(|body| {
+        children(body).all(|arm| arm.child_by_field_name("value").is_some_and(diverges))
+    })
 }
 
 impl Lower<'_> {
