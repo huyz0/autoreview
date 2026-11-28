@@ -67,7 +67,7 @@ jobs:
           echo "REPLAY_KOTLIN=$RUNNER_TEMP/replay-kotlin/kotlinc" >> "$GITHUB_ENV"
           echo "REPLAY_GRADLE=$RUNNER_TEMP/gradle-9.5.1/bin/gradle" >> "$GITHUB_ENV"
 
-      - name: Replay all 15 pinned manifests
+      - name: Replay all pinned manifests
         run: python benchmarks/ci/replay.py --binary target/debug/autoreview --output "$RUNNER_TEMP/replay"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
