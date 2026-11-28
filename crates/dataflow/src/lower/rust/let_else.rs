@@ -45,7 +45,9 @@ impl Lower<'_> {
         let otherwise = node.child_by_field_name("alternative")?;
         let tested = self.evaluate(node.child_by_field_name("value"), at, names);
         let unmatched = self.cfg.push_node(line(otherwise));
-        self.edge(tested, unmatched, EdgeKind::False);
+        if node.child_by_field_name("pattern").is_none_or(|pattern| pattern.kind() != "_") {
+            self.edge(tested, unmatched, EdgeKind::False);
+        }
         self.block(otherwise, unmatched, names);
         let matched = self.cfg.push_node(line(node));
         self.edge(tested, matched, EdgeKind::True);

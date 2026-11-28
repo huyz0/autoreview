@@ -1,4 +1,4 @@
-use super::{branch_value::{self, Mode}, Bindings, EdgeKind, Lower, Node, NodeId};
+use super::{branch_value::{self, Mode}, conditional, patterns, Bindings, EdgeKind, Lower, Node, NodeId};
 use crate::cfg::{BindingWrite, IdentityOperand, Stmt};
 
 pub(super) mod guard;
@@ -32,7 +32,7 @@ fn pattern(arm: Node<'_>) -> Option<Node<'_>> {
     let pattern = arm.child_by_field_name("pattern")?;
     (pattern
         .child_by_field_name("condition")
-        .is_none_or(guard::supported)
+        .is_none_or(conditional::supported)
         && arm.child_by_field_name("value").is_some_and(simple_arm))
     .then_some(pattern)
 }
@@ -75,40 +75,20 @@ fn simple_call(node: Node<'_>) -> bool {
 }
 
 fn supported_arm(arm: Node<'_>) -> bool {
-    pattern(arm).is_some_and(|pattern| {
-        let guard = pattern.child_by_field_name("condition");
-        let parts: Vec<_> = pattern.named_children(&mut pattern.walk()).filter(|part| Some(*part) != guard).collect();
-        matches!(parts.as_slice(), [part] if matches!(part.kind(), "integer_literal" | "boolean_literal" | "char_literal" | "string_literal" | "scoped_identifier")
-            || tuple_bindings(*part).is_some())
-    })
+    arm_pattern(arm).and_then(patterns::projected_names).is_some()
 }
 
-pub(super) fn tuple_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
-    let ty = node.child_by_field_name("type")?;
-    if node.kind() != "tuple_struct_pattern" || !matches!(ty.kind(), "identifier" | "scoped_identifier") { return None; }
-    let mut bindings = Vec::new();
-    let mut has_element = false;
-    for child in node.children(&mut node.walk()) {
-        if child == ty || matches!(child.kind(), "(" | ")" | ",") { continue; }
-        match child.kind() {
-            "_" => has_element = true,
-            "identifier" => { has_element = true; bindings.push(child); }
-            _ => return None,
-        }
-    }
-    has_element.then_some(bindings)
+fn arm_pattern(arm: Node<'_>) -> Option<Node<'_>> {
+    let pattern = pattern(arm)?;
+    pattern.children(&mut pattern.walk()).find(|child| child.kind() == "_" || child.is_named() && !child.is_extra())
 }
 
 pub(super) fn projection_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
-    let pattern = node.child_by_field_name("pattern")?;
-    match pattern.kind() {
-        "scoped_identifier" | "boolean_literal" | "integer_literal" => Some(Vec::new()),
-        _ => tuple_bindings(pattern),
-    }
+    patterns::projected_names(node.child_by_field_name("pattern")?)
 }
 
 pub(super) fn arm_bindings(arm: Node<'_>) -> Vec<Node<'_>> {
-    pattern(arm).and_then(|pattern| pattern.named_child(0)).and_then(tuple_bindings).unwrap_or_default()
+    arm_pattern(arm).and_then(patterns::projected_names).unwrap_or_default()
 }
 
 pub(super) fn has_bindings(node: Node<'_>) -> bool {
@@ -117,8 +97,10 @@ pub(super) fn has_bindings(node: Node<'_>) -> bool {
 }
 
 fn wildcard_arm(arm: Node<'_>) -> bool {
-    pattern(arm).is_some_and(|pattern| pattern.child_by_field_name("condition").is_none()
-        && pattern.child_count() == 1 && pattern.child(0).is_some_and(|part| part.kind() == "_"))
+    pattern(arm).is_some_and(|pattern| {
+        pattern.child_by_field_name("condition").is_none()
+            && pattern.children(&mut pattern.walk()).any(|part| part.kind() == "_")
+    })
 }
 
 impl Lower<'_> {
@@ -157,11 +139,11 @@ impl Lower<'_> {
                     EdgeKind::True
                 },
             );
-            if let Some(fallback) = fallback {
+            if let Some(fallback) = fallback.filter(|_| arm_pattern(arm).is_none_or(|pattern| pattern.kind() != "_")) {
                 self.edge(next, fallback, EdgeKind::False);
             }
             let mut arm_names = self.bind_arm(arm, start, names);
-            let body_start = self.guard_entry(arm, start, fallback, &arm_names)?;
+            let body_start = self.guard_entry(arm, start, fallback, &mut arm_names)?;
             let end = match mode {
                 Some(mode) => self.lower_value_arm(value, body_start, &mut arm_names, mode),
                 None => self.statement(value, body_start, &mut arm_names),
@@ -199,7 +181,7 @@ impl Lower<'_> {
         arm: Node<'_>,
         start: NodeId,
         fallback: Option<NodeId>,
-        names: &Bindings,
+        names: &mut Bindings,
     ) -> Option<NodeId> {
         let guard = arm
             .child_by_field_name("pattern")
@@ -210,7 +192,7 @@ impl Lower<'_> {
         let selected = self
             .cfg
             .push_node(super::line(arm.child_by_field_name("value")?));
-        self.lower_guard(guard, start, (selected, fallback?), names);
+        self.lower_pattern_test(guard, start, (selected, fallback?), names);
         Some(selected)
     }
 }

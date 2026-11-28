@@ -118,6 +118,7 @@ fn conditional_scope(node: Node<'_>) -> Option<Range<usize>> {
     let field = match owner.kind() {
         "if_expression" => "consequence",
         "while_expression" => "body",
+        "match_pattern" => return Some(owner.parent()?.byte_range()),
         _ => return None,
     };
     Some(owner.start_byte()..owner.child_by_field_name(field)?.end_byte())

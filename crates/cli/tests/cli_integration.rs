@@ -1203,6 +1203,13 @@ fn rust_branch_initializer_reaches_review_and_replay() {
     assert_rust_result_replays("Rust branch initializer", before, &after);
 }
 
+#[test]
+fn rust_match_guard_let_chain_reaches_review_and_replay() {
+    let before = "use std::fs::remove_file;\nfn run(value: Option<u8>, gate: bool) -> std::io::Result<()> {\n    match 1 { _ if gate && let Some(_) = value => { remove_file(\"example.txt\"); }, _ => {} };\n    Ok(())\n}\n";
+    let after = before.replace("remove_file(\"example.txt\");", "return remove_file(\"example.txt\");");
+    assert_rust_result_replays("Rust match guard let chain", before, &after);
+}
+
 fn assert_rust_result_replays(name: &str, before: &str, after: &str) {
     let repo = init_repo(&[("lib.rs", before)]);
     let old = current_commit(repo.path());

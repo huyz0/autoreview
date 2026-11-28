@@ -189,6 +189,23 @@ fn rust_tuple_loop_and_block_bindings_keep_the_outer_key() {
     );
 }
 
+#[test]
+fn rust_match_guard_and_let_else_bindings_keep_the_outer_key() {
+    assert_rust_shadowed_keys(
+        "value: Option<(&str, u8)>, choice: Option<&str>",
+        r#"    match value {
+        Some((key, _)) if let Some(other) = choice && allowed(other) => {
+            root.remove(key);
+        }
+        _ => {}
+    };
+    {
+        let Some(key) = choice else { root.remove(key); return; };
+        root.remove(key);
+    }"#,
+    );
+}
+
 fn assert_rust_shadowed_keys(parameters: &str, inner: &str) {
     let source = format!("fn pending(root: &mut Registry, key: &str, {parameters}) {{\n    root.register(key);\n{inner}\n    root.remove(key);\n}}\n");
     assert!(findings("Rust", "lib.rs", &source, RECEIVER, true).is_empty());
