@@ -93,9 +93,13 @@ def node_environment(name, repo, env):
     (repo / ".autoreview/rulepacks.yaml").write_text(json.dumps(config), encoding="utf-8")
 
 
-def go_environment(repo, env):
+def go_environment(repo, pairs, env):
     env.update(GOMODCACHE=str(repo / ".replay-go"), GOTOOLCHAIN="local", GOWORK="off")
-    run(["go", "mod", "download", "all"], cwd=repo, env=env)
+    revisions = sorted({commit for pair in pairs for commit in pair})
+    for revision in revisions:
+        snapshot = repo / ".replay-tmp" / revision
+        run(["git", "worktree", "add", "--quiet", "--detach", snapshot, revision], cwd=repo)
+        run(["go", "mod", "download", "all"], cwd=snapshot, env=env)
     env.update(
         GOPROXY="off", GOSUMDB="off",
         AUTOREVIEW_GO_ERROR_PROBE=os.environ["REPLAY_GO_PROBE"],
@@ -113,9 +117,7 @@ def prepare_environment(manifest, repo, pairs):
     if name in {"checkout-promise", "sftp-promise"}:
         node_environment(name, repo, env)
     elif name in {"yq-error", "yq-multi-error"}:
-        before, after = next(iter(pairs))
-        run(["git", "diff", "--exit-code", before, after, "--", "go.mod", "go.sum"], cwd=repo)
-        go_environment(repo, env)
+        go_environment(repo, pairs, env)
     elif name == "redicloud-coroutines":
         env["AUTOREVIEW_KOTLIN_CALLBACK_PROBE_CONFIG"] = str(prepare_redicloud(ROOT, repo))
     return env
