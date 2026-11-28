@@ -1,0 +1,12 @@
+cases:
+  - name: vaultwarden cli keeps certificate verification enabled
+    rule: {tool: autoreview-rust, id: rust-tls-invalid-certificates}
+    evidence:
+      kind: historical
+      source: https://github.com/haydonryan/vaultwarden-cli/blob/1a740831cae742f96bdc6ef2c37c48838c11876a/src/api.rs
+      license: MIT
+      rationale: >-
+        The earlier client explicitly refuses invalid certificates. The refactor
+        removes the redundant setter and keeps the verifying default.
+    before: {commit: ee241932a183376595c07f47a2cd1ef81a5c42df, path: &source1 src/api.rs, lines: []}
+    after: {commit: 1a740831cae742f96bdc6ef2c37c48838c11876a, path: *source1, lines: []}

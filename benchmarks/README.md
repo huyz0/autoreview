@@ -28,6 +28,13 @@ Home Assistant uses `runBlocking` in a synchronous initializer, and Tokio
 asserts the boolean returned by `matches!`. Each clean example exercises the
 same file in two snapshots and contributes no positive labels.
 
+Three more independent fixes cover Kotlin empty catches (Neko), Rust TLS
+certificate verification (LLM Bridge), and TSX async Promise executors
+(KubeStellar). The same rules also run on three clean cases. A Neko
+interceptor propagates errors as IO exceptions, Vaultwarden CLI keeps
+certificate verification enabled, and a KubeStellar modal awaits a promise
+with a synchronous timer executor.
+
 `silphscope-digest.yaml` records an MIT-licensed JavaScript fix where a Web
 Crypto digest promise was passed to `Uint8Array` before being awaited. The
 framework check recognizes direct calls and a single-use local `const`, with
