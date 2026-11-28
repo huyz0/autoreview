@@ -5,7 +5,7 @@ use tree_sitter::Node;
 
 use crate::call_order::CallOrderSpec;
 
-use super::kotlin::{kotlin_parameters, kotlin_parameter_list, named_kotlin_scope};
+use super::kotlin::{direct_kotlin_scope, kotlin_parameter_list, kotlin_parameters};
 use super::signature::{candidate, export, parameters};
 use super::{Associated, Frame, KeyedFunction, KeyedUnit, Plan, Program, Scope, Unit};
 
@@ -97,7 +97,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             declined_contract,
             unit,
             scope,
-            named_kotlin_calls: kotlin_list.is_some() && named_kotlin_scope(node),
+            direct_kotlin_calls: kotlin_list.is_some() && direct_kotlin_scope(node),
             kotlin_defaults,
             unsupported_rust_line: (rust_support == Some(false))
                 .then_some(node.start_position().row as u32 + 1),
@@ -106,7 +106,6 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             export,
         });
     }
-
 }
 
 fn scope(node: Node<'_>, unit: usize) -> Scope {

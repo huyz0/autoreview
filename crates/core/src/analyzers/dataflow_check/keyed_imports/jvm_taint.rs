@@ -118,6 +118,7 @@ class Terminal {
 import bridge.forward as relay
 import bridge.place
 import bridge.choose
+import interop.Safe.dispatch
 fun handle() {
     val input = readInput()
     relay(input)
@@ -125,6 +126,15 @@ fun handle() {
     relay(input, forwarded = "fixed")
     choose(input)
     choose(payload = input)
+    dispatch(input)
+}"#),
+            ("client/Dispatch.kt", r#"package client
+fun dispatch(payload: Any, label: String = "audit") {
+    sensitiveWrite(label, payload)
+}"#),
+            ("interop/Safe.java", r#"package interop;
+public class Safe {
+    public static void dispatch(String payload) {}
 }"#),
             ("bridge/Relay.kt", r#"package bridge
 fun forward(payload: String, forwarded: String = payload) {
@@ -144,7 +154,7 @@ fun terminal(category: String = "audit", raw: String) {
 }"#),
         ], "client/Handler.kt");
         assert_eq!(findings.len(), 2, "{findings:#?}");
-        for (finding, line) in findings.iter().zip([7, 8]) {
+        for (finding, line) in findings.iter().zip([8, 9]) {
             assert_path(finding, "client/Handler.kt", line, "bridge/Terminal.kt", 3);
         }
     }

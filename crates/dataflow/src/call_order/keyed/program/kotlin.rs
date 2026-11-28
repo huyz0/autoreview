@@ -53,29 +53,33 @@ impl Program<'_, '_, '_> {
         if (!named && !self.has_kotlin_defaults) || !site.local || name.contains(['.', ':']) {
             return fallback;
         }
-        let Some(binding) = self.kotlin_binding(from, name) else { return fallback };
+        let Some(binding) = self.kotlin_binding(from, name, named) else { return fallback };
         if !named && !binding.has_defaults {
             return KotlinTarget::Positional;
         }
-        let Some(target) = binding.frame else { return KotlinTarget::Declined };
-        let caller = &self.frames[from];
-        let callee = &self.frames[target];
-        if caller.named_kotlin_calls && callee.named_kotlin_calls
-            && callee.export.as_ref().is_some_and(|export| caller.unit == callee.unit || export.visible)
-            && self.unshadowed_root(from, name, site).is_some() {
-            KotlinTarget::Bound(target)
-        } else {
-            KotlinTarget::Declined
-        }
+        // An exact-arity declaration can compete with a longer one through its defaults.
+        binding.frame.filter(|&target| self.can_bind_kotlin_target(from, target, name, site))
+            .map_or(KotlinTarget::Declined, KotlinTarget::Bound)
     }
 
-    fn kotlin_binding(&self, from: usize, name: &str) -> Option<KotlinName> {
+    fn can_bind_kotlin_target(&self, from: usize, target: usize, name: &str, site: &CallSite) -> bool {
+        let caller = &self.frames[from];
+        let callee = &self.frames[target];
+        caller.direct_kotlin_calls && callee.direct_kotlin_calls
+            && callee.export.as_ref().is_some_and(|export| caller.unit == callee.unit || export.visible)
+            && self.unshadowed_root(from, name, site).is_some()
+    }
+
+    fn kotlin_binding(&self, from: usize, name: &str, named: bool) -> Option<KotlinName> {
         let frame = &self.frames[from];
         let lookup = |scope, name: &str| self.kotlin_names.get(&scope)?.get(name).copied();
         let local = [frame.scope, Scope::File(frame.unit)].into_iter().filter_map(|scope| lookup(scope, name));
         let imported = self.units[frame.unit].imports.iter().filter_map(|binding| {
-            if binding.owner.is_some() { return None; }
             let name = binding.target(name)?;
+            if binding.owner.is_some() {
+                // A Java static import can compete for a positional Kotlin call.
+                return (!named).then_some(KotlinName { frame: None, has_defaults: false });
+            }
             let unit = *self.paths.get(binding.path.as_str())?;
             lookup(Scope::File(unit), name)
         });
@@ -124,7 +128,7 @@ fn default_argument(value: Node<'_>, source: &[u8], earlier: &[String]) -> Defau
     }
 }
 
-pub(super) fn named_kotlin_scope(node: Node<'_>) -> bool {
+pub(super) fn direct_kotlin_scope(node: Node<'_>) -> bool {
     let Some(parent) = node.parent() else { return false };
     let Some(name) = node.child_by_field_name("name") else { return false };
     if children(node).take_while(|child| *child != name)

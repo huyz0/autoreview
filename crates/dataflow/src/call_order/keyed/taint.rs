@@ -142,6 +142,7 @@ fn kotlin_argument_sources(site: &CallSite, parameters: &[String], defaults: &[D
     if site.arguments.len() > parameters.len() || defaults.len() != parameters.len() {
         return None;
     }
+    // Each parameter points back to its supplied argument. Literal defaults have no source slot.
     let mut sources = vec![None; parameters.len()];
     let mut named = site.named_arguments.iter().peekable();
     let mut reordered = false;
@@ -156,6 +157,11 @@ fn kotlin_argument_sources(site: &CallSite, parameters: &[String], defaults: &[D
         }
         reordered |= slot != index;
     }
+    bind_omitted_defaults(&mut sources, defaults)?;
+    Some(sources)
+}
+
+fn bind_omitted_defaults(sources: &mut [Option<usize>], defaults: &[DefaultArgument]) -> Option<()> {
     for (slot, default) in defaults.iter().enumerate() {
         if sources[slot].is_none() {
             sources[slot] = match default {
@@ -165,7 +171,7 @@ fn kotlin_argument_sources(site: &CallSite, parameters: &[String], defaults: &[D
             };
         }
     }
-    Some(sources)
+    Some(())
 }
 
 fn eligible_helper(node: Node<'_>) -> bool {

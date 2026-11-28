@@ -51,7 +51,7 @@ pub(in crate::call_order) struct Frame<'spec, 'src, 'graph> {
     pub plan: Option<Plan<'spec, 'src>>,
     resolution_syntax: Option<Box<Syntax<'src>>>,
     scope: Scope,
-    named_kotlin_calls: bool,
+    direct_kotlin_calls: bool,
     pub(super) kotlin_defaults: Vec<DefaultArgument>,
     unsupported_rust_line: Option<u32>,
     declined_cleanup: Option<(u32, bool)>,
