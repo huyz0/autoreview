@@ -159,8 +159,15 @@ of array literals that list their values. Elements execute from left to right.
 An early exit skips later elements and any enclosing call that needs the
 aggregate. Result-use analysis can follow a whole array or tuple. It reports
 `rust_aggregate_element_projection` because it cannot distinguish individual
-element reads in these literals.
-Array repeat expressions still need separate modeling. [Rust array expressions](https://doc.rust-lang.org/reference/expressions/array-expr.html)
+element reads in these literals. [Rust array expressions](https://doc.rust-lang.org/reference/expressions/array-expr.html)
+
+An array repeat can use a supported `if` or `match` as its repeated value.
+Autoreview evaluates that value once, including when the length is zero. A
+literal zero length leaves the resulting array with no elements to observe.
+Whole-array result tracking treats unresolved lengths as potentially nonempty
+and reports the aggregate projection limitation. Compile-time length
+expressions, inline const blocks, const item operands, and other repeat-value
+shapes remain outside this coverage. [Rust array expressions](https://doc.rust-lang.org/reference/expressions/array-expr.html)
 
 Rust `match`, conditional patterns, `let-else`, ordinary `let`, and `for`
 support tuple, struct, slice, and reference patterns. The analyzer follows
@@ -185,8 +192,8 @@ operands. Explicit exits leave before the new bindings take effect. [Rust operan
 
 Autoreview follows explicit calls in the evaluated operands of array
 literals, indexing, ranges, field reads, casts, and dereferences. Rust
-evaluates these operands in source order. Array repeats and implicit trait
-calls for indexing or dereferencing still need additional modeling. [Rust operand evaluation order](https://doc.rust-lang.org/reference/expressions.html#evaluation-order-of-operands)
+evaluates these operands in source order. Implicit trait calls for indexing
+or dereferencing still need additional modeling. [Rust operand evaluation order](https://doc.rust-lang.org/reference/expressions.html#evaluation-order-of-operands)
 
 Report scopes should distinguish an entire file, a function or root, a rule,
 and an imported dependency. Findings from unaffected scopes remain useful.
