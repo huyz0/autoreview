@@ -1,0 +1,3 @@
+id: zod-aot-keyed-cleanup-benchmark
+version: "1"
+description: Tracks the active schema in the Zod AOT traversal.

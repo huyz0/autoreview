@@ -1,16 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, KeyedExport, KeyedFunction, KeyedImport, KeyedUnit};
-use autoreview_dataflow::lower;
-use autoreview_dataflow::cfg::{Cfg, Stmt};
 use autoreview_langsupport::{language_for_path, Language};
 use autoreview_schema::AnalysisCoverageIssue;
 use tree_sitter::Node;
 
 use super::cache::{ParseCache, ParsedFile, SummaryCaches};
-use super::dispatch::profile;
-use super::functions::{web_named_functions, web_result_functions};
+use super::functions::{lower_keyed_graphs, LoweredFile};
 use super::{call_order_rules::CallOrderRuleDef, AgentFinding};
 
 mod go;
@@ -33,8 +30,6 @@ struct Source {
     imports: Vec<KeyedImport>,
     exports: Vec<KeyedExport>,
 }
-
-type LoweredFile<'tree> = (usize, Vec<(Node<'tree>, Cfg<Stmt>)>);
 
 struct ImportSource<'a> {
     resolver: &'a Resolver<'a>,
@@ -105,11 +100,10 @@ fn run_group(
     if entries.is_empty() { return (Vec::new(), Vec::new()); }
     let (sources, mut coverage) = if limit == UNIT_LIMIT { resolver.load(&entries) } else { resolver.load_with_limit(&entries, limit) };
     jvm::record_index_coverage(resolver, &sources, &entries, rules, &mut coverage);
-    let findings = run_sources(&sources, &entries, rules, root, checker, &mut coverage);
+    let (findings, analysis_coverage) = run_sources(&sources, &entries, rules, root, checker);
+    coverage.extend(analysis_coverage);
     (findings, scope_coverage(coverage, rules, &entries))
 }
-
-
 
 fn run_sources(
     sources: &BTreeMap<String, Source>,
@@ -117,34 +111,15 @@ fn run_sources(
     rules: &[(&CallOrderRuleDef, Language)],
     root: &Path,
     checker: Option<&TrustedTypeScript>,
-    coverage: &mut Vec<AnalysisCoverageIssue>,
-) -> Vec<AgentFinding> {
-    let lowered: Vec<_> = sources
-        .values()
-        .map(|file| {
-            let (extract, _) = profile(file.language);
-            let mut nodes = extract(&file.parsed.1);
-            if matches!(file.language, Language::JavaScript | Language::TypeScript | Language::Tsx) {
-                nodes.extend(web_named_functions(&file.parsed.1));
-            }
-            let ordinary = nodes.len();
-            if matches!(file.language, Language::JavaScript | Language::TypeScript | Language::Tsx)
-                && rules.iter().any(|(rule, language)| rule.spec.tracks_result_use() && file.language.matches_rule_language(*language))
-            {
-                let mut seen: HashSet<_> = nodes.iter().map(Node::id).collect();
-                for node in web_result_functions(&file.parsed.1) {
-                    if seen.insert(node.id()) {
-                        nodes.push(node);
-                    }
-                }
-            }
-            let graphs = nodes.into_iter()
-                .map(|node| (node, lower::keyed_variant(file.language, file.parsed.0.as_bytes(), node)))
-                .collect::<Vec<_>>();
-            (ordinary, graphs)
-        })
-        .collect();
-    record_flow_limits(sources, &lowered, rules, coverage);
+) -> (Vec<AgentFinding>, Vec<AnalysisCoverageIssue>) {
+    let mut coverage = Vec::new();
+    let lowered: Vec<_> = sources.values().map(|file| {
+        let tracks_results = rules.iter().any(|(rule, declared)| {
+            rule.spec.tracks_result_use() && file.language.matches_rule_language(*declared)
+        });
+        lower_keyed_graphs(file.language, &file.parsed, tracks_results)
+    }).collect();
+    record_flow_limits(sources, &lowered, rules, &mut coverage);
     let functions: Vec<_> = lowered
         .iter()
         .map(|(ordinary, file)| {
@@ -179,7 +154,7 @@ fn run_sources(
         } else {
             (check_keyed_units_with_coverage(&rule.spec, &units), BTreeMap::new())
         };
-        record_rule_limits(coverage, &rule.id, result.limitations);
+        record_rule_limits(&mut coverage, &rule.id, result.limitations);
         findings.extend(result.hits.iter().map(|hit| {
             let path = hit.path.as_deref().unwrap_or_default();
             let origin = hit
@@ -196,7 +171,7 @@ fn run_sources(
             )
         }));
     }
-    findings
+    (findings, coverage)
 }
 
 
@@ -541,12 +516,11 @@ mod budget_tests {
         let rule = CallOrderRuleDef { id: "test-typed".into(), language: "TypeScript".into(), category: "correctness".into(), severity: Severity::Medium, message: "unused promise".into(), pack_id: None, metadata: None,
             spec: CallOrderSpec { rule_id: "test-typed".into(), after: vec![], unless: vec![], before: vec![], check_before_return: false, identity: None, contract: Some(ResultContract { mode: ContractMode::MustUse, language: ContractLanguage::Web, import: String::new(), methods: vec![], borrows: vec![], acquire_awaited: false, complete_observed: false, typed_promise_factory: true, typed_promise: false, typed_go_error: false }) } };
         let rules = [(&rule, Language::TypeScript)];
-        let mut coverage = Vec::new();
-        assert!(run_sources(&sources, &entries, &rules, dir.path(), None, &mut coverage).is_empty());
+        let (findings, coverage) = run_sources(&sources, &entries, &rules, dir.path(), None);
+        assert!(findings.is_empty());
         assert!(coverage.iter().any(|issue| issue.reason == "typed_promise_source_unavailable"));
         let checker = TrustedTypeScript { node: "node".into(), compiler, config: config.to_str().unwrap().into() };
-        let mut coverage = Vec::new();
-        let findings = run_sources(&sources, &entries, &rules, dir.path(), Some(&checker), &mut coverage);
+        let (findings, coverage) = run_sources(&sources, &entries, &rules, dir.path(), Some(&checker));
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].source.rule_id.as_deref(), Some("test-typed"));
         assert!(coverage.is_empty(), "{:?}", coverage.iter().map(|issue| &issue.reason).collect::<Vec<_>>());
@@ -726,7 +700,8 @@ mod budget_tests {
                 let entries = BTreeSet::from([entry]);
                 let (sources, mut coverage) = with_resolver(dir.path(), |resolver| resolver.load(&entries));
                 let checker = TrustedTypeScript { node: "node".into(), compiler: compiler.clone(), config: config.to_str().unwrap().into() };
-                let found = run_sources(&sources, &entries, &[(rule, Language::TypeScript)], dir.path(), Some(&checker), &mut coverage);
+                let (found, analysis_coverage) = run_sources(&sources, &entries, &[(rule, Language::TypeScript)], dir.path(), Some(&checker));
+                coverage.extend(analysis_coverage);
                 assert_eq!(found.len(), expected, "{fixture}.{extension}");
                 assert!(coverage.is_empty(), "{fixture}.{extension}: {:?}", coverage.iter().map(|issue| &issue.reason).collect::<Vec<_>>());
             }

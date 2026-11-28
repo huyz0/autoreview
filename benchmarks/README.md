@@ -35,6 +35,15 @@ interceptor propagates errors as IO exceptions, Vaultwarden CLI keeps
 certificate verification enabled, and a KubeStellar modal awaits a promise
 with a synchronous timer executor.
 
+Three independent upstream fixes exercise result flow and cleanup. Mattermost
+returns the error from a pretty-printer in another package. Its clean control
+checks errors from configuration helpers in a separate file. Nokia's Helm
+tooling defers cancellation before the first early return. Its smoke commands
+provide the clean control. Zod AOT removes the active schema from the visiting
+set in `finally`. A later extractor refactor provides two clean snapshots of
+the same cleanup contract. CI uses the Go type checker for Mattermost and a
+local keyed call-sequence pack for Zod AOT.
+
 `silphscope-digest.yaml` records an MIT-licensed JavaScript fix where a Web
 Crypto digest promise was passed to `Uint8Array` before being awaited. The
 framework check recognizes direct calls and a single-use local `const`, with

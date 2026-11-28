@@ -633,10 +633,8 @@ mod tests {
         let parsed = Rc::new((source.to_owned(), tree));
         let sources = BTreeMap::from([("main.go".to_owned(), Source { language: Language::Go, parsed, imports: vec![], exports: vec![] })]);
         let file = &sources["main.go"];
-        let (extract, _) = super::super::profile(Language::Go);
-        let nodes = extract(&file.parsed.1);
-        let graphs: Vec<_> = nodes.iter().map(|node| autoreview_dataflow::lower::keyed_variant(Language::Go, source.as_bytes(), *node)).collect();
-        let functions: Vec<_> = nodes.iter().zip(&graphs).map(|(node, graph)| KeyedFunction { node: *node, graph }).collect();
+        let (_, graphs) = super::super::lower_keyed_graphs(Language::Go, &file.parsed, true);
+        let functions: Vec<_> = graphs.iter().map(|(node, graph)| KeyedFunction { node: *node, graph }).collect();
         let units = [KeyedUnit { path: "main.go", source: source.as_bytes(), functions: &functions, imports: &[], exports: &[], entry: true }];
         let rules = crate::analyzers::call_order_rules::load_call_order_rules(&[]);
         let rule = rules.iter().find(|rule| rule.id == "go-project-error-result-unobserved").unwrap();
