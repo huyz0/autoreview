@@ -94,9 +94,6 @@ impl<'src> Syntax<'src> {
                     syntax.type_parameters.insert(name);
                 }
             }
-            if node.kind() == "use_declaration" {
-                syntax.record_local_import(node, source);
-            }
             if let Some(name) = local_callable(node, function, source) {
                 syntax.local_callables.insert(name);
             }
@@ -122,8 +119,9 @@ impl<'src> Syntax<'src> {
         self.type_parameters.contains(name)
     }
 
-    fn record_calls_and_guards(&mut self, node: Node<'_>, source: &[u8]) {
+    fn record_calls_and_guards(&mut self, node: Node<'_>, source: &'src [u8]) {
         match node.kind() {
+            "use_declaration" => self.record_local_import(node, source),
             "method_invocation" | "call_expression" | "new_expression" => {
                 if let Some(name) = name(node, source) {
                     self.calls.push((node.start_byte(), name));
