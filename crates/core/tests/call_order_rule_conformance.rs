@@ -2257,8 +2257,8 @@ fn assert_rust_results_with_full_coverage(source: &str, expected: &[u32]) {
         .map(|finding| finding.location.range.start_line)
         .collect();
     lines.sort_unstable();
-    assert_eq!(lines, expected, "{:?}", report.findings);
     assert!(report.coverage.is_empty(), "{:?}", report.coverage);
+    assert_eq!(lines, expected, "{:?}", report.findings);
 }
 
 #[test]
@@ -2313,6 +2313,97 @@ fn nested() -> std::io::Result<()> {
 }
 "#;
     assert_rust_results_with_full_coverage(source, &[11, 12]);
+}
+
+#[test]
+fn rust_local_pattern_sources_preserve_each_result_through_the_use() {
+    let source = r#"use std::fs::remove_file;
+fn declaration() -> std::io::Result<()> {
+    let pair = (remove_file("retained"), remove_file("discarded"));
+    let snapshot = pair;
+    let (kept, _) = snapshot;
+    kept
+}
+fn conditional() -> std::io::Result<()> {
+    let pair = [remove_file("discarded"), remove_file("retained")];
+    if let [.., kept @ _] = pair { return kept; }
+    Ok(())
+}
+fn matched() -> std::io::Result<()> {
+    let pair = (remove_file("discarded"), remove_file("retained"));
+    let selected = match pair { (_, kept @ _) => kept };
+    selected
+}
+fn let_else() -> std::io::Result<()> {
+    let pair = (remove_file("discarded"), remove_file("retained"));
+    let (_, kept @ _) = pair else { return Ok(()) };
+    kept
+}
+"#;
+    assert_rust_results_with_full_coverage(source, &[3, 9, 14, 19]);
+}
+
+#[test]
+fn rust_pattern_iterators_evaluate_all_items_before_the_first_body() {
+    let source = r#"use std::fs::remove_file;
+fn direct() -> std::io::Result<()> {
+    for (result, _) in [
+        (remove_file("returned"), 1),
+        (remove_file("never iterated"), 2),
+    ] {
+        return result;
+    }
+    Ok(())
+}
+fn stored() {
+    let rows = [
+        (remove_file("observed"), remove_file("ignored")),
+        (remove_file("also observed"), remove_file("also ignored")),
+    ];
+    'items: for (result, _) in rows {
+        let _ = result.is_ok();
+        continue 'items;
+    }
+}
+fn empty() {
+    let rows: [(u8, u8); 0] = [];
+    for (_, value) in rows { remove_file(value.to_string()); }
+}
+"#;
+    assert_rust_results_with_full_coverage(source, &[5, 13, 14]);
+}
+
+#[test]
+fn rust_pattern_projections_remain_incomplete_for_mutation_and_opaque_iterators() {
+    let source = r#"use std::fs::remove_file;
+fn mutated() {
+    let mut pair = (remove_file("original"), 0);
+    pair.1 += 1;
+    let (result, _) = pair;
+    let _ = result.is_ok();
+}
+fn borrowed() {
+    let pair = (remove_file("original"), 0);
+    inspect(&pair);
+    let (result, _) = pair;
+    let _ = result.is_ok();
+}
+fn dynamic(rows: Vec<(&str, u8)>) {
+    for (path, _) in rows { remove_file(path); }
+}
+fn opaque(make: fn() -> (&'static str, u8)) {
+    let pair = make();
+    let (path, _) = pair;
+    remove_file(path);
+}
+"#;
+    let root = write_single_file("lib.rs", source);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    let unresolved: std::collections::BTreeSet<_> = report.coverage.iter()
+        .filter(|issue| issue.reason == "rust_destructuring_binding_projection")
+        .filter_map(|issue| issue.line)
+        .collect();
+    assert_eq!(unresolved, [5, 11, 15, 19].into(), "{:?}", report.coverage);
 }
 
 #[test]

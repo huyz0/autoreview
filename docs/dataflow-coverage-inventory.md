@@ -193,9 +193,18 @@ from explicitly initialized struct fields. It also projects tuple payloads
 from a `self::Enum::Variant` constructor proven by the local enum declaration.
 Initializers run in source order. Explicit captures such as `value @ _`
 establish a binding in conditional patterns without resolving bare names
-as constants. Opaque initializers, struct updates, and unresolved iterator
-projections still report incomplete coverage. Loop bindings receive fresh
-identities each iteration. [Rust patterns](https://doc.rust-lang.org/reference/patterns.html#destructuring)
+as constants. The same projections can follow an immutable local and its
+single-use aliases within one block. The analyzer captures each component
+when the initializer runs and transfers it when the pattern binds it.
+Opaque initializers, struct updates, and locals with other uses still
+report incomplete coverage. [Rust patterns](https://doc.rust-lang.org/reference/patterns.html#destructuring)
+
+`for` loops can bind whole items or destructure them from by-value array
+literals with up to eight items, including arrays reached through those
+immutable locals. The analyzer evaluates every array item before entering the loop
+and follows each binding through `break`, `continue`, and return. Dynamic
+iterators, repeated arrays, and nested `for` loops retain the unresolved
+projection diagnostic when item identities cannot be proven.
 
 Statement-position `unsafe` blocks follow the control flow of their body.
 Loop labels resolve `break` and `continue` from loop bodies and supported

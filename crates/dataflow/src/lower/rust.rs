@@ -209,6 +209,11 @@ impl Lower<'_> {
     }
 
     fn loop_body(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
+        if self.cfg.keyed_flow.is_some() {
+            if let Some(plan) = destructuring::iteration::plan(expr, self.source) {
+                return self.projected_iteration(expr, at, names, plan);
+            }
+        }
         if let Some(test) = conditional::control_test(expr, self.source) {
             return self.tested_loop(test, at, names);
         }

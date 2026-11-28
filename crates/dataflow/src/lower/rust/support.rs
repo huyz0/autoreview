@@ -123,7 +123,7 @@ pub(crate) fn pattern_projection_sites(function: Node<'_>, source: &[u8], unreso
 
 fn projection_reason(node: Node<'_>, source: &[u8]) -> Option<&'static str> {
     if matches!(node.kind(), "let_condition" | "let_declaration" | "match_expression")
-        && destructuring::literal_projection(node, source).is_some()
+        && destructuring::value_projection(node, source).is_some()
     {
         return None;
     }
@@ -135,9 +135,9 @@ fn projection_reason(node: Node<'_>, source: &[u8]) -> Option<&'static str> {
             .is_some_and(|names| !names.is_empty())
             .then_some("rust_conditional_binding_projection"),
         "let_declaration" => declaration_projection(node, source),
-        "for_expression" => {
-            destructuring::projected_bindings(node, source).map(|_| "rust_destructuring_binding_projection")
-        }
+        "for_expression" => (destructuring::iteration::plan(node, source).is_none())
+            .then(|| destructuring::projected_bindings(node, source))
+            .flatten().map(|_| "rust_destructuring_binding_projection"),
         _ => None,
     }
 }

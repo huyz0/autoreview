@@ -25,7 +25,7 @@ pub(super) fn supported(node: Node<'_>, source: &[u8]) -> bool {
     match node.kind() {
         "let_chain" => children(node).all(|part| supported(part, source)),
         "let_condition" => {
-            super::literal_projection(node, source).is_some() || (bindings(node, source).is_some()
+            super::destructuring::value_projection(node, source).is_some() || (bindings(node, source).is_some()
                 && node
                     .child_by_field_name("value")
                     .is_some_and(|value| match_flow::simple_value(value, source)))
@@ -172,8 +172,8 @@ impl Lower<'_> {
 
     fn lower_binding_test(&mut self, node: Node<'_>, at: NodeId, targets: (NodeId, NodeId), names: &mut Bindings, bindings: Vec<Node<'_>>) {
         let (passed, failed) = targets;
-        if let Some(elements) = super::destructuring::literal_projection(node, self.source).filter(|_| self.cfg.keyed_flow.is_some()) {
-            if let Some(end) = self.lower_literal_projection(node, at, names, elements) {
+        if let Some(projection) = self.keyed_projection(node) {
+            if let Some(end) = self.lower_pattern_projection(node, at, names, projection) {
                 self.edge(end, passed, EdgeKind::Fallthrough);
             }
             return;

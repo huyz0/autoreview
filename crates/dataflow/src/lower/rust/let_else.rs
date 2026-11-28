@@ -14,7 +14,7 @@ fn pattern_bindings<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Vec<Node<
 
 pub(super) fn supports(node: Node<'_>, source: &[u8]) -> bool {
     pattern_bindings(node, source).is_some()
-        && (super::literal_projection(node, source).is_some() || node
+        && (super::destructuring::value_projection(node, source).is_some() || node
             .child_by_field_name("value")
             .is_some_and(|value| supported_initializer(value, source)))
         && node
@@ -68,9 +68,9 @@ impl Lower<'_> {
         names: &mut Bindings,
     ) -> Option<NodeId> {
         let otherwise = node.child_by_field_name("alternative")?;
-        if let Some(elements) = super::destructuring::literal_projection(node, self.source).filter(|_| self.cfg.keyed_flow.is_some()) {
+        if let Some(projection) = self.keyed_projection(node) {
             self.skip_calls([otherwise]);
-            return self.lower_literal_projection(node, at, names, elements);
+            return self.lower_pattern_projection(node, at, names, projection);
         }
         let value = node.child_by_field_name("value")?;
         let tested = if let Some(branch) = branch_value::from_value(value) {

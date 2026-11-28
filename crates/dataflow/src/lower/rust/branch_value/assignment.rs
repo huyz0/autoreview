@@ -48,6 +48,9 @@ impl Lower<'_> {
         if let Some(bindings) = destructuring::declaration_bindings(stmt, self.source) {
             return self.destructured_declaration(stmt, at, names, bindings);
         }
+        if let Some(end) = self.projected_local(stmt, at, names) {
+            return end;
+        }
         self.binding(stmt, at, names)
     }
 

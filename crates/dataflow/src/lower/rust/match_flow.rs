@@ -25,7 +25,7 @@ pub(super) fn supports(node: Node<'_>, source: &[u8]) -> bool {
 
 fn supported_scrutinee(node: Node<'_>, source: &[u8]) -> bool {
     node.child_by_field_name("value").is_some_and(|value| simple_value(value, source))
-        || super::literal_projection(node, source).is_some()
+        || super::destructuring::value_projection(node, source).is_some()
 }
 
 fn covers_match_arms(node: Node<'_>, arms: &[Node<'_>], source: &[u8]) -> bool {
@@ -33,7 +33,7 @@ fn covers_match_arms(node: Node<'_>, arms: &[Node<'_>], source: &[u8]) -> bool {
         return false;
     };
     let wildcard = wildcard_arm(*last, source);
-    if arms.len() == 1 && super::destructuring::literal_projection(node, source).is_some() {
+    if arms.len() == 1 && super::destructuring::value_projection(node, source).is_some() {
         return pattern(*last, source).is_some();
     }
     rest.iter().all(|arm| supported_arm(*arm, source))
@@ -199,9 +199,9 @@ impl Lower<'_> {
     pub(super) fn select_match(
         &mut self, node: Node<'_>, at: NodeId, names: &Bindings, mode: Option<&Mode<'_>>,
     ) -> Option<NodeId> {
-        if let Some(elements) = super::destructuring::literal_projection(node, self.source).filter(|_| self.cfg.keyed_flow.is_some()) {
+        if let Some(projection) = self.keyed_projection(node) {
             let arm = children(node.child_by_field_name("body")?).next()?;
-            return self.lower_projected_arm((node, arm), at, names, mode, elements);
+            return self.lower_projected_arm((node, arm), at, names, mode, projection);
         }
         let evaluated = self.evaluate(node.child_by_field_name("value"), at, names)?;
         let body = node.child_by_field_name("body")?;
@@ -246,11 +246,11 @@ impl Lower<'_> {
 
     fn lower_projected_arm(
         &mut self, nodes: (Node<'_>, Node<'_>), at: NodeId, names: &Bindings,
-        mode: Option<&Mode<'_>>, elements: Vec<(Node<'_>, Node<'_>)>,
+        mode: Option<&Mode<'_>>, projection: super::destructuring::ValueProjection<'_>,
     ) -> Option<NodeId> {
         let mut names = names.clone();
         let (matched, arm) = nodes;
-        let end = self.lower_literal_projection(matched, at, &mut names, elements)?;
+        let end = self.lower_pattern_projection(matched, at, &mut names, projection)?;
         let value = arm.child_by_field_name("value")?;
         match mode {
             Some(mode) => self.lower_value_arm(value, end, &mut names, mode),

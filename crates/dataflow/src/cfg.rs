@@ -16,6 +16,7 @@ pub(crate) struct Evaluation {
     pub(crate) syntax_kind: u16,
     pub(crate) returned: bool,
     pub(crate) assignment: Option<(std::ops::Range<usize>, u16)>,
+    pub(crate) pattern_slot: Option<std::ops::Range<usize>>,
 }
 
 #[derive(Debug, Clone)]
