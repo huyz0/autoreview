@@ -1438,6 +1438,33 @@ fn rust_match_initializer_keeps_a_direct_return_separate() {
 }
 
 #[test]
+fn rust_nested_struct_and_slice_patterns_analyze_calls_and_report_projection() {
+    let source = concat!(
+        "use std::fs::remove_file;\n",
+        "fn run(entry: Entry, entries: &[Entry], keys: &[u8]) { remove_file(\"old.txt\");\n",
+        " let Entry { name: key, tag: _, .. } = entry;\n",
+        " for &Entry { name, .. } in entries {}\n",
+        " if let Entry { tag: Some(tag), .. } = entry { inspect(tag); }\n",
+        " match keys { [key, rest @ ..] => {}, _ => {} };\n",
+        " let [head, ..] = keys else { return };\n",
+        "}\n",
+    );
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 2)]);
+    let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    for (reason, line) in [
+        ("rust_destructuring_binding_projection", 3),
+        ("rust_destructuring_binding_projection", 4),
+        ("rust_conditional_binding_projection", 5),
+        ("rust_match_binding_projection", 6),
+        ("rust_let_else_binding_projection", 7),
+    ] {
+        assert!(result.coverage.iter().any(|issue| issue.reason == reason
+            && issue.line == Some(line)), "{reason}:{line}: {:?}", result.coverage);
+    }
+}
+
+#[test]
 fn rust_match_arm_prefix_can_exit_before_producing_its_value() {
     let source = concat!(
         "fn open(flag: bool, abort: bool) -> u8 {\n",

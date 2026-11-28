@@ -118,9 +118,9 @@ Returned arms preserve result identity on each exit. Guards preserve the
 evaluation order of `&&`, `||`, and `!` and carry effects to the next arm
 when the guard fails. Let chains in a match guard expose names to later
 operands and the selected arm. The next arm resolves names in its own scope.
-Matches used in other nested value positions, struct and slice patterns,
-alternatives that bind names, and guards whose operands need additional lowering still
-produce coverage diagnostics. [Rust match expressions](https://doc.rust-lang.org/reference/expressions/match-expr.html) [Rust lazy boolean operators](https://doc.rust-lang.org/reference/expressions/operator-expr.html#lazy-boolean-operators)
+Matches used in other nested value positions, alternatives that bind names,
+and guards whose operands need additional lowering still produce coverage
+diagnostics. [Rust match expressions](https://doc.rust-lang.org/reference/expressions/match-expr.html) [Rust lazy boolean operators](https://doc.rust-lang.org/reference/expressions/operator-expr.html#lazy-boolean-operators)
 
 Rust `let-else` lowering represents both pattern outcomes when the
 initializer is supported and the fallback ends with `return`, `break`, or
@@ -138,12 +138,16 @@ whose source values cannot be projected report
 `if` and `if let` expressions also preserve the selected arm when they
 form a function return or initialize a single `let` binding. [Rust if expressions](https://doc.rust-lang.org/reference/expressions/if-expr.html)
 
-Rust `for` and ordinary `let` statements can destructure tuples with
-named bindings, wildcard elements, and nested tuples. Loop bindings receive
-fresh identities each iteration. Tuple components report
-`rust_destructuring_binding_projection` because their relationship to the
-initializer or iterator item is unresolved. When a supported `if` or `match`
-supplies the tuple, the analyzer follows calls through the selected arm,
+Rust `match`, conditional patterns, `let-else`, ordinary `let`, and `for`
+support tuple, struct, slice, and reference patterns. The analyzer follows
+shorthand and renamed struct fields, nested patterns, ignored rest fields or
+elements, and supported `@` bindings. Ordinary `let` and `for` bindings
+report `rust_destructuring_binding_projection` because their relationship to the
+initializer or iterator item is unresolved. Loop bindings receive fresh
+identities each iteration. [Rust patterns](https://doc.rust-lang.org/reference/patterns.html#destructuring)
+
+When a supported `if` or `match` supplies a tuple, the analyzer follows calls
+through the selected arm,
 including calls in tuple elements and in supported eager unary and binary
 operands. Explicit exits leave before the new bindings take effect. [Rust operand evaluation order](https://doc.rust-lang.org/reference/expressions.html#evaluation-order-of-operands)
 
