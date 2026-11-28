@@ -1,6 +1,6 @@
 use super::{
-    children, has_attributes, reexport_module, rust_paths, text, Language, Node, Path, PathBuf,
-    Resolver,
+    children, has_attributes, parent_module, reexport_module, rust_paths, text, Language, Node,
+    Path, PathBuf, Resolver,
 };
 use std::collections::HashSet;
 
@@ -44,6 +44,7 @@ fn simple_call(node: Node<'_>, source: &str) -> bool {
 // Follow unique explicit re-exports through verified module edges.
 pub(super) fn associated_type_origin(
     resolver: &Resolver<'_>,
+    requester: &Path,
     path: &Path,
     name: &str,
 ) -> Option<Binding> {
@@ -53,7 +54,8 @@ pub(super) fn associated_type_origin(
         if !seen.insert((resolver.relative(&current.0)?, current.1.clone())) {
             return None;
         }
-        match associated_step(resolver, &current.0, &current.1)? {
+        let private_visible = ancestor_module(resolver, requester, &current.0);
+        match associated_step(resolver, &current.0, &current.1, private_visible)? {
             Step::Found => return Some(current),
             Step::Next(next) => current = next,
         }
@@ -61,12 +63,19 @@ pub(super) fn associated_type_origin(
     None
 }
 
+fn ancestor_module(resolver: &Resolver<'_>, child: &Path, ancestor: &Path) -> bool {
+    let Some(expected) = resolver.relative(ancestor) else { return false };
+    std::iter::successors(parent_module(resolver, child), |module| {
+        parent_module(resolver, module)
+    }).take(128).any(|module| resolver.relative(&module).as_deref() == Some(expected.as_str()))
+}
+
 enum Step {
     Found,
     Next(Binding),
 }
 
-fn associated_step(resolver: &Resolver<'_>, path: &Path, name: &str) -> Option<Step> {
+fn associated_step(resolver: &Resolver<'_>, path: &Path, name: &str, private_visible: bool) -> Option<Step> {
     let parsed = resolver.cache.get(path, Language::Rust)?;
     let root = parsed.1.root_node();
     if root.has_error() || has_module_macro(root) {
@@ -77,6 +86,7 @@ fn associated_step(resolver: &Resolver<'_>, path: &Path, name: &str) -> Option<S
         path,
         source: &parsed.0,
         name,
+        private_visible,
     }
     .explicit_export(root)?;
     if local_associated_type(root, &parsed.0, name) {
@@ -107,6 +117,7 @@ struct ExportLookup<'a, 'b> {
     path: &'a Path,
     source: &'a str,
     name: &'a str,
+    private_visible: bool,
 }
 
 // Outer None is unsupported or ambiguous; inner None means absent.
@@ -169,7 +180,9 @@ impl ExportLookup<'_, '_> {
             .into_iter()
             .find(|part| part.kind() == "visibility_modifier")
             .and_then(|part| text(part, self.source));
-        if has_attributes(node) || !matches!(visibility, Some("pub" | "pub(crate)")) {
+        let visible = matches!(visibility, Some("pub" | "pub(crate)"))
+            || (visibility.is_none() && self.private_visible);
+        if has_attributes(node) || !visible {
             return None;
         }
         Some(Some((

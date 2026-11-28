@@ -30,7 +30,7 @@ fn collect<'tree>(pattern: Node<'tree>, names: &mut Vec<Node<'tree>>, nested: bo
     }
 }
 
-fn pattern_parts(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
+pub(super) fn pattern_parts(node: Node<'_>) -> impl Iterator<Item = Node<'_>> {
     node.children(&mut node.walk())
         .filter(|part| !part.is_extra() && (part.is_named() || part.kind() == "_"))
         .collect::<Vec<_>>()

@@ -12,7 +12,7 @@ mod patterns;
 mod argument_flow;
 
 use support::{simple_binding, supported};
-pub(crate) use destructuring::iterator_bindings;
+pub(crate) use destructuring::{iterator_bindings, literal_tuple};
 pub use support::{match_arm_bindings, match_binding_lines, supports_function, supports_match};
 pub use support::{match_arm_bindings_with_source, match_binding_lines_with_source, supports_function_with_source, supports_match_with_source};
 pub(crate) use support::{discards_match, lexical_bindings, pattern_projection_sites};

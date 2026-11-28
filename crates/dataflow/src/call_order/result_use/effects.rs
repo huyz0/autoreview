@@ -190,8 +190,13 @@ impl Lower<'_, '_, '_> {
         {
             return;
         }
-        let targets = assignment_targets(node, target);
-        let values = value.map_or_else(Vec::new, assignment_items);
+        let (targets, values) = if let Some(tuple) = crate::lower::rust::literal_tuple(node, self.source)
+            .filter(|_| self.language == ContractLanguage::Rust)
+        {
+            tuple.into_iter().unzip()
+        } else {
+            (assignment_targets(node, target), value.map_or_else(Vec::new, assignment_items))
+        };
         if let Some(call) = (values.len() == 1).then(|| transparent(values[0])) {
             if self.component_assignment(&targets, call, reassignment, effects) { return; }
         }

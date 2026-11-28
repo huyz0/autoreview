@@ -140,6 +140,9 @@ fn declaration_projection(node: Node<'_>, source: &[u8]) -> Option<&'static str>
     if let_else::bindings(node, source).is_some_and(|names| !names.is_empty()) {
         return Some("rust_let_else_binding_projection");
     }
+    if destructuring::literal_tuple(node, source).is_some() {
+        return None;
+    }
     destructuring::declaration_bindings(node, source).map(|_| "rust_destructuring_binding_projection")
 }
 
