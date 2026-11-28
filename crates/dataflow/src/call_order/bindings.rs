@@ -105,7 +105,7 @@ impl<'src> Bindings<'src> {
     }
 
     fn record_declarations(&mut self, node: Node<'_>, source: &'src [u8], track_results: bool) {
-        if let Some(targets) = crate::lower::rust::lexical_bindings(node) {
+        if let Some(targets) = crate::lower::rust::lexical_bindings(node, source) {
             for target in targets {
                 self.local_values.record_projected(node, target, source);
             }

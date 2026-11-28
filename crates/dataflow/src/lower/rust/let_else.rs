@@ -1,8 +1,8 @@
 use super::{branch_value::{self, Mode}, line, match_flow, Bindings, EdgeKind, Lower, Node, NodeId};
 use crate::lower::site::children;
 
-pub(crate) fn bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
-    supports(node).then(|| pattern_bindings(node)).flatten()
+pub(crate) fn bindings<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Vec<Node<'tree>>> {
+    supports(node, source).then(|| pattern_bindings(node)).flatten()
 }
 
 fn pattern_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
@@ -12,22 +12,22 @@ fn pattern_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
     match_flow::projection_bindings(node)
 }
 
-pub(super) fn supports(node: Node<'_>) -> bool {
+pub(super) fn supports(node: Node<'_>, source: &[u8]) -> bool {
     pattern_bindings(node).is_some()
         && node
             .child_by_field_name("value")
-            .is_some_and(supported_initializer)
+            .is_some_and(|value| supported_initializer(value, source))
         && node
             .child_by_field_name("alternative")
-            .is_some_and(diverges)
+            .is_some_and(|fallback| diverges(fallback, source))
 }
 
-fn supported_initializer(value: Node<'_>) -> bool {
+fn supported_initializer(value: Node<'_>, source: &[u8]) -> bool {
     match branch_value::from_value(value) {
         Some(branch) if value != branch && branch.kind() == "if_expression" => {
             branch_value::supports_if(branch)
         }
-        Some(branch) if value != branch => match_flow::supports(branch),
+        Some(branch) if value != branch => match_flow::supports(branch, source),
         Some(_) => false,
         None => match_flow::simple_value(value),
     }
@@ -39,7 +39,8 @@ pub(super) fn is_fallback(block: Node<'_>) -> bool {
     })
 }
 
-fn diverges(node: Node<'_>) -> bool {
+fn diverges(node: Node<'_>, source: &[u8]) -> bool {
+    let diverges = |child| diverges(child, source);
     match node.kind() {
         "return_expression" | "break_expression" | "continue_expression" => true,
         "block" => children(node).last().is_some_and(diverges),
@@ -48,14 +49,14 @@ fn diverges(node: Node<'_>) -> bool {
             node.child_by_field_name("consequence").is_some_and(diverges)
                 && node.child_by_field_name("alternative").is_some_and(diverges)
         }
-        "match_expression" => diverging_match(node),
+        "match_expression" => diverging_match(node, source),
         _ => false,
     }
 }
 
-fn diverging_match(node: Node<'_>) -> bool {
-    match_flow::supports(node) && node.child_by_field_name("body").is_some_and(|body| {
-        children(body).all(|arm| arm.child_by_field_name("value").is_some_and(diverges))
+fn diverging_match(node: Node<'_>, source: &[u8]) -> bool {
+    match_flow::supports(node, source) && node.child_by_field_name("body").is_some_and(|body| {
+        children(body).all(|arm| arm.child_by_field_name("value").is_some_and(|value| diverges(value, source)))
     })
 }
 

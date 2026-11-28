@@ -1,25 +1,30 @@
 use super::{branch_value, conditional, destructuring, let_else, match_flow, Node};
 
-/// Whether this function's body can be lowered without skipping it entirely.
+/// Whether this function's body can be lowered from syntax alone.
 pub fn supports_function(function: Node<'_>) -> bool {
-    function.child_by_field_name("body").is_some_and(supported)
+    supports_function_with_source(function, &[])
 }
 
-pub(super) fn supported(node: Node<'_>) -> bool {
+/// Whether this function's body can be lowered using its source text.
+pub fn supports_function_with_source(function: Node<'_>, source: &[u8]) -> bool {
+    function.child_by_field_name("body").is_some_and(|body| supported(body, source))
+}
+
+pub(super) fn supported(node: Node<'_>, source: &[u8]) -> bool {
     if matches!(
         node.kind(),
         "function_item" | "closure_expression" | "async_block" | "macro_invocation"
     ) {
         return true;
     }
-    supported_node(node) && node.named_children(&mut node.walk()).all(supported)
+    supported_node(node, source) && node.named_children(&mut node.walk()).all(|child| supported(child, source))
 }
 
-fn supported_node(node: Node<'_>) -> bool {
+fn supported_node(node: Node<'_>, source: &[u8]) -> bool {
     match node.kind() {
         "label" | "unsafe_block" => false,
         "let_chain" | "let_condition" => conditional::supported(node),
-        "let_declaration" => supported_declaration(node),
+        "let_declaration" => supported_declaration(node, source),
         "for_expression"
         | "if_expression"
         | "while_expression"
@@ -27,7 +32,7 @@ fn supported_node(node: Node<'_>) -> bool {
         | "return_expression"
         | "break_expression"
         | "continue_expression" => supported_statement(node),
-        "match_expression" => supports_match(node),
+        "match_expression" => supports_match_with_source(node, source),
         _ => true,
     }
 }
@@ -44,35 +49,40 @@ fn supported_statement(node: Node<'_>) -> bool {
         }
 }
 
-fn supported_declaration(node: Node<'_>) -> bool {
+fn supported_declaration(node: Node<'_>, source: &[u8]) -> bool {
     simple_binding(node)
-        || let_else::supports(node)
+        || let_else::supports(node, source)
         || destructuring::declaration_bindings(node).is_some()
 }
 
-pub(crate) fn lexical_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
+pub(crate) fn lexical_bindings<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Vec<Node<'tree>>> {
     match node.kind() {
         "let_condition" => conditional::bindings(node),
         "let_declaration" => {
-            let_else::bindings(node).or_else(|| destructuring::declaration_bindings(node))
+            let_else::bindings(node, source).or_else(|| destructuring::declaration_bindings(node))
         }
         "for_expression" => destructuring::iterator_bindings(node),
         "match_arm" => node
             .parent()
             .and_then(|body| body.parent())
-            .filter(|matched| supports_match(*matched))
+            .filter(|matched| supports_match_with_source(*matched, source))
             .map(|_| match_arm_bindings(node)),
         _ => None,
     }
 }
 
-/// Whether the match pattern, guard and arm flow can be represented.
+/// Whether the match can be represented using syntax alone.
 pub fn supports_match(node: Node<'_>) -> bool {
-    match_flow::supports(node)
+    supports_match_with_source(node, &[])
 }
 
-pub(crate) fn discards_match(node: Node<'_>) -> bool {
-    supports_match(node) && !branch_value::is_returned(node) && !branch_value::is_initializer(node)
+/// Whether the match can be represented using its source text.
+pub fn supports_match_with_source(node: Node<'_>, source: &[u8]) -> bool {
+    match_flow::supports(node, source)
+}
+
+pub(crate) fn discards_match(node: Node<'_>, source: &[u8]) -> bool {
+    supports_match_with_source(node, source) && !branch_value::is_returned(node) && !branch_value::is_initializer(node)
 }
 
 /// Simple arm-local bindings in a supported Rust match pattern.
@@ -82,27 +92,32 @@ pub fn match_arm_bindings(arm: Node<'_>) -> Vec<Node<'_>> {
 
 /// Lines where a supported match projects one or more arm-local values.
 pub fn match_binding_lines(function: Node<'_>) -> Vec<u32> {
+    match_binding_lines_with_source(function, &[])
+}
+
+/// Lines where a match supported with source text projects arm-local values.
+pub fn match_binding_lines_with_source(function: Node<'_>, source: &[u8]) -> Vec<u32> {
     binding_sites(function, |node| {
-        match_flow::has_bindings(node).then_some(())
+        match_flow::has_bindings(node, source).then_some(())
     })
     .into_iter()
     .map(|(_, line)| line)
     .collect()
 }
 
-pub(crate) fn pattern_projection_sites(function: Node<'_>) -> Vec<(&'static str, u32)> {
-    binding_sites(function, projection_reason)
+pub(crate) fn pattern_projection_sites(function: Node<'_>, source: &[u8]) -> Vec<(&'static str, u32)> {
+    binding_sites(function, |node| projection_reason(node, source))
 }
 
-fn projection_reason(node: Node<'_>) -> Option<&'static str> {
+fn projection_reason(node: Node<'_>, source: &[u8]) -> Option<&'static str> {
     match node.kind() {
         "match_expression" => {
-            match_flow::has_bindings(node).then_some("rust_match_binding_projection")
+            match_flow::has_bindings(node, source).then_some("rust_match_binding_projection")
         }
         "let_condition" => conditional::bindings(node)
             .is_some_and(|names| !names.is_empty())
             .then_some("rust_conditional_binding_projection"),
-        "let_declaration" => declaration_projection(node),
+        "let_declaration" => declaration_projection(node, source),
         "for_expression" => {
             destructuring::projected_bindings(node).map(|_| "rust_destructuring_binding_projection")
         }
@@ -110,8 +125,8 @@ fn projection_reason(node: Node<'_>) -> Option<&'static str> {
     }
 }
 
-fn declaration_projection(node: Node<'_>) -> Option<&'static str> {
-    if let_else::bindings(node).is_some_and(|names| !names.is_empty()) {
+fn declaration_projection(node: Node<'_>, source: &[u8]) -> Option<&'static str> {
+    if let_else::bindings(node, source).is_some_and(|names| !names.is_empty()) {
         return Some("rust_let_else_binding_projection");
     }
     destructuring::declaration_bindings(node).map(|_| "rust_destructuring_binding_projection")

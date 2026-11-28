@@ -117,6 +117,8 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         let plan = Plan::new(spec, function.graph, node, source, unit);
         let declined_cleanup = plan.is_none().then(|| Plan::declined_cleanup(spec, function.graph, node, source, unit)).flatten();
         let declined_contract = plan.is_none().then(|| Plan::declined_contract(spec, function.graph, node, source, unit)).flatten();
+        let rust_support = (node.kind() == "function_item")
+            .then(|| crate::lower::rust::supports_function_with_source(node, source));
         self.frames.push(Frame {
             graph: function.graph,
             plan,
@@ -124,10 +126,10 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             declined_contract,
             unit,
             scope,
-            unsupported_rust_line: (node.kind() == "function_item" && !crate::lower::rust::supports_function(node))
+            unsupported_rust_line: (rust_support == Some(false))
                 .then_some(node.start_position().row as u32 + 1),
-            rust_pattern_projections: if node.kind() == "function_item" && crate::lower::rust::supports_function(node) {
-                crate::lower::rust::pattern_projection_sites(node)
+            rust_pattern_projections: if rust_support == Some(true) {
+                crate::lower::rust::pattern_projection_sites(node, source)
             } else { Vec::new() },
             params: params.unwrap_or_default(),
             export,

@@ -13,6 +13,7 @@ mod patterns;
 use support::{simple_binding, supported};
 pub(crate) use destructuring::iterator_bindings;
 pub use support::{match_arm_bindings, match_binding_lines, supports_function, supports_match};
+pub use support::{match_binding_lines_with_source, supports_function_with_source, supports_match_with_source};
 pub(crate) use support::{discards_match, lexical_bindings, pattern_projection_sites};
 
 use std::collections::HashMap;
@@ -44,7 +45,7 @@ fn lower_function_with(cfg: Cfg<Stmt>, source: &[u8], function: Node<'_>) -> Cfg
     let entry = lower.cfg.entry;
     if let Some(body) = function
         .child_by_field_name("body")
-        .filter(|body| supported(*body))
+        .filter(|body| supported(*body, source))
     {
         if let Some(end) = lower.block(body, entry, &HashMap::new()) {
             if let Some(tail) = super::site::children(body).last() {

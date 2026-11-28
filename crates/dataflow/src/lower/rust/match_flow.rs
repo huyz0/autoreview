@@ -3,9 +3,9 @@ use crate::cfg::{BindingWrite, IdentityOperand, Stmt};
 use crate::lower::site::children;
 
 pub(super) mod guard;
+mod exhaustiveness;
 
-// A final unguarded wildcard guarantees an arm.
-pub(super) fn supports(node: Node<'_>) -> bool {
+pub(super) fn supports(node: Node<'_>, source: &[u8]) -> bool {
     if node.kind() != "match_expression"
         || node.has_error()
         || !branch_value::supports_position(node)
@@ -23,7 +23,9 @@ pub(super) fn supports(node: Node<'_>) -> bool {
     let Some((last, rest)) = arms.split_last() else {
         return false;
     };
-    rest.iter().all(|arm| supported_arm(*arm)) && wildcard_arm(*last)
+    let wildcard = wildcard_arm(*last);
+    rest.iter().all(|arm| supported_arm(*arm))
+        && (wildcard || (supported_arm(*last) && exhaustiveness::covers_enum(node, &arms, source)))
 }
 
 fn pattern(arm: Node<'_>) -> Option<Node<'_>> {
@@ -106,8 +108,8 @@ pub(super) fn arm_bindings(arm: Node<'_>) -> Vec<Node<'_>> {
     arm_pattern(arm).and_then(patterns::projected_names).unwrap_or_default()
 }
 
-pub(super) fn has_bindings(node: Node<'_>) -> bool {
-    supports(node) && node.child_by_field_name("body").is_some_and(|body|
+pub(super) fn has_bindings(node: Node<'_>, source: &[u8]) -> bool {
+    supports(node, source) && node.child_by_field_name("body").is_some_and(|body|
         body.named_children(&mut body.walk()).any(|arm| !arm_bindings(arm).is_empty()))
 }
 

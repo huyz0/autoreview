@@ -97,8 +97,8 @@ fn result_is_discarded(call: Node<'_>, source: &[u8]) -> bool {
         "expression_statement" => true,
         "ternary_expression" => discarded_conditional_arm(call),
         "block" => parent.parent().is_some_and(|owner| owner.kind() == "function_body"
-            || (owner.kind() == "match_arm" && discarded_match_arm(owner))),
-        "match_arm" => discarded_match_arm(parent),
+            || (owner.kind() == "match_arm" && discarded_match_arm(owner, source))),
+        "match_arm" => discarded_match_arm(parent, source),
         "let_declaration" => parent.children(&mut parent.walk()).any(|part| part.kind() == "_"),
         "expression_list" => {
             let Some(assignment) = parent.parent().filter(|node| node.kind() == "assignment_statement") else {
@@ -145,8 +145,8 @@ fn conditional_wrapper(kind: &str) -> bool {
     matches!(kind, "parenthesized_expression" | "as_expression" | "satisfies_expression" | "non_null_expression")
 }
 
-fn discarded_match_arm(arm: Node<'_>) -> bool {
-    arm.parent().and_then(|body| body.parent()).is_some_and(crate::lower::rust::discards_match)
+fn discarded_match_arm(arm: Node<'_>, source: &[u8]) -> bool {
+    arm.parent().and_then(|body| body.parent()).is_some_and(|node| crate::lower::rust::discards_match(node, source))
 }
 
 fn local_call(call: Node<'_>) -> bool {
