@@ -15,7 +15,7 @@ struct LocalValue {
     visible_at: usize,
     reusable: bool,
     tracked: bool,
-    conditional: bool,
+    projected: bool,
 }
 
 impl<'src> LocalValues<'src> {
@@ -24,9 +24,9 @@ impl<'src> LocalValues<'src> {
         binding.tracked.then_some(binding.declaration)
     }
 
-    pub(super) fn conditional_binding(&self, name: &str, at: usize, defining: bool) -> Option<usize> {
+    pub(super) fn projected_binding(&self, name: &str, at: usize, defining: bool) -> Option<usize> {
         let binding = self.binding(name, at, defining)?;
-        binding.conditional.then_some(binding.declaration)
+        binding.projected.then_some(binding.declaration)
     }
 
     fn binding(&self, name: &str, at: usize, defining: bool) -> Option<&LocalValue> {
@@ -47,6 +47,14 @@ impl<'src> LocalValues<'src> {
     }
 
     pub(super) fn record(&mut self, declaration: Node<'_>, target: Node<'_>, source: &'src [u8]) {
+        self.insert(declaration, target, source, false);
+    }
+
+    pub(super) fn record_projected(&mut self, declaration: Node<'_>, target: Node<'_>, source: &'src [u8]) {
+        self.insert(declaration, target, source, true);
+    }
+
+    fn insert(&mut self, declaration: Node<'_>, target: Node<'_>, source: &'src [u8], projected: bool) {
         let web_var = is_web_var(declaration);
         let Some(scope) = scope(declaration, web_var) else { return };
         let targets = if target.kind() == "expression_list" { children(target).collect() } else { vec![target] };
@@ -62,7 +70,7 @@ impl<'src> LocalValues<'src> {
                         visible_at,
                         reusable,
                         tracked: tracked && identifier == target,
-                        conditional: declaration.kind() == "let_condition",
+                        projected,
                     });
                 }
             }

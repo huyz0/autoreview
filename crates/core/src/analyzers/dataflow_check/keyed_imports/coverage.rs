@@ -58,6 +58,7 @@ fn rust_projection_detail(reason: &str) -> Option<&'static str> {
         "rust_match_binding_projection" => Some("Rust match pattern names are tracked as distinct local identities. Their relationship to the matched value and whether they denote constants could not be resolved."),
         "rust_let_else_binding_projection" => Some("Rust let-else pattern names are tracked as distinct local identities. Their relationship to the initializer could not be resolved."),
         "rust_conditional_binding_projection" => Some("Rust conditional pattern names are tracked as distinct local identities. Their relationship to the matched value could not be resolved."),
+        "rust_destructuring_binding_projection" => Some("Autoreview follows surrounding calls. It could not resolve component identities for this Rust tuple initializer or iterator item."),
         _ => None,
     }
 }

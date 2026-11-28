@@ -1334,7 +1334,7 @@ fn unresolved_imported_associated_methods_report_coverage() {
 fn imported_associated_call_in_skipped_function_reports_coverage() {
     let root = associated_coverage_fixture();
     let src = root.path().join("src");
-    for body in ["Store::unknown(); match 1 { value => {} }", "Store::known(); let (a, b) = (1, 2);"] {
+    for body in ["Store::unknown(); match 1 { value => {} }", "Store::known(); let [a, b] = [1, 2];"] {
         std::fs::write(src.join("worker.rs"), format!("use crate::support::Files as Store;\nfn run() {{ {body} }}\n")).unwrap();
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("src/worker.rs") && issue.line == Some(2) && issue.rule.as_deref() == Some("rust-discarded-remove-file-result")), "{body}: {:?}", result.coverage);
@@ -1488,6 +1488,26 @@ fn rust_let_else_lowers_both_paths_and_limits_projection() {
     let unbound = source.replace("Some(path)", "Some(_)").replace("remove_file(path);", "remove_file(\"present.txt\");");
     std::fs::write(root.path().join("lib.rs"), unbound).unwrap();
     assert!(!scan().coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" || issue.reason == "rust_let_else_binding_projection"));
+}
+
+#[test]
+fn rust_tuple_bindings_analyze_calls_without_claiming_component_identity() {
+    let source = r#"use std::fs::remove_file;
+fn run(pairs: Vec<(&str, u8)>, pair: (&str, (u8, bool))) {
+    let (name, (_, _)) = pair;
+    remove_file(name);
+    for (path, _) in pairs {
+        remove_file(path);
+    }
+}
+"#;
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 4), ("lib.rs", 6)]);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    let projections: std::collections::BTreeSet<_> = report.coverage.iter()
+        .filter(|issue| issue.reason == "rust_destructuring_binding_projection").filter_map(|issue| issue.line).collect();
+    assert_eq!(projections, [3, 5].into(), "{:?}", report.coverage);
+    assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"));
 }
 
 #[test]

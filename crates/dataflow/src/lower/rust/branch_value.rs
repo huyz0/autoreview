@@ -98,6 +98,13 @@ fn alternative(node: Node<'_>) -> Option<Node<'_>> {
 }
 
 impl Lower<'_> {
+    pub(super) fn lower_local(&mut self, stmt: Node<'_>, at: NodeId, names: &mut Bindings) -> Option<NodeId> {
+        if let Some(bindings) = super::destructuring::declaration_bindings(stmt) {
+            return Some(self.destructured_declaration(stmt, at, names, bindings));
+        }
+        self.binding(stmt, at, names)
+    }
+
     pub(super) fn explicit_return(
         &mut self,
         stmt: Node<'_>,
@@ -117,7 +124,7 @@ impl Lower<'_> {
         None
     }
 
-    pub(super) fn binding(
+    fn binding(
         &mut self,
         stmt: Node<'_>,
         at: NodeId,

@@ -137,6 +137,13 @@ form a function return or initialize a single `let` binding. Let chains
 inside match guards and complex patterns still report
 incomplete coverage. [Rust if expressions](https://doc.rust-lang.org/reference/expressions/if-expr.html)
 
+Rust `for` and ordinary `let` statements can destructure tuples with
+named bindings, wildcard elements, and nested tuples. Loop bindings receive
+fresh identities each iteration. Tuple components report
+`rust_destructuring_binding_projection` because their relationship to the
+initializer or iterator item is unresolved. The analyzer still follows calls
+in the supported surrounding flow.
+
 Report scopes should distinguish an entire file, a function or root, a rule,
 and an imported dependency. Findings from unaffected scopes remain useful.
 Deduplicate repeated limitations across callers while retaining enough location
