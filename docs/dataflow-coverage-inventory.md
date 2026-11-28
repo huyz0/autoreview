@@ -167,7 +167,11 @@ literals. It follows chains such as `matrix[1][0]` and `pair.0[1].2` when the
 literal initializer determines each traversed shape. A local qualifies when
 all its uses are supported element reads. Reading a selected leaf leaves
 sibling results eligible for discarded-result findings. Using a selected
-subaggregate as a whole observes its contents. Dynamic indices, tuple
+subaggregate as a whole observes its contents. Array indices can also come
+from an immutable local initialized with a literal `usize` value or copied
+from another such local. The analyzer follows lexical shadowing. An index
+stays unresolved when attributes, imports, or macros can change its binding.
+Arithmetic, mutable indices, runtime values, tuple
 structs, intermediate values with unknown shapes, borrows, mutation, and
 escapes of the original binding still need additional modeling. [Rust array indexing](https://doc.rust-lang.org/reference/expressions/array-expr.html#array-and-slice-indexing-expressions) [Rust tuple indexing](https://doc.rust-lang.org/reference/expressions/tuple-expr.html#tuple-indexing-expressions)
 

@@ -1678,6 +1678,114 @@ fn assert_rust_element_reads(source: &str, discarded: &[(&str, u32)]) {
 }
 
 #[test]
+fn rust_array_indices_follow_immutable_locals_and_copied_aliases() {
+    let source = r#"use std::fs::remove_file;
+fn local(flag: bool) -> bool {
+    let index = (0x1_usize);
+    let alias = (index);
+    let index = 0;
+    let values = [
+        if flag { remove_file("unused") } else { Ok(()) },
+        remove_file("used"),
+    ];
+    let _ = index;
+    values[alias].is_ok()
+}
+fn direct() -> bool {
+    let index: usize = 1;
+    [
+        remove_file("unused"),
+        remove_file("used"),
+    ][index].is_ok()
+}
+fn nested() -> bool {
+    let column = 0;
+    let values = (
+        [(remove_file("unused"), remove_file("used"))],
+        (),
+    );
+    values.0[column].1.is_ok()
+}
+fn shadowed(parameter: usize) -> bool {
+    let index = parameter;
+    let values = [
+        remove_file("used"),
+        remove_file("unused"),
+    ];
+    {
+        let index = 0;
+        values[(index)].is_ok()
+    }
+}
+"#;
+    let unused = source.lines().enumerate().filter(|(_, line)| line.contains("remove_file(\"unused\")"))
+        .map(|(index, _)| ("lib.rs", index as u32 + 1)).collect::<Vec<_>>();
+    assert_rust_element_reads(source, &unused);
+}
+
+#[test]
+fn rust_array_indices_decline_uncertain_values_and_shadowing() {
+    let source = r#"use std::fs::remove_file;
+const OTHER: usize = 1;
+macro_rules! introduce { ($name:ident) => { let $name = 1; }; }
+macro_rules! introduce_item { ($name:ident) => { const $name: usize = 1; }; }
+fn parameter(flag: bool, index: usize) -> bool {
+    let values = [if flag { remove_file("maybe used") } else { Ok(()) }, Ok(())];
+    values[index].is_ok()
+}
+fn mutable(flag: bool, change: bool) -> bool {
+    let mut index = 0;
+    if change { index = 1; }
+    let values = [if flag { remove_file("maybe used") } else { Ok(()) }, Ok(())];
+    values[index].is_ok()
+}
+fn imported(flag: bool) -> bool {
+    let index = 0;
+    let values = [if flag { remove_file("maybe used") } else { Ok(()) }, Ok(())];
+    { use crate::OTHER as index; values[index].is_ok() }
+}
+fn constant(flag: bool) -> bool {
+    let index = 0;
+    let values = [if flag { remove_file("maybe used") } else { Ok(()) }, Ok(())];
+    { const index: usize = 1; values[index].is_ok() }
+}
+fn macro_binding(flag: bool) -> bool {
+    let index = 0;
+    introduce!(index);
+    let values = [if flag { remove_file("maybe used") } else { Ok(()) }, Ok(())];
+    values[index].is_ok()
+}
+fn macro_item(flag: bool) -> bool {
+    let index = 0;
+    let values = [if flag { remove_file("maybe used") } else { Ok(()) }, Ok(())];
+    {
+        let observed = values[index].is_ok();
+        introduce_item!(index);
+        observed
+    }
+}
+fn configured(flag: bool) -> bool {
+    let index = 1;
+    #[cfg(any())]
+    let index = 0;
+    let values = [if flag { remove_file("maybe used") } else { Ok(()) }, Ok(())];
+    values[index].is_ok()
+}
+fn raw_shadow(flag: bool, index: usize) -> bool {
+    let index = 0;
+    let r#index = index + 1;
+    let values = [if flag { remove_file("maybe used") } else { Ok(()) }, Ok(())];
+    values[index].is_ok()
+}
+"#;
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[]);
+    let lines = source.lines().enumerate().filter(|(_, line)| line.contains("remove_file(\"maybe used\")"))
+        .map(|(index, _)| index as u32 + 1).collect::<Vec<_>>();
+    assert_rust_projection_limits(root.path(), "rust_aggregate_element_projection", &lines);
+}
+
+#[test]
 fn rust_element_reads_keep_dynamic_or_escaping_aggregates_incomplete() {
     let source = r#"use std::fs::remove_file;
 fn dynamic(flag: bool, index: usize) -> bool {
