@@ -1,0 +1,123 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use tree_sitter::Node;
+
+use crate::lower::site::children;
+use crate::taint::{has_direct_source, scan_helper_calls, TaintHit, TaintSpec, TaintedCall};
+
+use super::{KeyedUnit, Program};
+
+const HELPER_HOPS: usize = 2;
+
+pub struct HelperTaintHit {
+    pub caller_path: String,
+    pub caller_line: u32,
+    pub caller_argument: String,
+    pub sink_path: String,
+    pub sink: TaintHit,
+}
+
+/// Trace values from sources in entry files into directly resolved JVM helpers.
+pub fn check_jvm_taint_helpers(spec: &TaintSpec, units: &[KeyedUnit<'_, '_, '_>]) -> Vec<HelperTaintHit> {
+    if !units.iter().filter(|unit| unit.entry).flat_map(|unit| unit.functions)
+        .any(|function| has_direct_source(spec, function.graph)) {
+        return Vec::new();
+    }
+    let program = Program::for_resolution(units);
+    let eligible = units.iter().flat_map(|unit| unit.functions.iter().map(|fun| eligible_helper(fun.node))).collect();
+    // A summary describes the seeded parameter's effect. Independent sources
+    // inside the helper are already reported by the ordinary taint check.
+    let mut parameter_spec = spec.clone();
+    parameter_spec.sources.clear();
+    let mut analysis = Analysis { program: &program, eligible, spec: parameter_spec, summaries: BTreeMap::new() };
+    analysis.hits(spec)
+}
+
+#[derive(Clone)]
+struct Sink {
+    unit: usize,
+    hit: TaintHit,
+}
+
+struct Analysis<'a, 'src, 'graph> {
+    program: &'a Program<'a, 'src, 'graph>,
+    eligible: Vec<bool>,
+    spec: TaintSpec,
+    summaries: BTreeMap<(usize, usize, usize), Vec<Sink>>,
+}
+
+impl Analysis<'_, '_, '_> {
+    fn hits(&mut self, spec: &TaintSpec) -> Vec<HelperTaintHit> {
+        let mut hits = Vec::new();
+        let mut seen = BTreeSet::new();
+        for root in self.program.entry_frames() {
+            let frame = &self.program.frames[root];
+            if !has_direct_source(spec, frame.graph) {
+                continue;
+            }
+            let Some(caller_path) = self.program.path(frame.unit) else { continue };
+            for call in scan_helper_calls(spec, frame.graph, None).calls {
+                let Some(target) = self.target(root, &call) else { continue };
+                for (slot, arg) in call.arguments {
+                    for sink in self.summarize(target, slot, HELPER_HOPS) {
+                        let Some(sink_path) = self.program.path(sink.unit) else { continue };
+                        let key = (frame.unit, call.line, sink.unit, sink.hit.source_line, sink.hit.sink_call.clone());
+                        if seen.insert(key) {
+                            hits.push(HelperTaintHit {
+                                caller_path: caller_path.clone(), caller_line: call.line, caller_argument: arg.to_owned(),
+                                sink_path, sink: sink.hit,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        hits
+    }
+
+    fn target(&self, from: usize, call: &TaintedCall<'_>) -> Option<usize> {
+        let target = self.program.target(from, call.name, call.site)?;
+        self.eligible[target].then_some(target)
+    }
+
+    fn summarize(&mut self, target: usize, slot: usize, hops: usize) -> Vec<Sink> {
+        let key = (target, slot, hops);
+        if let Some(sinks) = self.summaries.get(&key) {
+            return sinks.clone();
+        }
+        let frame = &self.program.frames[target];
+        let Some(parameter) = frame.params.get(slot) else { return Vec::new() };
+        let scan = scan_helper_calls(&self.spec, frame.graph, Some(parameter));
+        let mut sinks: Vec<_> = scan.sinks.into_iter().map(|hit| Sink { unit: frame.unit, hit }).collect();
+        if hops > 1 {
+            for call in scan.calls {
+                let Some(callee) = self.target(target, &call) else { continue };
+                for (slot, _) in call.arguments {
+                    sinks.extend(self.summarize(callee, slot, hops - 1));
+                }
+            }
+        }
+        sinks.sort_by(|a, b| (a.unit, a.hit.source_line, &a.hit.sink_call).cmp(&(b.unit, b.hit.source_line, &b.hit.sink_call)));
+        sinks.dedup_by(|a, b| (a.unit, a.hit.source_line, &a.hit.sink_call) == (b.unit, b.hit.source_line, &b.hit.sink_call));
+        self.summaries.insert(key, sinks.clone());
+        sinks
+    }
+}
+
+fn eligible_helper(node: Node<'_>) -> bool {
+    match node.kind() {
+        "function_declaration" => node.parent().is_some_and(|parent| parent.kind() == "source_file"),
+        "method_declaration" => {
+            let Some(class) = node.parent().and_then(|body| body.parent()) else { return false };
+            class.kind() == "class_declaration" && class.child_by_field_name("superclass").is_none()
+                && (has_modifier(node, &["static", "private", "final"]) || has_modifier(class, &["final"]))
+        }
+        _ => false,
+    }
+}
+
+fn has_modifier(node: Node<'_>, names: &[&str]) -> bool {
+    children(node).find(|child| child.kind() == "modifiers").is_some_and(|modifiers| {
+        modifiers.children(&mut modifiers.walk()).any(|modifier| names.contains(&modifier.kind()))
+    })
+}

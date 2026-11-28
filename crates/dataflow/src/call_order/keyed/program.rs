@@ -12,6 +12,7 @@ pub use exports::{resolve_declaration_import, DeclarationResolution, KeyedDeclar
 use signature::{candidate, export, parameters, Export};
 
 use super::{CallOrderSpec, Plan, Values};
+use super::super::identity::Syntax;
 
 /// A parsed function and the graph used by keyed cleanup rules.
 pub struct KeyedFunction<'tree, 'graph> {
@@ -43,6 +44,7 @@ pub(in crate::call_order) struct Frame<'spec, 'src, 'graph> {
     pub unit: usize,
     export: Option<Export>,
     pub plan: Option<Plan<'spec, 'src>>,
+    resolution_syntax: Option<Syntax<'src>>,
     scope: Scope,
     unsupported_rust_line: Option<u32>,
     declined_cleanup: Option<(u32, bool)>,
@@ -68,6 +70,14 @@ struct Unit<'src, 'graph> {
 
 impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
     pub(in crate::call_order) fn new(spec: &'spec CallOrderSpec, inputs: &[KeyedUnit<'src, '_, 'graph>]) -> Self {
+        Self::build(Some(spec), inputs)
+    }
+
+    pub(super) fn for_resolution(inputs: &[KeyedUnit<'src, '_, 'graph>]) -> Self {
+        Self::build(None, inputs)
+    }
+
+    fn build(spec: Option<&'spec CallOrderSpec>, inputs: &[KeyedUnit<'src, '_, 'graph>]) -> Self {
         let mut program = Self {
             frames: Vec::new(),
             targets: BTreeMap::new(),
@@ -96,7 +106,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
 
     fn add_frame(
         &mut self,
-        spec: &'spec CallOrderSpec,
+        spec: Option<&'spec CallOrderSpec>,
         unit: usize,
         source: &'src [u8],
         function: &KeyedFunction<'_, 'graph>,
@@ -114,14 +124,17 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             Some(export(node, source, name))
         });
         self.units[unit].frames.push(self.frames.len());
-        let plan = Plan::new(spec, function.graph, node, source, unit);
-        let declined_cleanup = plan.is_none().then(|| Plan::declined_cleanup(spec, function.graph, node, source, unit)).flatten();
-        let declined_contract = plan.is_none().then(|| Plan::declined_contract(spec, function.graph, node, source, unit)).flatten();
+        let plan = spec.and_then(|spec| Plan::new(spec, function.graph, node, source, unit));
+        let declined = spec.filter(|_| plan.is_none());
+        let declined_cleanup = declined.and_then(|spec| Plan::declined_cleanup(spec, function.graph, node, source, unit));
+        let declined_contract = declined.and_then(|spec| Plan::declined_contract(spec, function.graph, node, source, unit));
+        let resolution_syntax = spec.is_none().then(|| Plan::resolution_syntax(function.graph, node, source, unit)).flatten();
         let rust_support = (node.kind() == "function_item")
             .then(|| crate::lower::rust::supports_function_with_source(node, source));
         self.frames.push(Frame {
             graph: function.graph,
             plan,
+            resolution_syntax,
             declined_cleanup,
             declined_contract,
             unit,
@@ -129,7 +142,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             unsupported_rust_line: (rust_support == Some(false))
                 .then_some(node.start_position().row as u32 + 1),
             rust_pattern_projections: if rust_support == Some(true) {
-                crate::lower::rust::pattern_projection_sites(node, source, spec.tracks_result_use())
+                crate::lower::rust::pattern_projection_sites(node, source, spec.is_some_and(CallOrderSpec::tracks_result_use))
             } else { Vec::new() },
             params: params.unwrap_or_default(),
             export,
@@ -148,7 +161,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
     pub(in crate::call_order) fn target(&self, from: usize, name: &str, site: &CallSite) -> Option<usize> {
         let frame = &self.frames[from];
         let root = name.split(['.', ':']).next()?;
-        let syntax = &frame.plan.as_ref()?.syntax;
+        let syntax = frame.plan.as_ref().map(|plan| &plan.syntax).or(frame.resolution_syntax.as_ref())?;
         if name.contains("::") && (syntax.shadows_type(root) || syntax.has_local_type_imports()) {
             self.unresolved.borrow_mut().insert((from, site.start, "unresolved_helper_target"));
             return None;
@@ -157,8 +170,8 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             return None;
         }
         let arity = match site.arguments.as_slice() {
-            [Some(crate::cfg::IdentityOperand::CallResult { start, .. })] => frame.plan.as_ref()?
-                .result_components.get(start).map_or(1, |shape| shape.count),
+            [Some(crate::cfg::IdentityOperand::CallResult { start, .. })] => frame.plan.as_ref()
+                .and_then(|plan| plan.result_components.get(start)).map_or(1, |shape| shape.count),
             _ => site.arguments.len(),
         };
         if let Some(target) = self.associated.lookup(frame.unit, frame.export.as_ref(), name, arity) {
@@ -166,6 +179,10 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             return target;
         }
         self.resolve_named(from, name, root, site, arity)
+    }
+
+    pub(super) fn entry_frames(&self) -> impl Iterator<Item = usize> + '_ {
+        self.units.iter().filter(|unit| unit.entry).flat_map(|unit| unit.frames.iter().copied())
     }
 
     pub(super) fn roots(&self) -> Vec<usize> {

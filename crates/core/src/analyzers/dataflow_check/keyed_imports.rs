@@ -12,6 +12,8 @@ use super::{call_order_rules::CallOrderRuleDef, AgentFinding};
 
 mod go;
 mod jvm;
+mod jvm_taint;
+pub(super) use jvm_taint::run_taint as run_jvm_taint;
 mod rust;
 mod web;
 mod typed;
