@@ -13,19 +13,33 @@ pub(super) struct Assignment<'a> {
     local: Option<&'a str>,
 }
 
-pub(super) fn is_branch(node: Node<'_>) -> bool {
-    matches!(node.kind(), "if_expression" | "match_expression")
+pub(super) fn from_value(mut node: Node<'_>) -> Option<Node<'_>> {
+    while node.kind() == "parenthesized_expression" {
+        node = site::children(node).next()?;
+    }
+    matches!(node.kind(), "if_expression" | "match_expression").then_some(node)
+}
+
+fn outermost_group(mut node: Node<'_>) -> Node<'_> {
+    while let Some(group) = node.parent().filter(|owner| owner.kind() == "parenthesized_expression") {
+        node = group;
+    }
+    node
 }
 
 pub(super) fn is_initializer(node: Node<'_>) -> bool {
-    node.parent().is_some_and(|parent| {
+    let value = outermost_group(node);
+    value.parent().is_some_and(|parent| {
         parent.kind() == "let_declaration"
-            && (simple_binding(parent) || destructuring::declaration_bindings(parent).is_some())
-            && parent.child_by_field_name("value") == Some(node)
+            && parent.child_by_field_name("value") == Some(value)
+            && (simple_binding(parent)
+                || destructuring::declaration_bindings(parent).is_some()
+                || (value != node && parent.child_by_field_name("alternative").is_some()))
     })
 }
 
 pub(super) fn is_returned(node: Node<'_>) -> bool {
+    let node = outermost_group(node);
     let Some(parent) = node.parent() else {
         return false;
     };
@@ -113,7 +127,7 @@ impl Lower<'_> {
         names: &Bindings,
     ) -> Option<NodeId> {
         let value = site::children(stmt).next();
-        if let Some(value) = value.filter(|node| is_branch(*node)) {
+        if let Some(value) = value.and_then(from_value) {
             return self.lower_branch_value(value, at, names, &Mode::Return);
         }
         let end = self.value(value, at, names, None);
@@ -137,7 +151,7 @@ impl Lower<'_> {
             .map(|n| self.text(n).to_owned());
         let target = name.as_ref().map(|name| self.fresh(name));
         let value = stmt.child_by_field_name("value");
-        let at = match value.filter(|node| is_branch(*node)) {
+        let at = match value.and_then(from_value) {
             Some(value) => {
                 let mode = Mode::Assign(Assignment {
                     declaration: stmt,

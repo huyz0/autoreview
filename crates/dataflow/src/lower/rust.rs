@@ -104,6 +104,7 @@ impl Lower<'_> {
     }
 
     fn flow_expression(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
+        let expr = branch_value::from_value(expr).unwrap_or(expr);
         match expr.kind() {
             "if_expression" => self.branch(expr, at, names),
             "match_expression" => self.match_expression(expr, at, names),

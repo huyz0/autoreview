@@ -129,7 +129,9 @@ that rely on macro expansion or a callee's return type still report incomplete
 coverage. The fallback sees the outer bindings. Names introduced on the
 success path have distinct identities and report
 `rust_let_else_binding_projection` because their relationship to the
-initializer is unresolved. [Rust let statements](https://doc.rust-lang.org/reference/statements.html#let-statements)
+initializer is unresolved. Grouped `if` and `match` initializers evaluate their
+selected arm before the pattern test. An explicit exit in an arm leaves before
+either pattern outcome. [Rust let statements](https://doc.rust-lang.org/reference/statements.html#let-statements)
 
 Rust statement-position `if let` and `while let` can use simple patterns
 and let chains. Chain operands execute from left to right. Each successful
@@ -138,8 +140,9 @@ Failure goes to the original `else` scope or exits the loop. Bindings
 whose source values cannot be projected report
 `rust_conditional_binding_projection`. Simple value-producing
 `if` and `if let` expressions also preserve the selected arm when they
-form a function return or initialize a single `let` binding. Ordinary `if`
-and `while` conditions also short-circuit `&&` and `||` when the operands
+form a function return or initialize a single `let` binding. These positions
+also accept grouping parentheses around supported `if` and `match` values.
+Ordinary `if` and `while` conditions short-circuit `&&` and `||` when the operands
 are supported, including grouped and negated conditions. [Rust if expressions](https://doc.rust-lang.org/reference/expressions/if-expr.html) [Rust lazy boolean operators](https://doc.rust-lang.org/reference/expressions/operator-expr.html#lazy-boolean-operators)
 
 Rust `match`, conditional patterns, `let-else`, ordinary `let`, and `for`
