@@ -19,10 +19,12 @@ BENCHMARKS = ROOT / "benchmarks"
 SOURCE = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/(?:commit|blob)/[0-9a-f]{40}(?:/[^\s]*)?")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 PINNED_MANIFESTS = {
-    "azure-iot-matches", "checkout-promise", "cilium-swallowed-error", "go-tools",
+    "azure-iot-matches", "checkout-promise", "cilium-swallowed-error",
+    "dart-code-promise-executor", "go-tools", "home-assistant-blocking-bridge",
     "iceberg-go", "jplag-trim", "niverwizard-msw-delay", "redicloud-coroutines",
     "sentry-async-executor", "sftp-promise", "silphscope-digest",
-    "syzkaller-swallowed-error", "uwas-rename", "yq-error", "yq-multi-error",
+    "synthea-string-equality", "syzkaller-swallowed-error", "tokio-asserted-matches",
+    "uwas-rename", "wesley-promise-executor", "yq-error", "yq-multi-error",
 }
 TRUSTED_BUILDS = {
     "checkout-promise": ("actions/checkout", "c952173edf28a2bd22e1a4926590c1ac39630461", "5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f"),
