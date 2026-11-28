@@ -49,27 +49,28 @@ pub(super) fn simple_arm(node: Node<'_>) -> bool {
             super::simple_binding(node)
                 && node.child_by_field_name("value").is_none_or(simple_value)
         }
-        "if_expression" => {
-            let root = conditional::root_branch(node);
-            (branch_value::is_discarded_statement(root) || conditional::unit_branch(root))
-                && node.child_by_field_name("condition").is_some_and(|test| {
-                    if conditional::test(node).is_some() {
-                        conditional::supported(test)
-                    } else {
-                        simple_value(test)
-                    }
-                })
-                && node.child_by_field_name("consequence").is_some_and(simple_arm)
-                && node.child_by_field_name("alternative").is_none_or(|otherwise| {
-                    children(otherwise).next().is_some_and(simple_arm)
-                })
-        }
+        "if_expression" => statement_if(node),
         "assignment_expression" => {
             node.child_by_field_name("left").is_some_and(|left| left.kind() == "identifier")
                 && node.child_by_field_name("right").is_some_and(simple_value)
         }
         _ => simple_value(node),
     }
+}
+
+fn statement_if(node: Node<'_>) -> bool {
+    let root = conditional::root_branch(node);
+    let supported_test = if conditional::test(node).is_some() {
+        conditional::supported
+    } else {
+        simple_value
+    };
+    (branch_value::is_discarded_statement(root) || conditional::unit_branch(root))
+        && node.child_by_field_name("condition").is_some_and(supported_test)
+        && node.child_by_field_name("consequence").is_some_and(simple_arm)
+        && node.child_by_field_name("alternative").is_none_or(|otherwise| {
+            children(otherwise).next().is_some_and(simple_arm)
+        })
 }
 
 pub(super) fn simple_value(node: Node<'_>) -> bool {
