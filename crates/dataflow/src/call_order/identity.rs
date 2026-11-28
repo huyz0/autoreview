@@ -320,7 +320,7 @@ fn unsupported_flow(node: Node<'_>, source: &[u8]) -> bool {
         node.kind(),
         "break_statement" | "continue_statement" | "label"
     ) {
-        return crate::lower::keyed_flow::loops::jump_kind(node, source).is_none();
+        return unsupported_jump(node, source);
     }
 
     // Rust's postfix `?` and Kotlin's `try` share a node kind.
@@ -347,4 +347,9 @@ fn unsupported_flow(node: Node<'_>, source: &[u8]) -> bool {
             | "goto_statement"
             | "go_statement"
     )
+}
+
+fn unsupported_jump(node: Node<'_>, source: &[u8]) -> bool {
+    !crate::lower::rust::supports_label(node, source)
+        && crate::lower::keyed_flow::loops::jump_kind(node, source).is_none()
 }

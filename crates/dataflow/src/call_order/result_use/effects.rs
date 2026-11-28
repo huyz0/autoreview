@@ -13,6 +13,7 @@ use super::{Analysis, Body, ContractLanguage, Flow, HelperSummary, Plan};
 
 mod aggregates;
 mod reads;
+mod statements;
 
 mod model;
 pub(super) use model::{Demand, Effect, HelperCall, Origin, Value, Write};
@@ -128,50 +129,6 @@ impl Lower<'_, '_, '_> {
         Body { flow, effects }
     }
 
-    fn statement(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
-        let value = if let Some(closure) = self.inside {
-            closure_result(node, closure)
-        } else if self.returns_to_caller {
-            return_value(node).or_else(|| {
-                self.return_tail
-                    .filter(|tail| {
-                        tail.byte_range() == node.byte_range() && tail.kind() == node.kind()
-                    })
-                    .map(|_| node)
-            })
-        } else {
-            None
-        };
-        if let Some(value) = value {
-            self.returned(value, effects);
-            return;
-        }
-        match node.kind() {
-            "expression_statement" => {
-                if let Some(expr) = site::children(node).next() {
-                    if !site::identifier(expr) {
-                        self.statement(expr, effects);
-                    }
-                }
-            }
-            "lexical_declaration"
-            | "variable_declaration"
-            | "local_variable_declaration"
-            | "var_declaration"
-            | "var_spec_list" => {
-                for child in site::children(node) {
-                    self.statement(child, effects);
-                }
-            }
-            _ => match assignment_parts(node, self.source) {
-                Some((target, value, reassignment)) => {
-                    self.assignment(node, target, value, reassignment, effects)
-                }
-                None => self.expression(node, effects),
-            },
-        }
-    }
-
     fn returned(&self, value: Node<'_>, effects: &mut Vec<Effect>) {
         let value = self.value(value, effects);
         effects.push(Effect::Write(vec![Write { target: Some(Place::Return), value }]));
@@ -193,7 +150,7 @@ impl Lower<'_, '_, '_> {
         {
             return;
         }
-        let (targets, values) = if let Some(tuple) = crate::lower::rust::literal_tuple(node, self.source)
+        let (targets, values) = if let Some(tuple) = crate::lower::rust::literal_projection(node, self.source)
             .filter(|_| self.language == ContractLanguage::Rust)
         {
             tuple.into_iter().unzip()

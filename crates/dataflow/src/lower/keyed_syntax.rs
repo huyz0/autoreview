@@ -68,6 +68,11 @@ pub(crate) fn assignment_parts<'tree>(
             node.child_by_field_name("value"),
             false,
         ),
+        "let_condition" if super::rust::literal_projection(node, source).is_some() => (
+            node.child_by_field_name("pattern")?,
+            node.child_by_field_name("value"),
+            false,
+        ),
         "variable_declarator" | "var_spec" => (
             node.child_by_field_name("name")?,
             node.child_by_field_name("value"),

@@ -2046,6 +2046,83 @@ fn rust_match_guard_tracks_cleanup_through_a_helper() {
 }
 
 #[test]
+fn rust_proven_pattern_bindings_keep_results_through_arms_and_conditions() {
+    let source = r#"use std::fs::remove_file;
+fn nested() -> std::io::Result<()> {
+    let ((used, _), [unused]) = ((remove_file("used"), 0), [remove_file("unused")]);
+    used
+}
+fn matched() {
+    match remove_file("matched") { ignored @ _ => {} };
+}
+fn condition() -> std::io::Result<()> {
+    if let [result @ _] = [remove_file("condition")] { return result; }
+    Ok(())
+}
+fn declaration() -> std::io::Result<()> {
+    let (result @ _, _) = (remove_file("declaration"), 0) else { return Ok(()) };
+    result
+}
+"#;
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 3), ("lib.rs", 7)]);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    assert!(report.coverage.is_empty(), "{:?}", report.coverage);
+}
+
+#[test]
+fn rust_conditional_literal_with_a_constant_keeps_the_failure_path() {
+    let source = "use std::fs::remove_file;\nconst KEY: u8 = 1;\nfn run() {\n if let (KEY, _) = (0, 1) {} else { remove_file(\"fallback\"); }\n}\n";
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 4)]);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    assert!(report.coverage.iter().any(|issue| issue.reason == "rust_conditional_binding_projection"), "{:?}", report.coverage);
+}
+
+#[test]
+fn rust_labeled_jumps_in_loop_conditions_keep_coverage_incomplete() {
+    let source = r#"use std::fs::remove_file;
+fn own_condition(flag: bool) {
+    'outer: while { if flag { break 'outer; } true } {}
+    remove_file("after");
+}
+fn nested_condition(flag: bool) {
+    'outer: loop { while { if flag { break 'outer; } true } {} }
+    remove_file("after");
+}
+"#;
+    let root = write_single_file("lib.rs", source);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    for line in [2, 6] {
+        assert!(report.coverage.iter().any(|issue| {
+            issue.line == Some(line) && issue.reason == "unsupported_rust_control_flow"
+                && issue.rule.as_deref() == Some("rust-discarded-remove-file-result")
+        }), "{:?}", report.coverage);
+    }
+}
+
+#[test]
+fn rust_statement_unsafe_blocks_and_reassignment_arms_follow_calls() {
+    let source = r#"use std::fs::remove_file;
+fn run(flag: bool) {
+    unsafe { remove_file("unsafe"); }
+    let mut result;
+    result = if flag { remove_file("one") } else { remove_file("two") };
+    result = match flag { true => remove_file("three"), _ => remove_file("four") };
+    let _handled = result.is_ok();
+}
+"#;
+    let root = write_single_file("lib.rs", source);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    let mut locations: Vec<_> = report.findings.iter()
+        .filter(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result"))
+        .map(|finding| finding.location.range.start_line).collect();
+    locations.sort_unstable();
+    assert_eq!(locations, [3, 5], "{:?}", report.findings);
+    assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", report.coverage);
+}
+
+#[test]
 fn rust_tuple_literal_bindings_track_each_result_in_a_match_arm() {
     let source = r#"use std::fs::remove_file;
 fn run(flag: bool) -> std::io::Result<()> {

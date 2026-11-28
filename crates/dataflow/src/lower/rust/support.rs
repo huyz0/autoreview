@@ -22,7 +22,8 @@ pub(super) fn supported(node: Node<'_>, source: &[u8]) -> bool {
 
 fn supported_node(node: Node<'_>, source: &[u8]) -> bool {
     match node.kind() {
-        "label" | "unsafe_block" => false,
+        "label" => super::supports_label(node, source),
+        "unsafe_block" => branch_value::is_discarded_statement(node),
         "let_chain" | "let_condition" => conditional::supported(node, source),
         "let_declaration" => supported_declaration(node, source),
         "for_expression"
@@ -121,6 +122,11 @@ pub(crate) fn pattern_projection_sites(function: Node<'_>, source: &[u8], unreso
 }
 
 fn projection_reason(node: Node<'_>, source: &[u8]) -> Option<&'static str> {
+    if matches!(node.kind(), "let_condition" | "let_declaration" | "match_expression")
+        && destructuring::literal_projection(node, source).is_some()
+    {
+        return None;
+    }
     match node.kind() {
         "match_expression" => {
             match_flow::has_bindings(node, source).then_some("rust_match_binding_projection")
@@ -139,9 +145,6 @@ fn projection_reason(node: Node<'_>, source: &[u8]) -> Option<&'static str> {
 fn declaration_projection(node: Node<'_>, source: &[u8]) -> Option<&'static str> {
     if let_else::bindings(node, source).is_some_and(|names| !names.is_empty()) {
         return Some("rust_let_else_binding_projection");
-    }
-    if destructuring::literal_tuple(node, source).is_some() {
-        return None;
     }
     destructuring::declaration_bindings(node, source).map(|_| "rust_destructuring_binding_projection")
 }
