@@ -1,7 +1,7 @@
 # Historical replay cases
 
 See [the Windows baseline](windows-baseline.md) for a measured selection of
-these cases, including replay failures and the known Cilium false positive.
+these cases, including historical replay failures.
 
 These cases reference public repositories and pinned commits; they do not
 copy the source files into Autoreview. Check each project's license before
@@ -128,20 +128,14 @@ autoreview rules replay --suite /absolute/path/to/autoreview/benchmarks/syzkalle
 the same rule. The checked IPv6 chain rename error was returned as `nil`;
 replay finds line 172 in the parent and no findings in the fixed file. It also
 labels normal context cancellation in `pkg/datapath/iptables/ipset/node_sync.go`
-as an intentional `nil` return. The rule currently flags line 101 in both
-revisions, so replay reports one true positive and two false positives and
-exits nonzero. The two false positives are the same unchanged code, not
-independent examples. The cancellation label follows the local limiter's
-one-token, burst-one configuration and the surrounding shutdown handling; it is
-a policy judgment, not proof of intent. These cases are too few to estimate
-general accuracy. The rule is marked for optional model verification, but
-static replay does not run that verifier and this benchmark does not measure
-its effectiveness. At the pinned revision, Cilium's `Limiter.Wait` delegates
-to `WaitN(ctx, 1)`, which can also return an error if the requested token count
-exceeds the configured burst. The local constructor supplies a burst of one;
-this conclusion depends on resolving that constructor and implementation, not
-just the spelling `Wait`. An unrelated method with the same name can return
-other errors, even beside an explicit context cancellation check. Reproduce with:
+as an intentional `nil` return. The replay reports one true positive and no
+false positives. The static analyzer checks the audited Cilium limiter and its
+vendored semaphore, proves the local limiter has burst one, and requires the
+adjacent shutdown branch to return nil when the same context is done. Both
+snapshots contain the same shutdown code. Other implementations, unrecognized
+bindings, and missing source evidence keep the warning. This replay covers the
+pinned vendored source and does not exercise optional model verification.
+Reproduce with:
 
 ```sh
 git init cilium
