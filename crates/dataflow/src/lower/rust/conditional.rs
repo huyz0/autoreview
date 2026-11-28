@@ -139,7 +139,7 @@ impl Lower<'_> {
         Some(after)
     }
 
-    fn lower_pattern_test(
+    pub(super) fn lower_pattern_test(
         &mut self,
         node: Node<'_>,
         mut at: NodeId,
@@ -160,7 +160,9 @@ impl Lower<'_> {
             let evaluated = self.evaluate(node.child_by_field_name("value"), at, names);
             let matched = self.cfg.push_node(line(node));
             self.edge(evaluated, matched, EdgeKind::True);
-            self.edge(evaluated, failed, EdgeKind::False);
+            if node.child_by_field_name("pattern").is_none_or(|pattern| pattern.kind() != "_") {
+                self.edge(evaluated, failed, EdgeKind::False);
+            }
             for binding in bindings {
                 self.project_pattern_binding(binding, matched, names);
             }

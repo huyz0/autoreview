@@ -8,11 +8,12 @@ mod conditional;
 mod support;
 mod branch_value;
 mod destructuring;
+mod patterns;
 
 use support::{simple_binding, supported};
 pub(crate) use destructuring::iterator_bindings;
 pub use support::{match_arm_bindings, match_binding_lines, supports_function, supports_match};
-pub(crate) use support::{discards_match, let_else_bindings, lexical_bindings, pattern_projection_sites};
+pub(crate) use support::{discards_match, lexical_bindings, pattern_projection_sites};
 
 use std::collections::HashMap;
 use tree_sitter::Node;

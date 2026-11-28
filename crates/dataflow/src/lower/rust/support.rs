@@ -53,8 +53,15 @@ fn supported_declaration(node: Node<'_>) -> bool {
 pub(crate) fn lexical_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
     match node.kind() {
         "let_condition" => conditional::bindings(node),
-        "let_declaration" => destructuring::declaration_bindings(node),
+        "let_declaration" => {
+            let_else::bindings(node).or_else(|| destructuring::declaration_bindings(node))
+        }
         "for_expression" => destructuring::iterator_bindings(node),
+        "match_arm" => node
+            .parent()
+            .and_then(|body| body.parent())
+            .filter(|matched| supports_match(*matched))
+            .map(|_| match_arm_bindings(node)),
         _ => None,
     }
 }
@@ -83,8 +90,6 @@ pub fn match_binding_lines(function: Node<'_>) -> Vec<u32> {
     .collect()
 }
 
-pub(crate) use let_else::bindings as let_else_bindings;
-
 pub(crate) fn pattern_projection_sites(function: Node<'_>) -> Vec<(&'static str, u32)> {
     binding_sites(function, projection_reason)
 }
@@ -106,7 +111,7 @@ fn projection_reason(node: Node<'_>) -> Option<&'static str> {
 }
 
 fn declaration_projection(node: Node<'_>) -> Option<&'static str> {
-    if let_else_bindings(node).is_some_and(|names| !names.is_empty()) {
+    if let_else::bindings(node).is_some_and(|names| !names.is_empty()) {
         return Some("rust_let_else_binding_projection");
     }
     destructuring::declaration_bindings(node).map(|_| "rust_destructuring_binding_projection")

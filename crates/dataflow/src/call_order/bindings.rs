@@ -112,7 +112,7 @@ impl<'src> Bindings<'src> {
             return;
         }
         let targets = declaration_targets(node);
-        let single_target = targets.len() == 1 || declares_iteration(node) || node.kind() == "match_arm"
+        let single_target = targets.len() == 1 || declares_iteration(node)
             || matches!(
                 node.kind(),
                 "parameter_declaration" | "variadic_parameter_declaration"
@@ -144,14 +144,10 @@ impl<'src> Bindings<'src> {
 }
 
 fn declaration_targets(node: Node<'_>) -> Vec<Node<'_>> {
-    use crate::lower::rust;
-    if node.kind() == "match_arm" && node.parent().and_then(|body| body.parent()).is_some_and(rust::supports_match) {
-        return rust::match_arm_bindings(node);
-    }
     if declares_iteration(node) {
         return crate::lower::keyed_flow::loops::iterator_bindings(node);
     }
-    rust::let_else_bindings(node).unwrap_or_else(|| declaration(node))
+    declaration(node)
 }
 
 fn declaration(node: Node<'_>) -> Vec<Node<'_>> {

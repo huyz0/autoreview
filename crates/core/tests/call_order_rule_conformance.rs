@@ -1375,11 +1375,44 @@ fn rust_literal_match_tracks_results_across_arms() {
 
 #[test]
 fn rust_unmodeled_matches_remain_incomplete() {
-    for body in ["match x { 0 if check() && other() + 1 > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { Some(ref value) => {}, _ => {} };", "match x { 0 => {} };", "match check(risky() + 1) { _ => {} };", "match x { _ => { let y = risky() + 1; } };", "consume(match x { _ => {} });"] {
+    for body in ["match x { 0 if check() && other() + 1 > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { Some(value) | Other(value) => {}, _ => {} };", "match x { 0 => {} };", "match check(risky() + 1) { _ => {} };", "match x { _ => { let y = risky() + 1; } };", "consume(match x { _ => {} });"] {
         let root = write_single_file("lib.rs", &format!("fn run(x: u8) {{ {body} }}\n"));
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("lib.rs")), "{body}: {:?}", result.coverage);
     }
+}
+
+#[test]
+fn rust_match_guards_track_nested_patterns_and_projected_names() {
+    let source = r#"use std::fs::remove_file;
+fn run(item: Option<(String, bool)>, extra: Option<&str>, tag: u8) {
+    match item {
+        Some((ref path, _)) if let Some(other) = extra && path.len() > 0 => {
+            remove_file(path);
+            remove_file(other);
+        }
+        _ => {}
+    };
+    match tag { 0 | 1 => { remove_file("fallback.txt"); }, _ => {} };
+}
+"#;
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 5), ("lib.rs", 6), ("lib.rs", 10)]);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    for reason in ["rust_match_binding_projection", "rust_conditional_binding_projection"] {
+        assert!(report.coverage.iter().any(|issue| issue.reason == reason), "{:?}", report.coverage);
+    }
+    assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"));
+}
+
+#[test]
+fn rust_guarded_wildcard_let_chain_short_circuits() {
+    let source = concat!(
+        "fn open(tag: u8) {\n match tag { _ if let Some(_) = begin() => {}, _ => {} };\n}\n",
+        "fn short(tag: u8) {\n match tag { _ if false && let Some(_) = begin() => {}, _ => {} };\n}\n",
+        "fn closed(tag: u8) {\n match tag { _ if let Some(_) = begin() => { finish(); }, _ => { finish(); } };\n}\n",
+    );
+    assert_rust_match_cleanup("rust-guarded-wildcard-chain", source);
 }
 
 #[test]

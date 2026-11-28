@@ -107,16 +107,18 @@ Rust lowering supports discarded statement matches, function-tail matches,
 direct `return match`, and matches used as simple `let` initializers.
 Supported matches require a final wildcard. Scrutinees can
 include simple field paths and supported direct calls. Arms can use literals,
-qualified unit variants, and simple tuple variants such as `Some(_)` or
-`Some(value)`. Arm-local names receive distinct identities, but the analyzer
+qualified unit variants, nested tuple variants, reference bindings, and
+alternatives that introduce no names. Arm-local names receive distinct identities, but the analyzer
 does not connect them to the matched value or resolve whether an identifier
 pattern denotes a constant: those cases report `rust_match_binding_projection`
 and replay remains incomplete. Arm bodies and guards must use supported
 simple expressions and calls, and the final wildcard must be unguarded.
 Returned arms preserve result identity on each exit. Guards preserve the
 evaluation order of `&&`, `||`, and `!` and carry effects to the next arm
-when the guard fails. Matches used in other nested value positions,
-complex patterns, and guards whose operands need additional lowering still
+when the guard fails. Let chains in a match guard expose names to later
+operands and the selected arm. The next arm resolves names in its own scope.
+Matches used in other nested value positions, struct and slice patterns,
+alternatives that bind names, and guards whose operands need additional lowering still
 produce coverage diagnostics. [Rust match expressions](https://doc.rust-lang.org/reference/expressions/match-expr.html) [Rust lazy boolean operators](https://doc.rust-lang.org/reference/expressions/operator-expr.html#lazy-boolean-operators)
 
 Rust `let-else` lowering represents both pattern outcomes when the
@@ -133,9 +135,7 @@ Failure goes to the original `else` scope or exits the loop. Bindings
 whose source values cannot be projected report
 `rust_conditional_binding_projection`. Simple value-producing
 `if` and `if let` expressions also preserve the selected arm when they
-form a function return or initialize a single `let` binding. Let chains
-inside match guards and complex patterns still report
-incomplete coverage. [Rust if expressions](https://doc.rust-lang.org/reference/expressions/if-expr.html)
+form a function return or initialize a single `let` binding. [Rust if expressions](https://doc.rust-lang.org/reference/expressions/if-expr.html)
 
 Rust `for` and ordinary `let` statements can destructure tuples with
 named bindings, wildcard elements, and nested tuples. Loop bindings receive
