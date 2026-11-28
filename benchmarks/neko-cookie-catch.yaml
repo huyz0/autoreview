@@ -1,0 +1,23 @@
+cases:
+  - name: neko reports cookie setter failures
+    rule: &rule {tool: ast-grep, id: kotlin-empty-catch-block}
+    evidence:
+      kind: historical
+      source: https://github.com/nekomangaorg/Neko/commit/d1d83e62c4008236609045576304e374bd2a7060
+      license: Apache-2.0
+      rationale: >-
+        The cookie setter swallowed every exception in an empty catch. The fix
+        rethrows cancellation and logs other failures.
+    before: {commit: &before 91b7a673d2a486b954d2e80c0003c4bea35f8559, path: &source1 core/src/main/kotlin/tachiyomi/core/network/interceptors/CookieInterceptor.kt, lines: [51]}
+    after: {commit: &after d1d83e62c4008236609045576304e374bd2a7060, path: *source1, lines: []}
+  - name: neko forwards interceptor failures as IO exceptions
+    rule: *rule
+    evidence:
+      kind: historical
+      source: https://github.com/nekomangaorg/Neko/blob/d1d83e62c4008236609045576304e374bd2a7060/core/src/main/kotlin/tachiyomi/core/network/interceptors/CloudflareInterceptor.kt
+      license: Apache-2.0
+      rationale: >-
+        The interceptor wraps failures as IO exceptions for the caller in both
+        snapshots. Neither catch body is empty.
+    before: {commit: *before, path: &source2 core/src/main/kotlin/tachiyomi/core/network/interceptors/CloudflareInterceptor.kt, lines: []}
+    after: {commit: *after, path: *source2, lines: []}

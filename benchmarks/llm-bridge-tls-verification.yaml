@@ -1,0 +1,13 @@
+cases:
+  - name: llm bridge verifies certificates on upstream HTTPS requests
+    rule: {tool: autoreview-rust, id: rust-tls-invalid-certificates}
+    evidence:
+      kind: historical
+      source: https://github.com/t-kawata/llm-bridge-rust/commit/9414590ba7bc192073bbff3a98fa621f3f43bcaa
+      license: Apache-2.0
+      rationale: >-
+        The runnable proxy disabled certificate validation when building its
+        upstream HTTP client. The fix removes that override and restores
+        verification.
+    before: {commit: 8ba0583a2091d63ec62377b69a7f30650c56f165, path: &source1 crates/core/examples/http-proxy.rs, lines: [2130]}
+    after: {commit: 9414590ba7bc192073bbff3a98fa621f3f43bcaa, path: *source1, lines: []}

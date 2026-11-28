@@ -1,0 +1,25 @@
+cases:
+  - name: kubestellar separates WebSocket setup from Promise executors
+    rule: &rule {tool: ast-grep, id: ts-async-promise-executor}
+    evidence:
+      kind: historical
+      source: https://github.com/kubestellar/console/commit/4918624d1fae76599b5bbf14e1d619633c640a62
+      license: Apache-2.0
+      rationale: >-
+        Three WebSocket paths used async Promise executors. The fix awaits
+        token retrieval before constructing the connection promise and uses
+        synchronous executors for all three paths.
+    before: {commit: &before f10b74108189415ee252a761703730ac93e04f58, path: &source1 web/src/components/cards/UpgradeStatus.tsx, lines: [127, 147, 221]}
+    after: {commit: &after 4918624d1fae76599b5bbf14e1d619633c640a62, path: *source1, lines: []}
+  - name: kubestellar wraps a timer with a synchronous executor
+    rule: *rule
+    evidence:
+      kind: historical
+      source: https://github.com/kubestellar/console/blob/4918624d1fae76599b5bbf14e1d619633c640a62/web/src/components/dashboard/AddCardModal.tsx
+      license: Apache-2.0
+      rationale: >-
+        The modal awaits a timer promise with a synchronous executor in both
+        snapshots. Its surrounding function can be async without making the
+        executor async.
+    before: {commit: *before, path: &source2 web/src/components/dashboard/AddCardModal.tsx, lines: []}
+    after: {commit: *after, path: *source2, lines: []}
