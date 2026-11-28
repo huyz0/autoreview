@@ -44,7 +44,9 @@ pub(super) fn simple_arm(node: Node<'_>) -> bool {
         "block" => children(node).all(simple_arm),
         "empty_statement" => true,
         "expression_statement" => children(node).next().is_some_and(simple_arm),
-        "return_expression" => children(node).next().is_none_or(simple_value),
+        "return_expression" | "break_expression" | "continue_expression" => {
+            children(node).next().is_none_or(simple_value)
+        }
         "let_declaration" => {
             super::simple_binding(node)
                 && node.child_by_field_name("value").is_none_or(simple_value)

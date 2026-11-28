@@ -123,8 +123,10 @@ and guards whose operands need additional lowering still produce coverage
 diagnostics. [Rust match expressions](https://doc.rust-lang.org/reference/expressions/match-expr.html) [Rust lazy boolean operators](https://doc.rust-lang.org/reference/expressions/operator-expr.html#lazy-boolean-operators)
 
 Rust `let-else` lowering represents both pattern outcomes when the
-initializer is supported and the fallback ends with `return`, `break`, or
-`continue`. The fallback sees the outer bindings. Names introduced on the
+initializer is supported and every fallback path ends with `return`, `break`,
+or `continue`. This includes supported `if` and `match` fallbacks. Fallbacks
+that rely on macro expansion or a callee's return type still report incomplete
+coverage. The fallback sees the outer bindings. Names introduced on the
 success path have distinct identities and report
 `rust_let_else_binding_projection` because their relationship to the
 initializer is unresolved. [Rust let statements](https://doc.rust-lang.org/reference/statements.html#let-statements)

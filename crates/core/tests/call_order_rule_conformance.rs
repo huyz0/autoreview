@@ -1568,6 +1568,26 @@ fn rust_returned_matches_preserve_results_through_helpers() {
 }
 
 #[test]
+fn rust_let_else_fallbacks_follow_explicit_exits() {
+    let source = concat!(
+        "fn open(flag: bool) {\n",
+        " let Some(_) = begin() else { if flag { finish(); return; } else { return; } };\n finish();\n}\n",
+        "fn closed(flag: bool) {\n",
+        " let Some(_) = begin() else { match flag { true => { finish(); return; }, _ => return finish() } };\n finish();\n}\n",
+        "fn loop_exits(flag: bool) {\n",
+        " loop { let Some(_) = begin() else { finish(); match flag { true => continue, _ => break } }; finish(); break; }\n}\n",
+    );
+    assert_rust_match_cleanup("rust-let-else-explicit-exits", source);
+}
+
+#[test]
+fn rust_let_else_macro_divergence_stays_incomplete() {
+    let root = write_single_file("lib.rs", "fn run(choice: Option<u8>) {\n let Some(_) = choice else { panic!(\"missing choice\"); };\n}\n");
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    assert!(report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", report.coverage);
+}
+
+#[test]
 fn rust_let_else_lowers_both_paths_and_limits_projection() {
     let source = concat!(
         "use std::fs::remove_file;\n",

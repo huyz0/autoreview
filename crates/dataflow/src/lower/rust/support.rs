@@ -144,7 +144,8 @@ fn statement_position(node: Node<'_>) -> bool {
     node.parent().is_some_and(|parent| match parent.kind() {
         "block" | "expression_statement" | "else_clause" => true,
         "match_arm" => {
-            node.kind() == "return_expression" && parent.child_by_field_name("value") == Some(node)
+            matches!(node.kind(), "return_expression" | "break_expression" | "continue_expression")
+                && parent.child_by_field_name("value") == Some(node)
         }
         _ => false,
     })

@@ -56,10 +56,10 @@ pub(super) fn is_discarded_statement(node: Node<'_>) -> bool {
         .parent()
         .filter(|parent| parent.kind() == "expression_statement")
         .unwrap_or(node);
-    statement
-        .parent()
-        .is_some_and(|parent| parent.kind() == "block")
-        && (has_semicolon(statement) || !last_statement(statement))
+    statement.parent().is_some_and(|parent| {
+        parent.kind() == "block"
+            && (has_semicolon(statement) || !last_statement(statement) || super::let_else::is_fallback(parent))
+    })
 }
 
 fn has_semicolon(node: Node<'_>) -> bool {
@@ -189,7 +189,7 @@ impl Lower<'_> {
         names: &mut Bindings,
         mode: &Mode<'_>,
     ) -> Option<NodeId> {
-        if arm.kind() == "return_expression" {
+        if matches!(arm.kind(), "return_expression" | "break_expression" | "continue_expression") {
             return self.statement(arm, at, names);
         }
         if arm.kind() == "assignment_expression" {
