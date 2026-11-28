@@ -132,6 +132,9 @@ fn rust_local_and_iterated_patterns_keep_cleanup_keys_distinct() {
     assert!(findings("Rust", "lib.rs", source, RECEIVER, true).is_empty());
     let one_item = source.replace("continue 'items;", "break 'items;");
     assert_eq!(findings("Rust", "lib.rs", &one_item, RECEIVER, true).len(), 1);
+    let scalar_items = source.replace("[(other, 1), (selected, 2)]", "[other, selected]")
+        .replace("for (candidate, _) in", "for candidate in");
+    assert!(findings("Rust", "lib.rs", &scalar_items, RECEIVER, true).is_empty());
 }
 
 #[test]

@@ -195,9 +195,9 @@ when the initializer runs and transfers it when the pattern binds it.
 Opaque initializers, struct updates, and locals with other uses still
 report incomplete coverage. [Rust patterns](https://doc.rust-lang.org/reference/patterns.html#destructuring)
 
-Destructuring `for` loops can project items from by-value array literals
-with up to eight items, including arrays reached through those immutable
-locals. The analyzer evaluates every array item before entering the loop
+`for` loops can bind whole items or destructure them from by-value array
+literals with up to eight items, including arrays reached through those
+immutable locals. The analyzer evaluates every array item before entering the loop
 and follows each binding through `break`, `continue`, and return. Dynamic
 iterators, repeated arrays, and nested `for` loops retain the unresolved
 projection diagnostic when item identities cannot be proven.

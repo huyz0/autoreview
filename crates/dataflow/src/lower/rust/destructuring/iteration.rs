@@ -1,4 +1,4 @@
-use super::{branch_value, local, pattern_pairs, projected_bindings, Projection, Bindings, Lower, Node, NodeId};
+use super::{branch_value, iterator_bindings, local, pattern_pairs, Projection, Bindings, Lower, Node, NodeId};
 use crate::cfg::EdgeKind;
 use crate::lower::{line, site::children};
 
@@ -10,7 +10,7 @@ pub(in crate::lower::rust) struct Iteration<'tree> {
 }
 
 pub(in crate::lower::rust) fn plan<'tree>(loop_expr: Node<'tree>, source: &[u8]) -> Option<Iteration<'tree>> {
-    if loop_expr.kind() != "for_expression" || projected_bindings(loop_expr, source)?.is_empty() {
+    if iterator_bindings(loop_expr, source)?.is_empty() {
         return None;
     }
     let pattern = loop_expr.child_by_field_name("pattern")?;
