@@ -3,6 +3,7 @@ use super::{simple_value, Bindings, EdgeKind, Lower, Node, NodeId};
 enum Predicate<'a> {
     And(Node<'a>, Node<'a>),
     Or(Node<'a>, Node<'a>),
+    Comparison(Node<'a>, Node<'a>),
     Not(Node<'a>),
     Value(Node<'a>),
 }
@@ -33,24 +34,28 @@ fn predicate(mut node: Node<'_>) -> Predicate<'_> {
         {
             Some("&&") => return Predicate::And(left, right),
             Some("||") => return Predicate::Or(left, right),
+            Some("==" | "!=" | "<" | ">" | "<=" | ">=") => {
+                return Predicate::Comparison(left, right)
+            }
             _ => {}
         }
     }
     Predicate::Value(node)
 }
 
-pub(super) fn supported(node: Node<'_>) -> bool {
+pub(in crate::lower::rust) fn supported(node: Node<'_>) -> bool {
     match predicate(node) {
         Predicate::And(left, right) | Predicate::Or(left, right) => {
             supported(left) && supported(right)
         }
         Predicate::Not(value) => supported(value),
+        Predicate::Comparison(left, right) => simple_value(left) && simple_value(right),
         Predicate::Value(value) => simple_value(value),
     }
 }
 
 impl Lower<'_> {
-    pub(super) fn lower_guard(
+    pub(in crate::lower::rust) fn lower_guard(
         &mut self,
         node: Node<'_>,
         at: NodeId,
@@ -70,6 +75,12 @@ impl Lower<'_> {
                 self.lower_guard(right, next, targets, names);
             }
             Predicate::Not(value) => self.lower_guard(value, at, (fail, pass), names),
+            Predicate::Comparison(left, right) => {
+                let end = self.evaluate(Some(left), at, names);
+                let end = self.evaluate(Some(right), end, names);
+                self.edge(end, pass, EdgeKind::True);
+                self.edge(end, fail, EdgeKind::False);
+            }
             Predicate::Value(value) => {
                 let end = self.evaluate(Some(value), at, names);
                 match self.text(value) {

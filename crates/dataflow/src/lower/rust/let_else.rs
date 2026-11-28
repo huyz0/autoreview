@@ -9,14 +9,7 @@ fn pattern_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
     if node.kind() != "let_declaration" || node.child_by_field_name("alternative").is_none() {
         return None;
     }
-    let pattern = node.child_by_field_name("pattern")?;
-    if matches!(
-        pattern.kind(),
-        "scoped_identifier" | "boolean_literal" | "integer_literal"
-    ) {
-        return Some(Vec::new());
-    }
-    match_flow::tuple_bindings(pattern)
+    match_flow::projection_bindings(node)
 }
 
 pub(super) fn supports(node: Node<'_>) -> bool {

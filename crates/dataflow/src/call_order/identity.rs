@@ -12,6 +12,8 @@ use crate::taint::NamePattern;
 use super::bindings::Bindings;
 use super::{CollectionSelector, EntryIdentity};
 
+mod lexical;
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Entry {
     pub collection: IdentityOperand,
@@ -67,6 +69,7 @@ impl<'src> Syntax<'src> {
         unit: usize,
         track_results: bool,
     ) -> Option<Self> {
+        let track_local_scopes = track_results || function.kind() == "function_item";
         let mut syntax = Self {
             owner: function.start_byte(),
             unit,
@@ -95,7 +98,7 @@ impl<'src> Syntax<'src> {
             if let Some(name) = local_callable(node, function, source) {
                 syntax.local_callables.insert(name);
             }
-            syntax.bindings.visit(node, source, writes.contains(&node.start_byte()), track_results);
+            syntax.bindings.visit(node, source, writes.contains(&node.start_byte()), track_local_scopes);
             nodes.extend(children(node));
         }
         syntax.bindings.record_borrowed_writes();
@@ -141,35 +144,20 @@ impl<'src> Syntax<'src> {
         name: &str,
         start: usize,
     ) -> Option<IdentityOperand> {
+        if let Some(key) = self.conditional_key(name, start, false) {
+            return values.get(&key).cloned().flatten();
+        }
         if !self.bindings.can_read(name) {
             return None;
         }
         values
             .get(name)
             .cloned()
-            .unwrap_or_else(|| match self.bindings.resolve(name, start)? {
-                IdentityOperand::Binding(name) => Some(IdentityOperand::Scoped {
-                    name,
-                    owner: self.owner,
-                    unit: self.unit,
-                }),
-                literal => Some(literal),
-            })
+            .unwrap_or_else(|| self.bindings.resolve(name, start).map(|value| self.scope_identity(value)))
     }
 
     pub(super) fn taken_name(&self, name: &str) -> bool {
         self.bindings.names().any(|binding| binding == name)
-    }
-
-    pub(super) fn stable_boolean(&self, name: &str, at: usize) -> Option<bool> {
-        self.bindings.stable_boolean(name, at)
-    }
-
-    pub(super) fn stable_identity(&self, name: &str, at: usize) -> Option<IdentityOperand> {
-        match self.bindings.stable_identity(name, at)? {
-            IdentityOperand::Binding(name) => Some(IdentityOperand::Scoped { name, owner: self.owner, unit: self.unit }),
-            value => Some(value),
-        }
     }
 
     pub(super) fn local_result_binding(&self, name: &str, start: usize, defining: bool) -> Option<usize> {
@@ -178,6 +166,10 @@ impl<'src> Syntax<'src> {
 
     pub(super) fn shadows_api(&self, name: &str) -> bool {
         self.taken_name(name) || self.local_callables.contains(name)
+    }
+
+    pub(super) fn shadows_api_at(&self, name: &str, at: usize) -> bool {
+        self.taken_name_at(name, at) || self.local_callables.contains(name)
     }
 
     /// Check bindings without requiring the enclosing control flow to be
@@ -218,12 +210,12 @@ impl<'src> Syntax<'src> {
             })
     }
 
-    pub(super) fn any_call(&self, predicate: impl Fn(&str) -> bool) -> bool {
-        self.calls.iter().any(|(_, name)| predicate(name))
+    pub(super) fn any_call(&self, predicate: impl Fn(usize, &str) -> bool) -> bool {
+        self.first_call(predicate).is_some()
     }
 
-    pub(super) fn first_call(&self, predicate: impl Fn(&str) -> bool) -> Option<usize> {
-        self.calls.iter().find_map(|(start, name)| predicate(name).then_some(*start))
+    pub(super) fn first_call(&self, predicate: impl Fn(usize, &str) -> bool) -> Option<usize> {
+        self.calls.iter().find_map(|(start, name)| predicate(*start, name).then_some(*start))
     }
 
     pub(super) fn has_registration(&self, candidates: &[NamePattern]) -> bool {

@@ -33,7 +33,7 @@ impl<'a, 'src> Plan<'a, 'src> {
         let mut sources = Sources::default();
         sources.collect(cfg)?;
         let syntax = Syntax::scan(function, source, &sources.writes, unit, false)?;
-        let start = syntax.first_call(|name| api.matches(name, |root| syntax.shadows_api(root)))?;
+        let start = syntax.first_call(|at, name| api.matches(name, |root| syntax.shadows_api_at(root, at)))?;
         Some(source.get(..start)?.iter().filter(|byte| **byte == b'\n').count() as u32 + 1)
     }
 
@@ -49,7 +49,7 @@ impl<'a, 'src> Plan<'a, 'src> {
         let registered = match &spec.contract {
             Some(contract) => {
                 let api = ApiMatcher::new(contract, function, source);
-                syntax.any_call(|name| api.matches(name, |root| syntax.shadows_api(root)))
+                syntax.any_call(|at, name| api.matches(name, |root| syntax.shadows_api_at(root, at)))
             }
             None => syntax.has_registration(&spec.after),
         };
@@ -119,19 +119,19 @@ impl<'a, 'src> Plan<'a, 'src> {
     pub(super) fn has_registration(&self) -> bool {
         if !self.extra_sources.is_empty() || !self.extra_spans.is_empty() { return true; }
         match &self.api {
-            Some(api) => self.syntax.any_call(|name| api.matches(name, |root| self.syntax.shadows_api(root))),
+            Some(api) => self.syntax.any_call(|at, name| api.matches(name, |root| self.syntax.shadows_api_at(root, at))),
             None => self.syntax.has_registration(&self.spec.after),
         }
     }
 
-    pub(super) fn source_mode(&self, name: &str) -> Option<ContractMode> {
+    pub(super) fn source_mode(&self, name: &str, at: usize) -> Option<ContractMode> {
         let api = self.api.as_ref()?;
-        api.matches(name, |root| self.syntax.shadows_api(root))
+        api.matches(name, |root| self.syntax.shadows_api_at(root, at))
             .then_some(api.mode())
     }
 
     pub(super) fn source_mode_at(&self, name: &str, start: usize, end: usize) -> Option<ContractMode> {
-        (self.extra_sources.contains(&start) || self.extra_spans.contains(&(start, end))).then_some(ContractMode::MustUse).or_else(|| self.source_mode(name))
+        (self.extra_sources.contains(&start) || self.extra_spans.contains(&(start, end))).then_some(ContractMode::MustUse).or_else(|| self.source_mode(name, start))
     }
 
     pub(super) fn is_completion(&self, name: &str, start: usize, values: &Values) -> bool {
@@ -146,7 +146,7 @@ impl<'a, 'src> Plan<'a, 'src> {
     pub(super) fn may_throw(&self, name: &str, start: usize, values: &Values) -> bool {
         // A call selected by this rule is a modeled event. Opaque calls can
         // transfer before completing their ordinary statement.
-        (self.source_mode(name).is_none()
+        (self.source_mode(name, start).is_none()
             || self.spec.contract.as_ref().is_some_and(|contract| contract.acquire_awaited))
             && [&self.spec.after, &self.spec.unless, &self.spec.before]
             .into_iter()

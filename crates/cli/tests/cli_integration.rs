@@ -1186,18 +1186,29 @@ fn rust_literal_match_result_reaches_review_and_replay() {
     let suffix = "}\nfn allowed() -> bool { true }\n";
     let before = format!("{prefix}    match flag.mode {{ Some(_) if allowed() && allowed() => {{ remove_file(path); Ok(()) }}, _ => Ok(()) }}\n{suffix}");
     let after = format!("{prefix}    match flag.mode {{ Some(_) if allowed() && allowed() => remove_file(path), _ => Ok(()) }}\n{suffix}");
-    let repo = init_repo(&[("lib.rs", &before)]);
+    assert_rust_result_replays("Rust match result", &before, &after);
+}
+
+#[test]
+fn rust_let_chain_reaches_review_and_replay() {
+    let before = "use std::fs::remove_file;\nfn run(value: Option<u8>, gate: bool) {\n    if gate && let Some(_) = value { remove_file(\"example.txt\"); }\n}\n";
+    let after = before.replace("remove_file(\"example.txt\");", "assert!(remove_file(\"example.txt\").is_ok());");
+    assert_rust_result_replays("Rust let chain", before, &after);
+}
+
+fn assert_rust_result_replays(name: &str, before: &str, after: &str) {
+    let repo = init_repo(&[("lib.rs", before)]);
     let old = current_commit(repo.path());
-    repo.commit(&[("lib.rs", &after)], "observe result inside match");
+    repo.commit(&[("lib.rs", after)], "observe the result");
     let fixed = current_commit(repo.path());
-    let suite = serde_json::json!({"cases": [{"name":"Rust match result", "rule":{"tool":"autoreview-dataflow", "id":"rust-discarded-remove-file-result"},
+    let suite = serde_json::json!({"cases": [{"name":name, "rule":{"tool":"autoreview-dataflow", "id":"rust-discarded-remove-file-result"},
         "before":{"commit":old, "path":"lib.rs", "lines":[3]}, "after":{"commit":fixed, "path":"lib.rs", "lines":[]}}]});
     std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
     let replay = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["rules", "replay", "--suite", "suite.json"]).assert().success();
     let replay: serde_json::Value = serde_json::from_slice(&replay.get_output().stdout).unwrap();
     assert_eq!(replay["rules"][0]["truePositives"], 1, "{replay}");
     assert_eq!(replay["rules"][0]["falsePositives"], 0, "{replay}");
-    repo.commit(&[("lib.rs", &before)], "discard result inside match");
+    repo.commit(&[("lib.rs", before)], "discard the result");
     let review = static_review_report(&repo, &fixed, None);
     assert!(review["findings"].as_array().unwrap().iter().any(|finding|
         finding["source"]["ruleId"] == "rust-discarded-remove-file-result" && finding["location"]["path"] == "lib.rs"

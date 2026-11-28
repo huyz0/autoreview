@@ -5,6 +5,8 @@ use tree_sitter::Node;
 use crate::cfg::IdentityOperand;
 use crate::lower::site::{children, identifier, operand};
 
+mod stable;
+
 mod local_values;
 use local_values::LocalValues;
 
@@ -50,35 +52,16 @@ impl<'src> Bindings<'src> {
         }
     }
 
-    pub(super) fn stable_identity<'a>(&'a self, mut name: &'a str, mut at: usize) -> Option<IdentityOperand> {
-        let mut seen = HashSet::new();
-        while seen.len() < 64 && seen.insert(name) {
-            (self.can_read(name) && !self.all_writes.contains(name)).then_some(())?;
-            let binding = self.declarations.get(name)?.as_ref()?;
-            (binding.visible_at <= at).then_some(())?;
-            let Some(alias) = binding.alias.as_ref() else { return Some(IdentityOperand::Binding(name.to_owned())); };
-            alias.borrowed_root.is_none().then_some(())?;
-            match &alias.operand {
-                IdentityOperand::Binding(origin) => { name = origin; at = alias.captured_at; }
-                value => return Some(value.clone()),
-            }
-        }
-        None
-    }
-
-    pub(super) fn stable_boolean(&self, name: &str, at: usize) -> Option<bool> {
-        match self.stable_identity(name, at)? {
-            IdentityOperand::Boolean(value) => Some(value),
-            _ => None,
-        }
-    }
-
     pub(super) fn can_read(&self, name: &str) -> bool {
         self.declarations.get(name).is_some_and(Option::is_some) && !self.writes.contains(name)
     }
 
     pub(super) fn local_value(&self, name: &str, at: usize, defining: bool) -> Option<usize> {
         self.local_values.resolve(name, at, defining)
+    }
+
+    pub(super) fn conditional_binding(&self, name: &str, at: usize, defining: bool) -> Option<usize> {
+        self.local_values.conditional_binding(name, at, defining)
     }
 
     pub(super) fn resolve<'a>(
@@ -122,6 +105,12 @@ impl<'src> Bindings<'src> {
     }
 
     fn record_declarations(&mut self, node: Node<'_>, source: &'src [u8], track_results: bool) {
+        if let Some(targets) = crate::lower::rust::conditional_bindings(node) {
+            for target in targets {
+                self.local_values.record(node, target, source);
+            }
+            return;
+        }
         let targets = declaration_targets(node);
         let single_target = targets.len() == 1 || declares_iteration(node) || node.kind() == "match_arm"
             || matches!(

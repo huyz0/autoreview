@@ -12,7 +12,7 @@ impl Engine<'_, '_, '_, '_> {
         location: StatementLocation,
     ) -> Option<bool> {
         let plan = self.program.frames[frame].plan.as_ref()?;
-        if plan.source_mode(name) != Some(ContractMode::MustComplete) {
+        if plan.source_mode(name, site.start) != Some(ContractMode::MustComplete) {
             return Some(false);
         }
         if plan.needs_completion(site) {

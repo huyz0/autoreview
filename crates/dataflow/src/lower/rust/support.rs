@@ -1,4 +1,4 @@
-use super::{let_else, match_flow, Node};
+use super::{conditional, let_else, match_flow, Node};
 
 /// Whether this function's body can be lowered without skipping it entirely.
 pub fn supports_function(function: Node<'_>) -> bool {
@@ -17,18 +17,28 @@ pub(super) fn supported(node: Node<'_>) -> bool {
 
 fn supported_node(node: Node<'_>) -> bool {
     match node.kind() {
-        "let_chain" | "let_condition" | "label" | "unsafe_block" => false,
+        "label" | "unsafe_block" => false,
+        "let_chain" | "let_condition" => conditional::supported(node),
         "let_declaration" => simple_binding(node) || let_else::supports(node),
-        "for_expression" => simple_binding(node) && statement_position(node),
-        "if_expression"
+        "for_expression"
+        | "if_expression"
         | "while_expression"
         | "loop_expression"
         | "return_expression"
         | "break_expression"
-        | "continue_expression" => statement_position(node),
+        | "continue_expression" => supported_statement(node),
         "match_expression" => supports_match(node),
         _ => true,
     }
+}
+
+fn supported_statement(node: Node<'_>) -> bool {
+    statement_position(node)
+        && match node.kind() {
+            "for_expression" => simple_binding(node),
+            "if_expression" | "while_expression" => conditional::supports_owner(node),
+            _ => true,
+        }
 }
 
 /// Whether the match pattern, guard and arm flow can be represented.
@@ -57,6 +67,9 @@ pub(crate) fn pattern_projection_sites(function: Node<'_>) -> Vec<(&'static str,
     let let_else_sites = match_flow::binding_lines(function, |node| {
         let_else_bindings(node).is_some_and(|names| !names.is_empty())
     });
+    let conditional_sites = match_flow::binding_lines(function, |node| {
+        conditional::bindings(node).is_some_and(|names| !names.is_empty())
+    });
     match_sites
         .into_iter()
         .map(|line| ("rust_match_binding_projection", line))
@@ -64,6 +77,11 @@ pub(crate) fn pattern_projection_sites(function: Node<'_>) -> Vec<(&'static str,
             let_else_sites
                 .into_iter()
                 .map(|line| ("rust_let_else_binding_projection", line)),
+        )
+        .chain(
+            conditional_sites
+                .into_iter()
+                .map(|line| ("rust_conditional_binding_projection", line)),
         )
         .collect()
 }
