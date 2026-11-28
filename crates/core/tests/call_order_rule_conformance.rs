@@ -1334,7 +1334,7 @@ fn unresolved_imported_associated_methods_report_coverage() {
 fn imported_associated_call_in_skipped_function_reports_coverage() {
     let root = associated_coverage_fixture();
     let src = root.path().join("src");
-    for body in ["Store::unknown(); match 1 { value => {} }", "Store::known(); let [a, b] = [1, 2];"] {
+    for body in ["Store::unknown(); match 1 { value => {} }", "Store::known(); let (Ok(a) | Err(a), b) = (Ok::<u8, u8>(1), 2);"] {
         std::fs::write(src.join("worker.rs"), format!("use crate::support::Files as Store;\nfn run() {{ {body} }}\n")).unwrap();
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("src/worker.rs") && issue.line == Some(2) && issue.rule.as_deref() == Some("rust-discarded-remove-file-result")), "{body}: {:?}", result.coverage);
@@ -1435,6 +1435,33 @@ fn rust_match_initializer_keeps_a_direct_return_separate() {
     let source = "use std::fs::remove_file;\nfn run(flag: bool) -> std::io::Result<()> {\n let result = match flag {\n  true => remove_file(\"example.txt\"),\n  _ => return Ok(()),\n };\n result\n}\n";
     let root = write_single_file("lib.rs", source);
     assert_rust_result_is_observed(root.path());
+}
+
+#[test]
+fn rust_nested_struct_and_slice_patterns_analyze_calls_and_report_projection() {
+    let source = concat!(
+        "use std::fs::remove_file;\n",
+        "fn run(entry: Entry, entries: &[Entry], keys: &[u8]) { remove_file(\"old.txt\");\n",
+        " let Entry { name: key, tag: _, .. } = entry;\n",
+        " for &Entry { name, .. } in entries {}\n",
+        " if let Entry { tag: Some(tag), .. } = entry { inspect(tag); }\n",
+        " match keys { [key, rest @ ..] => {}, _ => {} };\n",
+        " let [head, ..] = keys else { return };\n",
+        "}\n",
+    );
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 2)]);
+    let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    for (reason, line) in [
+        ("rust_destructuring_binding_projection", 3),
+        ("rust_destructuring_binding_projection", 4),
+        ("rust_conditional_binding_projection", 5),
+        ("rust_match_binding_projection", 6),
+        ("rust_let_else_binding_projection", 7),
+    ] {
+        assert!(result.coverage.iter().any(|issue| issue.reason == reason
+            && issue.line == Some(line)), "{reason}:{line}: {:?}", result.coverage);
+    }
 }
 
 #[test]

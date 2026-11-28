@@ -104,7 +104,7 @@ fn projection_reason(node: Node<'_>) -> Option<&'static str> {
             .then_some("rust_conditional_binding_projection"),
         "let_declaration" => declaration_projection(node),
         "for_expression" => {
-            destructuring::tuple_names(node).map(|_| "rust_destructuring_binding_projection")
+            destructuring::projected_bindings(node).map(|_| "rust_destructuring_binding_projection")
         }
         _ => None,
     }

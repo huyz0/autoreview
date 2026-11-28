@@ -1,31 +1,11 @@
-use super::{branch_value::{self, Mode}, Bindings, Lower, Node, NodeId};
+use super::{branch_value::{self, Mode}, patterns, Bindings, Lower, Node, NodeId};
 
-fn tuple_bindings<'tree>(pattern: Node<'tree>, names: &mut Vec<Node<'tree>>) -> Option<()> {
-    match pattern.kind() {
-        "identifier" => names.push(pattern),
-        "_" => {}
-        "tuple_pattern" => {
-            let mut cursor = pattern.walk();
-            for child in pattern
-                .children(&mut cursor)
-                .filter(|child| !child.is_extra() && !matches!(child.kind(), "(" | ")" | ","))
-            {
-                tuple_bindings(child, names)?;
-            }
-        }
-        _ => return None,
-    }
-    Some(())
-}
-
-pub(super) fn tuple_names(node: Node<'_>) -> Option<Vec<Node<'_>>> {
+pub(super) fn projected_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
     let pattern = node.child_by_field_name("pattern")?;
-    if pattern.kind() != "tuple_pattern" {
-        return None;
-    }
-    let mut names = Vec::new();
-    tuple_bindings(pattern, &mut names)?;
-    Some(names)
+    matches!(pattern.kind(), "tuple_pattern" | "tuple_struct_pattern" | "struct_pattern"
+        | "slice_pattern" | "reference_pattern" | "ref_pattern" | "mut_pattern")
+        .then(|| patterns::projected_names(pattern))
+        .flatten()
 }
 
 pub(super) fn declaration_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
@@ -33,7 +13,7 @@ pub(super) fn declaration_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
         return None;
     }
     node.child_by_field_name("value")?;
-    tuple_names(node)
+    projected_bindings(node)
 }
 
 pub(crate) fn iterator_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
@@ -44,7 +24,7 @@ pub(crate) fn iterator_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
     match pattern.kind() {
         "_" => Some(Vec::new()),
         "identifier" => Some(vec![pattern]),
-        _ => tuple_names(node),
+        _ => projected_bindings(node),
     }
 }
 
