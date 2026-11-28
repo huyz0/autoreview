@@ -1,6 +1,6 @@
 use crate::cfg::{CallSite, CallTarget, Cfg, IdentityOperand, Stmt};
 
-use super::{is_tainted, visit_calls, TaintHit, TaintSpec};
+use super::{is_tainted, visit_calls, Inputs, TaintHit, TaintSpec};
 
 pub(crate) struct TaintedCall<'a> {
     pub(crate) name: &'a str,
@@ -24,7 +24,7 @@ pub(crate) fn has_direct_source(spec: &TaintSpec, cfg: &Cfg<Stmt>) -> bool {
 
 pub(crate) fn scan_helper_calls<'a>(spec: &TaintSpec, cfg: &'a Cfg<Stmt>, seed: Option<&str>) -> HelperScan<'a> {
     let mut scan = HelperScan::default();
-    visit_calls(spec, cfg, None, seed, |call, facts| {
+    visit_calls(spec, cfg, Inputs::Helper(seed), |call, facts| {
         let Some(site) = call.site else { return };
         // Unmodeled operands can include Kotlin named arguments. Do not guess their mapping.
         if !site.arguments.iter().all(Option::is_some) {

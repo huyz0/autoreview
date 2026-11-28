@@ -3,15 +3,16 @@ use std::cell::RefCell;
 use tree_sitter::Node;
 
 use crate::cfg::{CallSite, CallTarget, Cfg, IdentityOperand, Stmt};
+mod build;
 mod signature;
 mod associated;
 use associated::Associated;
 pub use signature::has_attributes as has_rust_attributes;
 mod exports;
 pub use exports::{resolve_declaration_import, DeclarationResolution, KeyedDeclaration, KeyedExport, KeyedImport};
-use signature::{candidate, export, parameters, Export};
+use signature::Export;
 
-use super::{CallOrderSpec, Plan, Values};
+use super::{Plan, Values};
 use super::super::identity::Syntax;
 
 /// A parsed function and the graph used by keyed cleanup rules.
@@ -44,7 +45,7 @@ pub(in crate::call_order) struct Frame<'spec, 'src, 'graph> {
     pub unit: usize,
     export: Option<Export>,
     pub plan: Option<Plan<'spec, 'src>>,
-    resolution_syntax: Option<Syntax<'src>>,
+    resolution_syntax: Option<Box<Syntax<'src>>>,
     scope: Scope,
     unsupported_rust_line: Option<u32>,
     declined_cleanup: Option<(u32, bool)>,
@@ -69,86 +70,6 @@ struct Unit<'src, 'graph> {
 }
 
 impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
-    pub(in crate::call_order) fn new(spec: &'spec CallOrderSpec, inputs: &[KeyedUnit<'src, '_, 'graph>]) -> Self {
-        Self::build(Some(spec), inputs)
-    }
-
-    pub(super) fn for_resolution(inputs: &[KeyedUnit<'src, '_, 'graph>]) -> Self {
-        Self::build(None, inputs)
-    }
-
-    fn build(spec: Option<&'spec CallOrderSpec>, inputs: &[KeyedUnit<'src, '_, 'graph>]) -> Self {
-        let mut program = Self {
-            frames: Vec::new(),
-            targets: BTreeMap::new(),
-            associated: Associated::default(),
-            paths: BTreeMap::new(),
-            unresolved: RefCell::new(BTreeSet::new()),
-            units: Vec::new(),
-        };
-        for (unit, input) in inputs.iter().enumerate() {
-            program.associated.index_types(unit, input);
-            program.paths.insert(input.path, unit);
-            program.units.push(Unit {
-                path: input.path,
-                source: input.source,
-                imports: input.imports,
-                exports: input.exports,
-                entry: input.entry,
-                frames: Vec::new(),
-            });
-            for function in input.functions {
-                program.add_frame(spec, unit, input.source, function);
-            }
-        }
-        program
-    }
-
-    fn add_frame(
-        &mut self,
-        spec: Option<&'spec CallOrderSpec>,
-        unit: usize,
-        source: &'src [u8],
-        function: &KeyedFunction<'_, 'graph>,
-    ) {
-        let node = function.node;
-        let scope = scope(node, unit);
-        let params = parameters(node, source);
-        let export = params.as_ref().and_then(|params| {
-            let name = candidate(node, source)?;
-            self.targets
-                .entry((scope, name.clone(), params.len()))
-                .and_modify(|target| *target = None)
-                .or_insert(Some(self.frames.len()));
-            self.associated.register(unit, (node, source), &name, params.len(), self.frames.len());
-            Some(export(node, source, name))
-        });
-        self.units[unit].frames.push(self.frames.len());
-        let plan = spec.and_then(|spec| Plan::new(spec, function.graph, node, source, unit));
-        let declined = spec.filter(|_| plan.is_none());
-        let declined_cleanup = declined.and_then(|spec| Plan::declined_cleanup(spec, function.graph, node, source, unit));
-        let declined_contract = declined.and_then(|spec| Plan::declined_contract(spec, function.graph, node, source, unit));
-        let resolution_syntax = spec.is_none().then(|| Plan::resolution_syntax(function.graph, node, source, unit)).flatten();
-        let rust_support = (node.kind() == "function_item")
-            .then(|| crate::lower::rust::supports_function_with_source(node, source));
-        self.frames.push(Frame {
-            graph: function.graph,
-            plan,
-            resolution_syntax,
-            declined_cleanup,
-            declined_contract,
-            unit,
-            scope,
-            unsupported_rust_line: (rust_support == Some(false))
-                .then_some(node.start_position().row as u32 + 1),
-            rust_pattern_projections: if rust_support == Some(true) {
-                crate::lower::rust::pattern_projection_sites(node, source, spec.is_some_and(CallOrderSpec::tracks_result_use))
-            } else { Vec::new() },
-            params: params.unwrap_or_default(),
-            export,
-        });
-    }
-
     pub(in crate::call_order) fn path(&self, unit: usize) -> Option<String> {
         let path = self.units[unit].path;
         (!path.is_empty()).then(|| path.to_owned())
@@ -161,12 +82,13 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
     pub(in crate::call_order) fn target(&self, from: usize, name: &str, site: &CallSite) -> Option<usize> {
         let frame = &self.frames[from];
         let root = name.split(['.', ':']).next()?;
-        let syntax = frame.plan.as_ref().map(|plan| &plan.syntax).or(frame.resolution_syntax.as_ref())?;
+        let syntax = frame.plan.as_ref().map(|plan| &plan.syntax).or(frame.resolution_syntax.as_deref())?;
         if name.contains("::") && (syntax.shadows_type(root) || syntax.has_local_type_imports()) {
             self.unresolved.borrow_mut().insert((from, site.start, "unresolved_helper_target"));
             return None;
         }
-        if syntax.taken_name_at(root, site.start) || syntax.shadows_type(root) {
+        if syntax.taken_name_at(root, site.start) || syntax.shadows_type(root)
+            || (frame.plan.is_none() && syntax.shadows_api_at(root, site.start)) {
             return None;
         }
         let arity = match site.arguments.as_slice() {
@@ -186,12 +108,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
     }
 
     pub(super) fn roots(&self) -> Vec<usize> {
-        let entries: Vec<_> = self
-            .units
-            .iter()
-            .filter(|unit| unit.entry)
-            .flat_map(|unit| unit.frames.iter().copied())
-            .collect();
+        let entries: Vec<_> = self.entry_frames().collect();
         let mut pending = entries.clone();
         let mut incoming = BTreeSet::new();
         let mut seen = BTreeSet::new();
@@ -217,8 +134,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         if self.unresolved.borrow().is_empty() && self.frames.iter().all(|frame| frame.unsupported_rust_line.is_none() && frame.rust_pattern_projections.is_empty() && frame.declined_cleanup.is_none() && frame.declined_contract.is_none()) {
             return Vec::new();
         }
-        let mut pending: Vec<_> = self.units.iter().filter(|unit| unit.entry)
-            .flat_map(|unit| unit.frames.iter().copied()).collect();
+        let mut pending: Vec<_> = self.entry_frames().collect();
         let mut reachable = BTreeSet::new();
         while let Some(index) = pending.pop() {
             if !reachable.insert(index) { continue; }
@@ -348,12 +264,4 @@ fn reachable_nodes(cfg: &Cfg<Stmt>) -> Vec<&crate::cfg::CfgNode<Stmt>> {
         }
     }
     seen.into_iter().map(|id| &cfg.nodes[id]).collect()
-}
-
-fn scope(node: Node<'_>, unit: usize) -> Scope {
-    std::iter::successors(node.parent(), |parent| parent.parent())
-        .find(|parent| matches!(parent.kind(), "class_body" | "interface_body" | "enum_body" | "impl_item"))
-        .map_or(Scope::File(unit), |parent| {
-            Scope::Class(unit, parent.start_byte())
-        })
 }

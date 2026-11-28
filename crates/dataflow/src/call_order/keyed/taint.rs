@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use tree_sitter::Node;
 
@@ -24,7 +24,9 @@ pub fn check_jvm_taint_helpers(spec: &TaintSpec, units: &[KeyedUnit<'_, '_, '_>]
         return Vec::new();
     }
     let program = Program::for_resolution(units);
-    let eligible = units.iter().flat_map(|unit| unit.functions.iter().map(|fun| eligible_helper(fun.node))).collect();
+    let eligible = units.iter().flat_map(|unit| unit.functions.iter().map(|fun| {
+        fun.graph.keyed_flow != Some(0) && eligible_helper(fun.node)
+    })).collect();
     // A summary describes the seeded parameter's effect. Independent sources
     // inside the helper are already reported by the ordinary taint check.
     let mut parameter_spec = spec.clone();
@@ -39,6 +41,14 @@ struct Sink {
     hit: TaintHit,
 }
 
+impl Sink {
+    fn key(&self) -> (usize, u32, &str) {
+        (self.unit, self.hit.source_line, &self.hit.sink_call)
+    }
+}
+
+type HitKey = (usize, u32, usize, u32, String);
+
 struct Analysis<'a, 'src, 'graph> {
     program: &'a Program<'a, 'src, 'graph>,
     eligible: Vec<bool>,
@@ -48,31 +58,33 @@ struct Analysis<'a, 'src, 'graph> {
 
 impl Analysis<'_, '_, '_> {
     fn hits(&mut self, spec: &TaintSpec) -> Vec<HelperTaintHit> {
-        let mut hits = Vec::new();
-        let mut seen = BTreeSet::new();
+        let mut hits = BTreeMap::new();
         for root in self.program.entry_frames() {
             let frame = &self.program.frames[root];
             if !has_direct_source(spec, frame.graph) {
                 continue;
             }
-            let Some(caller_path) = self.program.path(frame.unit) else { continue };
             for call in scan_helper_calls(spec, frame.graph, None).calls {
-                let Some(target) = self.target(root, &call) else { continue };
-                for (slot, arg) in call.arguments {
-                    for sink in self.summarize(target, slot, HELPER_HOPS) {
-                        let Some(sink_path) = self.program.path(sink.unit) else { continue };
-                        let key = (frame.unit, call.line, sink.unit, sink.hit.source_line, sink.hit.sink_call.clone());
-                        if seen.insert(key) {
-                            hits.push(HelperTaintHit {
-                                caller_path: caller_path.clone(), caller_line: call.line, caller_argument: arg.to_owned(),
-                                sink_path, sink: sink.hit,
-                            });
-                        }
-                    }
-                }
+                self.record_call(root, call, &mut hits);
             }
         }
-        hits
+        hits.into_values().collect()
+    }
+
+    fn record_call(&mut self, root: usize, call: TaintedCall<'_>, hits: &mut BTreeMap<HitKey, HelperTaintHit>) {
+        let Some(target) = self.target(root, &call) else { return };
+        let unit = self.program.frames[root].unit;
+        let Some(caller_path) = self.program.path(unit) else { return };
+        for (slot, arg) in call.arguments {
+            for sink in self.summarize(target, slot, HELPER_HOPS) {
+                let Some(sink_path) = self.program.path(sink.unit) else { continue };
+                let key = (unit, call.line, sink.unit, sink.hit.source_line, sink.hit.sink_call.clone());
+                hits.entry(key).or_insert_with(|| HelperTaintHit {
+                    caller_path: caller_path.clone(), caller_line: call.line, caller_argument: arg.to_owned(),
+                    sink_path, sink: sink.hit,
+                });
+            }
+        }
     }
 
     fn target(&self, from: usize, call: &TaintedCall<'_>) -> Option<usize> {
@@ -97,8 +109,8 @@ impl Analysis<'_, '_, '_> {
                 }
             }
         }
-        sinks.sort_by(|a, b| (a.unit, a.hit.source_line, &a.hit.sink_call).cmp(&(b.unit, b.hit.source_line, &b.hit.sink_call)));
-        sinks.dedup_by(|a, b| (a.unit, a.hit.source_line, &a.hit.sink_call) == (b.unit, b.hit.source_line, &b.hit.sink_call));
+        sinks.sort_by(|a, b| a.key().cmp(&b.key()));
+        sinks.dedup_by(|a, b| a.key() == b.key());
         self.summaries.insert(key, sinks.clone());
         sinks
     }

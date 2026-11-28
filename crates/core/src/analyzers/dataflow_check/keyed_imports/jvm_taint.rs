@@ -5,7 +5,7 @@ use autoreview_dataflow::call_order::{check_jvm_taint_helpers, KeyedFunction, Ke
 use autoreview_langsupport::{language_for_path, Language};
 use autoreview_schema::{AgentFinding, AnalysisCoverageIssue};
 
-use super::super::{dispatch::profile, dsl::helper_taint_finding, taint_rules::TaintRuleDef};
+use super::super::{dsl::helper_taint_finding, functions::lower_keyed_graphs, taint_rules::TaintRuleDef};
 use super::{Resolver, SummaryCaches};
 
 pub(in crate::analyzers::dataflow_check) fn run_taint(
@@ -33,12 +33,8 @@ pub(in crate::analyzers::dataflow_check) fn run_taint(
         issue.reason = format!("jvm_taint_{}", issue.reason);
         issue.detail = issue.detail.replace("call-sequence", "JVM helper taint");
     }
-    let lowered: Vec<_> = sources.values().map(|file| {
-        let (extract, lower) = profile(file.language);
-        extract(&file.parsed.1).into_iter().filter(|node| !node.has_error())
-            .map(|node| (node, lower(file.parsed.0.as_bytes(), node))).collect::<Vec<_>>()
-    }).collect();
-    let functions: Vec<_> = lowered.iter().map(|file| {
+    let lowered: Vec<_> = sources.values().map(|file| lower_keyed_graphs(file.language, &file.parsed, false)).collect();
+    let functions: Vec<_> = lowered.iter().map(|(_, file)| {
         file.iter().map(|(node, graph)| KeyedFunction { node: *node, graph }).collect::<Vec<_>>()
     }).collect();
     let mut findings = Vec::new();
@@ -121,12 +117,15 @@ class Terminal {
             ("app/Entry.kt", r#"package app
 import helpers.forward as relay
 import helpers.forwardValidated
+import helpers.store as masked
 fun handle() {
     val input = readInput()
     relay("label", input)
     forwardValidated(input)
     relay(input, "literal")
     relay(input = "literal", label = input)
+    fun masked(input: String) {}
+    masked(input)
 }"#),
             ("helpers/Relay.kt", r#"package helpers
 fun forward(label: String, input: String) {
@@ -140,11 +139,12 @@ fun store(raw: String) {
     sensitiveWrite("audit", raw)
 }
 fun storeValidated(raw: String) {
-    val clean = validatedValue(raw)
+    var clean = raw
+    clean = validatedValue(clean)
     sensitiveWrite("audit", clean)
 }"#),
         ], "app/Entry.kt");
-        assert_single_path(&findings, "app/Entry.kt", 6, "helpers/Terminal.kt", 3);
+        assert_single_path(&findings, "app/Entry.kt", 7, "helpers/Terminal.kt", 3);
     }
 
     fn assert_single_path(findings: &[AgentFinding], caller: &str, line: u32, sink: &str, sink_line: u32) {
