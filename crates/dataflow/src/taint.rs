@@ -1,11 +1,9 @@
 //! A generic, declarative taint-tracking engine — the same shape as
 //! Semgrep's free-tier `mode: taint` (sources/sinks/sanitizers,
-//! auto-propagating through assignments and calls), reimplemented on
-//! this crate's own CFG/solver rather than ported code. Deliberately
-//! scoped to match what Semgrep's own OSS taint mode does: **strictly
-//! intraprocedural** (single function, no cross-function/cross-file
-//! taint tracking — Semgrep itself Pro-gates that, and it's resource-
-//! heavy even there).
+//! auto-propagating through assignments and calls), implemented with this
+//! crate's CFG solver. Source summaries can propagate taint back from
+//! helpers. The JVM helper analysis also seeds positional parameters to
+//! summarize flows into sensitive operations.
 //!
 //! Unlike the earlier dataflow rules (`append-shared-backing-array`,
 //! `typed-nil-interface-return`, `go_loopvar`), which are each their own
@@ -31,9 +29,12 @@ use std::sync::Arc;
 
 use regex::Regex;
 
-use crate::cfg::{Cfg, CfgNode, NodeId, Stmt};
+use crate::cfg::{CallSite, CallTarget, Cfg, CfgNode, NodeId, Stmt};
 use crate::lattice::Lattice;
 use crate::solver;
+
+mod helpers;
+pub(crate) use helpers::{has_direct_source, scan_helper_calls, TaintedCall};
 
 /// A name pattern for matching a `Stmt::Call`'s target name (as lowered
 /// by e.g. `lower::go::call_target_name`: `"name"` for a bare call,
@@ -223,25 +224,67 @@ pub fn compute_source_summary(spec: &TaintSpec, cfg: &Cfg<Stmt>) -> bool {
 /// `apply`'s own doc comment on exactly what gap this closes and how it
 /// stays scoped).
 pub fn check_with_summaries(spec: &TaintSpec, cfg: &Cfg<Stmt>, summaries: Option<&HashMap<String, bool>>) -> Vec<TaintHit> {
-    let out_facts = solver::solve(cfg, |_id, node: &CfgNode<Stmt>, in_fact: &TaintFacts| node.stmts.iter().fold(in_fact.clone(), |facts, stmt| apply(spec, &facts, stmt, summaries)));
-
     let mut hits = Vec::new();
-    for (node_id, node) in cfg.nodes.iter().enumerate() {
-        let preds = cfg.predecessors(node_id);
-        let mut facts = preds.iter().fold(TaintFacts::bottom(), |acc, &p| acc.join(&out_facts[p]));
+    visit_calls(spec, cfg, Inputs::Summaries(summaries), |call, facts| {
+        hits.extend(sink_arguments(spec, call.name, call.args, facts).map(|arg| call.hit(arg)));
+    });
+    hits
+}
+
+struct Call<'a> {
+    name: &'a str,
+    args: &'a [String],
+    site: Option<&'a CallSite>,
+    node: NodeId,
+    line: u32,
+}
+
+impl Call<'_> {
+    fn hit(&self, arg: &str) -> TaintHit {
+        TaintHit { sink_call: self.name.to_owned(), tainted_arg: arg.to_owned(), node: self.node, source_line: self.line }
+    }
+}
+
+enum Inputs<'a> {
+    Summaries(Option<&'a HashMap<String, bool>>),
+    Helper(Option<&'a str>),
+}
+
+fn visit_calls<'a>(
+    spec: &TaintSpec,
+    cfg: &'a Cfg<Stmt>,
+    inputs: Inputs<'_>,
+    mut visit: impl FnMut(Call<'a>, &TaintFacts),
+) {
+    let (summaries, seed, reachable) = match inputs {
+        Inputs::Summaries(summaries) => (summaries, None, None),
+        Inputs::Helper(seed) => (None, seed, Some(cfg.reachable())),
+    };
+    let is_reachable = |id: NodeId| reachable.as_ref().is_none_or(|nodes| nodes[id]);
+    let seed_entry = |id, facts: &mut TaintFacts| {
+        if let Some(param) = seed.filter(|_| id == cfg.entry) {
+            facts.0.insert(param.to_owned(), true);
+        }
+    };
+    let out_facts = solver::solve(cfg, |id, node, in_fact: &TaintFacts| {
+        if !is_reachable(id) {
+            return TaintFacts::bottom();
+        }
+        let mut facts = in_fact.clone();
+        seed_entry(id, &mut facts);
+        node.stmts.iter().fold(facts, |facts, stmt| apply(spec, &facts, stmt, summaries))
+    });
+
+    for (id, node) in cfg.nodes.iter().enumerate().filter(|(id, _)| is_reachable(*id)) {
+        let mut facts = cfg.predecessors(id).iter().fold(TaintFacts::bottom(), |acc, &prev| acc.join(&out_facts[prev]));
+        seed_entry(id, &mut facts);
         for (index, stmt) in node.stmts.iter().enumerate() {
-            if let Stmt::Call { target: crate::cfg::CallTarget::Named(name), args, .. } = stmt {
-                hits.extend(sink_arguments(spec, name, args, &facts).map(|var| TaintHit {
-                    sink_call: name.clone(),
-                    tainted_arg: var.to_owned(),
-                    node: node_id,
-                    source_line: node.statement_line(index),
-                }));
+            if let Stmt::Call { target: CallTarget::Named(name), args, site, .. } = stmt {
+                visit(Call { name, args, site: site.as_deref(), node: id, line: node.statement_line(index) }, &facts);
             }
             facts = apply(spec, &facts, stmt, summaries);
         }
     }
-    hits
 }
 
 fn sink_arguments<'a>(spec: &'a TaintSpec, name: &'a str, args: &'a [String], facts: &'a TaintFacts) -> impl Iterator<Item = &'a str> {

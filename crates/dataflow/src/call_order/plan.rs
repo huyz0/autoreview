@@ -24,6 +24,14 @@ pub(super) struct Call {
 }
 
 impl<'a, 'src> Plan<'a, 'src> {
+    pub(super) fn resolution_syntax(
+        cfg: &Cfg<Stmt>, function: Node<'_>, source: &'src [u8], unit: usize,
+    ) -> Option<Syntax<'src>> {
+        let mut sources = Sources::default();
+        sources.collect(cfg)?;
+        Syntax::scan(function, source, &sources.writes, unit, false)
+    }
+
     pub(super) fn declined_contract(
         spec: &CallOrderSpec, cfg: &Cfg<Stmt>, function: Node<'_>, source: &[u8], unit: usize,
     ) -> Option<u32> {

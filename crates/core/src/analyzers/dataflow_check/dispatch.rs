@@ -44,6 +44,9 @@ pub(super) fn run(
     let (cross_file, limitations) = super::keyed_imports::run(root, paths, &review.call_sequences, &review.caches);
     findings.extend(cross_file);
     coverage.extend(limitations);
+    let (helper_taint, limitations) = super::keyed_imports::run_jvm_taint(root, paths, &review.taint, &review.caches);
+    findings.extend(helper_taint);
+    coverage.extend(limitations);
     coverage.sort();
     coverage.dedup();
     persistent.save();
