@@ -78,6 +78,42 @@ const RECEIVER: &str = "{receiver: true, keyArgument: 0}";
 const ARGUMENT: &str = "{collectionArgument: 0, keyArgument: 2}";
 
 #[test]
+fn rust_label_jumps_skip_inner_cleanup_and_preserve_outer_cleanup() {
+    let source = r#"fn pending(root: &mut Registry, key: &str, again: bool) {
+    'outer: loop {
+        root.register(key);
+        loop {
+            if again {
+                break 'outer;
+            }
+            root.remove(key);
+            continue 'outer;
+        }
+    }
+    root.finish(key);
+}
+"#;
+    assert_eq!(findings("Rust", "lib.rs", source, RECEIVER, false).len(), 1);
+    let clean = source.replace("break 'outer;", "root.remove(key); break 'outer;");
+    assert!(findings("Rust", "lib.rs", &clean, RECEIVER, false).is_empty());
+}
+
+#[test]
+fn rust_nested_literal_projections_bind_the_matching_key() {
+    let source = r#"fn pending(root: &mut Registry, key: &str, other: &str) {
+    root.register(key);
+    let ([selected @ _], _) = ([key], 0) else { return };
+    match (selected, 0) {
+        (alias @ _, _) => root.remove(alias),
+    }
+}
+"#;
+    assert!(findings("Rust", "lib.rs", source, RECEIVER, true).is_empty());
+    let wrong = source.replace("([key], 0)", "([other], 0)");
+    assert_eq!(findings("Rust", "lib.rs", &wrong, RECEIVER, true).len(), 1);
+}
+
+#[test]
 fn rust_tuple_literal_keeps_receiver_and_key_tied_to_pre_shadow_values() {
     let source = r#"fn pending(root: &mut Registry, key: &str, other: &str) {
     root.register(key);

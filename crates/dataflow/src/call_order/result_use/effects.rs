@@ -126,6 +126,15 @@ impl Lower<'_, '_, '_> {
     }
 
     fn statement(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
+        if node.kind() == "match_expression" && self.language == ContractLanguage::Rust {
+            if let Some(projections) = crate::lower::rust::literal_projection(node, self.source) {
+                let writes = projections.into_iter()
+                    .filter_map(|(binding, value)| self.write(binding, Some(value), false, effects))
+                    .collect();
+                effects.push(Effect::Write(writes));
+                return;
+            }
+        }
         let value = if let Some(closure) = self.inside {
             closure_result(node, closure)
         } else if self.returns_to_caller {
@@ -190,7 +199,7 @@ impl Lower<'_, '_, '_> {
         {
             return;
         }
-        let (targets, values) = if let Some(tuple) = crate::lower::rust::literal_tuple(node, self.source)
+        let (targets, values) = if let Some(tuple) = crate::lower::rust::literal_projection(node, self.source)
             .filter(|_| self.language == ContractLanguage::Rust)
         {
             tuple.into_iter().unzip()

@@ -10,14 +10,16 @@ mod branch_value;
 mod destructuring;
 mod patterns;
 mod argument_flow;
+mod loops;
 
 use support::{simple_binding, supported};
-pub(crate) use destructuring::{iterator_bindings, literal_tuple};
+pub(crate) use destructuring::{iterator_bindings, literal_projection};
 pub use support::{match_arm_bindings, match_binding_lines, supports_function, supports_match};
 pub use support::{match_arm_bindings_with_source, match_binding_lines_with_source, supports_function_with_source, supports_match_with_source};
 pub(crate) use support::{discards_match, lexical_bindings, pattern_projection_sites};
 pub(crate) use argument_flow::{aggregate_result_operands, stages_aggregate, stages_call, OPERAND_TEMPORARY};
 pub(crate) use branch_value::is_returned as value_is_returned;
+pub(crate) use loops::supports_label;
 
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -66,7 +68,7 @@ struct Lower<'src> {
     cfg: Cfg<Stmt>,
     source: &'src [u8],
     serial: usize,
-    loops: Vec<(NodeId, NodeId)>,
+    loops: Vec<loops::LoopTarget>,
 }
 
 impl Lower<'_> {
@@ -128,15 +130,8 @@ impl Lower<'_> {
                 self.loop_body(expr, at, names)
             }
             "block" => self.block(expr, at, names),
-            "assignment_expression" => {
-                let target = expr
-                    .child_by_field_name("left")
-                    .and_then(|n| self.variable(n, names));
-                let end = self.value(expr.child_by_field_name("right"), at, names, target)?;
-                super::record_evaluation(&mut self.cfg, end, expr);
-                self.keyed_write(expr, end);
-                Some(end)
-            }
+            "unsafe_block" => self.block(super::site::children(expr).next()?, at, names),
+            "assignment_expression" => self.lower_assignment(expr, at, names),
             _ => {
                 let end = self.value(Some(expr), at, names, None)?;
                 super::record_evaluation(&mut self.cfg, end, expr);
@@ -157,19 +152,6 @@ impl Lower<'_> {
             for write in super::keyed_syntax::writes(node, self.source) {
                 self.cfg.emit(at, Stmt::Rebind(write), line(node));
             }
-        }
-    }
-
-    fn jump(&mut self, stmt: Node<'_>, at: NodeId, names: &Bindings) {
-        let Some(at) = self.value(stmt.named_child(0), at, names, None) else { return };
-        super::record_evaluation(&mut self.cfg, at, stmt);
-        if let Some(&(head, after)) = self.loops.last() {
-            let target = if stmt.kind() == "break_expression" {
-                after
-            } else {
-                head
-            };
-            self.edge(at, target, EdgeKind::Fallthrough);
         }
     }
 
@@ -238,7 +220,7 @@ impl Lower<'_> {
         if expr.kind() != "loop_expression" {
             self.edge(condition, after, EdgeKind::False);
         }
-        self.loops.push((head, after));
+        self.push_loop(expr, head, after);
         if let Some(body) = expr.child_by_field_name("body") {
             let start = self.cfg.push_node(line(body));
             self.edge(condition, start, EdgeKind::True);

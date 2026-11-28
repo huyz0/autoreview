@@ -139,7 +139,7 @@ impl Lower<'_> {
         self.edge(at, head, EdgeKind::Fallthrough);
         let mut success_names = names.clone();
         self.lower_pattern_test(test, head, (start, after), &mut success_names);
-        self.loops.push((head, after));
+        self.push_loop(expr, head, after);
         if let Some(end) = self.block(body, start, &success_names) {
             self.edge(end, head, EdgeKind::Loop);
         }
@@ -165,18 +165,29 @@ impl Lower<'_> {
                 at = next;
             }
         } else if let Some(bindings) = bindings(node, self.source) {
-            let Some(evaluated) = self.evaluate(node.child_by_field_name("value"), at, names) else { return };
-            let matched = self.cfg.push_node(line(node));
-            self.edge(evaluated, matched, EdgeKind::True);
-            if node.child_by_field_name("pattern").is_none_or(|pattern| pattern.kind() != "_") {
-                self.edge(evaluated, failed, EdgeKind::False);
-            }
-            for binding in bindings {
-                self.project_pattern_binding(binding, matched, names);
-            }
-            self.edge(matched, passed, EdgeKind::Fallthrough);
+            self.lower_binding_test(node, at, targets, names, bindings);
         } else {
             self.lower_guard(node, at, targets, names);
         }
+    }
+
+    fn lower_binding_test(&mut self, node: Node<'_>, at: NodeId, targets: (NodeId, NodeId), names: &mut Bindings, bindings: Vec<Node<'_>>) {
+        let (passed, failed) = targets;
+        if let Some(elements) = super::destructuring::literal_projection(node, self.source).filter(|_| self.cfg.keyed_flow.is_some()) {
+            if let Some(end) = self.lower_literal_projection(node, at, names, elements) {
+                self.edge(end, passed, EdgeKind::Fallthrough);
+            }
+            return;
+        }
+        let Some(evaluated) = self.evaluate(node.child_by_field_name("value"), at, names) else { return };
+        let matched = self.cfg.push_node(line(node));
+        self.edge(evaluated, matched, EdgeKind::True);
+        if node.child_by_field_name("pattern").is_none_or(|pattern| pattern.kind() != "_") {
+            self.edge(evaluated, failed, EdgeKind::False);
+        }
+        for binding in bindings {
+            self.project_pattern_binding(binding, matched, names);
+        }
+        self.edge(matched, passed, EdgeKind::Fallthrough);
     }
 }

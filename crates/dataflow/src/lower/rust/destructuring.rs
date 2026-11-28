@@ -30,30 +30,78 @@ pub(crate) fn iterator_bindings<'tree>(node: Node<'tree>, source: &[u8]) -> Opti
     }
 }
 
-pub(crate) fn literal_tuple<'tree>(
+pub(crate) fn literal_projection<'tree>(
     declaration: Node<'tree>,
     source: &[u8],
 ) -> Option<Vec<(Node<'tree>, Node<'tree>)>> {
-    let pattern = declaration.child_by_field_name("pattern")?;
-    let mut value = declaration.child_by_field_name("value")?;
-    while value.kind() == "parenthesized_expression" {
-        value = children(value).next()?;
-    }
-    if pattern.kind() != "tuple_pattern" || value.kind() != "tuple_expression"
-        || declaration.child_by_field_name("alternative").is_some()
-        || super::stages_aggregate(value)
+    let pattern = if declaration.kind() == "match_expression" {
+        super::match_flow::single_match_pattern(declaration)?
+    } else {
+        declaration.child_by_field_name("pattern")?
+    };
+    let value = declaration.child_by_field_name("value")?;
+    if !matches!(pattern.kind(), "tuple_pattern" | "slice_pattern" | "captured_pattern")
         || pattern.has_error() || value.has_error()
     {
         return None;
     }
+    let mut elements = Vec::new();
+    // A name in a conditional pattern can refer to a constant. Explicit
+    // captures and wildcards prove a match without name resolution.
+    let bare_bindings = declaration.kind() == "let_declaration"
+        && declaration.child_by_field_name("alternative").is_none();
+    project_literal(pattern, value, source, bare_bindings, &mut elements)?;
+    Some(elements)
+}
+
+fn project_literal<'tree>(
+    pattern: Node<'tree>,
+    value: Node<'tree>,
+    source: &[u8],
+    bare_bindings: bool,
+    elements: &mut Vec<(Node<'tree>, Node<'tree>)>,
+) -> Option<()> {
+    let value = super::branch_value::ungroup_value(value);
+    if let Some(binding) = literal_binding(pattern, bare_bindings) {
+        if !super::match_flow::simple_value(value, source) || !straight_line_element(value) {
+            return None;
+        }
+        elements.push((binding, value));
+        return Some(());
+    }
+    let aggregate = matches!((pattern.kind(), value.kind()),
+        ("tuple_pattern", "tuple_expression") | ("slice_pattern", "array_expression"));
+    if !aggregate || value.child_by_field_name("length").is_some() {
+        return None;
+    }
     let bindings: Vec<_> = patterns::pattern_parts(pattern).collect();
-    let elements: Vec<_> = children(value).collect();
-    (bindings.len() == elements.len()
-        && bindings.iter().all(|binding| matches!(binding.kind(), "identifier" | "_"))
-        && elements.iter().copied().all(|element| {
-            super::match_flow::simple_value(element, source) && straight_line_element(element)
-        }))
-        .then(|| bindings.into_iter().zip(elements).collect())
+    if pattern.kind() == "tuple_pattern" && bindings.len() == 1
+        && !pattern.children(&mut pattern.walk()).any(|child| child.kind() == ",")
+    {
+        return None;
+    }
+    let values: Vec<_> = children(value).collect();
+    if bindings.len() != values.len() {
+        return None;
+    }
+    for (binding, value) in bindings.into_iter().zip(values) {
+        project_literal(binding, value, source, bare_bindings, elements)?;
+    }
+    Some(())
+}
+
+fn literal_binding(pattern: Node<'_>, bare_bindings: bool) -> Option<Node<'_>> {
+    match pattern.kind() {
+        "_" => Some(pattern),
+        "identifier" if bare_bindings => Some(pattern),
+        "captured_pattern" => {
+            let mut parts = patterns::pattern_parts(pattern);
+            let binding = parts.next().filter(|part| part.kind() == "identifier")?;
+            parts.next().filter(|part| part.kind() == "_")?;
+            parts.next().is_none().then_some(binding)
+        }
+        _ => None,
+    }
 }
 
 fn straight_line_element(node: Node<'_>) -> bool {
@@ -73,8 +121,8 @@ impl Lower<'_> {
         names: &mut Bindings,
         bindings: Vec<Node<'_>>,
     ) -> Option<NodeId> {
-        if let Some(elements) = literal_tuple(node, self.source).filter(|_| self.cfg.keyed_flow.is_some()) {
-            return self.lower_literal_tuple(node, at, names, elements);
+        if let Some(elements) = literal_projection(node, self.source).filter(|_| self.cfg.keyed_flow.is_some()) {
+            return self.lower_literal_projection(node, at, names, elements);
         }
         let value = node.child_by_field_name("value")?;
         let end = if let Some(branch) = branch_value::from_value(value) {
@@ -88,7 +136,7 @@ impl Lower<'_> {
         Some(end)
     }
 
-    fn lower_literal_tuple(
+    pub(super) fn lower_literal_projection(
         &mut self,
         declaration: Node<'_>,
         mut at: NodeId,

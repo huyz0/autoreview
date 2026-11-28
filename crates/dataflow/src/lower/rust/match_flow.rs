@@ -24,6 +24,9 @@ pub(super) fn supports(node: Node<'_>, source: &[u8]) -> bool {
         return false;
     };
     let wildcard = wildcard_arm(*last, source);
+    if arms.len() == 1 && super::destructuring::literal_projection(node, source).is_some() {
+        return pattern(*last, source).is_some();
+    }
     rest.iter().all(|arm| supported_arm(*arm, source))
         && (wildcard || (supported_arm(*last, source) && exhaustiveness::covers_enum(node, &arms, source)))
 }
@@ -55,7 +58,7 @@ pub(super) fn simple_arm(node: Node<'_>, source: &[u8]) -> bool {
         "if_expression" => statement_if(node, source),
         "assignment_expression" => {
             node.child_by_field_name("left").is_some_and(|left| left.kind() == "identifier")
-                && node.child_by_field_name("right").is_some_and(simple_value)
+                && node.child_by_field_name("right").is_some_and(|value| simple_operand(value, source))
         }
         _ => simple_value(node),
     }
@@ -131,6 +134,19 @@ fn arm_pattern<'tree>(arm: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
     pattern.children(&mut pattern.walk()).find(|child| child.kind() == "_" || child.is_named() && !child.is_extra())
 }
 
+pub(super) fn single_match_pattern(node: Node<'_>) -> Option<Node<'_>> {
+    let mut arms = children(node.child_by_field_name("body")?);
+    let arm = arms.next().filter(|arm| arm.kind() == "match_arm")?;
+    if arms.next().is_some() || children(arm).any(|part| matches!(part.kind(), "attribute_item" | "inner_attribute_item")) {
+        return None;
+    }
+    let wrapper = arm.child_by_field_name("pattern")?;
+    if wrapper.child_by_field_name("condition").is_some() {
+        return None;
+    }
+    children(wrapper).next()
+}
+
 pub(super) fn projection_bindings<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Vec<Node<'tree>>> {
     patterns::projected_names(node.child_by_field_name("pattern")?, source)
 }
@@ -165,6 +181,10 @@ impl Lower<'_> {
     pub(super) fn select_match(
         &mut self, node: Node<'_>, at: NodeId, names: &Bindings, mode: Option<&Mode<'_>>,
     ) -> Option<NodeId> {
+        if let Some(elements) = super::destructuring::literal_projection(node, self.source).filter(|_| self.cfg.keyed_flow.is_some()) {
+            let arm = children(node.child_by_field_name("body")?).next()?;
+            return self.lower_projected_arm((node, arm), at, names, mode, elements);
+        }
         let evaluated = self.evaluate(node.child_by_field_name("value"), at, names)?;
         let body = node.child_by_field_name("body")?;
         let mut ends = Vec::new();
@@ -204,6 +224,20 @@ impl Lower<'_> {
             }
         }
         self.join_paths(node, ends)
+    }
+
+    fn lower_projected_arm(
+        &mut self, nodes: (Node<'_>, Node<'_>), at: NodeId, names: &Bindings,
+        mode: Option<&Mode<'_>>, elements: Vec<(Node<'_>, Node<'_>)>,
+    ) -> Option<NodeId> {
+        let mut names = names.clone();
+        let (matched, arm) = nodes;
+        let end = self.lower_literal_projection(matched, at, &mut names, elements)?;
+        let value = arm.child_by_field_name("value")?;
+        match mode {
+            Some(mode) => self.lower_value_arm(value, end, &mut names, mode),
+            None => self.statement(value, end, &mut names),
+        }
     }
 
     fn bind_arm(&mut self, arm: Node<'_>, start: NodeId, names: &Bindings) -> Bindings {

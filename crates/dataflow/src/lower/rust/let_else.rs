@@ -68,6 +68,10 @@ impl Lower<'_> {
         names: &mut Bindings,
     ) -> Option<NodeId> {
         let otherwise = node.child_by_field_name("alternative")?;
+        if let Some(elements) = super::destructuring::literal_projection(node, self.source).filter(|_| self.cfg.keyed_flow.is_some()) {
+            self.skip_calls([otherwise]);
+            return self.lower_literal_projection(node, at, names, elements);
+        }
         let value = node.child_by_field_name("value")?;
         let tested = if let Some(branch) = branch_value::from_value(value) {
             self.lower_branch_value(branch, at, names, &Mode::Project)?

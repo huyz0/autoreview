@@ -14,10 +14,16 @@ pub(super) struct Assignment<'a> {
     local: Option<&'a str>,
 }
 
-pub(super) fn from_value(mut node: Node<'_>) -> Option<Node<'_>> {
+pub(super) fn ungroup_value(mut node: Node<'_>) -> Node<'_> {
     while node.kind() == "parenthesized_expression" {
-        node = site::children(node).next()?;
+        let Some(inner) = site::children(node).next() else { break };
+        node = inner;
     }
+    node
+}
+
+pub(super) fn from_value(node: Node<'_>) -> Option<Node<'_>> {
+    let node = ungroup_value(node);
     matches!(node.kind(), "if_expression" | "match_expression").then_some(node)
 }
 
@@ -63,7 +69,17 @@ pub(crate) fn is_returned(node: Node<'_>) -> bool {
 }
 
 pub(super) fn supports_position(node: Node<'_>, source: &[u8]) -> bool {
-    is_returned(node) || is_initializer(node, source) || is_discarded_statement(node) || argument_flow::is_operand(node)
+    is_returned(node) || is_initializer(node, source) || is_reassignment(node)
+        || is_discarded_statement(node) || argument_flow::is_operand(node)
+}
+
+fn is_reassignment(node: Node<'_>) -> bool {
+    let value = outermost_group(node);
+    value.parent().is_some_and(|assignment| assignment_target(assignment) && assignment.child_by_field_name("right") == Some(value))
+}
+
+fn assignment_target(node: Node<'_>) -> bool {
+    node.kind() == "assignment_expression" && node.child_by_field_name("left").is_some_and(|target| target.kind() == "identifier")
 }
 
 pub(super) fn is_discarded_statement(node: Node<'_>) -> bool {
@@ -89,7 +105,7 @@ fn last_statement(node: Node<'_>) -> bool {
 
 pub(super) fn supports_value_if(node: Node<'_>, source: &[u8]) -> bool {
     let root = conditional::root_branch(node);
-    (is_returned(root) || is_initializer(root, source) || argument_flow::is_operand(root)) && supports_if(node, source)
+    (is_returned(root) || is_initializer(root, source) || is_reassignment(root) || argument_flow::is_operand(root)) && supports_if(node, source)
 }
 
 pub(super) fn supports_if(node: Node<'_>, source: &[u8]) -> bool {
@@ -114,6 +130,21 @@ fn alternative(node: Node<'_>) -> Option<Node<'_>> {
 }
 
 impl Lower<'_> {
+    pub(super) fn lower_assignment(&mut self, node: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
+        let target = node.child_by_field_name("left").and_then(|target| self.variable(target, names));
+        let right = node.child_by_field_name("right");
+        if let Some(branch) = right.and_then(from_value).filter(|_| assignment_target(node)) {
+            return self.lower_branch_value(branch, at, names, &Mode::Assign(Assignment {
+                declaration: node,
+                local: target.as_deref(),
+            }));
+        }
+        let end = self.value(right, at, names, target)?;
+        record_evaluation(&mut self.cfg, end, node);
+        self.keyed_write(node, end);
+        Some(end)
+    }
+
     pub(super) fn lower_local(&mut self, stmt: Node<'_>, at: NodeId, names: &mut Bindings) -> Option<NodeId> {
         if let Some(bindings) = destructuring::declaration_bindings(stmt, self.source) {
             return self.destructured_declaration(stmt, at, names, bindings);
@@ -282,7 +313,7 @@ impl Lower<'_> {
             }
         }
         if let Some(target) = declaration
-            .child_by_field_name("pattern")
+            .child_by_field_name("pattern").or_else(|| declaration.child_by_field_name("left"))
             .filter(|target| target.kind() == "identifier" && self.cfg.keyed_flow.is_some())
         {
             let name = self.text(target).to_owned();
@@ -292,7 +323,7 @@ impl Lower<'_> {
                 end,
                 Stmt::Rebind(BindingWrite {
                     name,
-                    start: declaration.start_byte(),
+                    start: if declaration.kind() == "assignment_expression" { target.start_byte() } else { declaration.start_byte() },
                     value,
                 }),
                 line(declaration),
