@@ -21,6 +21,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         let mut program = Self {
             frames: Vec::new(),
             targets: BTreeMap::new(),
+            kotlin_names: BTreeMap::new(),
             associated: Associated::default(),
             paths: BTreeMap::new(),
             unresolved: RefCell::new(BTreeSet::new()),
@@ -53,6 +54,9 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
     ) {
         let node = function.node;
         let scope = scope(node, unit);
+        if spec.is_none() {
+            self.index_kotlin_name(node, source, scope);
+        }
         let params = parameters(node, source);
         let export = params.as_ref().and_then(|params| {
             let name = candidate(node, source)?;
@@ -87,6 +91,19 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             params: params.unwrap_or_default(),
             export,
         });
+    }
+
+    fn index_kotlin_name(&mut self, node: Node<'_>, source: &[u8], scope: Scope) {
+        if node.kind() != "function_declaration"
+            || !node.parent().is_some_and(|parent| matches!(parent.kind(), "source_file" | "class_body"))
+            || !crate::lower::site::children(node).any(|child| child.kind() == "function_value_parameters") {
+            return;
+        }
+        if let Some(name) = node.child_by_field_name("name").and_then(|name| name.utf8_text(source).ok()) {
+            // Count declarations with defaults or varargs even if their body is not analyzable.
+            self.kotlin_names.entry(scope).or_default().entry(name.to_owned())
+                .and_modify(|candidate| *candidate = None).or_insert(Some(self.frames.len()));
+        }
     }
 }
 

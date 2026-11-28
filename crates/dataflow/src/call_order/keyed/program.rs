@@ -34,6 +34,7 @@ pub struct KeyedUnit<'src, 'tree, 'graph> {
 pub(in crate::call_order) struct Program<'spec, 'src, 'graph> {
     pub frames: Vec<Frame<'spec, 'src, 'graph>>,
     targets: BTreeMap<(Scope, String, usize), Option<usize>>,
+    kotlin_names: BTreeMap<Scope, BTreeMap<String, Option<usize>>>,
     associated: Associated,
     units: Vec<Unit<'src, 'graph>>,
     paths: BTreeMap<&'src str, usize>,
@@ -107,6 +108,19 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             return target;
         }
         self.resolve_named(from, name, root, site, arity)
+    }
+
+    pub(super) fn unique_kotlin_name(&self, from: usize, name: &str, target: usize) -> bool {
+        let frame = &self.frames[from];
+        let callee = &self.frames[target];
+        let lookup = |scope, name: &str| self.kotlin_names.get(&scope).and_then(|names| names.get(name)).copied();
+        let only_target = |scope, name: &str| lookup(scope, name).is_none_or(|candidate| candidate == Some(target));
+        callee.export.as_ref().is_some_and(|export| lookup(callee.scope, &export.name) == Some(Some(target)))
+            && only_target(frame.scope, name) && only_target(Scope::File(frame.unit), name)
+            && self.units[frame.unit].imports.iter().filter(|binding| binding.owner.is_none()).all(|binding| {
+                binding.target(name).zip(self.paths.get(binding.path.as_str()))
+                    .is_none_or(|(name, &unit)| only_target(Scope::File(unit), name))
+            })
     }
 
     pub(super) fn entry_frames(&self) -> impl Iterator<Item = usize> + '_ {

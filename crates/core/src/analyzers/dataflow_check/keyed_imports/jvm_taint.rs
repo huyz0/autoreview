@@ -112,6 +112,73 @@ class Terminal {
     }
 
     #[test]
+    fn kotlin_binds_reordered_named_arguments_at_each_helper_hop() {
+        let findings = review("Kotlin", &[
+            ("app/Entry.kt", r#"package app
+import helpers.forward as relay
+fun handle() {
+    val input = readInput()
+    relay(payload = input, label = "audit")
+    relay(payload = "literal", label = input)
+    relay("audit", payload = input)
+}"#),
+            ("helpers/Relay.kt", r#"package helpers
+fun forward(label: String, payload: String) {
+    store(raw = payload, topic = label)
+}"#),
+            ("helpers/Terminal.kt", r#"package helpers
+fun store(topic: String, raw: String) {
+    sensitiveWrite(topic, raw)
+}"#),
+        ], "app/Entry.kt");
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+        for (finding, line) in findings.iter().zip([5, 7]) {
+            assert_single_path(std::slice::from_ref(finding), "app/Entry.kt", line, "helpers/Terminal.kt", 3);
+        }
+    }
+
+    #[test]
+    fn kotlin_named_helper_arguments_stay_clean_after_validation() {
+        let findings = review("Kotlin", &[
+            ("app/Entry.kt", r#"package app
+import helpers.forward
+fun handle() {
+    val input = readInput()
+    forward(payload = input, label = "audit")
+}"#),
+            ("helpers/Relay.kt", r#"package helpers
+fun forward(label: String, payload: String) {
+    val clean = validatedValue(payload)
+    store(raw = clean, topic = label)
+}"#),
+            ("helpers/Terminal.kt", r#"package helpers
+fun store(topic: String, raw: String) {
+    sensitiveWrite(topic, raw)
+}"#),
+        ], "app/Entry.kt");
+        assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    #[test]
+    fn kotlin_named_helper_calls_decline_competing_default_overloads() {
+        let findings = review("Kotlin", &[
+            ("app/Entry.kt", r#"package app
+import helpers.forward
+fun handle() {
+    val input = readInput()
+    forward(payload = input)
+}"#),
+            ("helpers/Relay.kt", r#"package helpers
+fun forward(payload: Any) {
+    sensitiveWrite("audit", payload)
+}"#),
+            ("helpers/OtherRelay.kt", r#"package helpers
+fun forward(payload: String, label: String = "audit") {}"#),
+        ], "app/Entry.kt");
+        assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    #[test]
     fn kotlin_tracks_import_aliases_and_respects_validation_and_argument_order() {
         let findings = review("Kotlin", &[
             ("app/Entry.kt", r#"package app

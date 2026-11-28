@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use tree_sitter::Node;
 
+use crate::cfg::CallSite;
 use crate::lower::site::children;
 use crate::taint::{has_direct_source, scan_helper_calls, TaintHit, TaintSpec, TaintedCall};
 
@@ -71,8 +72,8 @@ impl Analysis<'_, '_, '_> {
         hits.into_values().collect()
     }
 
-    fn record_call(&mut self, root: usize, call: TaintedCall<'_>, hits: &mut BTreeMap<HitKey, HelperTaintHit>) {
-        let Some(target) = self.target(root, &call) else { return };
+    fn record_call(&mut self, root: usize, mut call: TaintedCall<'_>, hits: &mut BTreeMap<HitKey, HelperTaintHit>) {
+        let Some(target) = self.bind_call(root, &mut call) else { return };
         let unit = self.program.frames[root].unit;
         let Some(caller_path) = self.program.path(unit) else { return };
         for (slot, arg) in call.arguments {
@@ -87,9 +88,22 @@ impl Analysis<'_, '_, '_> {
         }
     }
 
-    fn target(&self, from: usize, call: &TaintedCall<'_>) -> Option<usize> {
+    fn bind_call(&self, from: usize, call: &mut TaintedCall<'_>) -> Option<usize> {
         let target = self.program.target(from, call.name, call.site)?;
-        self.eligible[target].then_some(target)
+        if !self.eligible[target] {
+            return None;
+        }
+        if !call.site.named_arguments.is_empty() {
+            let frame = &self.program.frames[target];
+            if !self.program.unique_kotlin_name(from, call.name, target) {
+                return None;
+            }
+            let slots = named_slots(call.site, &frame.params)?;
+            for (index, _) in &mut call.arguments {
+                *index = slots[*index];
+            }
+        }
+        Some(target)
     }
 
     fn summarize(&mut self, target: usize, slot: usize, hops: usize) -> Vec<Sink> {
@@ -102,8 +116,8 @@ impl Analysis<'_, '_, '_> {
         let scan = scan_helper_calls(&self.spec, frame.graph, Some(parameter));
         let mut sinks: Vec<_> = scan.sinks.into_iter().map(|hit| Sink { unit: frame.unit, hit }).collect();
         if hops > 1 {
-            for call in scan.calls {
-                let Some(callee) = self.target(target, &call) else { continue };
+            for mut call in scan.calls {
+                let Some(callee) = self.bind_call(target, &mut call) else { continue };
                 for (slot, _) in call.arguments {
                     sinks.extend(self.summarize(callee, slot, hops - 1));
                 }
@@ -114,6 +128,27 @@ impl Analysis<'_, '_, '_> {
         self.summaries.insert(key, sinks.clone());
         sinks
     }
+}
+
+fn named_slots(site: &CallSite, parameters: &[String]) -> Option<Vec<usize>> {
+    if site.arguments.len() != parameters.len() {
+        return None;
+    }
+    let mut bound = vec![false; parameters.len()];
+    let mut named = site.named_arguments.iter().peekable();
+    let mut reordered = false;
+    (0..parameters.len()).map(|index| {
+        let slot = match named.next_if(|arg| arg.index == index) {
+            Some(arg) => parameters.iter().position(|name| *name == arg.label)?,
+            None if !reordered => index,
+            None => return None,
+        };
+        if std::mem::replace(&mut bound[slot], true) {
+            return None;
+        }
+        reordered |= slot != index;
+        Some(slot)
+    }).collect()
 }
 
 fn eligible_helper(node: Node<'_>) -> bool {

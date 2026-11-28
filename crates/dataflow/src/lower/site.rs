@@ -1,6 +1,6 @@
 use tree_sitter::Node;
 
-use crate::cfg::{CallSite, CallTarget, IdentityOperand, Stmt, VarId};
+use crate::cfg::{CallSite, CallTarget, IdentityOperand, NamedArgument, Stmt, VarId};
 
 pub(super) fn named(
     name: String,
@@ -30,10 +30,15 @@ pub(crate) fn capture(call: Node<'_>, source: &[u8]) -> Option<Box<CallSite>> {
     if optional(call) || args.into_iter().flat_map(children).any(has_spread) {
         return None;
     }
-    let mut arguments: Vec<_> = args.into_iter().flat_map(children)
-        .map(|node| {
+    let mut named_arguments = Vec::new();
+    let mut arguments: Vec<_> = args.into_iter().flat_map(children).enumerate()
+        .map(|(index, node)| {
+            if let Some((label, value)) = kotlin_named_argument(node, source) {
+                named_arguments.push(NamedArgument { index, label: label.to_owned(), value: argument_operand(value, source) });
+                return None;
+            }
             let value = argument(node)?;
-            operand(value, source).or_else(|| call_result_argument(value, source))
+            argument_operand(value, source)
         })
         .collect();
     arguments.extend(trailing_lambda.then_some(None));
@@ -47,8 +52,23 @@ pub(crate) fn capture(call: Node<'_>, source: &[u8]) -> Option<Box<CallSite>> {
         observed: awaited || returned,
         receiver,
         arguments,
+        named_arguments: named_arguments.into_boxed_slice(),
         local: local_call(call),
     }))
+}
+
+fn kotlin_named_argument<'src, 'tree>(node: Node<'tree>, source: &'src [u8]) -> Option<(&'src str, Node<'tree>)> {
+    if node.kind() != "value_argument" || node.has_error()
+        || !node.children(&mut node.walk()).any(|part| part.kind() == "=") {
+        return None;
+    }
+    let mut parts = children(node);
+    let label = parts.next().filter(|node| identifier(*node))?.utf8_text(source).ok()?;
+    Some((label, parts.next()?))
+}
+
+fn argument_operand(value: Node<'_>, source: &[u8]) -> Option<IdentityOperand> {
+    operand(value, source).or_else(|| call_result_argument(value, source))
 }
 
 fn call_result_argument(node: Node<'_>, source: &[u8]) -> Option<IdentityOperand> {
@@ -86,7 +106,7 @@ pub(super) fn await_binding(node: Node<'_>, source: &[u8]) -> Option<Stmt> {
         site: Some(Box::new(CallSite {
             start: node.start_byte(), end: node.end_byte(), discarded: false,
             awaited: true, observed: true, receiver: Some(receiver.to_owned()),
-            arguments: Vec::new(), local: false,
+            arguments: Vec::new(), named_arguments: Box::default(), local: false,
         })),
     })
 }
