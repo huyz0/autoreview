@@ -1416,7 +1416,7 @@ fn rust_enum_exhaustiveness_requires_unconditional_whole_variants() {
 
 #[test]
 fn rust_unmodeled_matches_remain_incomplete() {
-    for body in ["match x { 0 if check() && defer(|| other()) > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { 0 => {} };", "match check([risky(); 3]) { _ => {} };", "match x { _ => { let y = defer(|| risky()); } };", "consume(match x { _ => {} });"] {
+    for body in ["match x { 0 if check() && defer(|| other()) > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { 0 => {} };", "match check([risky(); 3]) { _ => {} };", "match x { _ => { let y = defer(|| risky()); } };", "consume([match x { _ => {} }]);", "consume({ consume(match x { _ => {} }) });"] {
         let root = write_single_file("lib.rs", &format!("fn run(x: u8) {{ {body} }}\n"));
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("lib.rs")), "{body}: {:?}", result.coverage);
@@ -1500,6 +1500,51 @@ fn rust_guarded_wildcard_let_chain_short_circuits() {
         "fn closed(tag: u8) {\n match tag { _ if let Some(_) = begin() => { finish(); }, _ => { finish(); } };\n}\n",
     );
     assert_rust_match_cleanup("rust-guarded-wildcard-chain", source);
+}
+
+#[test]
+fn rust_branch_call_arguments_preserve_evaluation_order_and_early_exits() {
+    let source = concat!(
+        "fn open(flag: bool) {\n invoke(begin(), if flag { token() } else { return }, finish());\n}\n",
+        "fn closed(flag: bool) {\n begin().invoke((match flag { true => token(), _ => { finish(); return } }), finish());\n}\n",
+        "fn absent(flag: bool) {\n invoke(token(), if flag { return } else { return }, begin());\n}\n",
+        "fn unit(flag: bool) {\n invoke(if flag { begin(); }, finish());\n}\n",
+    );
+    assert_rust_match_cleanup("rust-branch-argument-order", source);
+}
+
+#[test]
+fn rust_branch_call_argument_exit_keeps_prior_obligations_visible() {
+    let source = "fn open() {\n begin(); finish(if true { return } else { return });\n}\n";
+    assert_rust_match_cleanup("rust-branch-argument-skipped-cleanup", source);
+}
+
+#[test]
+fn rust_branch_call_argument_question_mark_skips_later_cleanup() {
+    let source = "fn open(flag: bool) -> std::io::Result<()> {\n invoke(begin(), if flag { token()? } else { fallback() }, finish());\n Ok(())\n}\n";
+    assert_rust_match_cleanup("rust-branch-argument-try-cleanup", source);
+}
+
+#[test]
+fn rust_branch_call_arguments_transfer_only_reachable_results() {
+    let source = concat!(
+        "use std::fs::remove_file;\n",
+        "fn ignored(_value: std::io::Result<()>) {}\n",
+        "fn kept(result: std::io::Result<()>, _unit: ()) -> std::io::Result<()> { result }\n",
+        "fn open(flag: bool) {\n",
+        " ignored(if flag { remove_file(\"one.txt\") } else { return });\n",
+        "}\n",
+        "fn closed(flag: bool) -> std::io::Result<()> {\n",
+        " kept(match flag { true => remove_file(\"two.txt\"), _ => return Ok(()) }, ())\n",
+        "}\n",
+        "fn exited(flag: bool) -> std::io::Result<()> {\n",
+        " kept(remove_file(\"three.txt\"), if flag { return Ok(()) } else { return Ok(()) })\n",
+        "}\n",
+    );
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 5), ("lib.rs", 11)]);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", report.coverage);
 }
 
 #[test]

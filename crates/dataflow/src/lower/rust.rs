@@ -9,12 +9,14 @@ mod support;
 mod branch_value;
 mod destructuring;
 mod patterns;
+mod argument_flow;
 
 use support::{simple_binding, supported};
 pub(crate) use destructuring::iterator_bindings;
 pub use support::{match_arm_bindings, match_binding_lines, supports_function, supports_match};
 pub use support::{match_arm_bindings_with_source, match_binding_lines_with_source, supports_function_with_source, supports_match_with_source};
 pub(crate) use support::{discards_match, lexical_bindings, pattern_projection_sites};
+pub(crate) use argument_flow::{stages_call, OPERAND_TEMPORARY};
 
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -82,8 +84,13 @@ impl Lower<'_> {
 
     fn block(&mut self, body: Node<'_>, mut at: NodeId, outer: &Bindings) -> Option<NodeId> {
         let mut names = outer.clone();
-        for stmt in body.named_children(&mut body.walk()) {
-            at = self.statement(stmt, at, &mut names)?;
+        let mut statements = super::site::children(body);
+        while let Some(stmt) = statements.next() {
+            let Some(end) = self.statement(stmt, at, &mut names) else {
+                self.skip_calls(statements);
+                return None;
+            };
+            at = end;
         }
         Some(at)
     }
@@ -117,13 +124,13 @@ impl Lower<'_> {
                 let target = expr
                     .child_by_field_name("left")
                     .and_then(|n| self.variable(n, names));
-                let end = self.value(expr.child_by_field_name("right"), at, names, target);
+                let end = self.value(expr.child_by_field_name("right"), at, names, target)?;
                 super::record_evaluation(&mut self.cfg, end, expr);
                 self.keyed_write(expr, end);
                 Some(end)
             }
             _ => {
-                let end = self.value(Some(expr), at, names, None);
+                let end = self.value(Some(expr), at, names, None)?;
                 super::record_evaluation(&mut self.cfg, end, expr);
                 Some(end)
             }
@@ -146,7 +153,7 @@ impl Lower<'_> {
     }
 
     fn jump(&mut self, stmt: Node<'_>, at: NodeId, names: &Bindings) {
-        let at = self.value(stmt.named_child(0), at, names, None);
+        let Some(at) = self.value(stmt.named_child(0), at, names, None) else { return };
         super::record_evaluation(&mut self.cfg, at, stmt);
         if let Some(&(head, after)) = self.loops.last() {
             let target = if stmt.kind() == "break_expression" {
@@ -162,10 +169,10 @@ impl Lower<'_> {
         if branch_value::is_returned(expr) && branch_value::supports_if(expr, self.source) {
             return self.lower_branch_value(expr, at, names, &branch_value::Mode::Return);
         }
-        if let Some(test) = conditional::control_test(expr) {
+        if let Some(test) = conditional::control_test(expr, self.source) {
             return self.tested_branch(test, at, names);
         }
-        let condition = self.test(expr, at, names);
+        let condition = self.test(expr, at, names)?;
         if self.cfg.keyed_flow.is_some() {
             self.cfg.nodes[condition].condition = super::keyed_syntax::condition(expr, self.source);
         }
@@ -208,14 +215,14 @@ impl Lower<'_> {
     }
 
     fn loop_body(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
-        if let Some(test) = conditional::control_test(expr) {
+        if let Some(test) = conditional::control_test(expr, self.source) {
             return self.tested_loop(test, at, names);
         }
         let head = self.cfg.push_node(line(expr));
         let after = self.cfg.push_node(expr.end_position().row as u32 + 1);
-        let iterable = self.evaluate(expr.child_by_field_name("value"), at, names);
+        let iterable = self.evaluate(expr.child_by_field_name("value"), at, names)?;
         self.edge(iterable, head, EdgeKind::Fallthrough);
-        let condition = self.test(expr, head, names);
+        let condition = self.test(expr, head, names)?;
         if self.cfg.keyed_flow.is_some() {
             self.cfg.nodes[condition].condition = super::keyed_syntax::condition(expr, self.source);
             self.cfg.nodes[condition].loop_condition = true;
@@ -251,16 +258,16 @@ impl Lower<'_> {
         })
     }
 
-    fn test(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> NodeId {
+    fn test(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
         self.evaluate(expr.child_by_field_name("condition"), at, names)
     }
 
-    fn evaluate(&mut self, expr: Option<Node<'_>>, at: NodeId, names: &Bindings) -> NodeId {
-        let end = self.value(expr, at, names, None);
+    fn evaluate(&mut self, expr: Option<Node<'_>>, at: NodeId, names: &Bindings) -> Option<NodeId> {
+        let end = self.value(expr, at, names, None)?;
         if let Some(expr) = expr {
             super::record_evaluation(&mut self.cfg, end, expr);
         }
-        end
+        Some(end)
     }
 
     fn fresh(&mut self, name: &str) -> String {

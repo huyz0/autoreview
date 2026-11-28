@@ -15,6 +15,7 @@ pub(super) enum Place {
     Field(usize, usize),
     Capture(usize, usize),
     CallResult(usize, usize),
+    Operand(usize, usize),
     CallComponent(usize, usize),
     Return,
 }

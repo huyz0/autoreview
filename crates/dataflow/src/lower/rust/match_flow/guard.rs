@@ -43,14 +43,14 @@ fn predicate(mut node: Node<'_>) -> Predicate<'_> {
     Predicate::Value(node)
 }
 
-pub(in crate::lower::rust) fn supported(node: Node<'_>) -> bool {
+pub(in crate::lower::rust) fn supported(node: Node<'_>, source: &[u8]) -> bool {
     match predicate(node) {
         Predicate::And(left, right) | Predicate::Or(left, right) => {
-            supported(left) && supported(right)
+            supported(left, source) && supported(right, source)
         }
-        Predicate::Not(value) => supported(value),
-        Predicate::Comparison(left, right) => simple_value(left) && simple_value(right),
-        Predicate::Value(value) => simple_value(value),
+        Predicate::Not(value) => supported(value, source),
+        Predicate::Comparison(left, right) => simple_value(left, source) && simple_value(right, source),
+        Predicate::Value(value) => simple_value(value, source),
     }
 }
 
@@ -84,13 +84,13 @@ impl Lower<'_> {
             }
             Predicate::Not(value) => self.lower_guard(value, at, (fail, pass), names),
             Predicate::Comparison(left, right) => {
-                let end = self.evaluate(Some(left), at, names);
-                let end = self.evaluate(Some(right), end, names);
+                let Some(end) = self.evaluate(Some(left), at, names)
+                    .and_then(|left| self.evaluate(Some(right), left, names)) else { return };
                 self.edge(end, pass, EdgeKind::True);
                 self.edge(end, fail, EdgeKind::False);
             }
             Predicate::Value(value) => {
-                let end = self.evaluate(Some(value), at, names);
+                let Some(end) = self.evaluate(Some(value), at, names) else { return };
                 match self.text(value) {
                     "true" => self.edge(end, pass, EdgeKind::True),
                     "false" => self.edge(end, fail, EdgeKind::False),

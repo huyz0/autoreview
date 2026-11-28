@@ -40,7 +40,7 @@ impl Lower<'_> {
         let end = if let Some(branch) = branch_value::from_value(value) {
             self.lower_branch_value(branch, at, names, &Mode::Project)?
         } else {
-            self.evaluate(Some(value), at, names)
+            self.evaluate(Some(value), at, names)?
         };
         for binding in bindings {
             self.project_pattern_binding(binding, end, names);

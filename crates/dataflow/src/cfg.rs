@@ -11,10 +11,17 @@ pub type VarId = String;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Evaluation {
+    pub(crate) operand: Option<OperandEvaluation>,
     pub(crate) span: std::ops::Range<usize>,
     pub(crate) syntax_kind: u16,
     pub(crate) returned: bool,
     pub(crate) assignment: Option<(std::ops::Range<usize>, u16)>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OperandEvaluation {
+    pub(crate) slot: std::ops::Range<usize>,
+    pub(crate) has_value: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +204,7 @@ pub struct Cfg<S> {
     pub(crate) keyed_flow: Option<usize>,
     pub(crate) keyed_exceptions: bool,
     pub(crate) loop_targets: Vec<(NodeId, NodeId, NodeId)>,
+    pub(crate) unreachable_calls: Vec<usize>,
 }
 
 impl<S> Cfg<S> {
@@ -244,7 +252,7 @@ impl<S> Cfg<S> {
     }
 
     pub fn new_empty() -> Self {
-        Cfg { entry: 0, exit: 0, nodes: Vec::new(), edges: Vec::new(), keyed_flow: None, keyed_exceptions: false, loop_targets: Vec::new() }
+        Cfg { entry: 0, exit: 0, nodes: Vec::new(), edges: Vec::new(), keyed_flow: None, keyed_exceptions: false, loop_targets: Vec::new(), unreachable_calls: Vec::new() }
     }
 }
 

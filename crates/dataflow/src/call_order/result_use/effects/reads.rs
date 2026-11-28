@@ -99,6 +99,7 @@ impl Lower<'_, '_, '_> {
         if let Some(index) = self.closure_call(node) {
             todo.push(Visit::Invoke(index, demand));
         }
+        if self.read_staged_call(node, effects) { return; }
         let parts: Vec<_> = site::children(node).collect();
         todo.extend(parts.into_iter().rev().map(|child| Visit::Syntax(child, Demand::Observed)));
     }
@@ -118,7 +119,7 @@ impl Lower<'_, '_, '_> {
             (specialize(&summary.when_discarded, &arguments, self.source, kotlin, &self.plan.syntax),
              specialize(&summary.when_observed, &arguments, self.source, kotlin, &self.plan.syntax))
         };
-        let Some(arguments) = self.lower_helper_arguments(arguments, effects) else { return true; };
+        let Some(arguments) = self.lower_helper_arguments(node, arguments, effects) else { return true; };
         let origins = |values: &[(super::Origin, bool)]| {
             values
                 .iter()
@@ -160,7 +161,10 @@ impl Lower<'_, '_, '_> {
         true
     }
 
-    fn lower_helper_arguments(&self, arguments: Vec<Node<'_>>, effects: &mut Vec<Effect>) -> Option<Vec<Option<Place>>> {
+    fn lower_helper_arguments(&self, call: Node<'_>, arguments: Vec<Node<'_>>, effects: &mut Vec<Effect>) -> Option<Vec<Option<Place>>> {
+        if self.staged_call(call) {
+            return Some(arguments.into_iter().map(|arg| Some(operand_slot(arg))).collect());
+        }
         let multi = (arguments.len() == 1).then(|| transparent(arguments[0]))
             .and_then(|call| self.plan.result_components.get(&call.start_byte()).map(|shape| (call, shape)));
         let arguments = if let Some((call, shape)) = multi {
@@ -194,6 +198,10 @@ impl Lower<'_, '_, '_> {
     fn opaque_arguments(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
         if !matches!(node.kind(), "call_expression" | "method_invocation" | "new_expression") || self.origin(node).is_some() { return; }
         let Some(arguments) = site::arguments(node) else { return; };
+        if self.staged_call(node) {
+            effects.extend(site::children(arguments).map(|argument| Effect::OpaqueRead(operand_slot(argument))));
+            return;
+        }
         for argument in site::children(arguments).filter_map(site::argument) {
             let argument = transparent(argument);
             if let Some(place) = self.place(argument, false) {
@@ -206,6 +214,17 @@ impl Lower<'_, '_, '_> {
                 effects.push(Effect::OpaqueRead(temporary));
             }
         }
+    }
+
+    fn staged_call(&self, node: Node<'_>) -> bool {
+        self.language == crate::call_order::ContractLanguage::Rust && crate::lower::rust::stages_call(node)
+    }
+
+    fn read_staged_call(&self, node: Node<'_>, effects: &mut Vec<Effect>) -> bool {
+        if !self.staged_call(node) { return false; }
+        let operands = site::receiver(node).into_iter().chain(site::arguments(node).into_iter().flat_map(site::children));
+        effects.extend(operands.map(|operand| Effect::Read(operand_slot(operand))));
+        true
     }
 
     fn opaque_wrapped_arguments(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
@@ -239,4 +258,8 @@ impl Lower<'_, '_, '_> {
         }
         string_references(node, self.source, self.language, read);
     }
+}
+
+fn operand_slot(node: Node<'_>) -> Place {
+    Place::Operand(node.start_byte(), node.end_byte())
 }

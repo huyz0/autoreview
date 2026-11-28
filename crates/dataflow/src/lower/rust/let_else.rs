@@ -29,7 +29,7 @@ fn supported_initializer(value: Node<'_>, source: &[u8]) -> bool {
         }
         Some(branch) if value != branch => match_flow::supports(branch, source),
         Some(_) => false,
-        None => match_flow::simple_value(value),
+        None => match_flow::simple_value(value, source),
     }
 }
 
@@ -72,7 +72,7 @@ impl Lower<'_> {
         let tested = if let Some(branch) = branch_value::from_value(value) {
             self.lower_branch_value(branch, at, names, &Mode::Project)?
         } else {
-            self.evaluate(Some(value), at, names)
+            self.evaluate(Some(value), at, names)?
         };
         let unmatched = self.cfg.push_node(line(otherwise));
         if node.child_by_field_name("pattern").is_none_or(|pattern| pattern.kind() != "_") {

@@ -165,6 +165,7 @@ impl Sources {
         if cfg.keyed_flow == Some(0) {
             return None;
         }
+        self.calls.extend(&cfg.unreachable_calls);
         for stmt in cfg.nodes.iter().flat_map(|node| &node.stmts) {
             match stmt {
                 Stmt::Call {
