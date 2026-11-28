@@ -163,11 +163,13 @@ staged aggregate remain unresolved. [Rust array expressions](https://doc.rust-la
 
 Result-use analysis distinguishes literal array indices and numeric tuple
 fields on direct literals and immutable local bindings initialized from those
-literals. A local qualifies when all its uses are supported element reads.
-Observing one element leaves other elements' results eligible for discarded
-result findings. Dynamic indices, tuple structs, nested projections, borrows,
-mutation, and aggregate values that escape their local binding still need
-additional modeling. [Rust array indexing](https://doc.rust-lang.org/reference/expressions/array-expr.html#array-and-slice-indexing-expressions) [Rust tuple indexing](https://doc.rust-lang.org/reference/expressions/tuple-expr.html#tuple-indexing-expressions)
+literals. It follows chains such as `matrix[1][0]` and `pair.0[1].2` when the
+literal initializer determines each traversed shape. A local qualifies when
+all its uses are supported element reads. Reading a selected leaf leaves
+sibling results eligible for discarded-result findings. Using a selected
+subaggregate as a whole observes its contents. Dynamic indices, tuple
+structs, intermediate values with unknown shapes, borrows, mutation, and
+escapes of the original binding still need additional modeling. [Rust array indexing](https://doc.rust-lang.org/reference/expressions/array-expr.html#array-and-slice-indexing-expressions) [Rust tuple indexing](https://doc.rust-lang.org/reference/expressions/tuple-expr.html#tuple-indexing-expressions)
 
 An array repeat can use a supported `if` or `match` as its repeated value.
 Autoreview evaluates that value once, including when the length is zero. A

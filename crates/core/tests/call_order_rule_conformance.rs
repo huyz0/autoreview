@@ -1617,9 +1617,61 @@ fn shadowed() -> (std::io::Result<()>, std::io::Result<()>) {
     (earlier, pair.1)
 }
 "#;
+    assert_rust_element_reads(source, &[("lib.rs", 5), ("lib.rs", 10), ("lib.rs", 15), ("lib.rs", 21), ("lib.rs", 32), ("lib.rs", 36)]);
+}
+
+#[test]
+fn rust_nested_element_reads_follow_the_selected_path() {
+    let source = r#"use std::fs::remove_file;
+fn array(flag: bool) -> bool {
+    let grid = [
+        [
+            remove_file("unused"),
+            remove_file("unused"),
+        ],
+        [remove_file("unused"), if flag { remove_file("used") } else { Ok(()) }],
+    ];
+    grid[(0x1_usize)][1].is_ok()
+}
+fn tuple() -> std::io::Result<()> {
+    let pair = (
+        (remove_file("unused"), remove_file("used")),
+        (remove_file("unused"), ()),
+    );
+    pair.0.1
+}
+fn direct(flag: bool) -> bool {
+    (
+        [(remove_file("unused"), remove_file("used"))],
+        [match flag { true => remove_file("unused"), _ => Ok(()) }; 1],
+    ).0[0].1.is_ok()
+}
+fn returned_row() -> [std::io::Result<()>; 2] {
+    let grid = (
+        [remove_file("unused"), Ok(())],
+        [remove_file("used"), remove_file("used")],
+    );
+    grid.1
+}
+fn whole_row_or_leaf(flag: bool) -> (std::io::Result<()>, std::io::Result<()>) {
+    let grid = ((remove_file("used"), remove_file("used")), (remove_file("used"), remove_file("unused")));
+    if flag { grid.0 } else { (grid.1.0, Ok(())) }
+}
+fn nested_repeat(flag: bool) -> bool {
+    let pair = (remove_file("unused"), [if flag { remove_file("used") } else { Ok(()) }; 1]);
+    pair.1[0].is_ok()
+}
+"#;
+    let lines = source.lines().enumerate()
+        .filter(|(_, line)| line.contains("remove_file(\"unused\")"))
+        .map(|(index, _)| ("lib.rs", index as u32 + 1))
+        .collect::<Vec<_>>();
+    assert_rust_element_reads(source, &lines);
+}
+
+fn assert_rust_element_reads(source: &str, discarded: &[(&str, u32)]) {
     let root = write_single_file("lib.rs", source);
-    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result",
-        &[("lib.rs", 5), ("lib.rs", 10), ("lib.rs", 15), ("lib.rs", 21), ("lib.rs", 32), ("lib.rs", 36)]);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", discarded);
     let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
     assert!(!report.coverage.iter().any(|issue| matches!(issue.reason.as_str(),
         "unsupported_rust_control_flow" | "rust_aggregate_element_projection")), "{:?}", report.coverage);
@@ -1647,10 +1699,20 @@ fn mutated(flag: bool) -> bool {
     pair.0 = Ok(());
     pair.0.is_ok()
 }
+fn dynamic_suffix(flag: bool, index: usize) -> bool {
+    let grid = [[if flag { remove_file("maybe used") } else { Ok(()) }, Ok(())]];
+    let _ = grid[0][0].is_ok();
+    grid[0][index].is_ok()
+}
+fn borrowed_suffix(flag: bool) -> bool {
+    let pair = (((), if flag { remove_file("borrowed") } else { Ok(()) }), ());
+    let borrowed = &pair.0.1;
+    borrowed.is_ok()
+}
 "#;
     let root = write_single_file("lib.rs", source);
     assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[]);
-    assert_rust_projection_limits(root.path(), "rust_aggregate_element_projection", &[3, 7, 12, 17]);
+    assert_rust_projection_limits(root.path(), "rust_aggregate_element_projection", &[3, 7, 12, 17, 22, 27]);
 }
 
 #[test]

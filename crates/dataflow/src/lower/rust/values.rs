@@ -40,10 +40,8 @@ impl Lower<'_> {
 
     fn eager_values<'tree>(&mut self, expr: Node<'_>, mut operands: impl Iterator<Item = Node<'tree>>, mut at: NodeId, names: &Bindings) -> Option<NodeId> {
         let staged = argument_flow::stages_aggregate(expr);
-        let projection_owner = (!staged && self.cfg.keyed_flow.is_some()
-            && (element_access::local_aggregate(expr).is_some()
-                || element_access::direct_projection(expr, self.source).is_some()))
-            .then_some(expr.start_byte());
+        let projection_owner = (!staged && self.cfg.keyed_flow.is_some())
+            .then(|| element_access::projection_owner(expr, self.source)).flatten();
         while let Some(operand) = operands.next() {
             let end = if staged {
                 self.lower_operand(operand, at, names, true).map(|(end, _)| end)
