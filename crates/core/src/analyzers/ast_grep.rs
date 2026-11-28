@@ -1,5 +1,6 @@
 mod catalog;
 mod callback_coverage;
+mod go_shutdown;
 
 pub use catalog::{find_rule_definition, list_builtin_rules, semantic_rule_ids, RuleCatalogEntry, RuleDefinition, RuleMeta, RuleMetadataBlock};
 pub(crate) use catalog::{metadata_to_meta_map, walk_rule_contents};
@@ -129,6 +130,7 @@ pub fn run_ast_grep_with_coverage(repo_root: &Path, changed_files: &[String], re
     let metadata = rule_metadata(&roots);
     let pack_provenance = pack_rule_provenance(registered_packs);
     let mut findings: Vec<_> = matches.iter().filter_map(|m| match_to_finding(m, &categories, &metadata, &pack_provenance)).collect();
+    go_shutdown::filter(repo_root, &mut findings);
     let coverage = callback_coverage::annotate(repo_root, &mut findings);
     Ok(PatternReviewResult { findings, coverage })
 }

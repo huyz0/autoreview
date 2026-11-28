@@ -12,7 +12,6 @@ describe intended results, not completed work.
   verification of indirect rebinding and runtime instrumentation.
 - Improve Rust call-sequence coverage for unresolved associated calls and
   control-flow lowering reported while reviewing the replay evidence changes.
-- Investigate the two existing Cilium swallowed-error benchmark false positives.
 
 ## 1. Track ignored results across helpers
 
@@ -139,17 +138,17 @@ this single pair cannot establish general precision or recall.
 
 ### Checked errors and cancellation
 
-The checked-error-to-nil heuristic has a known Cilium cancellation false
-positive. Its limiter's `Wait` calls `WaitN(ctx, 1)`; `WaitN` has a separate
-burst-exceeded error, ruled out at that call site by the local burst-one
-constructor. A method named `Wait` is not evidence that errors are limited to
-cancellation. The static rule must continue warning unless the receiver,
-configuration, and possible error paths are established.
+The checked-error-to-nil rule excludes Cilium's intentional context shutdown in
+both pinned revisions. The static analyzer checks the audited limiter and
+vendored semaphore source, requires a local burst-one constructor with no
+reassignment or escape, and checks for a preceding select that returns nil
+when the same context is done. The limiter's one-token request cannot hit its
+burst error in this configuration. Call sites outside this proof keep the warning.
 
 The optional probe can specialize a direct call using an integer constant in
 an explicitly verified dependency as well as in the target package. This is
-call-specific metadata only; it does not track a receiver's constructor or
-mutable fields and does not resolve the Cilium false positive.
+call-specific metadata only. The current Cilium exception uses static source
+evidence through the normal review and replay paths.
 
 The experimental Go probe can optionally identify a statically bound callee;
 the Go result-use rule can attach it to finding metadata without changing
