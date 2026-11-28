@@ -64,6 +64,13 @@ pub enum IdentityOperand {
     Boolean(bool),
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct NamedArgument {
+    pub(crate) index: usize,
+    pub(crate) label: String,
+    pub(crate) value: Option<IdentityOperand>,
+}
+
 /// Positional operands are separate from the flattened arguments used for taint.
 #[derive(Debug, Clone)]
 pub struct CallSite {
@@ -74,6 +81,8 @@ pub struct CallSite {
     pub observed: bool,
     pub receiver: Option<String>,
     pub arguments: Vec<Option<IdentityOperand>>,
+    /// Kotlin labels and values are separate so positional consumers cannot use them as slots.
+    pub(crate) named_arguments: Box<[NamedArgument]>,
     pub(crate) local: bool,
 }
 
