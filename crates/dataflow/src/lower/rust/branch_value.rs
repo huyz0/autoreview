@@ -200,30 +200,28 @@ impl Lower<'_> {
     pub(super) fn lower_value_arm(
         &mut self,
         arm: Node<'_>,
-        mut at: NodeId,
+        at: NodeId,
         names: &mut Bindings,
         mode: &Mode<'_>,
     ) -> Option<NodeId> {
-        if matches!(arm.kind(), "return_expression" | "break_expression" | "continue_expression") {
-            return self.statement(arm, at, names);
+        match arm.kind() {
+            "return_expression" | "break_expression" | "continue_expression" => self.statement(arm, at, names),
+            "assignment_expression" => {
+                let end = self.statement(arm, at, names)?;
+                self.complete_value(None, end, names, mode)
+            }
+            "block" => self.lower_value_block(arm, at, names, mode),
+            _ => self.complete_value(Some(arm), at, names, mode),
         }
-        if arm.kind() == "assignment_expression" {
-            let end = self.statement(arm, at, names)?;
-            return self.complete_value(None, end, names, mode);
-        }
-        if arm.kind() != "block" {
-            return self.complete_value(Some(arm), at, names, mode);
-        }
+    }
+
+    fn lower_value_block(&mut self, arm: Node<'_>, mut at: NodeId, names: &mut Bindings, mode: &Mode<'_>) -> Option<NodeId> {
         let mut statements = site::children(arm).peekable();
         while let Some(statement) = statements.next() {
             if statements.peek().is_none() && match_flow::simple_value(statement, self.source) {
                 return self.complete_value(Some(statement), at, names, mode);
             }
-            let Some(end) = self.statement(statement, at, names) else {
-                self.skip_calls(statements);
-                return None;
-            };
-            at = end;
+            at = self.statement_in_sequence(statement, at, names, &mut statements)?;
         }
         self.complete_value(None, at, names, mode)
     }

@@ -86,13 +86,20 @@ impl Lower<'_> {
         let mut names = outer.clone();
         let mut statements = super::site::children(body);
         while let Some(stmt) = statements.next() {
-            let Some(end) = self.statement(stmt, at, &mut names) else {
-                self.skip_calls(statements);
-                return None;
-            };
-            at = end;
+            at = self.statement_in_sequence(stmt, at, &mut names, &mut statements)?;
         }
         Some(at)
+    }
+
+    fn statement_in_sequence<'tree>(
+        &mut self, stmt: Node<'tree>, at: NodeId, names: &mut Bindings,
+        remaining: &mut impl Iterator<Item = Node<'tree>>,
+    ) -> Option<NodeId> {
+        let end = self.statement(stmt, at, names);
+        if end.is_none() {
+            self.skip_calls(remaining);
+        }
+        end
     }
 
     fn statement(&mut self, stmt: Node<'_>, at: NodeId, names: &mut Bindings) -> Option<NodeId> {
