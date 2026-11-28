@@ -1,0 +1,22 @@
+allprojects {
+    def replayRepository = System.getenv("REPLAY_MAVEN_URI")
+    buildscript.repositories.maven { url = uri(replayRepository) }
+    repositories.maven { url = uri(replayRepository) }
+}
+
+gradle.projectsEvaluated {
+    def cluster = gradle.rootProject.findProject(":file-cluster")
+    if (cluster != null) {
+        cluster.tasks.register("replayClasspaths") {
+            dependsOn("compileKotlin")
+            doLast {
+                cluster.configurations.compileClasspath.files.each {
+                    println("COMPILE_JAR " + it.absolutePath)
+                }
+                cluster.configurations.runtimeClasspath.files.each {
+                    println("RUNTIME_JAR " + it.absolutePath)
+                }
+            }
+        }
+    }
+}

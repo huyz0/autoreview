@@ -1,0 +1,83 @@
+name: Pinned historical replay
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pinned-replay-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pinned-replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Build replay tools
+        run: |
+          cargo build --locked -p autoreview-cli
+          cargo install ast-grep --version 0.51.3 --locked
+          (cd tools/go-error-evidence && GOTOOLCHAIN=local go build -o "$RUNNER_TEMP/replay-go-probe" .)
+          python -m pip install --only-binary=:all: PyYAML==6.0.3
+          echo "REPLAY_GO_PROBE=$RUNNER_TEMP/replay-go-probe" >> "$GITHUB_ENV"
+          echo "REPLAY_GO_BINARY=$(command -v go)" >> "$GITHUB_ENV"
+
+      - name: Install pinned benchmark runtimes
+        run: |
+          download() {
+            curl --fail --silent --show-error --location --retry 3 --output "$2" "$1"
+            echo "$3  $2" | sha256sum --check
+          }
+          download https://nodejs.org/dist/v12.22.12/node-v12.22.12-linux-x64.tar.xz \
+            "$RUNNER_TEMP/node12.tar.xz" e6d052364bfa2c17da92cf31794100cfd709ba147415ddaeed2222eec9ca1469
+          download https://github.com/JetBrains/kotlin/releases/download/v2.3.21/kotlin-compiler-2.3.21.zip \
+            "$RUNNER_TEMP/kotlin.zip" a8cfc1d62cd4d0de4d04f42575e40135bd620588c17d568a20eb9c7c259af14f
+          download https://services.gradle.org/distributions/gradle-9.5.1-bin.zip \
+            "$RUNNER_TEMP/gradle.zip" bafc141b619ad6350fd975fc903156dd5c151998cc8b058e8c1044ab5f7b031f
+          tar -xJf "$RUNNER_TEMP/node12.tar.xz" -C "$RUNNER_TEMP" node-v12.22.12-linux-x64/bin/node
+          unzip -q "$RUNNER_TEMP/kotlin.zip" -d "$RUNNER_TEMP/replay-kotlin"
+          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
+          echo "REPLAY_NODE12=$RUNNER_TEMP/node-v12.22.12-linux-x64/bin/node" >> "$GITHUB_ENV"
+          echo "REPLAY_KOTLIN=$RUNNER_TEMP/replay-kotlin/kotlinc" >> "$GITHUB_ENV"
+          echo "REPLAY_GRADLE=$RUNNER_TEMP/gradle-9.5.1/bin/gradle" >> "$GITHUB_ENV"
+
+      - name: Replay all 15 pinned manifests
+        run: python benchmarks/ci/replay.py --binary target/debug/autoreview --output "$RUNNER_TEMP/replay"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: pinned-replay-reports
+          path: |
+            ${{ runner.temp }}/replay/*.json
+            ${{ runner.temp }}/replay/*.stderr
+            ${{ runner.temp }}/replay/*.failure
+            ${{ runner.temp }}/replay/worktrees/redicloud-coroutines/.replay-kotlin/gradle.*
+          include-hidden-files: true
+          retention-days: 14
