@@ -117,15 +117,24 @@ impl Lower<'_> {
 }
 
 pub(super) fn eager_operands(node: Node<'_>) -> Option<impl Iterator<Item = Node<'_>>> {
-    let eager = match node.kind() {
-        "tuple_expression" => true,
-        "unary_expression" => node.children(&mut node.walk()).any(|part| matches!(part.kind(), "-" | "!")),
+    let single_operand = match node.kind() {
+        "field_expression" | "type_cast_expression" => Some(node.child_by_field_name("value")?),
+        _ if evaluates_all_operands(node) => None,
+        _ => return None,
+    };
+    Some(children(node).filter(move |operand| single_operand.is_none_or(|value| *operand == value)))
+}
+
+fn evaluates_all_operands(node: Node<'_>) -> bool {
+    match node.kind() {
+        "tuple_expression" | "index_expression" | "range_expression" => true,
+        "array_expression" => node.child_by_field_name("length").is_none(),
+        "unary_expression" => node.children(&mut node.walk()).any(|part| matches!(part.kind(), "-" | "!" | "*")),
         "binary_expression" => node.child_by_field_name("operator").is_some_and(|operator| {
             !matches!(operator.kind(), "&&" | "||")
         }),
         _ => false,
-    };
-    eager.then(|| children(node))
+    }
 }
 
 fn keyed_await(mut expression: Node<'_>) -> Option<Node<'_>> {

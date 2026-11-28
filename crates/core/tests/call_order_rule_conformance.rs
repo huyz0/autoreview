@@ -1375,7 +1375,7 @@ fn rust_literal_match_tracks_results_across_arms() {
 
 #[test]
 fn rust_unmodeled_matches_remain_incomplete() {
-    for body in ["match x { 0 if check() && items[other()] > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { Some(value) | Other(value) => {}, _ => {} };", "match x { 0 => {} };", "match check(items[risky()]) { _ => {} };", "match x { _ => { let y = items[risky()]; } };", "consume(match x { _ => {} });"] {
+    for body in ["match x { 0 if check() && defer(|| other()) > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { Some(value) | Other(value) => {}, _ => {} };", "match x { 0 => {} };", "match check([risky(); 3]) { _ => {} };", "match x { _ => { let y = defer(|| risky()); } };", "consume(match x { _ => {} });"] {
         let root = write_single_file("lib.rs", &format!("fn run(x: u8) {{ {body} }}\n"));
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("lib.rs")), "{body}: {:?}", result.coverage);
@@ -1492,6 +1492,16 @@ fn rust_tuple_branch_results_evaluate_operands_in_order() {
         assert!(report.coverage.iter().any(|issue| issue.reason == "rust_destructuring_binding_projection"
             && issue.line == Some(line)), "{:?}", report.coverage);
     }
+}
+
+#[test]
+fn rust_eager_projections_evaluate_values_from_left_to_right() {
+    let source = concat!(
+        "fn open() {\n match [finish(), begin() as usize][0] { _ => {} };\n}\n",
+        "fn closed() {\n match [wrap(begin()).field, finish()][0] { _ => {} };\n}\n",
+        "fn slice(values: &[usize]) {\n let [first, ..] = &values[*borrow(begin())..finish()] else { return };\n consume(first);\n}\n",
+    );
+    assert_rust_match_cleanup("rust-eager-projection-order", source);
 }
 
 #[test]

@@ -72,10 +72,6 @@ pub(super) fn simple_value(node: Node<'_>) -> bool {
     match node.kind() {
         "identifier" | "self" | "scoped_identifier" | "integer_literal" | "boolean_literal"
         | "char_literal" | "string_literal" | "unit_expression" => true,
-        "field_expression" => node.child_by_field_name("value").is_some_and(|receiver| {
-            matches!(receiver.kind(), "identifier" | "self" | "field_expression")
-                && simple_value(receiver)
-        }),
         "reference_expression" | "parenthesized_expression" | "try_expression" => {
             node.child_by_field_name("value").or_else(|| children(node).next()).is_some_and(simple_value)
         }
