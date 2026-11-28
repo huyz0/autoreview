@@ -2,9 +2,9 @@ use tree_sitter::Node;
 
 use crate::lower::site::children;
 
-use super::{argument_flow, branch_value, simple_binding};
+use super::{argument_flow, branch_value};
 
-fn projection<'tree>(node: Node<'tree>, source: &[u8]) -> Option<(Node<'tree>, usize)> {
+fn projection<'tree>(node: Node<'tree>, source: &[u8], known_index: &impl Fn(Node<'_>) -> Option<usize>) -> Option<(Node<'tree>, usize)> {
     let (base, index) = match node.kind() {
         "field_expression" => {
             let field = node.child_by_field_name("field")?;
@@ -16,7 +16,9 @@ fn projection<'tree>(node: Node<'tree>, source: &[u8]) -> Option<(Node<'tree>, u
         }
         "index_expression" => {
             let mut operands = children(node);
-            (operands.next()?, literal_usize(operands.next()?, source)?)
+            let base = operands.next()?;
+            let index = ungroup(operands.next()?);
+            (base, literal_usize(index, source).or_else(|| known_index(index))?)
         }
         _ => return None,
     };
@@ -41,28 +43,31 @@ pub(crate) fn local_aggregate(node: Node<'_>) -> Option<Node<'_>> {
     if !matches!(node.kind(), "array_expression" | "tuple_expression") { return None; }
     let value = branch_value::outermost_group(node);
     let declaration = value.parent()?;
-    if declaration.kind() != "let_declaration"
-        || declaration.child_by_field_name("value") != Some(value)
-        || declaration.child_by_field_name("alternative").is_some()
-        || !simple_binding(declaration)
+    if declaration.child_by_field_name("value") != Some(value) || !argument_flow::can_evaluate(node) {
+        return None;
+    }
+    immutable_let(declaration)
+}
+
+pub(crate) fn immutable_let(declaration: Node<'_>) -> Option<Node<'_>> {
+    if declaration.kind() != "let_declaration" || declaration.child_by_field_name("alternative").is_some()
         || children(declaration).any(|child| child.kind() == "mutable_specifier")
-        || !argument_flow::can_evaluate(node)
     {
         return None;
     }
     declaration.child_by_field_name("pattern").filter(|pattern| pattern.kind() == "identifier")
 }
 
-pub(crate) fn direct_projection<'tree>(aggregate: Node<'tree>, source: &[u8]) -> Option<(Node<'tree>, Node<'tree>)> {
+pub(crate) fn direct_projection<'tree>(aggregate: Node<'tree>, source: &[u8], known_index: &impl Fn(Node<'_>) -> Option<usize>) -> Option<(Node<'tree>, Node<'tree>)> {
     if !matches!(aggregate.kind(), "array_expression" | "tuple_expression") { return None; }
-    projection_chain(aggregate, aggregate, source)
+    projection_chain(aggregate, aggregate, source, known_index)
 }
 
-pub(crate) fn projection_chain<'tree>(base: Node<'tree>, aggregate: Node<'tree>, source: &[u8]) -> Option<(Node<'tree>, Node<'tree>)> {
+pub(crate) fn projection_chain<'tree>(base: Node<'tree>, aggregate: Node<'tree>, source: &[u8], known_index: &impl Fn(Node<'_>) -> Option<usize>) -> Option<(Node<'tree>, Node<'tree>)> {
     let mut access = base;
     let mut slot = aggregate;
     while let Some(next) = branch_value::outermost_group(access).parent() {
-        let Some((receiver, index)) = projection(next, source) else { break };
+        let Some((receiver, index)) = projection(next, source, known_index) else { break };
         if receiver != access { break; }
         slot = element_slot(ungroup(slot), next, index, source)?;
         access = next;
@@ -70,13 +75,24 @@ pub(crate) fn projection_chain<'tree>(base: Node<'tree>, aggregate: Node<'tree>,
     (access != base && read_only(access)).then_some((access, slot))
 }
 
-pub(super) fn projection_owner(mut aggregate: Node<'_>, source: &[u8]) -> Option<usize> {
+pub(super) fn projection_owner(mut aggregate: Node<'_>) -> Option<usize> {
     if !matches!(aggregate.kind(), "array_expression" | "tuple_expression") { return None; }
     while let Some(parent) = branch_value::outermost_group(aggregate).parent().filter(|parent| is_list(*parent)) {
         aggregate = parent;
     }
-    (local_aggregate(aggregate).is_some() || direct_projection(aggregate, source).is_some())
+    // Record candidates here so result analysis can prove them using lexical bindings.
+    (local_aggregate(aggregate).is_some() || has_projection_receiver(aggregate))
         .then_some(aggregate.start_byte())
+}
+
+fn has_projection_receiver(aggregate: Node<'_>) -> bool {
+    let receiver = branch_value::outermost_group(aggregate);
+    receiver.parent().is_some_and(|parent| match parent.kind() {
+        "index_expression" => children(parent).next() == Some(receiver),
+        "field_expression" => parent.child_by_field_name("value") == Some(receiver)
+            && parent.child_by_field_name("field").is_some_and(|field| field.kind() == "integer_literal"),
+        _ => false,
+    })
 }
 
 pub(crate) fn nested_aggregates<'tree, 'src>(root: Node<'tree>, source: &'src [u8]) -> impl Iterator<Item = Node<'tree>> + use<'tree, 'src> {
@@ -118,7 +134,7 @@ fn read_only(access: Node<'_>) -> bool {
     }
 }
 
-pub(super) fn literal_usize(node: Node<'_>, source: &[u8]) -> Option<usize> {
+pub(crate) fn literal_usize(node: Node<'_>, source: &[u8]) -> Option<usize> {
     let node = ungroup(node);
     if node.kind() != "integer_literal" { return None; }
     let spelling = node.utf8_text(source).ok()?;
@@ -129,7 +145,7 @@ pub(super) fn literal_usize(node: Node<'_>, source: &[u8]) -> Option<usize> {
     usize::from_str_radix(&digits.replace('_', ""), radix).ok()
 }
 
-fn ungroup(mut node: Node<'_>) -> Node<'_> {
+pub(crate) fn ungroup(mut node: Node<'_>) -> Node<'_> {
     while node.kind() == "parenthesized_expression" {
         let Some(value) = children(node).next() else { break };
         node = value;
