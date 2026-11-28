@@ -1416,7 +1416,7 @@ fn rust_enum_exhaustiveness_requires_unconditional_whole_variants() {
 
 #[test]
 fn rust_unmodeled_matches_remain_incomplete() {
-    for body in ["match x { 0 if check() && defer(|| other()) > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { 0 => {} };", "match check([risky(); 3]) { _ => {} };", "match x { _ => { let y = defer(|| risky()); } };", "consume([match x { _ => 1 }; 3]);", "consume({ consume((match x { _ => {} },)) });"] {
+    for body in ["match x { 0 if check() && defer(|| other()) > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { 0 => {} };", "match check([risky(); 3]) { _ => {} };", "match x { _ => { let y = defer(|| risky()); } };", "consume([0; match 0 { _ => 3 }]);", "consume({ consume((match x { _ => {} },)) });"] {
         let root = write_single_file("lib.rs", &format!("fn run(x: u8) {{ {body} }}\n"));
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("lib.rs")), "{body}: {:?}", result.coverage);
@@ -1533,6 +1533,42 @@ fn rust_branch_elements_preserve_whole_results_and_report_projection_limits() {
     );
     let root = write_single_file("lib.rs", source);
     assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 3), ("lib.rs", 9)]);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", report.coverage);
+    assert!(report.coverage.iter().any(|issue| issue.reason == "rust_aggregate_element_projection" && issue.line == Some(6)), "{:?}", report.coverage);
+}
+
+#[test]
+fn rust_branch_array_repeats_evaluate_the_operand_before_later_arguments() {
+    let source = concat!(
+        "fn open(flag: bool) -> std::io::Result<()> {\n",
+        " consume(begin(), [if flag { token()? } else { fallback() }; 0], finish());\n Ok(())\n}\n",
+        "fn closed(flag: bool) {\n",
+        " consume(begin(), [(match flag { true => token(), _ => { finish(); return } }); 3], finish());\n}\n",
+        "fn absent(flag: bool) {\n",
+        " consume([if flag { return } else { return }; 0], begin());\n}\n",
+        "fn balanced<const N: usize>(flag: bool) {\n",
+        " let _ = [match flag { true => begin(), _ => token() }; N];\n finish();\n}\n",
+    );
+    assert_rust_match_cleanup("rust-branch-array-repeat-order", source);
+}
+
+#[test]
+fn rust_branch_array_repeats_distinguish_an_empty_array_from_a_used_result() {
+    let source = concat!(
+        "use std::fs::remove_file;\n",
+        "fn dropped(flag: bool) {\n",
+        " let _ = [if flag { remove_file(\"dropped.txt\") } else { return }; 1];\n}\n",
+        "fn kept(flag: bool) -> [std::io::Result<()>; 1] {\n",
+        " [match flag { true => remove_file(\"kept.txt\"), _ => Ok(()) }; 1]\n}\n",
+        "fn empty(flag: bool) -> [std::io::Result<()>; 0] {\n",
+        " [(if flag { remove_file(\"empty.txt\") } else { Ok(()) }); (0x0_usize)]\n}\n",
+        "fn passthrough(value: [std::io::Result<()>; 0]) -> [std::io::Result<()>; 0] { value }\n",
+        "fn forwarded_empty(flag: bool) -> [std::io::Result<()>; 0] {\n",
+        " passthrough([match flag { true => remove_file(\"forwarded.txt\"), _ => Ok(()) }; 0])\n}\n",
+    );
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 3), ("lib.rs", 9), ("lib.rs", 13)]);
     let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
     assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", report.coverage);
     assert!(report.coverage.iter().any(|issue| issue.reason == "rust_aggregate_element_projection" && issue.line == Some(6)), "{:?}", report.coverage);

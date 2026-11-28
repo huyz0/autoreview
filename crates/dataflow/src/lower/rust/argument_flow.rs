@@ -12,14 +12,42 @@ pub(super) fn is_operand(branch: Node<'_>) -> bool {
     let container = if owner.kind() == "arguments" {
         owner.parent().filter(|call| modeled_call(*call) && call.child_by_field_name("arguments") == Some(owner))
     } else {
-        is_aggregate(owner).then_some(owner)
+        aggregate_operands(owner).is_some_and(|mut operands| operands.any(|item| item == operand)).then_some(owner)
     };
     container.is_some_and(|value| evaluated_position(value) && within_lowered_blocks(value))
 }
 
-pub(super) fn is_aggregate(node: Node<'_>) -> bool {
-    node.kind() == "tuple_expression"
-        || (node.kind() == "array_expression" && node.child_by_field_name("length").is_none())
+pub(super) fn aggregate_operands(node: Node<'_>) -> Option<impl Iterator<Item = Node<'_>>> {
+    if !matches!(node.kind(), "tuple_expression" | "array_expression") {
+        return None;
+    }
+    let mut operands = children(node).peekable();
+    let count = repeat_length(node);
+    if let Some(length) = count {
+        // A branch is an ordinary repeat operand, which Rust evaluates once even at length zero.
+        let operand = operands.peek().copied().filter(|operand| *operand != length)?;
+        branch_value::from_value(operand)?;
+    }
+    Some(operands.filter(move |operand| Some(*operand) != count))
+}
+
+fn repeat_length(node: Node<'_>) -> Option<Node<'_>> {
+    node.child_by_field_name("length").filter(|_| node.kind() == "array_expression")
+}
+
+pub(crate) fn aggregate_result_operands<'tree>(node: Node<'tree>, source: &[u8]) -> impl Iterator<Item = Node<'tree>> {
+    let empty = repeat_length(node).is_some_and(|mut length| {
+        while length.kind() == "parenthesized_expression" {
+            let Some(inner) = children(length).next() else { return false };
+            length = inner;
+        }
+        if length.kind() != "integer_literal" { return false; }
+        let Ok(literal) = length.utf8_text(source) else { return false };
+        let digits = literal.strip_suffix("usize").unwrap_or(literal);
+        let digits = ["0x", "0o", "0b"].into_iter().find_map(|prefix| digits.strip_prefix(prefix)).unwrap_or(digits);
+        digits.bytes().all(|digit| matches!(digit, b'0' | b'_'))
+    });
+    aggregate_operands(node).into_iter().flatten().filter(move |_| !empty)
 }
 
 fn modeled_call(call: Node<'_>) -> bool {
@@ -111,7 +139,7 @@ pub(crate) fn stages_call(call: Node<'_>) -> bool {
 }
 
 pub(crate) fn stages_aggregate(node: Node<'_>) -> bool {
-    is_aggregate(node) && contains_branch_operands(node)
+    aggregate_operands(node).is_some() && contains_branch_operands(node)
 }
 
 fn contains_branch_operands(root: Node<'_>) -> bool {
@@ -119,10 +147,50 @@ fn contains_branch_operands(root: Node<'_>) -> bool {
     while let Some(node) = pending.pop() {
         match node.kind() {
             "closure_expression" | "async_block" | "macro_invocation" | "function_item" => continue,
-            _ if (node.kind() == "arguments" || is_aggregate(node))
-                && children(node).any(|operand| branch_value::from_value(operand).is_some()) => return true,
+            "arguments" | "array_expression" | "tuple_expression" => {
+                let previous = pending.len();
+                if node.kind() == "arguments" {
+                    pending.extend(children(node));
+                } else {
+                    pending.extend(aggregate_operands(node).into_iter().flatten());
+                }
+                if pending[previous..].iter().any(|operand| branch_value::from_value(*operand).is_some()) {
+                    return true;
+                }
+            }
             _ => pending.extend(children(node)),
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use autoreview_langsupport::{parser_for, Language};
+
+    use crate::cfg::CallTarget;
+
+    use super::*;
+
+    #[test]
+    fn array_repeat_evaluates_the_selected_arm_once_and_skips_the_count() {
+        for (operand, count, expected) in [
+            ("if true { selected() } else { skipped() }", "0", Some("selected")),
+            ("match 0 { _ => selected() }", "count()", Some("selected")),
+            ("const { skipped() }", "0", None),
+        ] {
+            let source = format!("fn run() {{ let _ = [{operand}; {count}]; }}");
+            let tree = parser_for(Language::Rust).unwrap().parse(&source, None).unwrap();
+            let function = tree.root_node().named_child(0).unwrap();
+            assert!(!function.has_error(), "{source}");
+            let graph = super::super::lower_keyed(source.as_bytes(), function);
+            let calls: Vec<_> = graph.nodes.iter().flat_map(|node| &node.stmts).filter_map(|stmt| {
+                match stmt {
+                    Stmt::Call { target: CallTarget::Named(name), .. } => Some(name.as_str()),
+                    _ => None,
+                }
+            }).collect();
+            assert_eq!(calls, expected.into_iter().collect::<Vec<_>>(), "{source}");
+        }
+    }
 }

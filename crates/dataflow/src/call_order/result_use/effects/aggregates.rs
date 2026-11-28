@@ -1,6 +1,7 @@
 use tree_sitter::Node;
 
 use crate::lower::site;
+use crate::lower::rust::aggregate_result_operands;
 
 use super::{reads::operand_slot, return_value, transparent, ContractLanguage, Effect, Lower, Value};
 
@@ -11,7 +12,7 @@ impl Lower<'_, '_, '_> {
 
     pub(super) fn aggregate_value(&self, value: Node<'_>, effects: &mut Vec<Effect>) -> Option<Value> {
         if self.staged_aggregate(value) {
-            Some(Value::StagedAggregate(site::children(value).map(operand_slot).collect()))
+            Some(Value::StagedAggregate(aggregate_result_operands(value, self.source).map(operand_slot).collect()))
         } else if self.language == ContractLanguage::Web && value.kind() == "array" {
             let members = site::children(value).map(|item| {
                 let member = self.value(item, effects);
@@ -30,7 +31,7 @@ impl Lower<'_, '_, '_> {
 
     pub(super) fn read_staged_aggregate(&self, aggregate: Node<'_>, effects: &mut Vec<Effect>) -> bool {
         if !self.staged_aggregate(aggregate) { return false; }
-        effects.extend(site::children(aggregate).map(|item| Effect::OpaqueRead(operand_slot(item))));
+        effects.extend(aggregate_result_operands(aggregate, self.source).map(|item| Effect::OpaqueRead(operand_slot(item))));
         true
     }
 
@@ -47,6 +48,6 @@ impl Lower<'_, '_, '_> {
     }
 
     pub(super) fn observe_elements(&self, aggregate: Node<'_>, effects: &mut Vec<Effect>) {
-        effects.extend(site::children(aggregate).map(|item| Effect::Read(operand_slot(item))));
+        effects.extend(aggregate_result_operands(aggregate, self.source).map(|item| Effect::Read(operand_slot(item))));
     }
 }

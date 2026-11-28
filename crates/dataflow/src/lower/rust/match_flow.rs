@@ -83,7 +83,8 @@ pub(super) fn simple_value(node: Node<'_>, source: &[u8]) -> bool {
             node.child_by_field_name("value").or_else(|| children(node).next()).is_some_and(simple_value)
         }
         "call_expression" => simple_call(node, source),
-        _ if super::argument_flow::is_aggregate(node) => children(node).all(|element| simple_operand(element, source)),
+        "tuple_expression" | "array_expression" => super::argument_flow::aggregate_operands(node)
+            .is_some_and(|mut operands| operands.all(|element| simple_operand(element, source))),
         _ => values::eager_operands(node).is_some_and(|mut operands| operands.all(simple_value)),
     }
 }
