@@ -5,7 +5,8 @@ use crate::cfg::{CallSite, Cfg, Stmt};
 
 use super::identity::{Entry, Syntax, Values};
 use super::contract::ApiMatcher;
-use super::{CallOrderSpec, ContractMode};
+use super::result_use::rust_elements::RustElements;
+use super::{CallOrderSpec, ContractLanguage, ContractMode};
 
 pub(super) struct Plan<'a, 'src> {
     pub spec: &'a CallOrderSpec,
@@ -14,6 +15,7 @@ pub(super) struct Plan<'a, 'src> {
     pub(super) extra_sources: BTreeSet<usize>,
     pub(super) extra_spans: BTreeSet<(usize, usize)>,
     pub(super) result_components: BTreeMap<usize, super::ResultComponents>,
+    pub(super) rust_elements: RustElements,
 }
 
 pub(super) struct Call {
@@ -78,16 +80,24 @@ impl<'a, 'src> Plan<'a, 'src> {
         if api.as_ref().is_some_and(|api| !api.supports_local_handles(function, source)) {
             return None;
         }
-        syntax
-            .models_cleanup(&spec.unless, &sources.calls)
-            .then_some(Self {
+        syntax.models_cleanup(&spec.unless, &sources.calls).then(|| {
+            let rust_elements = if spec.tracks_result_use()
+                && spec.contract.as_ref().is_some_and(|contract| contract.language == ContractLanguage::Rust)
+            {
+                RustElements::scan(function, source, &syntax)
+            } else {
+                RustElements::default()
+            };
+            Self {
                 spec,
                 syntax,
                 api,
                 extra_sources: BTreeSet::new(),
                 extra_spans: BTreeSet::new(),
                 result_components: BTreeMap::new(),
-            })
+                rust_elements,
+            }
+        })
     }
 
     pub(super) fn call(

@@ -71,6 +71,14 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         let resolution_syntax = spec.is_none().then(|| Plan::resolution_syntax(function.graph, node, source, unit)).flatten().map(Box::new);
         let rust_support = (node.kind() == "function_item")
             .then(|| crate::lower::rust::supports_function_with_source(node, source));
+        let rust_pattern_projections = if rust_support == Some(true) {
+            crate::lower::rust::pattern_projection_sites(node, source, |aggregate| {
+                spec.is_some_and(CallOrderSpec::tracks_result_use)
+                    && !plan.as_ref().is_some_and(|plan| plan.rust_elements.tracks_aggregate(aggregate.start_byte()))
+            })
+        } else {
+            Vec::new()
+        };
         self.frames.push(Frame {
             graph: function.graph,
             plan,
@@ -81,9 +89,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             scope,
             unsupported_rust_line: (rust_support == Some(false))
                 .then_some(node.start_position().row as u32 + 1),
-            rust_pattern_projections: if rust_support == Some(true) {
-                crate::lower::rust::pattern_projection_sites(node, source, spec.is_some_and(CallOrderSpec::tracks_result_use))
-            } else { Vec::new() },
+            rust_pattern_projections,
             params: params.unwrap_or_default(),
             export,
         });

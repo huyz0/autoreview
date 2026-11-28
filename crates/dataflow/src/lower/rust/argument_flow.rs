@@ -14,7 +14,7 @@ pub(super) fn is_operand(branch: Node<'_>) -> bool {
     } else {
         aggregate_operands(owner).is_some_and(|mut operands| operands.any(|item| item == operand)).then_some(owner)
     };
-    container.is_some_and(|value| evaluated_position(value) && within_lowered_blocks(value))
+    container.is_some_and(can_evaluate)
 }
 
 pub(super) fn aggregate_operands(node: Node<'_>) -> Option<impl Iterator<Item = Node<'_>>> {
@@ -36,17 +36,7 @@ fn repeat_length(node: Node<'_>) -> Option<Node<'_>> {
 }
 
 pub(crate) fn aggregate_result_operands<'tree>(node: Node<'tree>, source: &[u8]) -> impl Iterator<Item = Node<'tree>> {
-    let empty = repeat_length(node).is_some_and(|mut length| {
-        while length.kind() == "parenthesized_expression" {
-            let Some(inner) = children(length).next() else { return false };
-            length = inner;
-        }
-        if length.kind() != "integer_literal" { return false; }
-        let Ok(literal) = length.utf8_text(source) else { return false };
-        let digits = literal.strip_suffix("usize").unwrap_or(literal);
-        let digits = ["0x", "0o", "0b"].into_iter().find_map(|prefix| digits.strip_prefix(prefix)).unwrap_or(digits);
-        digits.bytes().all(|digit| matches!(digit, b'0' | b'_'))
-    });
+    let empty = repeat_length(node).and_then(|length| super::element_access::literal_usize(length, source)) == Some(0);
     aggregate_operands(node).into_iter().flatten().filter(move |_| !empty)
 }
 
@@ -55,6 +45,10 @@ fn modeled_call(call: Node<'_>) -> bool {
         let callee = callee.child_by_field_name("function").unwrap_or(callee);
         matches!(callee.kind(), "identifier" | "scoped_identifier" | "field_expression")
     })
+}
+
+pub(super) fn can_evaluate(node: Node<'_>) -> bool {
+    evaluated_position(node) && within_lowered_blocks(node)
 }
 
 fn evaluated_position(mut value: Node<'_>) -> bool {
@@ -123,14 +117,18 @@ impl Lower<'_> {
             return;
         }
         let origin = value.unwrap_or(syntax);
-        record_evaluation(&mut self.cfg, at, origin);
-        if let Some(evaluation) = self.cfg.nodes[at].evaluations.last_mut() {
-            evaluation.operand = Some(OperandEvaluation { slot: syntax.byte_range(), has_value: value.is_some() });
-        }
+        self.record_operand(syntax, origin, value.is_some(), None, at);
         let identity = value.and_then(|value| keyed_syntax::result_operand(value, self.source, false));
         self.cfg.emit(at, Stmt::Rebind(BindingWrite {
             name: temporary.to_owned(), start: origin.start_byte(), value: identity,
         }), line(origin));
+    }
+
+    pub(super) fn record_operand(&mut self, syntax: Node<'_>, origin: Node<'_>, has_value: bool, projection_owner: Option<usize>, at: NodeId) {
+        record_evaluation(&mut self.cfg, at, origin);
+        if let Some(evaluation) = self.cfg.nodes[at].evaluations.last_mut() {
+            evaluation.operand = Some(OperandEvaluation { slot: syntax.byte_range(), has_value, projection_owner });
+        }
     }
 }
 

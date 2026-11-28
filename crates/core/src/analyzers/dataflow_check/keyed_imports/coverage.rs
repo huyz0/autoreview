@@ -59,7 +59,7 @@ fn rust_projection_detail(reason: &str) -> Option<&'static str> {
         "rust_let_else_binding_projection" => Some("Rust let-else pattern names are tracked as distinct local identities. Their relationship to the initializer could not be resolved."),
         "rust_conditional_binding_projection" => Some("Rust conditional pattern names are tracked as distinct local identities. Their relationship to the matched value could not be resolved."),
         "rust_destructuring_binding_projection" => Some("Autoreview follows surrounding calls. It could not resolve how this Rust pattern binds parts of the initializer or iterator item."),
-        "rust_aggregate_element_projection" => Some("Autoreview follows the selected Rust element values. Reads of individual array or tuple elements are not tracked separately."),
+        "rust_aggregate_element_projection" => Some("Autoreview follows Rust aggregate values but could not resolve individual element reads for this aggregate."),
         _ => None,
     }
 }
