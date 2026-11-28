@@ -54,6 +54,16 @@ pub(in crate::call_order) struct Frame<'spec, 'src, 'graph> {
     pub(in crate::call_order) params: Vec<String>,
 }
 
+impl Frame<'_, '_, '_> {
+    fn call_arity(&self, site: &CallSite) -> usize {
+        match site.arguments.as_slice() {
+            [Some(IdentityOperand::CallResult { start, .. })] => self.plan.as_ref()
+                .and_then(|plan| plan.result_components.get(start)).map_or(1, |shape| shape.count),
+            _ => site.arguments.len(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Scope {
     File(usize),
@@ -91,11 +101,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             || (frame.plan.is_none() && syntax.shadows_api_at(root, site.start)) {
             return None;
         }
-        let arity = match site.arguments.as_slice() {
-            [Some(crate::cfg::IdentityOperand::CallResult { start, .. })] => frame.plan.as_ref()
-                .and_then(|plan| plan.result_components.get(start)).map_or(1, |shape| shape.count),
-            _ => site.arguments.len(),
-        };
+        let arity = frame.call_arity(site);
         if let Some(target) = self.associated.lookup(frame.unit, frame.export.as_ref(), name, arity) {
             if target.is_none() { self.unresolved.borrow_mut().insert((from, site.start, "unresolved_helper_target")); }
             return target;
