@@ -111,8 +111,9 @@ qualified unit variants, nested tuple variants, reference bindings, and
 alternatives that introduce no names. Arm-local names receive distinct identities, but the analyzer
 does not connect them to the matched value or resolve whether an identifier
 pattern denotes a constant: those cases report `rust_match_binding_projection`
-and replay remains incomplete. Arm bodies and guards must use supported
-simple expressions and calls, and the final wildcard must be unguarded.
+and replay remains incomplete. Arms can contain supported local assignments
+and statement-position conditionals, including early returns before an arm
+produces its value. The final wildcard must be unguarded.
 Returned arms preserve result identity on each exit. Guards preserve the
 evaluation order of `&&`, `||`, and `!` and carry effects to the next arm
 when the guard fails. Let chains in a match guard expose names to later
@@ -141,8 +142,10 @@ Rust `for` and ordinary `let` statements can destructure tuples with
 named bindings, wildcard elements, and nested tuples. Loop bindings receive
 fresh identities each iteration. Tuple components report
 `rust_destructuring_binding_projection` because their relationship to the
-initializer or iterator item is unresolved. The analyzer still follows calls
-in the supported surrounding flow.
+initializer or iterator item is unresolved. When a supported `if` or `match`
+supplies the tuple, the analyzer follows calls through the selected arm,
+including calls in tuple elements and in supported eager unary and binary
+operands. Explicit exits leave before the new bindings take effect. [Rust operand evaluation order](https://doc.rust-lang.org/reference/expressions.html#evaluation-order-of-operands)
 
 Report scopes should distinguish an entire file, a function or root, a rule,
 and an imported dependency. Findings from unaffected scopes remain useful.

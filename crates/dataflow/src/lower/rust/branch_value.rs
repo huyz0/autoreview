@@ -1,10 +1,11 @@
-use super::{conditional, line, match_flow, simple_binding, Bindings, Lower, Node, NodeId};
+use super::{conditional, destructuring, line, match_flow, simple_binding, Bindings, Lower, Node, NodeId};
 use crate::cfg::{BindingWrite, Stmt};
 use crate::lower::{keyed_syntax, record_evaluation, site};
 
 pub(super) enum Mode<'a> {
     Return,
     Assign(Assignment<'a>),
+    Project,
 }
 
 pub(super) struct Assignment<'a> {
@@ -19,7 +20,7 @@ pub(super) fn is_branch(node: Node<'_>) -> bool {
 pub(super) fn is_initializer(node: Node<'_>) -> bool {
     node.parent().is_some_and(|parent| {
         parent.kind() == "let_declaration"
-            && simple_binding(parent)
+            && (simple_binding(parent) || destructuring::declaration_bindings(parent).is_some())
             && parent.child_by_field_name("value") == Some(node)
     })
 }
@@ -99,8 +100,8 @@ fn alternative(node: Node<'_>) -> Option<Node<'_>> {
 
 impl Lower<'_> {
     pub(super) fn lower_local(&mut self, stmt: Node<'_>, at: NodeId, names: &mut Bindings) -> Option<NodeId> {
-        if let Some(bindings) = super::destructuring::declaration_bindings(stmt) {
-            return Some(self.destructured_declaration(stmt, at, names, bindings));
+        if let Some(bindings) = destructuring::declaration_bindings(stmt) {
+            return self.destructured_declaration(stmt, at, names, bindings);
         }
         self.binding(stmt, at, names)
     }
@@ -191,6 +192,10 @@ impl Lower<'_> {
         if arm.kind() == "return_expression" {
             return self.statement(arm, at, names);
         }
+        if arm.kind() == "assignment_expression" {
+            let end = self.statement(arm, at, names)?;
+            return self.complete_value(None, end, names, mode);
+        }
         if arm.kind() != "block" {
             return self.complete_value(Some(arm), at, names, mode);
         }
@@ -225,6 +230,7 @@ impl Lower<'_> {
                 None
             }
             Mode::Assign(assignment) => Some(self.assign_arm(value, at, names, assignment)),
+            Mode::Project => Some(self.evaluate(value, at, names)),
         }
     }
 

@@ -1,5 +1,6 @@
 use super::{line, Bindings, Lower};
 use crate::cfg::{CallTarget, EdgeKind, NodeId, RhsShape, Stmt};
+use crate::lower::site::children;
 use tree_sitter::Node;
 
 impl Lower<'_> {
@@ -22,6 +23,9 @@ impl Lower<'_> {
             "try_expression" => self.try_value(expr, at, names, target),
             "call_expression" => self.call(expr, at, names, target),
             _ => {
+                let at = eager_operands(expr).map_or(at, |operands| {
+                    operands.fold(at, |at, operand| self.value(Some(operand), at, names, None))
+                });
                 if let Some(lhs) = target {
                     let rhs = self
                         .variable(expr, names)
@@ -40,7 +44,7 @@ impl Lower<'_> {
         names: &Bindings,
         target: Option<String>,
     ) -> NodeId {
-        let evaluated = self.value(expr.named_child(0), at, names, target);
+        let evaluated = self.value(children(expr).next(), at, names, target);
         let early_return = self.cfg.push_node(line(expr));
         let success = self.cfg.push_node(line(expr));
         self.edge(evaluated, early_return, EdgeKind::False);
@@ -112,6 +116,18 @@ impl Lower<'_> {
     }
 }
 
+pub(super) fn eager_operands(node: Node<'_>) -> Option<impl Iterator<Item = Node<'_>>> {
+    let eager = match node.kind() {
+        "tuple_expression" => true,
+        "unary_expression" => node.children(&mut node.walk()).any(|part| matches!(part.kind(), "-" | "!")),
+        "binary_expression" => node.child_by_field_name("operator").is_some_and(|operator| {
+            !matches!(operator.kind(), "&&" | "||")
+        }),
+        _ => false,
+    };
+    eager.then(|| children(node))
+}
+
 fn keyed_await(mut expression: Node<'_>) -> Option<Node<'_>> {
     while expression.kind() == "parenthesized_expression" {
         expression = expression.named_child(0)?;
@@ -126,7 +142,7 @@ pub(super) fn unwrap_value(mut expr: Node<'_>) -> Node<'_> {
     ) {
         let Some(inner) = expr
             .child_by_field_name("value")
-            .or_else(|| expr.named_child(0))
+            .or_else(|| children(expr).next())
         else {
             break;
         };
