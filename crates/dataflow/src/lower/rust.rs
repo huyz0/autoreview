@@ -6,6 +6,7 @@ mod match_flow;
 mod let_else;
 mod conditional;
 mod support;
+mod branch_value;
 
 use support::{simple_binding, supported};
 pub(crate) use conditional::bindings as conditional_bindings;
@@ -89,7 +90,7 @@ impl Lower<'_> {
             "let_declaration" if stmt.child_by_field_name("alternative").is_some() => {
                 self.lower_let_else(stmt, at, names)
             }
-            "let_declaration" => Some(self.binding(stmt, at, names)),
+            "let_declaration" => self.binding(stmt, at, names),
             "expression_statement" => self.statement(super::site::children(stmt).next()?, at, names),
             "return_expression" => self.explicit_return(stmt, at, names),
             "break_expression" | "continue_expression" => {
@@ -98,20 +99,6 @@ impl Lower<'_> {
             }
             _ => self.flow_expression(stmt, at, names),
         }
-    }
-
-    fn explicit_return(&mut self, stmt: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
-        let value = super::site::children(stmt).next();
-        if let Some(value) = value.filter(|node| node.kind() == "match_expression") {
-            return self.match_expression(value, at, names);
-        }
-        let end = self.value(value, at, names, None);
-        super::record_evaluation(&mut self.cfg, end, stmt);
-        if let Some(value) = value {
-            self.return_identity(value, end);
-        }
-        self.finish(end, line(stmt));
-        None
     }
 
     fn flow_expression(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
@@ -137,21 +124,6 @@ impl Lower<'_> {
                 Some(end)
             }
         }
-    }
-
-    fn binding(&mut self, stmt: Node<'_>, at: NodeId, names: &mut Bindings) -> NodeId {
-        let pattern = stmt.child_by_field_name("pattern");
-        let name = pattern
-            .filter(|n| n.kind() == "identifier")
-            .map(|n| self.text(n).to_owned());
-        let target = name.as_ref().map(|name| self.fresh(name));
-        let at = self.value(stmt.child_by_field_name("value"), at, names, target.clone());
-        super::record_evaluation(&mut self.cfg, at, stmt);
-        self.keyed_write(stmt, at);
-        if let Some((name, target)) = name.zip(target) {
-            names.insert(name, target);
-        }
-        at
     }
 
     fn return_identity(&mut self, tail: Node<'_>, at: NodeId) {
@@ -183,6 +155,9 @@ impl Lower<'_> {
     }
 
     fn branch(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
+        if branch_value::is_returned(expr) && branch_value::supports_if(expr) {
+            return self.lower_branch_value(expr, at, names, &branch_value::Mode::Return);
+        }
         if let Some(test) = conditional::test(expr) {
             return self.pattern_branch(test, at, names);
         }

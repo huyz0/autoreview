@@ -1375,10 +1375,37 @@ fn rust_literal_match_tracks_results_across_arms() {
 
 #[test]
 fn rust_unmodeled_matches_remain_incomplete() {
-    for body in ["match x { 0 if check() && other() + 1 > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { Some(ref value) => {}, _ => {} };", "match x { 0 => {} };", "match check(risky() + 1) { _ => {} };", "match x { _ => { let y = risky() + 1; } };", "let y = match x { _ => {} };"] {
+    for body in ["match x { 0 if check() && other() + 1 > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { Some(ref value) => {}, _ => {} };", "match x { 0 => {} };", "match check(risky() + 1) { _ => {} };", "match x { _ => { let y = risky() + 1; } };", "consume(match x { _ => {} });"] {
         let root = write_single_file("lib.rs", &format!("fn run(x: u8) {{ {body} }}\n"));
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("lib.rs")), "{body}: {:?}", result.coverage);
+    }
+}
+
+#[test]
+fn rust_branch_initializers_track_results_from_each_reachable_arm() {
+    let initializers = [
+        "if flag {\n remove_file(\"one.txt\")\n } else {\n remove_file(\"two.txt\")\n }",
+        "match flag {\n true => remove_file(\"one.txt\"),\n\n _ => remove_file(\"two.txt\")\n }",
+    ];
+    for initializer in initializers {
+        let source = format!("use std::fs::remove_file;\nfn run(flag: bool) -> std::io::Result<()> {{\n let result = {initializer};\n Ok(())\n}}\n");
+        let root = write_single_file("lib.rs", &source);
+        assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 4), ("lib.rs", 6)]);
+        std::fs::write(root.path().join("lib.rs"), source.replace(" Ok(())\n", " result\n")).unwrap();
+        assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[]);
+    }
+}
+
+#[test]
+fn rust_returned_branch_values_preserve_explicit_and_implicit_exits() {
+    let conditional = "if let Some(_) = choice {\n   let result = remove_file(\"one.txt\"); result\n } else {\n   remove_file(\"two.txt\")\n }";
+    for returned in [conditional.to_owned(), format!("return {conditional};")] {
+        let source = format!("use std::fs::remove_file;\nfn run(choice: Option<u8>) -> std::io::Result<()> {{\n {returned}\n}}\n");
+        let root = write_single_file("lib.rs", &source);
+        assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[]);
+        let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+        assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", report.coverage);
     }
 }
 
