@@ -2141,26 +2141,106 @@ fn rust_conditional_literal_with_a_constant_keeps_the_failure_path() {
     assert!(report.coverage.iter().any(|issue| issue.reason == "rust_conditional_binding_projection"), "{:?}", report.coverage);
 }
 
+fn assert_rust_results_with_full_coverage(source: &str, expected: &[u32]) {
+    let root = write_single_file("lib.rs", source);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    let mut lines: Vec<_> = report.findings.iter()
+        .filter(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result"))
+        .map(|finding| finding.location.range.start_line)
+        .collect();
+    lines.sort_unstable();
+    assert_eq!(lines, expected, "{:?}", report.findings);
+    assert!(report.coverage.is_empty(), "{:?}", report.coverage);
+}
+
 #[test]
-fn rust_labeled_jumps_in_loop_conditions_keep_coverage_incomplete() {
+fn rust_loop_condition_jumps_skip_body_and_reach_named_exit() {
     let source = r#"use std::fs::remove_file;
-fn own_condition(flag: bool) {
-    'outer: while { if flag { break 'outer; } true } {}
+fn own_condition() {
+    'outer: while { break 'outer; } {
+        remove_file("unreachable");
+    }
     remove_file("after");
 }
 fn nested_condition(flag: bool) {
-    'outer: loop { while { if flag { break 'outer; } true } {} }
-    remove_file("after");
+    'outer: loop {
+        while flag && { break 'outer; } {
+            remove_file("unreachable");
+        }
+        continue 'outer;
+    }
+    remove_file("after outer");
+}
+fn continuing() {
+    'outer: while { continue 'outer; } {
+        remove_file("unreachable");
+    }
+    remove_file("unreachable after");
 }
 "#;
-    let root = write_single_file("lib.rs", source);
-    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
-    for line in [2, 6] {
-        assert!(report.coverage.iter().any(|issue| {
-            issue.line == Some(line) && issue.reason == "unsupported_rust_control_flow"
-                && issue.rule.as_deref() == Some("rust-discarded-remove-file-result")
-        }), "{:?}", report.coverage);
+    assert_rust_results_with_full_coverage(source, &[6, 15]);
+}
+
+#[test]
+fn rust_labeled_block_result_follows_break_and_tail_values() {
+    let source = r#"use std::fs::remove_file;
+fn clean(flag: bool) -> std::io::Result<()> {
+    let result = 'output: {
+        if flag { break 'output remove_file("early"); }
+        if flag { remove_file("alternate") } else { remove_file("tail") }
+    };
+    result
+}
+fn ignored(flag: bool) {
+    let _ = 'output: {
+        if flag { break 'output remove_file("early"); }
+        remove_file("tail")
+    };
+}
+fn nested() -> std::io::Result<()> {
+    'out: {
+        let value = 'inner: { break 'inner remove_file("inner"); };
+        loop { break 'out value; }
     }
+}
+"#;
+    assert_rust_results_with_full_coverage(source, &[11, 12]);
+}
+
+#[test]
+fn rust_struct_and_rest_patterns_distinguish_dropped_results() {
+    let source = r#"use std::fs::remove_file;
+type Removal = std::io::Result<()>;
+struct Pair { first: Removal, second: Removal }
+fn fields() -> Removal {
+    let Pair { second, .. } = Pair { first: remove_file("dropped"), second: remove_file("kept") };
+    second
+}
+fn sequence() -> Removal {
+    let [.., last] = [remove_file("dropped"), remove_file("kept")];
+    last
+}
+fn conditional() -> Removal {
+    if let Pair { second: value @ _, .. } = (Pair { second: remove_file("kept"), first: remove_file("dropped") }) {
+        return value;
+    }
+    Ok(())
+}
+"#;
+    assert_rust_results_with_full_coverage(source, &[5, 9, 13]);
+}
+
+#[test]
+fn rust_qualified_enum_constructor_projects_a_pattern_payload() {
+    let source = r#"use std::fs::remove_file;
+enum Choice<T> { Chosen(T, T), Other }
+fn chosen() -> std::io::Result<()> {
+    let self::Choice::Chosen(kept @ _, ..) =
+        self::Choice::Chosen(remove_file("kept"), remove_file("unused")) else { return Ok(()) };
+    kept
+}
+"#;
+    assert_rust_results_with_full_coverage(source, &[5]);
 }
 
 #[test]

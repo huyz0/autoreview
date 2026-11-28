@@ -10,7 +10,7 @@ pub(super) fn test(owner: Node<'_>) -> Option<Node<'_>> {
 pub(super) fn control_test<'tree>(owner: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
     test(owner).or_else(|| {
         owner.child_by_field_name("condition").filter(|condition| {
-            match_flow::guard::has_short_circuit(*condition) && match_flow::guard::supported(*condition, source)
+            match_flow::guard::has_control_flow(*condition) && match_flow::guard::supported(*condition, source)
         })
     })
 }
@@ -25,10 +25,10 @@ pub(super) fn supported(node: Node<'_>, source: &[u8]) -> bool {
     match node.kind() {
         "let_chain" => children(node).all(|part| supported(part, source)),
         "let_condition" => {
-            bindings(node, source).is_some()
+            super::literal_projection(node, source).is_some() || (bindings(node, source).is_some()
                 && node
                     .child_by_field_name("value")
-                    .is_some_and(|value| match_flow::simple_value(value, source))
+                    .is_some_and(|value| match_flow::simple_value(value, source)))
         }
         _ => match_flow::guard::supported(node, source),
     }
@@ -138,13 +138,12 @@ impl Lower<'_> {
         let after = self.cfg.push_node(expr.end_position().row as u32 + 1);
         self.edge(at, head, EdgeKind::Fallthrough);
         let mut success_names = names.clone();
-        self.lower_pattern_test(test, head, (start, after), &mut success_names);
         self.push_loop(expr, head, after);
+        self.lower_pattern_test(test, head, (start, after), &mut success_names);
         if let Some(end) = self.block(body, start, &success_names) {
             self.edge(end, head, EdgeKind::Loop);
         }
-        self.loops.pop();
-        Some(after)
+        self.close_loop(after)
     }
 
     pub(super) fn lower_pattern_test(

@@ -9,6 +9,7 @@ pub(super) enum Mode<'a> {
     Return,
     Assign(Assignment<'a>),
     Project,
+    Predicate((NodeId, NodeId)),
     Operand { syntax: Node<'a>, temporary: &'a str },
 }
 
@@ -57,7 +58,7 @@ pub(crate) fn is_returned(node: Node<'_>) -> bool {
 
 pub(super) fn supports_position(node: Node<'_>, source: &[u8]) -> bool {
     is_returned(node) || is_initializer(node, source) || is_reassignment(node)
-        || is_discarded_statement(node) || argument_flow::is_operand(node)
+        || is_discarded_statement(node) || argument_flow::is_operand(node) || is_labeled_tail(node)
 }
 
 pub(super) fn is_discarded_statement(node: Node<'_>) -> bool {
@@ -83,7 +84,8 @@ fn last_statement(node: Node<'_>) -> bool {
 
 pub(super) fn supports_value_if(node: Node<'_>, source: &[u8]) -> bool {
     let root = conditional::root_branch(node);
-    (is_returned(root) || is_initializer(root, source) || is_reassignment(root) || argument_flow::is_operand(root)) && supports_if(node, source)
+    (is_labeled_tail(root) || is_returned(root) || is_initializer(root, source) || is_reassignment(root)
+        || argument_flow::is_operand(root)) && supports_if(node, source)
 }
 
 pub(super) fn supports_if(node: Node<'_>, source: &[u8]) -> bool {
@@ -94,7 +96,10 @@ pub(super) fn supports_if(node: Node<'_>, source: &[u8]) -> bool {
         && node
             .child_by_field_name("consequence")
             .is_some_and(|arm| match_flow::simple_arm(arm, source))
-        && alternative(node).map_or_else(|| argument_flow::is_operand(conditional::root_branch(node)), |arm| {
+        && alternative(node).map_or_else(|| {
+            let root = conditional::root_branch(node);
+            argument_flow::is_operand(root) || is_labeled_tail(root)
+        }, |arm| {
             if arm.kind() == "if_expression" {
                 supports_if(arm, source)
             } else {
@@ -105,6 +110,43 @@ pub(super) fn supports_if(node: Node<'_>, source: &[u8]) -> bool {
 
 fn alternative(node: Node<'_>) -> Option<Node<'_>> {
     site::children(node.child_by_field_name("alternative")?).next()
+}
+
+fn in_expression_statement(node: Node<'_>) -> Node<'_> {
+    node.parent().filter(|parent| parent.kind() == "expression_statement").unwrap_or(node)
+}
+
+fn is_labeled_tail(node: Node<'_>) -> bool {
+    let statement = in_expression_statement(outermost_group(node));
+    !has_semicolon(statement) && last_statement(statement)
+        && statement.parent().is_some_and(super::is_labeled_block)
+}
+
+fn tail_expression(node: Node<'_>) -> Option<Node<'_>> {
+    match node.kind() {
+        "expression_statement" if !has_semicolon(node) => site::children(node).next(),
+        "expression_statement" | "let_declaration" | "empty_statement" | "label"
+        | "return_expression" | "break_expression" | "continue_expression" => None,
+        _ => Some(node),
+    }
+}
+
+pub(super) fn supports_block_tail(block: Node<'_>, source: &[u8]) -> bool {
+    site::children(block).last().and_then(tail_expression).is_none_or(|tail| {
+        match from_value(tail) {
+            Some(branch) if branch.kind() == "if_expression" => supports_if(branch, source),
+            Some(branch) => match_flow::supports(branch, source),
+            None => super::is_labeled_block(ungroup_value(tail)) || match_flow::simple_value(tail, source)
+                || matches!(tail.kind(), "loop_expression" | "while_expression" | "for_expression" | "assignment_expression"),
+        }
+    })
+}
+
+fn value_tail(node: Node<'_>, mode: &Mode<'_>, source: &[u8]) -> bool {
+    if matches!(mode, Mode::Predicate(_)) {
+        return match_flow::guard::supported(node, source);
+    }
+    match_flow::simple_value(node, source) || super::is_labeled_block(ungroup_value(node))
 }
 
 impl Lower<'_> {
@@ -169,18 +211,25 @@ impl Lower<'_> {
         }
     }
 
-    fn lower_value_block(&mut self, arm: Node<'_>, mut at: NodeId, names: &mut Bindings, mode: &Mode<'_>) -> Option<NodeId> {
-        let mut statements = site::children(arm).peekable();
+    pub(super) fn lower_value_block(&mut self, arm: Node<'_>, mut at: NodeId, names: &mut Bindings, mode: &Mode<'_>) -> Option<NodeId> {
+        let mut statements = site::children(arm).filter(|node| node.kind() != "label").peekable();
         while let Some(statement) = statements.next() {
-            if statements.peek().is_none() && match_flow::simple_value(statement, self.source) {
-                return self.complete_value(Some(statement), at, names, mode);
+            if statements.peek().is_none() {
+                if let Some(tail) = tail_expression(statement) {
+                    if let Some(branch) = from_value(tail).filter(|_| super::is_labeled_block(arm)) {
+                        return self.lower_branch_value(branch, at, names, mode);
+                    }
+                    if value_tail(tail, mode, self.source) {
+                        return self.complete_value(Some(tail), at, names, mode);
+                    }
+                }
             }
             at = self.statement_in_sequence(statement, at, names, &mut statements)?;
         }
         self.complete_value(None, at, names, mode)
     }
 
-    fn complete_value(
+    pub(super) fn complete_value(
         &mut self,
         value: Option<Node<'_>>,
         at: NodeId,
@@ -202,13 +251,19 @@ impl Lower<'_> {
             }
             Mode::Assign(assignment) => self.assign_arm(value, at, names, assignment),
             Mode::Project => self.evaluate(value, at, names),
+            Mode::Predicate(targets) => {
+                if let Some(value) = value {
+                    self.lower_guard(value, at, *targets, names);
+                }
+                None
+            }
             Mode::Operand { syntax, temporary } => {
                 self.complete_operand(*syntax, value, temporary, at, names)
             }
         }
     }
 
-    fn complete_operand(&mut self, syntax: Node<'_>, value: Option<Node<'_>>, temporary: &str, at: NodeId, names: &Bindings) -> Option<NodeId> {
+    pub(super) fn complete_operand(&mut self, syntax: Node<'_>, value: Option<Node<'_>>, temporary: &str, at: NodeId, names: &Bindings) -> Option<NodeId> {
         let target = temporary.to_owned();
         let end = if value.is_some() {
             self.value(value, at, names, Some(target))?

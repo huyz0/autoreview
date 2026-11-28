@@ -75,10 +75,11 @@ impl<'plan, 'src> Places<'plan, 'src> {
 
     pub(super) fn place(&self, node: Node<'_>, defining: bool) -> Option<Place> {
         let node = transparent(node);
-        if identifier(node) {
+        if identifier(node) || (defining && node.kind() == "shorthand_field_identifier") {
             return self.binding(node, defining).map(Place::Local);
         }
         if !defining {
+            if crate::lower::rust::is_labeled_block(node) { return Some(operand_slot(node)); }
             if let Some(element) = self.rust_elements.place(node) { return Some(element); }
         }
         let (object, member) = field(node)?;

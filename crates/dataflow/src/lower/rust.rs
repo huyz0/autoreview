@@ -14,13 +14,13 @@ mod loops;
 pub(crate) mod element_access;
 
 use support::{simple_binding, supported};
-pub(crate) use destructuring::{iterator_bindings, literal_projection};
+pub(crate) use destructuring::{iterator_bindings, literal_projection, projects_constructor_argument};
 pub use support::{match_arm_bindings, match_binding_lines, supports_function, supports_match};
 pub use support::{match_arm_bindings_with_source, match_binding_lines_with_source, supports_function_with_source, supports_match_with_source};
 pub(crate) use support::{discards_match, lexical_bindings, pattern_projection_sites};
 pub(crate) use argument_flow::{aggregate_result_operands, stages_aggregate, stages_call, OPERAND_TEMPORARY};
 pub(crate) use branch_value::is_returned as value_is_returned;
-pub(crate) use loops::supports_label;
+pub(crate) use loops::{block_binding, is_labeled_block, supports_label};
 
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -69,7 +69,7 @@ struct Lower<'src> {
     cfg: Cfg<Stmt>,
     source: &'src [u8],
     serial: usize,
-    loops: Vec<loops::LoopTarget>,
+    loops: Vec<loops::JumpTarget>,
 }
 
 impl Lower<'_> {
@@ -130,7 +130,10 @@ impl Lower<'_> {
             "while_expression" | "for_expression" | "loop_expression" => {
                 self.loop_body(expr, at, names)
             }
-            "block" => self.block(expr, at, names),
+            "block" if !is_labeled_block(expr) => self.block(expr, at, names),
+            "block" if branch_value::is_returned(expr) => {
+                self.complete_value(Some(expr), at, names, &branch_value::Mode::Return)
+            }
             "unsafe_block" => self.block(super::site::children(expr).next()?, at, names),
             "assignment_expression" => self.lower_assignment(expr, at, names),
             _ => {
@@ -233,12 +236,7 @@ impl Lower<'_> {
                 self.edge(end, head, EdgeKind::Loop);
             }
         }
-        self.loops.pop();
-        self.cfg
-            .edges
-            .iter()
-            .any(|(_, to, _)| *to == after)
-            .then_some(after)
+        self.close_loop(after)
     }
 
     fn variable(&self, expr: Node<'_>, names: &Bindings) -> Option<String> {

@@ -36,13 +36,28 @@ fn variant_pattern<'tree, 'src>(arm: Node<'tree>, source: &'src [u8]) -> Option<
     }
     let variant = arm_pattern(arm, source)?;
     let path = variant.child_by_field_name("type").unwrap_or(variant);
+    let (owner, name) = variant_path(path, source)?;
+    Some((owner, name, variant))
+}
+
+fn variant_path<'src>(path: Node<'_>, source: &'src [u8]) -> Option<(&'src str, &'src str)> {
     let owner = path.child_by_field_name("path")?;
     if owner.child_by_field_name("path")?.kind() != "self" {
         return None;
     }
     let owner = owner.child_by_field_name("name")?.utf8_text(source).ok()?;
     let name = path.child_by_field_name("name")?.utf8_text(source).ok()?;
-    Some((owner, name, variant))
+    Some((owner, name))
+}
+
+pub(in crate::lower::rust) fn tuple_constructor_arity(path: Node<'_>, source: &[u8]) -> Option<usize> {
+    let (owner, name) = variant_path(path, source)?;
+    enum_variants(path, owner, source)?.into_iter().find_map(|(variant, payload)| {
+        if let Payload::Tuple(arity) = payload {
+            return (variant == name).then_some(arity);
+        }
+        None
+    })
 }
 
 fn enum_variants<'src>(node: Node<'_>, owner: &str, source: &'src [u8]) -> Option<Vec<(&'src str, Payload)>> {

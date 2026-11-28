@@ -2,6 +2,8 @@ use super::{branch_value::{self, Mode}, line, patterns, Bindings, Lower, Node, N
 use crate::cfg::{BindingWrite, IdentityOperand, Stmt};
 use crate::lower::{keyed_syntax, record_evaluation, site::children};
 
+mod fields;
+
 pub(super) fn projected_bindings<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Vec<Node<'tree>>> {
     let pattern = node.child_by_field_name("pattern")?;
     matches!(pattern.kind(), "tuple_pattern" | "tuple_struct_pattern" | "struct_pattern"
@@ -40,7 +42,7 @@ pub(crate) fn literal_projection<'tree>(
         declaration.child_by_field_name("pattern")?
     };
     let value = declaration.child_by_field_name("value")?;
-    if !matches!(pattern.kind(), "tuple_pattern" | "slice_pattern" | "captured_pattern")
+    if !matches!(pattern.kind(), "tuple_pattern" | "slice_pattern" | "struct_pattern" | "tuple_struct_pattern" | "captured_pattern")
         || pattern.has_error() || value.has_error()
     {
         return None;
@@ -52,6 +54,20 @@ pub(crate) fn literal_projection<'tree>(
         && declaration.child_by_field_name("alternative").is_none();
     project_literal(pattern, value, source, bare_bindings, &mut elements)?;
     Some(elements)
+}
+
+pub(crate) fn projects_constructor_argument(node: Node<'_>, constructor: Node<'_>, source: &[u8]) -> bool {
+    if constructor.child_by_field_name("function").and_then(|path| {
+        super::match_flow::exhaustiveness::tuple_constructor_arity(path, source)
+    }).is_none() {
+        return false;
+    }
+    std::iter::successors(constructor.parent(), |parent| parent.parent())
+        .take_while(|parent| !matches!(parent.kind(), "function_item" | "closure_expression"))
+        .filter(|parent| matches!(parent.kind(), "let_declaration" | "let_condition" | "match_expression"))
+        .any(|parent| literal_projection(parent, source).is_some_and(|parts| {
+            parts.into_iter().any(|(_, value)| value == node)
+        }))
 }
 
 fn project_literal<'tree>(
@@ -66,30 +82,15 @@ fn project_literal<'tree>(
         return (super::match_flow::simple_value(value, source) && straight_line_element(value))
             .then(|| elements.push((binding, value)));
     }
-    literal_fields(pattern, value)?.into_iter().try_for_each(|(binding, value)| {
+    fields::fields(pattern, value, source)?.into_iter().try_for_each(|(binding, value)| {
         project_literal(binding, value, source, bare_bindings, elements)
     })
 }
 
-fn literal_fields<'tree>(pattern: Node<'tree>, value: Node<'tree>) -> Option<Vec<(Node<'tree>, Node<'tree>)>> {
-    let aggregate = matches!((pattern.kind(), value.kind()),
-        ("tuple_pattern", "tuple_expression") | ("slice_pattern", "array_expression"));
-    if !aggregate || value.child_by_field_name("length").is_some() {
-        return None;
-    }
-    let bindings: Vec<_> = patterns::pattern_parts(pattern).collect();
-    if pattern.kind() == "tuple_pattern" && bindings.len() == 1
-        && !pattern.children(&mut pattern.walk()).any(|child| child.kind() == ",")
-    {
-        return None;
-    }
-    let values: Vec<_> = children(value).collect();
-    (bindings.len() == values.len()).then(|| bindings.into_iter().zip(values).collect())
-}
-
 fn literal_binding(pattern: Node<'_>, bare_bindings: bool) -> Option<Node<'_>> {
     match pattern.kind() {
-        "_" => Some(pattern),
+        "_" | "remaining_field_pattern" | "shorthand_field_identifier" => Some(pattern),
+        "mut_pattern" => patterns::pattern_parts(pattern).find(|part| part.kind() == "identifier"),
         "identifier" if bare_bindings => Some(pattern),
         "captured_pattern" => {
             let mut parts = patterns::pattern_parts(pattern);
@@ -149,7 +150,7 @@ impl Lower<'_> {
                 return None;
             };
             at = end;
-            if binding.kind() == "identifier" {
+            if matches!(binding.kind(), "identifier" | "shorthand_field_identifier") {
                 let temporary = self.fresh(super::argument_flow::OPERAND_TEMPORARY);
                 let identity = keyed_syntax::result_operand(value, self.source, false);
                 self.rebind_tuple_element(temporary.clone(), value, identity, at);

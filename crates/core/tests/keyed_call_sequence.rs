@@ -99,6 +99,23 @@ fn rust_label_jumps_skip_inner_cleanup_and_preserve_outer_cleanup() {
 }
 
 #[test]
+fn rust_labeled_value_and_struct_rest_keep_the_selected_key() {
+    let source = r#"struct Keys<'a> { selected: &'a str, fallback: &'a str }
+fn pending(root: &mut Registry, key: &str, other: &str, early: bool) {
+    root.register(key);
+    let Keys { selected, .. } = Keys { fallback: other, selected: key };
+    root.remove('select: {
+        if early { break 'select selected; }
+        selected
+    });
+}
+"#;
+    assert!(findings("Rust", "lib.rs", source, RECEIVER, true).is_empty());
+    let wrong = source.replace("break 'select selected", "break 'select other");
+    assert_eq!(findings("Rust", "lib.rs", &wrong, RECEIVER, true).len(), 1);
+}
+
+#[test]
 fn rust_nested_literal_projections_bind_the_matching_key() {
     let source = r#"fn pending(root: &mut Registry, key: &str, other: &str) {
     root.register(key);

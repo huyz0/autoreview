@@ -183,18 +183,22 @@ shapes remain outside this coverage. [Rust array expressions](https://doc.rust-l
 Rust `match`, conditional patterns, `let-else`, ordinary `let`, and `for`
 support tuple, struct, slice, and reference patterns. The analyzer follows
 shorthand and renamed struct fields, nested patterns, ignored rest fields or
-elements, and supported `@` bindings. It tracks individual values in nested
-tuple and array literals when the pattern and literal have the same shape and
-elements evaluate in straight-line order. A single match arm or conditional
-pattern can use explicit captures such as `value @ _` to establish a match
-without resolving bare identifiers as constants. Other unresolved initializer
-and iterator projections still report incomplete coverage. Loop bindings
-receive fresh identities each iteration. [Rust patterns](https://doc.rust-lang.org/reference/patterns.html#destructuring)
+elements, and supported `@` bindings. It projects individual values from
+direct tuple and array literals, including fixed-width rest patterns, and
+from explicitly initialized struct fields. It also projects tuple payloads
+from a `self::Enum::Variant` constructor proven by the local enum declaration.
+Initializers run in source order. Explicit captures such as `value @ _`
+establish a binding in conditional patterns without resolving bare names
+as constants. Opaque initializers, struct updates, and unresolved iterator
+projections still report incomplete coverage. Loop bindings receive fresh
+identities each iteration. [Rust patterns](https://doc.rust-lang.org/reference/patterns.html#destructuring)
 
 Statement-position `unsafe` blocks follow the control flow of their body.
-Loop labels resolve `break` and `continue` from a loop body to the named
-enclosing loop, including jumps from a nested loop. Jumps inside loop
-conditions and value-producing labeled blocks still report incomplete coverage.
+Loop labels resolve `break` and `continue` from loop bodies and supported
+boolean condition blocks, including jumps to an outer loop. A labeled block
+can supply its value through a named `break` or its tail expression. The
+analyzer tracks those values through assignments, returns, and call arguments.
+[Rust loop and labeled block expressions](https://doc.rust-lang.org/reference/expressions/loop-expr.html)
 
 Or-patterns can bind names in unguarded match arms, conditional patterns,
 `let-else`, and supported destructuring. The alternatives must bind the same

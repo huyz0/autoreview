@@ -3,13 +3,13 @@ use crate::cfg::{BindingWrite, IdentityOperand, Stmt};
 use crate::lower::site::children;
 
 pub(super) mod guard;
-mod exhaustiveness;
+pub(super) mod exhaustiveness;
 
 pub(super) fn supports(node: Node<'_>, source: &[u8]) -> bool {
     if node.kind() != "match_expression"
         || node.has_error()
         || !branch_value::supports_position(node, source)
-        || !node.child_by_field_name("value").is_some_and(|value| simple_value(value, source))
+        || !supported_scrutinee(node, source)
     {
         return false;
     }
@@ -21,6 +21,11 @@ pub(super) fn supports(node: Node<'_>, source: &[u8]) -> bool {
         .filter(|item| item.kind() != "line_comment" && item.kind() != "block_comment")
         .collect();
     covers_match_arms(node, &arms, source)
+}
+
+fn supported_scrutinee(node: Node<'_>, source: &[u8]) -> bool {
+    node.child_by_field_name("value").is_some_and(|value| simple_value(value, source))
+        || super::literal_projection(node, source).is_some()
 }
 
 fn covers_match_arms(node: Node<'_>, arms: &[Node<'_>], source: &[u8]) -> bool {
@@ -52,11 +57,11 @@ pub(super) fn simple_arm(node: Node<'_>, source: &[u8]) -> bool {
     let simple_arm = |child| simple_arm(child, source);
     let simple_value = |child| simple_value(child, source);
     match node.kind() {
-        "block" => children(node).all(simple_arm),
+        "block" => simple_block(node, source),
         "empty_statement" => true,
         "expression_statement" => children(node).next().is_some_and(simple_arm),
         "return_expression" | "break_expression" | "continue_expression" => {
-            children(node).next().is_none_or(simple_value)
+            children(node).find(|child| child.kind() != "label").is_none_or(simple_value)
         }
         "let_declaration" => arm_declaration(node, source),
         "if_expression" => statement_if(node, source),
@@ -65,6 +70,14 @@ pub(super) fn simple_arm(node: Node<'_>, source: &[u8]) -> bool {
                 && node.child_by_field_name("right").is_some_and(|value| simple_operand(value, source))
         }
         _ => simple_value(node),
+    }
+}
+
+fn simple_block(node: Node<'_>, source: &[u8]) -> bool {
+    if super::is_labeled_block(node) {
+        branch_value::supports_block_tail(node, source)
+    } else {
+        children(node).all(|statement| simple_arm(statement, source))
     }
 }
 
@@ -94,6 +107,7 @@ pub(super) fn simple_value(node: Node<'_>, source: &[u8]) -> bool {
         "reference_expression" | "parenthesized_expression" | "try_expression" => {
             node.child_by_field_name("value").or_else(|| children(node).next()).is_some_and(simple_value)
         }
+        "block" if super::is_labeled_block(node) => super::branch_value::supports_block_tail(node, source),
         "call_expression" => simple_call(node, source),
         "tuple_expression" | "array_expression" => super::argument_flow::aggregate_operands(node)
             .is_some_and(|mut operands| operands.all(|element| simple_operand(element, source))),
