@@ -8,7 +8,7 @@ use crate::lower::site::identifier;
 use super::super::identity::Syntax;
 use super::places::operand_slot;
 use super::references::{capture_scope, reference, string_references};
-use super::syntax::{descendants, transparent};
+use super::syntax::descendants;
 use super::{ContractLanguage, Place};
 
 #[derive(Default)]
@@ -34,7 +34,7 @@ impl RustElements {
             .filter(|node| matches!(node.kind(), "array_expression" | "tuple_expression") && in_body(*node, body))
         {
             if let Some((access, slot)) = element_access::direct_projection(node, source) {
-                self.record(node, access, slot);
+                self.record(node, access, slot, source);
             }
             if let Some(binding) = element_access::local_aggregate(node) {
                 locals.insert(binding.start_byte(), node);
@@ -62,7 +62,7 @@ impl RustElements {
         }
         // A read can use the initializer's slot only while the binding has no other uses.
         for (_, aggregate, access, slot) in pending.into_iter().filter(|(id, ..)| !rejected.contains(id)) {
-            self.record(aggregate, access, slot);
+            self.record(aggregate, access, slot, source);
         }
     }
 
@@ -74,8 +74,10 @@ impl RustElements {
         self.reads.get(&(node.start_byte(), node.end_byte())).copied()
     }
 
-    fn record(&mut self, aggregate: Node<'_>, access: Node<'_>, slot: Node<'_>) {
-        self.aggregates.insert(aggregate.start_byte());
+    fn record(&mut self, aggregate: Node<'_>, access: Node<'_>, slot: Node<'_>, source: &[u8]) {
+        if !self.tracks_aggregate(aggregate.start_byte()) {
+            self.aggregates.extend(element_access::nested_aggregates(aggregate, source).map(|node| node.start_byte()));
+        }
         self.reads.insert((access.start_byte(), access.end_byte()), operand_slot(slot));
     }
 }
@@ -90,11 +92,7 @@ fn referenced_binding(syntax: &Syntax<'_>, node: Node<'_>, source: &[u8]) -> Opt
 
 fn local_projection<'tree>(node: Node<'tree>, aggregate: Node<'tree>, body: Node<'_>, source: &[u8]) -> Option<(Node<'tree>, Node<'tree>)> {
     if !identifier(node) || !in_body(node, body) { return None; }
-    let access = std::iter::successors(node.parent(), Node::parent)
-        .find(|parent| transparent(*parent) != node)?;
-    let (base, index) = element_access::projection(access, source)?;
-    if base != node || !element_access::read_only(access) { return None; }
-    Some((access, element_access::element_slot(aggregate, access, index, source)?))
+    element_access::projection_chain(node, aggregate, source)
 }
 
 fn in_body(node: Node<'_>, body: Node<'_>) -> bool {
