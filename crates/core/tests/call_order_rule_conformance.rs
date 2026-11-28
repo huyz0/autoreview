@@ -1660,6 +1660,28 @@ fn rust_match_guard_side_effects_reach_later_arms() {
 }
 
 #[test]
+fn rust_ordinary_if_short_circuits_cleanup_paths() {
+    let source = concat!(
+        "fn open(flag: bool) {\n if flag && begin() { finish(); }\n}\n",
+        "fn closed() {\n if true || begin() {}\n if false && begin() {}\n if !(true || begin()) {}\n}\n",
+        "fn both_arms(flag: bool) {\n if flag || begin() { finish(); } else { finish(); }\n}\n",
+        "fn nested(flag: bool) {\n match flag { true => { if false && begin() {} }, _ => {} };\n}\n",
+    );
+    assert_rust_match_cleanup("rust-if-short-circuit", source);
+}
+
+#[test]
+fn rust_ordinary_while_short_circuits_cleanup_paths() {
+    let source = concat!(
+        "fn open(flag: bool) {\n while flag && begin() { finish(); break; }\n}\n",
+        "fn never_enters() {\n while false && begin() {}\n}\n",
+        "fn no_right_operand() {\n while true || begin() { break; }\n}\n",
+        "fn closed(flag: bool) {\n while flag && begin() { finish(); break; }\n finish();\n}\n",
+    );
+    assert_rust_match_cleanup("rust-while-short-circuit", source);
+}
+
+#[test]
 fn rust_match_guards_short_circuit_before_running_the_right_operand() {
     let source = concat!(
         "fn partial(flag: u8) {\n match flag { 0 if gate() || begin() => {}, _ => {} };\n}\n",

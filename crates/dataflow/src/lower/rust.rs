@@ -160,8 +160,8 @@ impl Lower<'_> {
         if branch_value::is_returned(expr) && branch_value::supports_if(expr) {
             return self.lower_branch_value(expr, at, names, &branch_value::Mode::Return);
         }
-        if let Some(test) = conditional::test(expr) {
-            return self.pattern_branch(test, at, names);
+        if let Some(test) = conditional::control_test(expr) {
+            return self.tested_branch(test, at, names);
         }
         let condition = self.test(expr, at, names);
         if self.cfg.keyed_flow.is_some() {
@@ -206,8 +206,8 @@ impl Lower<'_> {
     }
 
     fn loop_body(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
-        if let Some(test) = conditional::test(expr) {
-            return self.pattern_loop(test, at, names);
+        if let Some(test) = conditional::control_test(expr) {
+            return self.tested_loop(test, at, names);
         }
         let head = self.cfg.push_node(line(expr));
         let after = self.cfg.push_node(expr.end_position().row as u32 + 1);

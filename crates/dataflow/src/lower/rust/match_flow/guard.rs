@@ -54,6 +54,14 @@ pub(in crate::lower::rust) fn supported(node: Node<'_>) -> bool {
     }
 }
 
+pub(in crate::lower::rust) fn has_short_circuit(node: Node<'_>) -> bool {
+    match predicate(node) {
+        Predicate::And(_, _) | Predicate::Or(_, _) => true,
+        Predicate::Not(value) => has_short_circuit(value),
+        _ => false,
+    }
+}
+
 impl Lower<'_> {
     pub(in crate::lower::rust) fn lower_guard(
         &mut self,

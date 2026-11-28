@@ -7,6 +7,14 @@ pub(super) fn test(owner: Node<'_>) -> Option<Node<'_>> {
         .filter(|node| matches!(node.kind(), "let_condition" | "let_chain"))
 }
 
+pub(super) fn control_test(owner: Node<'_>) -> Option<Node<'_>> {
+    test(owner).or_else(|| {
+        owner.child_by_field_name("condition").filter(|condition| {
+            match_flow::guard::has_short_circuit(*condition) && match_flow::guard::supported(*condition)
+        })
+    })
+}
+
 pub(crate) fn bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
     (node.kind() == "let_condition")
         .then(|| match_flow::projection_bindings(node))
@@ -74,7 +82,7 @@ pub(super) fn unit_branch(node: Node<'_>) -> bool {
 }
 
 impl Lower<'_> {
-    pub(super) fn pattern_branch(
+    pub(super) fn tested_branch(
         &mut self,
         test: Node<'_>,
         at: NodeId,
@@ -122,7 +130,7 @@ impl Lower<'_> {
         Some(join)
     }
 
-    pub(super) fn pattern_loop(&mut self, test: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
+    pub(super) fn tested_loop(&mut self, test: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
         let expr = test.parent()?;
         let body = expr.child_by_field_name("body")?;
         let head = self.cfg.push_node(line(expr));
