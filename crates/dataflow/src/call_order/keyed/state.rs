@@ -95,7 +95,9 @@ impl<'graph> State<'graph> {
             Some(operand) => self.materialize(plan, operand, write.start),
             None => None,
         };
-        self.values.insert(write.name.clone(), value);
+        let key = plan.syntax.conditional_key(&write.name, write.start, true)
+            .unwrap_or_else(|| write.name.clone());
+        self.values.insert(key, value);
     }
 
     pub(super) fn materialize(

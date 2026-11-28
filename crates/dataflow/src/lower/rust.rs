@@ -4,9 +4,11 @@
 mod values;
 mod match_flow;
 mod let_else;
+mod conditional;
 mod support;
 
 use support::{simple_binding, supported};
+pub(crate) use conditional::bindings as conditional_bindings;
 pub use support::{match_arm_bindings, match_binding_lines, supports_function, supports_match};
 pub(crate) use support::{discards_match, let_else_bindings, pattern_projection_sites};
 
@@ -181,6 +183,9 @@ impl Lower<'_> {
     }
 
     fn branch(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
+        if let Some(test) = conditional::test(expr) {
+            return self.pattern_branch(expr, test, at, names);
+        }
         let condition = self.test(expr, at, names);
         if self.cfg.keyed_flow.is_some() {
             self.cfg.nodes[condition].condition = super::keyed_syntax::condition(expr, self.source);
@@ -224,6 +229,9 @@ impl Lower<'_> {
     }
 
     fn loop_body(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
+        if let Some(test) = conditional::test(expr) {
+            return self.pattern_loop(expr, test, at, names);
+        }
         let head = self.cfg.push_node(line(expr));
         let after = self.cfg.push_node(expr.end_position().row as u32 + 1);
         let iterable = self.evaluate(expr.child_by_field_name("value"), at, names);

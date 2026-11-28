@@ -1,7 +1,7 @@
 use super::{Bindings, EdgeKind, Lower, Node, NodeId};
 use crate::cfg::{BindingWrite, IdentityOperand, Stmt};
 
-mod guard;
+pub(super) mod guard;
 mod returns;
 
 pub(super) use returns::returns_match;
@@ -101,6 +101,13 @@ pub(super) fn tuple_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
         }
     }
     has_element.then_some(bindings)
+}
+
+pub(super) fn projection_bindings(pattern: Node<'_>) -> Option<Vec<Node<'_>>> {
+    match pattern.kind() {
+        "scoped_identifier" | "boolean_literal" | "integer_literal" => Some(Vec::new()),
+        _ => tuple_bindings(pattern),
+    }
 }
 
 pub(super) fn arm_bindings(arm: Node<'_>) -> Vec<Node<'_>> {

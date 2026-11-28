@@ -1205,6 +1205,26 @@ fn rust_literal_match_result_reaches_review_and_replay() {
 }
 
 #[test]
+fn rust_let_chain_reaches_review_and_replay() {
+    let before = "use std::fs::remove_file;\nfn run(value: Option<u8>, gate: bool) {\n    if gate && let Some(_) = value { remove_file(\"example.txt\"); }\n}\n";
+    let after = before.replace("remove_file(\"example.txt\");", "assert!(remove_file(\"example.txt\").is_ok());");
+    let repo = init_repo(&[("lib.rs", before)]);
+    let old = current_commit(repo.path());
+    repo.commit(&[("lib.rs", &after)], "observe the result");
+    let fixed = current_commit(repo.path());
+    let suite = serde_json::json!({"cases": [{"name":"Rust let chain", "rule":{"tool":"autoreview-dataflow", "id":"rust-discarded-remove-file-result"},
+        "before":{"commit":old, "path":"lib.rs", "lines":[3]}, "after":{"commit":fixed, "path":"lib.rs", "lines":[]}}]});
+    std::fs::write(repo.path().join("suite.json"), suite.to_string()).unwrap();
+    let replay = Command::cargo_bin("autoreview").unwrap().current_dir(repo.path()).args(["rules", "replay", "--suite", "suite.json"]).assert().success();
+    let replay: serde_json::Value = serde_json::from_slice(&replay.get_output().stdout).unwrap();
+    assert_eq!(replay["rules"][0]["truePositives"], 1, "{replay}");
+    repo.commit(&[("lib.rs", before)], "discard the result");
+    let review = static_review_report(&repo, &fixed, None);
+    assert!(review["findings"].as_array().unwrap().iter().any(|finding|
+        finding["source"]["ruleId"] == "rust-discarded-remove-file-result" && finding["location"]["range"]["startLine"] == 3), "{review}");
+}
+
+#[test]
 fn rust_match_binding_projection_keeps_replay_incomplete() {
     let prefix = "use std::fs::remove_file;\nfn run(value: Option<&str>) -> std::io::Result<()> {\n";
     let before = format!("{prefix}    match value {{ Some(path) => {{ remove_file(path); }}, _ => {{}} }};\n    Ok(())\n}}\n");

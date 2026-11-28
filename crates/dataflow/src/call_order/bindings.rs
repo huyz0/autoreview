@@ -81,6 +81,10 @@ impl<'src> Bindings<'src> {
         self.local_values.resolve(name, at, defining)
     }
 
+    pub(super) fn conditional_binding(&self, name: &str, at: usize, defining: bool) -> Option<usize> {
+        self.local_values.conditional_binding(name, at, defining)
+    }
+
     pub(super) fn resolve<'a>(
         &'a self,
         mut name: &'a str,
@@ -122,6 +126,12 @@ impl<'src> Bindings<'src> {
     }
 
     fn record_declarations(&mut self, node: Node<'_>, source: &'src [u8], track_results: bool) {
+        if let Some(targets) = crate::lower::rust::conditional_bindings(node) {
+            for target in targets {
+                self.local_values.record(node, target, source);
+            }
+            return;
+        }
         let targets = declaration_targets(node);
         let single_target = targets.len() == 1 || declares_iteration(node) || node.kind() == "match_arm"
             || matches!(

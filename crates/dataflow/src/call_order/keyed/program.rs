@@ -151,7 +151,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             self.unresolved.borrow_mut().insert((from, site.start, "unresolved_helper_target"));
             return None;
         }
-        if syntax.taken_name(root) || syntax.shadows_type(root) {
+        if syntax.taken_name_at(root, site.start) || syntax.shadows_type(root) {
             return None;
         }
         let arity = match site.arguments.as_slice() {

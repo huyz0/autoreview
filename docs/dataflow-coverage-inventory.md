@@ -123,8 +123,16 @@ initializer is supported and the fallback ends with `return`, `break`, or
 `continue`. The fallback sees the outer bindings. Names introduced on the
 success path have distinct identities and report
 `rust_let_else_binding_projection` because their relationship to the
-initializer is unresolved. Complex patterns, `if let`, and let chains still
-report incomplete coverage. [Rust let statements](https://doc.rust-lang.org/reference/statements.html#let-statements)
+initializer is unresolved. [Rust let statements](https://doc.rust-lang.org/reference/statements.html#let-statements)
+
+Rust statement-position `if let` and `while let` can use simple patterns
+and let chains. Chain operands execute from left to right. Each successful
+pattern exposes its names to subsequent operands and the success body.
+Failure goes to the original `else` scope or exits the loop. Bindings
+whose source values cannot be projected report
+`rust_conditional_binding_projection`. Returned conditional values,
+let chains inside match guards, and complex patterns still report
+incomplete coverage. [Rust if expressions](https://doc.rust-lang.org/reference/expressions/if-expr.html)
 
 Report scopes should distinguish an entire file, a function or root, a rule,
 and an imported dependency. Findings from unaffected scopes remain useful.

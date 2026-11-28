@@ -1375,11 +1375,46 @@ fn rust_literal_match_tracks_results_across_arms() {
 
 #[test]
 fn rust_unmodeled_matches_remain_incomplete() {
-    for body in ["match x { 0 if check() && other() == true => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { Some(ref value) => {}, _ => {} };", "match x { 0 => {} };", "match check(risky() + 1) { _ => {} };", "match x { _ => { let y = risky() + 1; } };", "let y = match x { _ => {} };"] {
+    for body in ["match x { 0 if check() && other() + 1 > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { Some(ref value) => {}, _ => {} };", "match x { 0 => {} };", "match check(risky() + 1) { _ => {} };", "match x { _ => { let y = risky() + 1; } };", "let y = match x { _ => {} };"] {
         let root = write_single_file("lib.rs", &format!("fn run(x: u8) {{ {body} }}\n"));
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("lib.rs")), "{body}: {:?}", result.coverage);
     }
+}
+
+#[test]
+fn rust_conditional_bindings_follow_chain_and_else_scopes() {
+    let source = r#"use std::fs::remove_file;
+fn run(path: Option<Option<&str>>, callback: Option<fn(&str)>) {
+    if let Some(candidate) = path
+        && let Some(path) = candidate
+        && path.len() > 0 {
+        remove_file(path);
+    } else if let Some(remove_file) = callback {
+        remove_file("local.txt");
+    } else {
+        remove_file("fallback.txt");
+    }
+    remove_file("after.txt");
+}
+"#;
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 6), ("lib.rs", 10), ("lib.rs", 12)]);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    let projection: std::collections::BTreeSet<_> = report.coverage.iter()
+        .filter(|issue| issue.reason == "rust_conditional_binding_projection").filter_map(|issue| issue.line).collect();
+    assert_eq!(projection, [3, 4, 7].into(), "{:?}", report.coverage);
+    assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"));
+}
+
+#[test]
+fn rust_conditional_loops_and_short_circuits_bound_call_sequence_paths() {
+    let source = concat!(
+        "fn open() {\n if let Some(_) = begin() && allowed() { finish(); }\n}\n",
+        "fn short() {\n if false && let Some(_) = begin() {}\n}\n",
+        "fn closed() {\n while let Some(_) = begin() && allowed() { finish(); continue; }\n finish();\n}\n",
+    );
+    assert_rust_match_cleanup("rust-conditional-cleanup", source);
 }
 
 #[test]

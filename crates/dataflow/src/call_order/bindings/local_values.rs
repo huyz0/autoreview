@@ -15,10 +15,21 @@ struct LocalValue {
     visible_at: usize,
     reusable: bool,
     tracked: bool,
+    conditional: bool,
 }
 
 impl<'src> LocalValues<'src> {
     pub(super) fn resolve(&self, name: &str, at: usize, defining: bool) -> Option<usize> {
+        let binding = self.binding(name, at, defining)?;
+        binding.tracked.then_some(binding.declaration)
+    }
+
+    pub(super) fn conditional_binding(&self, name: &str, at: usize, defining: bool) -> Option<usize> {
+        let binding = self.binding(name, at, defining)?;
+        binding.conditional.then_some(binding.declaration)
+    }
+
+    fn binding(&self, name: &str, at: usize, defining: bool) -> Option<&LocalValue> {
         let locals = self.by_name.get(name)?;
         let at_declaration = |value: &LocalValue| defining && value.declaration == at;
         let binding = locals
@@ -32,7 +43,7 @@ impl<'src> LocalValues<'src> {
         } else {
             binding
         };
-        binding.tracked.then_some(binding.declaration)
+        Some(binding)
     }
 
     pub(super) fn record(&mut self, declaration: Node<'_>, target: Node<'_>, source: &'src [u8]) {
@@ -51,6 +62,7 @@ impl<'src> LocalValues<'src> {
                         visible_at,
                         reusable,
                         tracked: tracked && identifier == target,
+                        conditional: declaration.kind() == "let_condition",
                     });
                 }
             }
@@ -74,6 +86,9 @@ fn visible_after(declaration: Node<'_>, target: Node<'_>) -> usize {
 }
 
 fn scope(node: Node<'_>, web_var: bool) -> Option<Range<usize>> {
+    if node.kind() == "let_condition" {
+        return conditional_scope(node);
+    }
     if node.kind() == "match_arm" { return Some(node.byte_range()); }
     if declares_iteration(node) && node.kind() != "range_clause" {
         return Some(node.byte_range());
@@ -87,6 +102,17 @@ fn scope(node: Node<'_>, web_var: bool) -> Option<Range<usize>> {
                 scope.byte_range()
             }
         })
+}
+
+fn conditional_scope(node: Node<'_>) -> Option<Range<usize>> {
+    let owner = std::iter::successors(node.parent(), Node::parent)
+        .find(|parent| parent.kind() != "let_chain")?;
+    let field = match owner.kind() {
+        "if_expression" => "consequence",
+        "while_expression" => "body",
+        _ => return None,
+    };
+    Some(owner.start_byte()..owner.child_by_field_name(field)?.end_byte())
 }
 
 fn function_scope(node: Node<'_>) -> bool {
