@@ -126,16 +126,18 @@ impl Lower<'_, '_, '_> {
     }
 
     fn statement(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
-        if node.kind() == "match_expression" && self.language == ContractLanguage::Rust {
-            if let Some(projections) = crate::lower::rust::literal_projection(node, self.source) {
-                let writes = projections.into_iter()
-                    .filter_map(|(binding, value)| self.write(binding, Some(value), false, effects))
-                    .collect();
-                effects.push(Effect::Write(writes));
-                return;
-            }
+        if self.project_match(node, effects) {
+            return;
         }
-        let value = if let Some(closure) = self.inside {
+        if let Some(value) = self.statement_result(node) {
+            self.returned(value, effects);
+            return;
+        }
+        self.statement_effects(node, effects);
+    }
+
+    fn statement_result<'tree>(&self, node: Node<'tree>) -> Option<Node<'tree>> {
+        if let Some(closure) = self.inside {
             closure_result(node, closure)
         } else if self.returns_to_caller {
             return_value(node).or_else(|| {
@@ -147,11 +149,10 @@ impl Lower<'_, '_, '_> {
             })
         } else {
             None
-        };
-        if let Some(value) = value {
-            self.returned(value, effects);
-            return;
         }
+    }
+
+    fn statement_effects(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
         match node.kind() {
             "expression_statement" => {
                 if let Some(expr) = site::children(node).next() {

@@ -20,6 +20,10 @@ pub(super) fn supports(node: Node<'_>, source: &[u8]) -> bool {
         .named_children(&mut body.walk())
         .filter(|item| item.kind() != "line_comment" && item.kind() != "block_comment")
         .collect();
+    covers_match_arms(node, &arms, source)
+}
+
+fn covers_match_arms(node: Node<'_>, arms: &[Node<'_>], source: &[u8]) -> bool {
     let Some((last, rest)) = arms.split_last() else {
         return false;
     };
@@ -28,7 +32,7 @@ pub(super) fn supports(node: Node<'_>, source: &[u8]) -> bool {
         return pattern(*last, source).is_some();
     }
     rest.iter().all(|arm| supported_arm(*arm, source))
-        && (wildcard || (supported_arm(*last, source) && exhaustiveness::covers_enum(node, &arms, source)))
+        && (wildcard || (supported_arm(*last, source) && exhaustiveness::covers_enum(node, arms, source)))
 }
 
 fn pattern<'tree>(arm: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {

@@ -63,12 +63,15 @@ fn project_literal<'tree>(
 ) -> Option<()> {
     let value = super::branch_value::ungroup_value(value);
     if let Some(binding) = literal_binding(pattern, bare_bindings) {
-        if !super::match_flow::simple_value(value, source) || !straight_line_element(value) {
-            return None;
-        }
-        elements.push((binding, value));
-        return Some(());
+        return (super::match_flow::simple_value(value, source) && straight_line_element(value))
+            .then(|| elements.push((binding, value)));
     }
+    literal_fields(pattern, value)?.into_iter().try_for_each(|(binding, value)| {
+        project_literal(binding, value, source, bare_bindings, elements)
+    })
+}
+
+fn literal_fields<'tree>(pattern: Node<'tree>, value: Node<'tree>) -> Option<Vec<(Node<'tree>, Node<'tree>)>> {
     let aggregate = matches!((pattern.kind(), value.kind()),
         ("tuple_pattern", "tuple_expression") | ("slice_pattern", "array_expression"));
     if !aggregate || value.child_by_field_name("length").is_some() {
@@ -81,13 +84,7 @@ fn project_literal<'tree>(
         return None;
     }
     let values: Vec<_> = children(value).collect();
-    if bindings.len() != values.len() {
-        return None;
-    }
-    for (binding, value) in bindings.into_iter().zip(values) {
-        project_literal(binding, value, source, bare_bindings, elements)?;
-    }
-    Some(())
+    (bindings.len() == values.len()).then(|| bindings.into_iter().zip(values).collect())
 }
 
 fn literal_binding(pattern: Node<'_>, bare_bindings: bool) -> Option<Node<'_>> {

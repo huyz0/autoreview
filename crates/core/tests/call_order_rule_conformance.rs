@@ -2002,15 +2002,19 @@ fn rust_statement_unsafe_blocks_and_reassignment_arms_follow_calls() {
     let source = r#"use std::fs::remove_file;
 fn run(flag: bool) {
     unsafe { remove_file("unsafe"); }
-    let result;
+    let mut result;
     result = if flag { remove_file("one") } else { remove_file("two") };
     result = match flag { true => remove_file("three"), _ => remove_file("four") };
     let _handled = result.is_ok();
 }
 "#;
-    let root = write_single_file("lib.rs", &source.replace("let result;", "let mut result;"));
-    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 3), ("lib.rs", 5)]);
+    let root = write_single_file("lib.rs", source);
     let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    let mut locations: Vec<_> = report.findings.iter()
+        .filter(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result"))
+        .map(|finding| finding.location.range.start_line).collect();
+    locations.sort_unstable();
+    assert_eq!(locations, [3, 5], "{:?}", report.findings);
     assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", report.coverage);
 }
 
