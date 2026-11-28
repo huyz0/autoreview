@@ -99,7 +99,7 @@ impl Lower<'_, '_, '_> {
         if let Some(index) = self.closure_call(node) {
             todo.push(Visit::Invoke(index, demand));
         }
-        if self.read_staged_call(node, effects) { return; }
+        if self.read_staged_call(node, effects) || self.read_staged_aggregate(node, effects) { return; }
         let parts: Vec<_> = site::children(node).collect();
         todo.extend(parts.into_iter().rev().map(|child| Visit::Syntax(child, Demand::Observed)));
     }
@@ -260,6 +260,6 @@ impl Lower<'_, '_, '_> {
     }
 }
 
-fn operand_slot(node: Node<'_>) -> Place {
+pub(super) fn operand_slot(node: Node<'_>) -> Place {
     Place::Operand(node.start_byte(), node.end_byte())
 }

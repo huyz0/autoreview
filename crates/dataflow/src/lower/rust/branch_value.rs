@@ -6,7 +6,7 @@ pub(super) enum Mode<'a> {
     Return,
     Assign(Assignment<'a>),
     Project,
-    Argument { syntax: Node<'a>, temporary: &'a str },
+    Operand { syntax: Node<'a>, temporary: &'a str },
 }
 
 pub(super) struct Assignment<'a> {
@@ -39,7 +39,7 @@ pub(super) fn is_initializer(node: Node<'_>, source: &[u8]) -> bool {
     })
 }
 
-pub(super) fn is_returned(node: Node<'_>) -> bool {
+pub(crate) fn is_returned(node: Node<'_>) -> bool {
     let node = outermost_group(node);
     let Some(parent) = node.parent() else {
         return false;
@@ -63,7 +63,7 @@ pub(super) fn is_returned(node: Node<'_>) -> bool {
 }
 
 pub(super) fn supports_position(node: Node<'_>, source: &[u8]) -> bool {
-    is_returned(node) || is_initializer(node, source) || is_discarded_statement(node) || argument_flow::is_argument(node)
+    is_returned(node) || is_initializer(node, source) || is_discarded_statement(node) || argument_flow::is_operand(node)
 }
 
 pub(super) fn is_discarded_statement(node: Node<'_>) -> bool {
@@ -89,7 +89,7 @@ fn last_statement(node: Node<'_>) -> bool {
 
 pub(super) fn supports_value_if(node: Node<'_>, source: &[u8]) -> bool {
     let root = conditional::root_branch(node);
-    (is_returned(root) || is_initializer(root, source) || argument_flow::is_argument(root)) && supports_if(node, source)
+    (is_returned(root) || is_initializer(root, source) || argument_flow::is_operand(root)) && supports_if(node, source)
 }
 
 pub(super) fn supports_if(node: Node<'_>, source: &[u8]) -> bool {
@@ -100,7 +100,7 @@ pub(super) fn supports_if(node: Node<'_>, source: &[u8]) -> bool {
         && node
             .child_by_field_name("consequence")
             .is_some_and(|arm| match_flow::simple_arm(arm, source))
-        && alternative(node).map_or_else(|| argument_flow::is_argument(conditional::root_branch(node)), |arm| {
+        && alternative(node).map_or_else(|| argument_flow::is_operand(conditional::root_branch(node)), |arm| {
             if arm.kind() == "if_expression" {
                 supports_if(arm, source)
             } else {
@@ -248,13 +248,13 @@ impl Lower<'_> {
             }
             Mode::Assign(assignment) => self.assign_arm(value, at, names, assignment),
             Mode::Project => self.evaluate(value, at, names),
-            Mode::Argument { syntax, temporary } => {
-                self.complete_argument(*syntax, value, temporary, at, names)
+            Mode::Operand { syntax, temporary } => {
+                self.complete_operand(*syntax, value, temporary, at, names)
             }
         }
     }
 
-    fn complete_argument(&mut self, syntax: Node<'_>, value: Option<Node<'_>>, temporary: &str, at: NodeId, names: &Bindings) -> Option<NodeId> {
+    fn complete_operand(&mut self, syntax: Node<'_>, value: Option<Node<'_>>, temporary: &str, at: NodeId, names: &Bindings) -> Option<NodeId> {
         let target = temporary.to_owned();
         let end = if value.is_some() {
             self.value(value, at, names, Some(target))?

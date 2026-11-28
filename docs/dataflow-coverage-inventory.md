@@ -152,9 +152,15 @@ are supported, including grouped and negated conditions. [Rust if expressions](h
 Supported `if` and `match` expressions can also supply direct arguments to
 functions and methods. Autoreview evaluates the receiver and arguments in
 source order and passes the selected arm's value to the call. An early exit
-inside an argument skips the remaining operands and the call. Branch values
-inside unsupported positions such as array elements still report incomplete
-coverage. [Rust operand evaluation order](https://doc.rust-lang.org/reference/expressions.html#evaluation-order-of-operands)
+inside an argument skips the remaining operands and the call. [Rust operand evaluation order](https://doc.rust-lang.org/reference/expressions.html#evaluation-order-of-operands)
+
+Supported `if` and `match` expressions can supply tuple elements and elements
+of array literals that list their values. Elements execute from left to right.
+An early exit skips later elements and any enclosing call that needs the
+aggregate. Result-use analysis can follow a whole array or tuple. It reports
+`rust_aggregate_element_projection` because it cannot distinguish individual
+element reads in these literals.
+Array repeat expressions still need separate modeling. [Rust array expressions](https://doc.rust-lang.org/reference/expressions/array-expr.html)
 
 Rust `match`, conditional patterns, `let-else`, ordinary `let`, and `for`
 support tuple, struct, slice, and reference patterns. The analyzer follows

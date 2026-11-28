@@ -312,7 +312,7 @@ fn transfer_writes(writes: &[Write], live: &mut Live, mut observe: Option<&mut O
                     report(origin, used);
                 }
             }
-            Value::Copy(binding) if used => copies.push(*binding),
+            value if used => value.collect_copies(&mut copies),
             _ => {}
         }
     }

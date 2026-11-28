@@ -15,7 +15,18 @@ pub(in crate::call_order::result_use) enum Value {
     Source(Origin),
     Copy(Place),
     Aggregate(Vec<Value>),
+    StagedAggregate(Vec<Place>),
     Other,
+}
+
+impl Value {
+    pub(in crate::call_order::result_use) fn collect_copies(&self, copies: &mut Vec<Place>) {
+        match self {
+            Self::Copy(place) => copies.push(*place),
+            Self::StagedAggregate(elements) => copies.extend(elements.iter().copied()),
+            _ => {}
+        }
+    }
 }
 
 pub(in crate::call_order::result_use) struct Write {

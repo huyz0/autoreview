@@ -129,7 +129,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             unsupported_rust_line: (rust_support == Some(false))
                 .then_some(node.start_position().row as u32 + 1),
             rust_pattern_projections: if rust_support == Some(true) {
-                crate::lower::rust::pattern_projection_sites(node, source)
+                crate::lower::rust::pattern_projection_sites(node, source, spec.tracks_result_use())
             } else { Vec::new() },
             params: params.unwrap_or_default(),
             export,

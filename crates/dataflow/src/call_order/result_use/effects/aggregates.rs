@@ -1,0 +1,52 @@
+use tree_sitter::Node;
+
+use crate::lower::site;
+
+use super::{reads::operand_slot, return_value, transparent, ContractLanguage, Effect, Lower, Value};
+
+impl Lower<'_, '_, '_> {
+    pub(super) fn staged_aggregate(&self, node: Node<'_>) -> bool {
+        self.language == ContractLanguage::Rust && crate::lower::rust::stages_aggregate(node)
+    }
+
+    pub(super) fn aggregate_value(&self, value: Node<'_>, effects: &mut Vec<Effect>) -> Option<Value> {
+        if self.staged_aggregate(value) {
+            Some(Value::StagedAggregate(site::children(value).map(operand_slot).collect()))
+        } else if self.language == ContractLanguage::Web && value.kind() == "array" {
+            let members = site::children(value).map(|item| {
+                let member = self.value(item, effects);
+                if let Value::Copy(place) = member {
+                    effects.push(Effect::ObservedOnly(vec![Effect::Read(place)]));
+                    Value::Copy(place)
+                } else {
+                    member
+                }
+            });
+            Some(Value::Aggregate(members.collect()))
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn read_staged_aggregate(&self, aggregate: Node<'_>, effects: &mut Vec<Effect>) -> bool {
+        if !self.staged_aggregate(aggregate) { return false; }
+        effects.extend(site::children(aggregate).map(|item| Effect::OpaqueRead(operand_slot(item))));
+        true
+    }
+
+    pub(super) fn aggregate_expression(&self, node: Node<'_>, effects: &mut Vec<Effect>) -> bool {
+        let value = return_value(node).unwrap_or(node);
+        let aggregate = transparent(value);
+        if !self.staged_aggregate(aggregate) { return false; }
+        if crate::lower::rust::value_is_returned(value) {
+            self.observe_elements(aggregate, effects);
+        } else if node.parent().is_some_and(|owner| owner.kind() == "let_declaration") {
+            self.read_staged_aggregate(aggregate, effects);
+        }
+        true
+    }
+
+    pub(super) fn observe_elements(&self, aggregate: Node<'_>, effects: &mut Vec<Effect>) {
+        effects.extend(site::children(aggregate).map(|item| Effect::Read(operand_slot(item))));
+    }
+}

@@ -1416,7 +1416,7 @@ fn rust_enum_exhaustiveness_requires_unconditional_whole_variants() {
 
 #[test]
 fn rust_unmodeled_matches_remain_incomplete() {
-    for body in ["match x { 0 if check() && defer(|| other()) > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { 0 => {} };", "match check([risky(); 3]) { _ => {} };", "match x { _ => { let y = defer(|| risky()); } };", "consume([match x { _ => {} }]);", "consume({ consume(match x { _ => {} }) });"] {
+    for body in ["match x { 0 if check() && defer(|| other()) > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { 0 => {} };", "match check([risky(); 3]) { _ => {} };", "match x { _ => { let y = defer(|| risky()); } };", "consume([match x { _ => 1 }; 3]);", "consume({ consume((match x { _ => {} },)) });"] {
         let root = write_single_file("lib.rs", &format!("fn run(x: u8) {{ {body} }}\n"));
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("lib.rs")), "{body}: {:?}", result.coverage);
@@ -1500,6 +1500,42 @@ fn rust_guarded_wildcard_let_chain_short_circuits() {
         "fn closed(tag: u8) {\n match tag { _ if let Some(_) = begin() => { finish(); }, _ => { finish(); } };\n}\n",
     );
     assert_rust_match_cleanup("rust-guarded-wildcard-chain", source);
+}
+
+#[test]
+fn rust_branch_elements_preserve_order_and_early_exits() {
+    let source = concat!(
+        "fn open(flag: bool) -> std::io::Result<()> {\n",
+        " let _ = [begin(), if flag { token()? } else { fallback() }, finish()];\n Ok(())\n}\n",
+        "fn closed(flag: bool) {\n",
+        " consume((begin(), (match flag { true => token(), _ => { finish(); return } }), finish()));\n}\n",
+        "fn absent(flag: bool) {\n",
+        " consume((if flag { return } else { return }, begin()));\n}\n",
+        "fn balanced(flag: bool) {\n",
+        " let _ = [match flag { true => begin(), _ => token() }, finish()];\n}\n",
+    );
+    assert_rust_match_cleanup("rust-branch-element-order", source);
+}
+
+#[test]
+fn rust_branch_elements_preserve_whole_results_and_report_projection_limits() {
+    let source = concat!(
+        "use std::fs::remove_file;\n",
+        "fn dropped(flag: bool) {\n",
+        " let _ = [if flag { remove_file(\"array.txt\") } else { return }, Ok(())];\n}\n",
+        "fn returned(flag: bool) -> (std::io::Result<()>, ()) {\n",
+        " (match flag { true => remove_file(\"tuple.txt\"), _ => Ok(()) }, ())\n}\n",
+        "fn exited(flag: bool) {\n",
+        " let _ = (remove_file(\"early.txt\"), if flag { return } else { return });\n}\n",
+        "fn keep(value: (std::io::Result<()>, ())) -> (std::io::Result<()>, ()) { value }\n",
+        "fn forwarded(flag: bool) -> (std::io::Result<()>, ()) {\n",
+        " keep((if flag { remove_file(\"forwarded.txt\") } else { Ok(()) }, ()))\n}\n",
+    );
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 3), ("lib.rs", 9)]);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", report.coverage);
+    assert!(report.coverage.iter().any(|issue| issue.reason == "rust_aggregate_element_projection" && issue.line == Some(6)), "{:?}", report.coverage);
 }
 
 #[test]
