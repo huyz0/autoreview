@@ -1,22 +1,22 @@
 use super::{branch_value::{self, Mode}, patterns, Bindings, Lower, Node, NodeId};
 
-pub(super) fn projected_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
+pub(super) fn projected_bindings<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Vec<Node<'tree>>> {
     let pattern = node.child_by_field_name("pattern")?;
     matches!(pattern.kind(), "tuple_pattern" | "tuple_struct_pattern" | "struct_pattern"
         | "slice_pattern" | "reference_pattern" | "ref_pattern" | "mut_pattern")
-        .then(|| patterns::projected_names(pattern))
+        .then(|| patterns::projected_names(pattern, source))
         .flatten()
 }
 
-pub(super) fn declaration_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
+pub(super) fn declaration_bindings<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Vec<Node<'tree>>> {
     if node.kind() != "let_declaration" || node.child_by_field_name("alternative").is_some() {
         return None;
     }
     node.child_by_field_name("value")?;
-    projected_bindings(node)
+    projected_bindings(node, source)
 }
 
-pub(crate) fn iterator_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
+pub(crate) fn iterator_bindings<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Vec<Node<'tree>>> {
     if node.kind() != "for_expression" {
         return None;
     }
@@ -24,7 +24,7 @@ pub(crate) fn iterator_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
     match pattern.kind() {
         "_" => Some(Vec::new()),
         "identifier" => Some(vec![pattern]),
-        _ => projected_bindings(node),
+        _ => projected_bindings(node, source),
     }
 }
 

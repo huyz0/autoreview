@@ -263,7 +263,7 @@ fn iteration_value(node: Node<'_>) -> Option<Node<'_>> {
     }
 }
 
-pub(crate) fn iterator_bindings(node: Node<'_>) -> Vec<Node<'_>> {
+pub(crate) fn iterator_bindings<'tree>(node: Node<'tree>, source: &[u8]) -> Vec<Node<'tree>> {
     match node.kind() {
         "range_clause" => node
             .child_by_field_name("left")
@@ -283,7 +283,7 @@ pub(crate) fn iterator_bindings(node: Node<'_>) -> Vec<Node<'_>> {
             .filter(|child| site::identifier(*child))
             .into_iter()
             .collect(),
-        "for_expression" => crate::lower::rust::iterator_bindings(node).unwrap_or_default(),
+        "for_expression" => crate::lower::rust::iterator_bindings(node, source).unwrap_or_default(),
         _ => Vec::new(),
     }
 }
@@ -292,7 +292,7 @@ pub(crate) fn iteration_writes(node: Node<'_>, source: &[u8]) -> Vec<BindingWrit
     let binding = site::children(node)
         .find(|child| child.kind() == "range_clause")
         .unwrap_or(node);
-    iterator_bindings(binding)
+    iterator_bindings(binding, source)
         .into_iter()
         .filter_map(|var| {
             let name = var.utf8_text(source).ok()?;

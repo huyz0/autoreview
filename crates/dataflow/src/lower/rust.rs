@@ -13,7 +13,7 @@ mod patterns;
 use support::{simple_binding, supported};
 pub(crate) use destructuring::iterator_bindings;
 pub use support::{match_arm_bindings, match_binding_lines, supports_function, supports_match};
-pub use support::{match_binding_lines_with_source, supports_function_with_source, supports_match_with_source};
+pub use support::{match_arm_bindings_with_source, match_binding_lines_with_source, supports_function_with_source, supports_match_with_source};
 pub(crate) use support::{discards_match, lexical_bindings, pattern_projection_sites};
 
 use std::collections::HashMap;
@@ -159,7 +159,7 @@ impl Lower<'_> {
     }
 
     fn branch(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
-        if branch_value::is_returned(expr) && branch_value::supports_if(expr) {
+        if branch_value::is_returned(expr) && branch_value::supports_if(expr, self.source) {
             return self.lower_branch_value(expr, at, names, &branch_value::Mode::Return);
         }
         if let Some(test) = conditional::control_test(expr) {
@@ -228,7 +228,7 @@ impl Lower<'_> {
             let start = self.cfg.push_node(line(body));
             self.edge(condition, start, EdgeKind::True);
             let mut body_names = names.clone();
-            for binding in iterator_bindings(expr).into_iter().flatten() {
+            for binding in iterator_bindings(expr, self.source).into_iter().flatten() {
                 self.project_pattern_binding(binding, start, &mut body_names);
             }
             if let Some(end) = self.flow_expression(body, start, &body_names) {

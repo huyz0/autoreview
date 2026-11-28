@@ -9,6 +9,9 @@ enum Payload {
 }
 
 pub(super) fn covers_enum(node: Node<'_>, arms: &[Node<'_>], source: &[u8]) -> bool {
+    if node.end_byte() > source.len() {
+        return false;
+    }
     let Some((owner, _, _)) = arms.first().and_then(|arm| variant_pattern(*arm, source)) else {
         return false;
     };
@@ -31,7 +34,7 @@ fn variant_pattern<'tree, 'src>(arm: Node<'tree>, source: &'src [u8]) -> Option<
     {
         return None;
     }
-    let variant = arm_pattern(arm)?;
+    let variant = arm_pattern(arm, source)?;
     let path = variant.child_by_field_name("type").unwrap_or(variant);
     let owner = path.child_by_field_name("path")?;
     if owner.child_by_field_name("path")?.kind() != "self" {
@@ -45,6 +48,9 @@ fn variant_pattern<'tree, 'src>(arm: Node<'tree>, source: &'src [u8]) -> Option<
 fn enum_variants<'src>(node: Node<'_>, owner: &str, source: &'src [u8]) -> Option<Vec<(&'src str, Payload)>> {
     let module = std::iter::successors(node.parent(), |node| node.parent())
         .find(|scope| matches!(scope.kind(), "source_file" | "mod_item"))?;
+    if module.end_byte() > source.len() {
+        return None;
+    }
     let items = module.child_by_field_name("body").unwrap_or(module);
     let mut matching = children(items).filter(|item| {
         item.kind() == "enum_item"
