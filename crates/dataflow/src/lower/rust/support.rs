@@ -91,23 +91,25 @@ pub(crate) fn pattern_projection_sites(function: Node<'_>) -> Vec<(&'static str,
 
 fn projection_reason(node: Node<'_>) -> Option<&'static str> {
     match node.kind() {
-        "match_expression" if match_flow::has_bindings(node) => {
-            Some("rust_match_binding_projection")
+        "match_expression" => {
+            match_flow::has_bindings(node).then_some("rust_match_binding_projection")
         }
-        "let_condition" if conditional::bindings(node).is_some_and(|names| !names.is_empty()) => {
-            Some("rust_conditional_binding_projection")
-        }
-        "let_declaration" if let_else_bindings(node).is_some_and(|names| !names.is_empty()) => {
-            Some("rust_let_else_binding_projection")
-        }
-        "let_declaration" if destructuring::declaration_bindings(node).is_some() => {
-            Some("rust_destructuring_binding_projection")
-        }
-        "for_expression" if destructuring::tuple_names(node).is_some() => {
-            Some("rust_destructuring_binding_projection")
+        "let_condition" => conditional::bindings(node)
+            .is_some_and(|names| !names.is_empty())
+            .then_some("rust_conditional_binding_projection"),
+        "let_declaration" => declaration_projection(node),
+        "for_expression" => {
+            destructuring::tuple_names(node).map(|_| "rust_destructuring_binding_projection")
         }
         _ => None,
     }
+}
+
+fn declaration_projection(node: Node<'_>) -> Option<&'static str> {
+    if let_else_bindings(node).is_some_and(|names| !names.is_empty()) {
+        return Some("rust_let_else_binding_projection");
+    }
+    destructuring::declaration_bindings(node).map(|_| "rust_destructuring_binding_projection")
 }
 
 fn binding_sites<Tag: Ord>(

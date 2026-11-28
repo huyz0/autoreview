@@ -166,26 +166,17 @@ fn rust_match_bindings_do_not_borrow_outer_key_identity() {
 
 #[test]
 fn rust_if_let_keys_do_not_escape_the_success_path() {
-    let source = r#"fn pending(root: &mut Registry, key: &str, value: Option<&str>) {
-    root.register(key);
-    if let Some(key) = value && allowed(key) {
+    assert_rust_shadowed_keys("value: Option<&str>", r#"    if let Some(key) = value && allowed(key) {
         root.register(key);
         root.remove(key);
-    }
-    root.remove(key);
-}
-"#;
-    assert!(findings("Rust", "lib.rs", source, RECEIVER, true).is_empty());
-    let missing = source.replace("    root.remove(key);\n}", "}");
-    let hits = findings("Rust", "lib.rs", &missing, RECEIVER, true);
-    assert_eq!(one(&hits).related_locations.as_ref().unwrap()[0].range.start_line, 2);
+    }"#);
 }
 
 #[test]
 fn rust_tuple_loop_and_block_bindings_keep_the_outer_key() {
-    let source = r#"fn pending(root: &mut Registry, key: &str, pairs: Vec<(&str, u8)>, pair: (&str, u8)) {
-    root.register(key);
-    for (key, _) in pairs {
+    assert_rust_shadowed_keys(
+        "pairs: Vec<(&str, u8)>, pair: (&str, u8)",
+        r#"    for (key, _) in pairs {
         root.register(key);
         root.remove(key);
         continue;
@@ -194,11 +185,13 @@ fn rust_tuple_loop_and_block_bindings_keep_the_outer_key() {
         let (key, _) = pair;
         root.register(key);
         root.remove(key);
-    }
-    root.remove(key);
+    }"#,
+    );
 }
-"#;
-    assert!(findings("Rust", "lib.rs", source, RECEIVER, true).is_empty());
+
+fn assert_rust_shadowed_keys(parameters: &str, inner: &str) {
+    let source = format!("fn pending(root: &mut Registry, key: &str, {parameters}) {{\n    root.register(key);\n{inner}\n    root.remove(key);\n}}\n");
+    assert!(findings("Rust", "lib.rs", &source, RECEIVER, true).is_empty());
     let missing = source.replace("    root.remove(key);\n}", "}");
     let hits = findings("Rust", "lib.rs", &missing, RECEIVER, true);
     assert_eq!(one(&hits).related_locations.as_ref().unwrap()[0].range.start_line, 2);
