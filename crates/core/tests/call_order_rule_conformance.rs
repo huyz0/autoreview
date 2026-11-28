@@ -1398,15 +1398,26 @@ fn rust_branch_initializers_track_results_from_each_reachable_arm() {
 }
 
 #[test]
+fn rust_match_initializer_keeps_a_direct_return_separate() {
+    let source = "use std::fs::remove_file;\nfn run(flag: bool) -> std::io::Result<()> {\n let result = match flag {\n  true => remove_file(\"example.txt\"),\n  _ => return Ok(()),\n };\n result\n}\n";
+    let root = write_single_file("lib.rs", source);
+    assert_rust_result_is_observed(root.path());
+}
+
+#[test]
 fn rust_returned_branch_values_preserve_explicit_and_implicit_exits() {
     let conditional = "if let Some(_) = choice {\n   let result = remove_file(\"one.txt\"); result\n } else {\n   remove_file(\"two.txt\")\n }";
     for returned in [conditional.to_owned(), format!("return {conditional};")] {
         let source = format!("use std::fs::remove_file;\nfn run(choice: Option<u8>) -> std::io::Result<()> {{\n {returned}\n}}\n");
         let root = write_single_file("lib.rs", &source);
-        assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[]);
-        let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
-        assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", report.coverage);
+        assert_rust_result_is_observed(root.path());
     }
+}
+
+fn assert_rust_result_is_observed(root: &std::path::Path) {
+    assert_helper_locations(root, "lib.rs", "rust-discarded-remove-file-result", &[]);
+    let report = run_dataflow_check_with_coverage(root, root, &["lib.rs".into()], &[]);
+    assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", report.coverage);
 }
 
 #[test]
@@ -1452,9 +1463,7 @@ fn rust_returned_matches_preserve_results_through_helpers() {
     let clean = source.replace("    remove(path, flag);", "    assert!(remove(path, flag).is_ok());");
     for form in [clean.clone(), clean.replace("    match flag", "    return /* chosen result */ match flag").replace("result } }\n", "result } };\n")] {
         std::fs::write(root.path().join("lib.rs"), form).unwrap();
-        assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[]);
-        let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
-        assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", report.coverage);
+        assert_rust_result_is_observed(root.path());
     }
 }
 

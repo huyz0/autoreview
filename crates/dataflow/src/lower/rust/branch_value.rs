@@ -157,20 +157,9 @@ impl Lower<'_> {
         names: &Bindings,
         mode: &Mode<'_>,
     ) -> Option<NodeId> {
-        if node.kind() == "if_expression" {
-            self.select_if_value(node, at, names, mode)
-        } else {
-            self.select_match(node, at, names, Some(mode))
+        if node.kind() != "if_expression" {
+            return self.select_match(node, at, names, Some(mode));
         }
-    }
-
-    fn select_if_value(
-        &mut self,
-        node: Node<'_>,
-        at: NodeId,
-        names: &Bindings,
-        mode: &Mode<'_>,
-    ) -> Option<NodeId> {
         let test = node.child_by_field_name("condition")?;
         let yes = node.child_by_field_name("consequence")?;
         let no = alternative(node)?;
@@ -178,7 +167,7 @@ impl Lower<'_> {
             self.split_branch(test, at, (line(yes), line(no)), names);
         let then_end = self.lower_value_arm(yes, passed, &mut success_names, mode);
         let else_end = if no.kind() == "if_expression" {
-            self.select_if_value(no, failed, names, mode)
+            self.lower_branch_value(no, failed, names, mode)
         } else {
             self.lower_value_arm(no, failed, &mut names.clone(), mode)
         };

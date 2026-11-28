@@ -122,12 +122,7 @@ impl Lower<'_> {
         Some(join)
     }
 
-    pub(super) fn pattern_loop(
-        &mut self,
-        test: Node<'_>,
-        at: NodeId,
-        names: &Bindings,
-    ) -> Option<NodeId> {
+    pub(super) fn pattern_loop(&mut self, test: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
         let expr = test.parent()?;
         let body = expr.child_by_field_name("body")?;
         let head = self.cfg.push_node(line(expr));

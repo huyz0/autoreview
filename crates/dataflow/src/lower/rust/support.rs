@@ -90,11 +90,12 @@ pub(crate) fn pattern_projection_sites(function: Node<'_>) -> Vec<(&'static str,
 }
 
 fn statement_position(node: Node<'_>) -> bool {
-    node.parent().is_some_and(|parent| {
-        matches!(
-            parent.kind(),
-            "block" | "expression_statement" | "else_clause"
-        )
+    node.parent().is_some_and(|parent| match parent.kind() {
+        "block" | "expression_statement" | "else_clause" => true,
+        "match_arm" => {
+            node.kind() == "return_expression" && parent.child_by_field_name("value") == Some(node)
+        }
+        _ => false,
     })
 }
 
