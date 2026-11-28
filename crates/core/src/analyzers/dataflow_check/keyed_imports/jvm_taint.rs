@@ -112,6 +112,60 @@ class Terminal {
     }
 
     #[test]
+    fn kotlin_binds_named_helper_arguments_and_preserves_validation_and_dispatch() {
+        let findings = review("Kotlin", &[
+            ("app/Entry.kt", r#"package app
+import helpers.forward as relay
+import helpers.forwardValidated
+import helpers.overloaded
+import helpers.dispatch
+class Entry {
+    fun handle() {
+        val input = readInput()
+        relay(payload = input, label = "audit")
+        relay(payload = "literal", label = input)
+        relay("audit", payload = input)
+        forwardValidated(payload = input, label = "audit")
+        overloaded(payload = input)
+    }
+}
+open class Base {
+    protected fun dispatch(payload: String) {}
+}
+class Inherited : Base() {
+    fun check() {
+        val input = readInput()
+        dispatch(payload = input)
+    }
+}"#),
+            ("helpers/Relay.kt", r#"package helpers
+fun forward(label: String, payload: String) {
+    store(raw = payload, topic = label)
+}
+fun forwardValidated(label: String, payload: String) {
+    val clean = validatedValue(payload)
+    store(raw = clean, topic = label)
+}
+fun overloaded(payload: Any) {
+    sensitiveWrite("audit", payload)
+}
+fun dispatch(payload: String) {
+    store(raw = payload, topic = "audit")
+}"#),
+            ("helpers/Overload.kt", r#"package helpers
+fun overloaded(payload: String, label: String = "audit") {}"#),
+            ("helpers/Terminal.kt", r#"package helpers
+fun store(topic: String, raw: String) {
+    sensitiveWrite(topic, raw)
+}"#),
+        ], "app/Entry.kt");
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+        for (finding, line) in findings.iter().zip([9, 11]) {
+            assert_path(finding, "app/Entry.kt", line, "helpers/Terminal.kt", 3);
+        }
+    }
+
+    #[test]
     fn kotlin_tracks_import_aliases_and_respects_validation_and_argument_order() {
         let findings = review("Kotlin", &[
             ("app/Entry.kt", r#"package app
@@ -149,10 +203,14 @@ fun storeValidated(raw: String) {
 
     fn assert_single_path(findings: &[AgentFinding], caller: &str, line: u32, sink: &str, sink_line: u32) {
         assert_eq!(findings.len(), 1, "{findings:#?}");
-        assert_eq!(findings[0].location.path, caller);
-        assert_eq!(findings[0].location.range.start_line, line);
-        assert!(findings[0].title.contains("`input`"));
-        let related = findings[0].related_locations.as_ref().unwrap();
+        assert_path(&findings[0], caller, line, sink, sink_line);
+    }
+
+    fn assert_path(finding: &AgentFinding, caller: &str, line: u32, sink: &str, sink_line: u32) {
+        assert_eq!(finding.location.path, caller);
+        assert_eq!(finding.location.range.start_line, line);
+        assert!(finding.title.contains("`input`"));
+        let related = finding.related_locations.as_ref().unwrap();
         assert_eq!(related[0].path, sink);
         assert_eq!(related[0].range.start_line, sink_line);
     }
