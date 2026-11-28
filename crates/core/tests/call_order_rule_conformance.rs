@@ -1410,9 +1410,7 @@ fn rust_enum_exhaustiveness_requires_unconditional_whole_variants() {
         ("enum Choice { A(u8), B }", "Choice::A(_)", "Choice::B"),
     ] {
         let source = format!("{declaration}\nfn run(choice: Choice) {{ match choice {{ {first} => {{}}, {last} => {{}} }}; }}\n");
-        let root = write_single_file("lib.rs", &source);
-        let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
-        assert!(report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{source}: {:?}", report.coverage);
+        assert_rust_control_flow_incomplete(&source);
     }
 }
 
@@ -1461,10 +1459,14 @@ fn rust_or_patterns_keep_inconsistent_and_guarded_bindings_incomplete() {
         "key @ _ | key @ _",
     ] {
         let source = format!("fn run(item: Choice) {{ match item {{ {alternative} => {{}}, _ => {{}} }}; }}\n");
-        let root = write_single_file("lib.rs", &source);
-        let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
-        assert!(report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{source}: {:?}", report.coverage);
+        assert_rust_control_flow_incomplete(&source);
     }
+}
+
+fn assert_rust_control_flow_incomplete(source: &str) {
+    let root = write_single_file("lib.rs", source);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    assert!(report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{source}: {:?}", report.coverage);
 }
 
 #[test]

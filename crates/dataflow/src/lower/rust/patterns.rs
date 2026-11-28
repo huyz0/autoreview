@@ -125,18 +125,23 @@ fn binding_modifiers(mut node: Node<'_>) -> BindingModifiers {
             "mut_pattern" => modifiers.mutable = true,
             "captured_pattern" if parent.named_child(0) == Some(node) => {},
             "field_pattern" if parent.child_by_field_name("name") == Some(node) => {
-                for part in parent.children(&mut parent.walk()) {
-                    match part.kind() {
-                        "ref" => modifiers.by_ref = true,
-                        "mutable_specifier" => modifiers.mutable = true,
-                        _ => {},
-                    }
-                }
-                break;
+                return shorthand_modifiers(parent);
             }
             _ => break,
         }
         node = parent;
+    }
+    modifiers
+}
+
+fn shorthand_modifiers(field: Node<'_>) -> BindingModifiers {
+    let mut modifiers = BindingModifiers::default();
+    for part in field.children(&mut field.walk()) {
+        match part.kind() {
+            "ref" => modifiers.by_ref = true,
+            "mutable_specifier" => modifiers.mutable = true,
+            _ => {},
+        }
     }
     modifiers
 }
