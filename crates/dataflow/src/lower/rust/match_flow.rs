@@ -60,13 +60,8 @@ pub(super) fn simple_arm(node: Node<'_>) -> bool {
 
 fn statement_if(node: Node<'_>) -> bool {
     let root = conditional::root_branch(node);
-    let supported_test = if conditional::test(node).is_some() {
-        conditional::supported
-    } else {
-        simple_value
-    };
     (branch_value::is_discarded_statement(root) || conditional::unit_branch(root))
-        && node.child_by_field_name("condition").is_some_and(supported_test)
+        && node.child_by_field_name("condition").is_some_and(conditional::supported)
         && node.child_by_field_name("consequence").is_some_and(simple_arm)
         && node.child_by_field_name("alternative").is_none_or(|otherwise| {
             children(otherwise).next().is_some_and(simple_arm)

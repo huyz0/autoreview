@@ -136,7 +136,9 @@ Failure goes to the original `else` scope or exits the loop. Bindings
 whose source values cannot be projected report
 `rust_conditional_binding_projection`. Simple value-producing
 `if` and `if let` expressions also preserve the selected arm when they
-form a function return or initialize a single `let` binding. [Rust if expressions](https://doc.rust-lang.org/reference/expressions/if-expr.html)
+form a function return or initialize a single `let` binding. Ordinary `if`
+and `while` conditions also short-circuit `&&` and `||` when the operands
+are supported, including grouped and negated conditions. [Rust if expressions](https://doc.rust-lang.org/reference/expressions/if-expr.html) [Rust lazy boolean operators](https://doc.rust-lang.org/reference/expressions/operator-expr.html#lazy-boolean-operators)
 
 Rust `match`, conditional patterns, `let-else`, ordinary `let`, and `for`
 support tuple, struct, slice, and reference patterns. The analyzer follows
