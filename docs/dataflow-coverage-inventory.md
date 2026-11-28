@@ -153,6 +153,11 @@ through the selected arm,
 including calls in tuple elements and in supported eager unary and binary
 operands. Explicit exits leave before the new bindings take effect. [Rust operand evaluation order](https://doc.rust-lang.org/reference/expressions.html#evaluation-order-of-operands)
 
+Autoreview follows explicit calls in the evaluated operands of array
+literals, indexing, ranges, field reads, casts, and dereferences. Rust
+evaluates these operands in source order. Array repeats and implicit trait
+calls for indexing or dereferencing still need additional modeling. [Rust operand evaluation order](https://doc.rust-lang.org/reference/expressions.html#evaluation-order-of-operands)
+
 Report scopes should distinguish an entire file, a function or root, a rule,
 and an imported dependency. Findings from unaffected scopes remain useful.
 Deduplicate repeated limitations across callers while retaining enough location
