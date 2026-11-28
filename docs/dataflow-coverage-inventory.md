@@ -113,7 +113,12 @@ does not connect them to the matched value or resolve whether an identifier
 pattern denotes a constant: those cases report `rust_match_binding_projection`
 and replay remains incomplete. Arms can contain supported local assignments
 and statement-position conditionals, including early returns before an arm
-produces its value. The final wildcard must be unguarded.
+produces its value. A final unguarded wildcard guarantees coverage. Autoreview
+also checks wildcard-free matches against enums declared directly in the same
+module when every arm names its variant through `self::`. Each variant needs
+one unguarded arm that covers the whole payload. Attributes on the enum,
+variants, or arms and paths through imports or aliases still need separate
+evidence. [Rust match expressions](https://doc.rust-lang.org/reference/expressions/match-expr.html)
 Returned arms preserve result identity on each exit. Guards preserve the
 evaluation order of `&&`, `||`, and `!` and carry effects to the next arm
 when the guard fails. Let chains in a match guard expose names to later

@@ -1374,6 +1374,49 @@ fn rust_literal_match_tracks_results_across_arms() {
 }
 
 #[test]
+fn rust_exhaustive_local_enum_preserves_arm_calls_and_results() {
+    let source = concat!(
+        "use std::fs::remove_file;\n",
+        "enum Choice { Empty, Tuple(u8, u8), Record { field: u8 } }\n",
+        "fn run(choice: Choice) {\n",
+        " match choice {\n",
+        "  self::Choice::Empty => {},\n",
+        "  self::Choice::Tuple(value @ _, _) => { use_value(value); remove_file(\"old.txt\"); },\n",
+        "  self :: Choice :: Record { .. } => {},\n",
+        " };\n}\n",
+        "fn returned(choice: Choice) -> std::io::Result<()> {\n",
+        " match choice {\n",
+        "  self::Choice::Empty => remove_file(\"other.txt\"),\n",
+        "  self::Choice::Tuple(..) => Ok(()),\n",
+        "  self::Choice::Record { .. } => Ok(()),\n",
+        " }\n}\n",
+    );
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 6)]);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", report.coverage);
+    assert!(report.coverage.iter().any(|issue| issue.reason == "rust_match_binding_projection" && issue.line == Some(4)), "{:?}", report.coverage);
+}
+
+#[test]
+fn rust_enum_exhaustiveness_requires_unconditional_whole_variants() {
+    for (declaration, first, last) in [
+        ("enum Choice { A(u8), B, C }", "self::Choice::A(_)", "self::Choice::B"),
+        ("enum Choice { A(u8), B }", "self::Choice::A(0)", "self::Choice::B"),
+        ("enum Choice { A(u8), B }", "self::Choice::A(_) if check()", "self::Choice::B"),
+        ("enum Choice { A(u8), B }", "self::Choice::A(_)", "self::Choice::A(_)"),
+        ("enum Choice { A(u8), B }", "#[cfg(test)] self::Choice::A(_)", "self::Choice::B"),
+        ("enum Choice { A(u8), #[cfg(test)] B }", "self::Choice::A(_)", "self::Choice::B"),
+        ("enum Choice { A(u8), B }", "Choice::A(_)", "Choice::B"),
+    ] {
+        let source = format!("{declaration}\nfn run(choice: Choice) {{ match choice {{ {first} => {{}}, {last} => {{}} }}; }}\n");
+        let root = write_single_file("lib.rs", &source);
+        let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+        assert!(report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{source}: {:?}", report.coverage);
+    }
+}
+
+#[test]
 fn rust_unmodeled_matches_remain_incomplete() {
     for body in ["match x { 0 if check() && defer(|| other()) > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { Some(value) | Other(value) => {}, _ => {} };", "match x { 0 => {} };", "match check([risky(); 3]) { _ => {} };", "match x { _ => { let y = defer(|| risky()); } };", "consume(match x { _ => {} });"] {
         let root = write_single_file("lib.rs", &format!("fn run(x: u8) {{ {body} }}\n"));
