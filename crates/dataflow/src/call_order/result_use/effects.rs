@@ -101,6 +101,9 @@ impl Lower<'_, '_, '_> {
                         let Some(syntax) = evaluation(function, range) else { continue; };
                         if site::identifier(syntax) && site::discarded_conditional_arm(syntax) { continue; }
                         if let Some(operand) = &range.operand {
+                            if operand.projection_owner.is_some_and(|start| !self.plan.rust_elements.tracks_aggregate(start)) {
+                                continue;
+                            }
                             let value = if operand.has_value { self.value(syntax, &mut effects) } else { Value::Other };
                             effects.push(Effect::Write(vec![Write {
                                 target: Some(Place::Operand(operand.slot.start, operand.slot.end)), value,

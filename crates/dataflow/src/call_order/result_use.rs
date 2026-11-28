@@ -5,6 +5,7 @@ mod closures;
 mod effects;
 mod places;
 mod references;
+pub(super) mod rust_elements;
 mod summaries;
 mod syntax;
 #[cfg(test)]

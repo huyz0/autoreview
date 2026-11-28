@@ -2,6 +2,7 @@ use tree_sitter::Node;
 
 use crate::lower::site;
 
+use super::super::places::operand_slot;
 use super::super::references::{reference, string_references};
 use super::super::syntax::transparent;
 use super::{Demand, Effect, HelperCall, Lower, Place, Value, Write};
@@ -91,7 +92,7 @@ impl Lower<'_, '_, '_> {
             return;
         }
         self.opaque_arguments(node, effects);
-        if let Some(place) = self.places.place(node, false).filter(|place| matches!(place, Place::Field(..))) {
+        if let Some(place) = self.places.place(node, false).filter(|place| matches!(place, Place::Field(..) | Place::Operand(..))) {
             effects.push(Effect::Read(self.remap(place)));
             return;
         }
@@ -258,8 +259,4 @@ impl Lower<'_, '_, '_> {
         }
         string_references(node, self.source, self.language, read);
     }
-}
-
-pub(super) fn operand_slot(node: Node<'_>) -> Place {
-    Place::Operand(node.start_byte(), node.end_byte())
 }

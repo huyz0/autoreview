@@ -3,11 +3,14 @@ use tree_sitter::Node;
 use crate::lower::site;
 use crate::lower::rust::aggregate_result_operands;
 
-use super::{reads::operand_slot, return_value, transparent, ContractLanguage, Effect, Lower, Value};
+use super::super::places::operand_slot;
+use super::{return_value, transparent, ContractLanguage, Effect, Lower, Value};
 
 impl Lower<'_, '_, '_> {
     pub(super) fn staged_aggregate(&self, node: Node<'_>) -> bool {
-        self.language == ContractLanguage::Rust && crate::lower::rust::stages_aggregate(node)
+        self.language == ContractLanguage::Rust
+            && matches!(node.kind(), "array_expression" | "tuple_expression")
+            && (crate::lower::rust::stages_aggregate(node) || self.plan.rust_elements.tracks_aggregate(node.start_byte()))
     }
 
     pub(super) fn aggregate_value(&self, value: Node<'_>, effects: &mut Vec<Effect>) -> Option<Value> {
