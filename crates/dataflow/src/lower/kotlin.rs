@@ -98,7 +98,19 @@ fn lower_property_declaration(node: Node, source: &[u8]) -> Stmt {
     let mut cursor = node.walk();
     let value = node.children(&mut cursor).filter(|c| c.kind() != "variable_declaration" && c.is_named()).last();
     let Some(value) = value else { return fallback() };
+    lower_binding(lhs, value, source)
+}
 
+fn lower_assignment(node: Node, source: &[u8]) -> Stmt {
+    match super::keyed_syntax::assignment_parts(node, source) {
+        Some((target, Some(value), _)) if target.kind() == "identifier" => {
+            lower_binding(text(target, source).to_owned(), value, source)
+        }
+        _ => Stmt::Other(text(node, source).to_owned()),
+    }
+}
+
+fn lower_binding(lhs: String, value: Node, source: &[u8]) -> Stmt {
     if value.kind() == "call_expression" {
         if let Some(name) = call_target_name(value, source) {
             return super::site::named(name, call_arg_identifiers(value, source), Some(lhs), value, source);
@@ -132,6 +144,10 @@ fn lower_statement_inner(cfg: &mut Cfg<Stmt>, stmt: Node, source: &[u8], current
     match stmt.kind() {
         "property_declaration" => {
             cfg.nodes[current].stmts.push(lower_property_declaration(stmt, source));
+            current
+        }
+        "assignment" => {
+            cfg.nodes[current].stmts.push(lower_assignment(stmt, source));
             current
         }
         "return_expression" => {

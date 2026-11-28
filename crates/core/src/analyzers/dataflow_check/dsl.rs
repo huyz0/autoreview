@@ -109,6 +109,23 @@ fn taint_finding(path: &str, rule: &TaintRuleDef, hit: &taint::TaintHit) -> Agen
     )
 }
 
+pub(super) fn helper_taint_finding(
+    rule: &TaintRuleDef,
+    mut hit: autoreview_dataflow::call_order::HelperTaintHit,
+) -> AgentFinding {
+    let sink = Location {
+        path: hit.sink_path,
+        range: LocationRange { start_line: hit.sink.source_line, ..Default::default() },
+        snippet: hit.sink.sink_call.clone(),
+        side: Side::New,
+    };
+    hit.sink.source_line = hit.caller_line;
+    hit.sink.tainted_arg = hit.caller_argument;
+    let mut finding = taint_finding(&hit.caller_path, rule, &hit.sink);
+    finding.related_locations = Some(vec![sink]);
+    finding
+}
+
 /// Renders a `call-sequence` rule's `{trigger_call}` placeholder — the
 /// call (or, for a `checkBeforeReturn` hit, the literal text `"return"`)
 /// that actually tripped the rule while its obligation was still open.

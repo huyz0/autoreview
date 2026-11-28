@@ -12,6 +12,8 @@ mod contracts;
 mod coverage;
 pub use coverage::{check_keyed_units, check_keyed_units_with_coverage, check_keyed_units_with_verified_sources, check_keyed_units_with_verified_components, keyed_flow_exhausted, KeyedCheckResult, KeyedLimitation};
 mod helpers;
+mod taint;
+pub use taint::{check_jvm_taint_helpers, HelperTaintHit};
 pub(super) mod program;
 mod state;
 use program::Program;
