@@ -112,6 +112,44 @@ class Terminal {
     }
 
     #[test]
+    fn kotlin_tracks_omitted_defaults_without_selecting_an_overload() {
+        let findings = review("Kotlin", &[
+            ("client/Handler.kt", r#"package client
+import bridge.forward as relay
+import bridge.place
+import bridge.choose
+fun handle() {
+    val input = readInput()
+    relay(input)
+    place(payload = input)
+    relay(input, forwarded = "fixed")
+    choose(input)
+    choose(payload = input)
+}"#),
+            ("bridge/Relay.kt", r#"package bridge
+fun forward(payload: String, forwarded: String = payload) {
+    terminal(raw = forwarded)
+}
+fun place(label: String = "audit", payload: String) {
+    terminal(label, payload)
+}
+fun choose(payload: Any) {
+    sensitiveWrite("audit", payload)
+}"#),
+            ("bridge/Other.kt", r#"package bridge
+fun choose(payload: String, label: String = "audit") {}"#),
+            ("bridge/Terminal.kt", r#"package bridge
+fun terminal(category: String = "audit", raw: String) {
+    sensitiveWrite(category, raw)
+}"#),
+        ], "client/Handler.kt");
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+        for (finding, line) in findings.iter().zip([7, 8]) {
+            assert_path(finding, "client/Handler.kt", line, "bridge/Terminal.kt", 3);
+        }
+    }
+
+    #[test]
     fn kotlin_binds_named_helper_arguments_and_preserves_validation_and_dispatch() {
         let findings = review("Kotlin", &[
             ("app/Entry.kt", r#"package app
