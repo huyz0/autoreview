@@ -48,6 +48,7 @@ pub(in crate::call_order) struct Frame<'spec, 'src, 'graph> {
     pub plan: Option<Plan<'spec, 'src>>,
     resolution_syntax: Option<Box<Syntax<'src>>>,
     scope: Scope,
+    named_kotlin_calls: bool,
     unsupported_rust_line: Option<u32>,
     declined_cleanup: Option<(u32, bool)>,
     declined_contract: Option<u32>,
@@ -113,6 +114,9 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
     pub(super) fn unique_kotlin_name(&self, from: usize, name: &str, target: usize) -> bool {
         let frame = &self.frames[from];
         let callee = &self.frames[target];
+        if !frame.named_kotlin_calls || !callee.named_kotlin_calls {
+            return false;
+        }
         let lookup = |scope, name: &str| self.kotlin_names.get(&scope).and_then(|names| names.get(name)).copied();
         let only_target = |scope, name: &str| lookup(scope, name).is_none_or(|candidate| candidate == Some(target));
         callee.export.as_ref().is_some_and(|export| lookup(callee.scope, &export.name) == Some(Some(target)))

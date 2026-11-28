@@ -1,6 +1,10 @@
 use tree_sitter::Node;
 
-use crate::cfg::{CallSite, CallTarget, IdentityOperand, NamedArgument, Stmt, VarId};
+use crate::cfg::{CallSite, CallTarget, IdentityOperand, Stmt, VarId};
+
+mod arguments;
+pub(crate) use arguments::{argument, arguments};
+use arguments::capture_arguments;
 
 pub(super) fn named(
     name: String,
@@ -18,30 +22,14 @@ pub(super) fn named(
 }
 
 pub(crate) fn capture(call: Node<'_>, source: &[u8]) -> Option<Box<CallSite>> {
-    let args = arguments(call);
-    let trailing_lambda = children(call).any(|node| node.kind() == "annotated_lambda");
-    if args.is_none() && !trailing_lambda {
+    if optional(call) {
         return None;
     }
+    let args = capture_arguments(call, source)?;
     let receiver = receiver(call)
         .filter(|node| identifier(*node))
         .and_then(|node| node.utf8_text(source).ok())
         .map(str::to_owned);
-    if optional(call) || args.into_iter().flat_map(children).any(has_spread) {
-        return None;
-    }
-    let mut named_arguments = Vec::new();
-    let mut arguments: Vec<_> = args.into_iter().flat_map(children).enumerate()
-        .map(|(index, node)| {
-            if let Some((label, value)) = kotlin_named_argument(node, source) {
-                named_arguments.push(NamedArgument { index, label: label.to_owned(), value: argument_operand(value, source) });
-                return None;
-            }
-            let value = argument(node)?;
-            argument_operand(value, source)
-        })
-        .collect();
-    arguments.extend(trailing_lambda.then_some(None));
     let (expression, awaited) = call_context(call);
     let returned = expression.parent().is_some_and(|parent| matches!(parent.kind(), "return_statement" | "return_expression"));
     Some(Box::new(CallSite {
@@ -51,36 +39,10 @@ pub(crate) fn capture(call: Node<'_>, source: &[u8]) -> Option<Box<CallSite>> {
         awaited,
         observed: awaited || returned,
         receiver,
-        arguments,
-        named_arguments: named_arguments.into_boxed_slice(),
+        arguments: args.positional,
+        named_arguments: args.named,
         local: local_call(call),
     }))
-}
-
-fn kotlin_named_argument<'src, 'tree>(node: Node<'tree>, source: &'src [u8]) -> Option<(&'src str, Node<'tree>)> {
-    if node.kind() != "value_argument" || node.has_error()
-        || !node.children(&mut node.walk()).any(|part| part.kind() == "=") {
-        return None;
-    }
-    let mut parts = children(node);
-    let label = parts.next().filter(|node| identifier(*node))?.utf8_text(source).ok()?;
-    Some((label, parts.next()?))
-}
-
-fn argument_operand(value: Node<'_>, source: &[u8]) -> Option<IdentityOperand> {
-    operand(value, source).or_else(|| call_result_argument(value, source))
-}
-
-fn call_result_argument(node: Node<'_>, source: &[u8]) -> Option<IdentityOperand> {
-    if node.kind() == "reference_expression"
-        && !children(node).any(|child| child.kind() == "mutable_specifier")
-    {
-        return call_result_argument(node.child_by_field_name("value")?, source);
-    }
-    match super::keyed_syntax::result_operand(node, source, false)? {
-        result @ IdentityOperand::CallResult { .. } => Some(result),
-        _ => None,
-    }
 }
 
 fn call_context(mut expression: Node<'_>) -> (Node<'_>, bool) {
@@ -193,17 +155,6 @@ fn optional(call: Node<'_>) -> bool {
     optional
 }
 
-fn has_spread(node: Node<'_>) -> bool {
-    matches!(
-        node.kind(),
-        "spread_element" | "spread_expression" | "variadic_argument"
-    ) || (node.kind() == "value_argument" && {
-        let mut cursor = node.walk();
-        let spread = node.children(&mut cursor).any(|child| child.kind() == "*");
-        spread
-    })
-}
-
 pub(crate) fn name(call: Node<'_>, source: &[u8]) -> Option<String> {
     if call.kind() == "method_invocation" {
         return super::java::method_invocation_target_name(call, source);
@@ -238,11 +189,6 @@ fn callee(call: Node<'_>) -> Option<Node<'_>> {
         .or_else(|| call.named_child(0))
 }
 
-pub(crate) fn arguments(call: Node<'_>) -> Option<Node<'_>> {
-    call.child_by_field_name("arguments")
-        .or_else(|| children(call).find(|node| node.kind() == "value_arguments"))
-}
-
 pub(crate) fn receiver(call: Node<'_>) -> Option<Node<'_>> {
     if call.kind() == "method_invocation" {
         return call.child_by_field_name("object");
@@ -260,17 +206,6 @@ pub(crate) fn receiver(call: Node<'_>) -> Option<Node<'_>> {
         "navigation_expression" => callee.named_child(0),
         "call_expression" => receiver(callee),
         _ => None,
-    }
-}
-
-pub(crate) fn argument(node: Node<'_>) -> Option<Node<'_>> {
-    match node.kind() {
-        "value_argument" => {
-            let mut parts = children(node);
-            let first = parts.next()?;
-            parts.next().is_none().then_some(first)
-        }
-        _ => Some(node),
     }
 }
 

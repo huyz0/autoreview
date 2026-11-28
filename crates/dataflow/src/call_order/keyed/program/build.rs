@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use tree_sitter::Node;
 
 use crate::call_order::CallOrderSpec;
+use crate::lower::site::children;
 
 use super::signature::{candidate, export, parameters};
 use super::{Associated, Frame, KeyedFunction, KeyedUnit, Plan, Program, Scope, Unit};
@@ -83,6 +84,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             declined_contract,
             unit,
             scope,
+            named_kotlin_calls: spec.is_none() && named_kotlin_scope(node),
             unsupported_rust_line: (rust_support == Some(false))
                 .then_some(node.start_position().row as u32 + 1),
             rust_pattern_projections: if rust_support == Some(true) {
@@ -96,7 +98,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
     fn index_kotlin_name(&mut self, node: Node<'_>, source: &[u8], scope: Scope) {
         if node.kind() != "function_declaration"
             || !node.parent().is_some_and(|parent| matches!(parent.kind(), "source_file" | "class_body"))
-            || !crate::lower::site::children(node).any(|child| child.kind() == "function_value_parameters") {
+            || !children(node).any(|child| child.kind() == "function_value_parameters") {
             return;
         }
         if let Some(name) = node.child_by_field_name("name").and_then(|name| name.utf8_text(source).ok()) {
@@ -104,6 +106,26 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             self.kotlin_names.entry(scope).or_default().entry(name.to_owned())
                 .and_modify(|candidate| *candidate = None).or_insert(Some(self.frames.len()));
         }
+    }
+}
+
+fn named_kotlin_scope(node: Node<'_>) -> bool {
+    let Some(parent) = node.parent().filter(|_| node.kind() == "function_declaration") else { return false };
+    let Some(name) = node.child_by_field_name("name") else { return false };
+    if !children(node).any(|child| child.kind() == "function_value_parameters")
+        || children(node).take_while(|child| *child != name)
+            .any(|child| !matches!(child.kind(), "modifiers" | "type_parameters")) {
+        return false;
+    }
+    // Implicit receivers can bind a bare name before Kotlin considers imports.
+    match parent.kind() {
+        "source_file" => true,
+        "class_body" => parent.parent().is_some_and(|owner| {
+            owner.parent().is_some_and(|outer| outer.kind() == "source_file")
+                && !children(owner).any(|child| child.kind() == "delegation_specifiers")
+                && !children(parent).any(|child| child.kind() == "companion_object")
+        }),
+        _ => false,
     }
 }
 
