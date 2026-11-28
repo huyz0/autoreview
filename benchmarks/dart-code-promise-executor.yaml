@@ -1,37 +1,25 @@
 cases:
   - name: dart code separates test orchestration from the termination promise
-    rule: {tool: ast-grep, id: ts-async-promise-executor}
+    rule: &rule {tool: ast-grep, id: ts-async-promise-executor}
     evidence:
       kind: historical
-      source: https://github.com/Dart-Code/Dart-Code/commit/c73205c1bbb57daff2686339359b4a36899cf599
-      license: MIT
+      source: &source https://github.com/Dart-Code/Dart-Code/commit/c73205c1bbb57daff2686339359b4a36899cf599
+      license: &license MIT
       rationale: >-
         The test runner passed an async executor to Promise. The fix awaits
         orchestration separately and uses a synchronous executor for the
         termination event.
-    before:
-      commit: cc1c24d3bbb478d8a4d67ca4f64ec092f6538325
-      path: src/extension/commands/test.ts
-      lines: [283]
-    after:
-      commit: c73205c1bbb57daff2686339359b4a36899cf599
-      path: src/extension/commands/test.ts
-      lines: []
+    before: {commit: &before cc1c24d3bbb478d8a4d67ca4f64ec092f6538325, path: &file1 src/extension/commands/test.ts, lines: [283]}
+    after: {commit: &after c73205c1bbb57daff2686339359b4a36899cf599, path: *file1, lines: []}
   - name: dart code awaits package discovery without an async executor
-    rule: {tool: ast-grep, id: ts-async-promise-executor}
+    rule: *rule
     evidence:
       kind: historical
-      source: https://github.com/Dart-Code/Dart-Code/commit/c73205c1bbb57daff2686339359b4a36899cf599
-      license: MIT
+      source: *source
+      license: *license
       rationale: >-
         Package map discovery used an async Promise executor. The fix calls an
         async helper directly, so errors use the promise returned by that
         helper.
-    before:
-      commit: cc1c24d3bbb478d8a4d67ca4f64ec092f6538325
-      path: src/shared/vscode/terminal/package_uri_link_provider.ts
-      lines: [32]
-    after:
-      commit: c73205c1bbb57daff2686339359b4a36899cf599
-      path: src/shared/vscode/terminal/package_uri_link_provider.ts
-      lines: []
+    before: {commit: *before, path: &file2 src/shared/vscode/terminal/package_uri_link_provider.ts, lines: [32]}
+    after: {commit: *after, path: *file2, lines: []}
