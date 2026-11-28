@@ -1,4 +1,4 @@
-use super::{conditional, let_else, match_flow, Node};
+use super::{branch_value, conditional, let_else, match_flow, Node};
 
 /// Whether this function's body can be lowered without skipping it entirely.
 pub fn supports_function(function: Node<'_>) -> bool {
@@ -33,6 +33,9 @@ fn supported_node(node: Node<'_>) -> bool {
 }
 
 fn supported_statement(node: Node<'_>) -> bool {
+    if node.kind() == "if_expression" && branch_value::supports_value_if(node) {
+        return true;
+    }
     statement_position(node)
         && match node.kind() {
             "for_expression" => simple_binding(node),
@@ -47,7 +50,7 @@ pub fn supports_match(node: Node<'_>) -> bool {
 }
 
 pub(crate) fn discards_match(node: Node<'_>) -> bool {
-    supports_match(node) && !match_flow::returns_match(node)
+    supports_match(node) && !branch_value::is_returned(node) && !branch_value::is_initializer(node)
 }
 
 /// Simple arm-local bindings in a supported Rust match pattern.
@@ -87,11 +90,12 @@ pub(crate) fn pattern_projection_sites(function: Node<'_>) -> Vec<(&'static str,
 }
 
 fn statement_position(node: Node<'_>) -> bool {
-    node.parent().is_some_and(|parent| {
-        matches!(
-            parent.kind(),
-            "block" | "expression_statement" | "else_clause"
-        )
+    node.parent().is_some_and(|parent| match parent.kind() {
+        "block" | "expression_statement" | "else_clause" => true,
+        "match_arm" => {
+            node.kind() == "return_expression" && parent.child_by_field_name("value") == Some(node)
+        }
+        _ => false,
     })
 }
 

@@ -104,7 +104,8 @@ the generic rule-scoped incomplete-checker reason. These reports do not expose
 raw subprocess errors.
 
 Rust lowering supports discarded statement matches, function-tail matches,
-and direct `return match` expressions with a final wildcard. Scrutinees can
+direct `return match`, and matches used as simple `let` initializers.
+Supported matches require a final wildcard. Scrutinees can
 include simple field paths and supported direct calls. Arms can use literals,
 qualified unit variants, and simple tuple variants such as `Some(_)` or
 `Some(value)`. Arm-local names receive distinct identities, but the analyzer
@@ -114,7 +115,7 @@ and replay remains incomplete. Arm bodies and guards must use supported
 simple expressions and calls, and the final wildcard must be unguarded.
 Returned arms preserve result identity on each exit. Guards preserve the
 evaluation order of `&&`, `||`, and `!` and carry effects to the next arm
-when the guard fails. Matches used as initializers or other nested values,
+when the guard fails. Matches used in other nested value positions,
 complex patterns, and guards whose operands need additional lowering still
 produce coverage diagnostics. [Rust match expressions](https://doc.rust-lang.org/reference/expressions/match-expr.html) [Rust lazy boolean operators](https://doc.rust-lang.org/reference/expressions/operator-expr.html#lazy-boolean-operators)
 
@@ -130,8 +131,10 @@ and let chains. Chain operands execute from left to right. Each successful
 pattern exposes its names to subsequent operands and the success body.
 Failure goes to the original `else` scope or exits the loop. Bindings
 whose source values cannot be projected report
-`rust_conditional_binding_projection`. Returned conditional values,
-let chains inside match guards, and complex patterns still report
+`rust_conditional_binding_projection`. Simple value-producing
+`if` and `if let` expressions also preserve the selected arm when they
+form a function return or initialize a single `let` binding. Let chains
+inside match guards and complex patterns still report
 incomplete coverage. [Rust if expressions](https://doc.rust-lang.org/reference/expressions/if-expr.html)
 
 Report scopes should distinguish an entire file, a function or root, a rule,

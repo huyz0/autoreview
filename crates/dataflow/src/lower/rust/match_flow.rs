@@ -1,17 +1,13 @@
-use super::{Bindings, EdgeKind, Lower, Node, NodeId};
+use super::{branch_value::{self, Mode}, Bindings, EdgeKind, Lower, Node, NodeId};
 use crate::cfg::{BindingWrite, IdentityOperand, Stmt};
 
 pub(super) mod guard;
-mod returns;
-
-pub(super) use returns::returns_match;
-use returns::statement_match;
 
 // A final unguarded wildcard guarantees an arm.
 pub(super) fn supports(node: Node<'_>) -> bool {
     if node.kind() != "match_expression"
         || node.has_error()
-        || !(returns_match(node) || node.parent().is_some_and(statement_match))
+        || !branch_value::supports_position(node)
         || !node.child_by_field_name("value").is_some_and(simple_value)
     {
         return false;
@@ -42,7 +38,7 @@ fn pattern(arm: Node<'_>) -> Option<Node<'_>> {
 }
 
 // Only accept arm statements whose nested calls the Rust lowerer traverses.
-fn simple_arm(node: Node<'_>) -> bool {
+pub(super) fn simple_arm(node: Node<'_>) -> bool {
     match node.kind() {
         "block" => node.named_children(&mut node.walk()).all(simple_arm),
         "line_comment" | "block_comment" | "empty_statement" => true,
@@ -147,10 +143,16 @@ impl Lower<'_> {
         at: NodeId,
         names: &Bindings,
     ) -> Option<NodeId> {
+        let mode = branch_value::is_returned(node).then_some(Mode::Return);
+        self.select_match(node, at, names, mode.as_ref())
+    }
+
+    pub(super) fn select_match(
+        &mut self, node: Node<'_>, at: NodeId, names: &Bindings, mode: Option<&Mode<'_>>,
+    ) -> Option<NodeId> {
         let evaluated = self.evaluate(node.child_by_field_name("value"), at, names);
         let body = node.child_by_field_name("body")?;
         let mut ends = Vec::new();
-        let returning = returns_match(node);
         let arms: Vec<_> = body
             .named_children(&mut body.walk())
             .filter(|item| item.kind() == "match_arm")
@@ -175,9 +177,11 @@ impl Lower<'_> {
             }
             let mut arm_names = self.bind_arm(arm, start, names);
             let body_start = self.guard_entry(arm, start, fallback, &arm_names)?;
-            if returning {
-                self.return_match_arm(value, body_start, &mut arm_names);
-            } else if let Some(end) = self.statement(value, body_start, &mut arm_names) {
+            let end = match mode {
+                Some(mode) => self.lower_value_arm(value, body_start, &mut arm_names, mode),
+                None => self.statement(value, body_start, &mut arm_names),
+            };
+            if let Some(end) = end {
                 ends.push(end);
             }
             if let Some(fallback) = fallback {
