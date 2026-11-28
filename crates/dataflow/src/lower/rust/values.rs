@@ -24,7 +24,7 @@ impl Lower<'_> {
             "call_expression" => self.call(expr, at, names, target),
             _ => {
                 let at = if let Some(operands) = eager_operands(expr) {
-                    self.eager_values(operands, at, names)?
+                    self.eager_values(operands, at, names, argument_flow::stages_aggregate(expr))?
                 } else { at };
                 if let Some(lhs) = target {
                     let rhs = self
@@ -37,9 +37,14 @@ impl Lower<'_> {
         }
     }
 
-    fn eager_values<'tree>(&mut self, mut operands: impl Iterator<Item = Node<'tree>>, mut at: NodeId, names: &Bindings) -> Option<NodeId> {
+    fn eager_values<'tree>(&mut self, mut operands: impl Iterator<Item = Node<'tree>>, mut at: NodeId, names: &Bindings, staged: bool) -> Option<NodeId> {
         while let Some(operand) = operands.next() {
-            let Some(end) = self.value(Some(operand), at, names, None) else {
+            let end = if staged {
+                self.lower_operand(operand, at, names, true).map(|(end, _)| end)
+            } else {
+                self.value(Some(operand), at, names, None)
+            };
+            let Some(end) = end else {
                 self.skip_calls(operands);
                 return None;
             };
@@ -84,7 +89,7 @@ impl Lower<'_> {
         };
         let mut args = Vec::new();
         while let Some(argument) = arguments.next() {
-            let Some((end, argument)) = self.call_argument(argument, at, names, staged) else {
+            let Some((end, argument)) = self.lower_operand(argument, at, names, staged) else {
                 self.skip_call(expr, arguments);
                 return None;
             };
@@ -114,19 +119,19 @@ impl Lower<'_> {
         }
     }
 
-    fn call_argument(&mut self, argument: Node<'_>, at: NodeId, names: &Bindings, staged: bool) -> Option<(NodeId, String)> {
+    fn lower_operand(&mut self, operand: Node<'_>, at: NodeId, names: &Bindings, staged: bool) -> Option<(NodeId, String)> {
         if !staged {
-            if let Some(variable) = self.variable(argument, names) {
+            if let Some(variable) = self.variable(operand, names) {
                 return Some((at, variable));
             }
         }
         let temporary = self.fresh(if staged { argument_flow::OPERAND_TEMPORARY } else { "expression" });
-        let end = if let Some(branch) = branch_value::from_value(argument) {
-            self.lower_branch_value(branch, at, names, &Mode::Argument { syntax: argument, temporary: &temporary })?
+        let end = if let Some(branch) = branch_value::from_value(operand) {
+            self.lower_branch_value(branch, at, names, &Mode::Operand { syntax: operand, temporary: &temporary })?
         } else {
-            let end = self.value(Some(argument), at, names, Some(temporary.clone()))?;
+            let end = self.value(Some(operand), at, names, Some(temporary.clone()))?;
             if staged {
-                self.capture_operand(argument, Some(argument), &temporary, end);
+                self.capture_operand(operand, Some(operand), &temporary, end);
             }
             end
         };
@@ -174,13 +179,12 @@ pub(super) fn eager_operands(node: Node<'_>) -> Option<impl Iterator<Item = Node
 
 fn evaluates_all_operands(node: Node<'_>) -> bool {
     match node.kind() {
-        "tuple_expression" | "index_expression" | "range_expression" => true,
-        "array_expression" => node.child_by_field_name("length").is_none(),
+        "index_expression" | "range_expression" => true,
         "unary_expression" => node.children(&mut node.walk()).any(|part| matches!(part.kind(), "-" | "!" | "*")),
         "binary_expression" => node.child_by_field_name("operator").is_some_and(|operator| {
             !matches!(operator.kind(), "&&" | "||")
         }),
-        _ => false,
+        _ => argument_flow::is_aggregate(node),
     }
 }
 

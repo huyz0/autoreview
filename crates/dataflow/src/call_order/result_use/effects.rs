@@ -111,6 +111,8 @@ impl Lower<'_, '_, '_> {
                             }
                         } else if range.returned && (self.returns_to_caller || self.inside.is_some()) {
                             self.returned(syntax, &mut effects);
+                        } else if range.returned && self.staged_aggregate(transparent(syntax)) {
+                            self.observe_elements(transparent(syntax), &mut effects);
                         } else {
                             self.statement(syntax, &mut effects);
                         }
@@ -263,6 +265,9 @@ impl Lower<'_, '_, '_> {
 
     fn value(&self, node: Node<'_>, effects: &mut Vec<Effect>) -> Value {
         let value = transparent(node);
+        if self.staged_aggregate(value) {
+            return Value::StagedAggregate(site::children(value).map(reads::operand_slot).collect());
+        }
         if self.language == ContractLanguage::Web && value.kind() == "array" {
             return Value::Aggregate(self.array_members(value, effects));
         }
@@ -319,6 +324,7 @@ impl Lower<'_, '_, '_> {
 
     fn expression(&self, node: Node<'_>, effects: &mut Vec<Effect>) {
         let call = transparent(node);
+        if self.aggregate_expression(node, effects) { return; }
         if self.place(call, false).is_some()
             && node
                 .parent()
@@ -345,6 +351,22 @@ impl Lower<'_, '_, '_> {
                 value: Value::Source(origin),
             }]));
         }
+    }
+
+    fn aggregate_expression(&self, node: Node<'_>, effects: &mut Vec<Effect>) -> bool {
+        let value = return_value(node).unwrap_or(node);
+        let aggregate = transparent(value);
+        if !self.staged_aggregate(aggregate) { return false; }
+        if crate::lower::rust::value_is_returned(value) {
+            self.observe_elements(aggregate, effects);
+        } else if node.parent().is_some_and(|owner| owner.kind() == "let_declaration") {
+            effects.extend(site::children(aggregate).map(|item| Effect::OpaqueRead(reads::operand_slot(item))));
+        }
+        true
+    }
+
+    fn observe_elements(&self, aggregate: Node<'_>, effects: &mut Vec<Effect>) {
+        effects.extend(site::children(aggregate).map(|item| Effect::Read(reads::operand_slot(item))));
     }
 
     fn origin(&self, node: Node<'_>) -> Option<Origin> {

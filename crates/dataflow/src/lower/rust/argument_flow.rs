@@ -4,15 +4,22 @@ use crate::lower::{keyed_syntax, record_evaluation, site::children};
 
 pub(crate) const OPERAND_TEMPORARY: &str = "#rust-operand";
 
-pub(super) fn is_argument(branch: Node<'_>) -> bool {
-    let argument = branch_value::outermost_group(branch);
-    let Some(arguments) = argument.parent().filter(|node| node.kind() == "arguments") else {
+pub(super) fn is_operand(branch: Node<'_>) -> bool {
+    let operand = branch_value::outermost_group(branch);
+    let Some(owner) = operand.parent() else {
         return false;
     };
-    arguments.parent().is_some_and(|call| {
-        modeled_call(call) && call.child_by_field_name("arguments") == Some(arguments)
-            && evaluated_position(call) && within_lowered_blocks(call)
-    })
+    let container = if owner.kind() == "arguments" {
+        owner.parent().filter(|call| modeled_call(*call) && call.child_by_field_name("arguments") == Some(owner))
+    } else {
+        is_aggregate(owner).then_some(owner)
+    };
+    container.is_some_and(|value| evaluated_position(value) && within_lowered_blocks(value))
+}
+
+pub(super) fn is_aggregate(node: Node<'_>) -> bool {
+    node.kind() == "tuple_expression"
+        || (node.kind() == "array_expression" && node.child_by_field_name("length").is_none())
 }
 
 fn modeled_call(call: Node<'_>) -> bool {
@@ -100,14 +107,20 @@ impl Lower<'_> {
 }
 
 pub(crate) fn stages_call(call: Node<'_>) -> bool {
-    if call.kind() != "call_expression" {
-        return false;
-    }
-    let mut pending = vec![call];
+    call.kind() == "call_expression" && contains_branch_operands(call)
+}
+
+pub(crate) fn stages_aggregate(node: Node<'_>) -> bool {
+    is_aggregate(node) && contains_branch_operands(node)
+}
+
+fn contains_branch_operands(root: Node<'_>) -> bool {
+    let mut pending = vec![root];
     while let Some(node) = pending.pop() {
         match node.kind() {
             "closure_expression" | "async_block" | "macro_invocation" | "function_item" => continue,
-            "arguments" if children(node).any(|arg| branch_value::from_value(arg).is_some()) => return true,
+            _ if (node.kind() == "arguments" || is_aggregate(node))
+                && children(node).any(|operand| branch_value::from_value(operand).is_some()) => return true,
             _ => pending.extend(children(node)),
         }
     }

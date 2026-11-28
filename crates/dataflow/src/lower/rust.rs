@@ -16,7 +16,8 @@ pub(crate) use destructuring::iterator_bindings;
 pub use support::{match_arm_bindings, match_binding_lines, supports_function, supports_match};
 pub use support::{match_arm_bindings_with_source, match_binding_lines_with_source, supports_function_with_source, supports_match_with_source};
 pub(crate) use support::{discards_match, lexical_bindings, pattern_projection_sites};
-pub(crate) use argument_flow::{stages_call, OPERAND_TEMPORARY};
+pub(crate) use argument_flow::{stages_aggregate, stages_call, OPERAND_TEMPORARY};
+pub(crate) use branch_value::is_returned as value_is_returned;
 
 use std::collections::HashMap;
 use tree_sitter::Node;

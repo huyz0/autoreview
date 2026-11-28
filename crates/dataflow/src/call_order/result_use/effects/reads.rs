@@ -100,6 +100,10 @@ impl Lower<'_, '_, '_> {
             todo.push(Visit::Invoke(index, demand));
         }
         if self.read_staged_call(node, effects) { return; }
+        if self.staged_aggregate(node) {
+            effects.extend(site::children(node).map(|element| Effect::OpaqueRead(operand_slot(element))));
+            return;
+        }
         let parts: Vec<_> = site::children(node).collect();
         todo.extend(parts.into_iter().rev().map(|child| Visit::Syntax(child, Demand::Observed)));
     }
@@ -220,6 +224,10 @@ impl Lower<'_, '_, '_> {
         self.language == crate::call_order::ContractLanguage::Rust && crate::lower::rust::stages_call(node)
     }
 
+    pub(super) fn staged_aggregate(&self, node: Node<'_>) -> bool {
+        self.language == crate::call_order::ContractLanguage::Rust && crate::lower::rust::stages_aggregate(node)
+    }
+
     fn read_staged_call(&self, node: Node<'_>, effects: &mut Vec<Effect>) -> bool {
         if !self.staged_call(node) { return false; }
         let operands = site::receiver(node).into_iter().chain(site::arguments(node).into_iter().flat_map(site::children));
@@ -260,6 +268,6 @@ impl Lower<'_, '_, '_> {
     }
 }
 
-fn operand_slot(node: Node<'_>) -> Place {
+pub(super) fn operand_slot(node: Node<'_>) -> Place {
     Place::Operand(node.start_byte(), node.end_byte())
 }

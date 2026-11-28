@@ -83,6 +83,7 @@ pub(super) fn simple_value(node: Node<'_>, source: &[u8]) -> bool {
             node.child_by_field_name("value").or_else(|| children(node).next()).is_some_and(simple_value)
         }
         "call_expression" => simple_call(node, source),
+        _ if super::argument_flow::is_aggregate(node) => children(node).all(|element| simple_operand(element, source)),
         _ => values::eager_operands(node).is_some_and(|mut operands| operands.all(simple_value)),
     }
 }
@@ -91,13 +92,15 @@ fn simple_call(node: Node<'_>, source: &[u8]) -> bool {
     let Some(function) = node.child_by_field_name("function") else { return false };
     let callee = matches!(function.kind(), "identifier" | "scoped_identifier")
         || (function.kind() == "field_expression" && function.child_by_field_name("value").is_some_and(|value| simple_value(value, source)));
-    callee && node.child_by_field_name("arguments").is_some_and(|args| {
-        children(args).all(|argument| match branch_value::from_value(argument) {
-            Some(branch) if branch.kind() == "if_expression" => branch_value::supports_value_if(branch, source),
-            Some(branch) => supports(branch, source),
-            None => simple_value(argument, source),
-        })
-    })
+    callee && node.child_by_field_name("arguments").is_some_and(|args| children(args).all(|argument| simple_operand(argument, source)))
+}
+
+fn simple_operand(operand: Node<'_>, source: &[u8]) -> bool {
+    match branch_value::from_value(operand) {
+        Some(branch) if branch.kind() == "if_expression" => branch_value::supports_value_if(branch, source),
+        Some(branch) => supports(branch, source),
+        None => simple_value(operand, source),
+    }
 }
 
 fn supported_arm(arm: Node<'_>, source: &[u8]) -> bool {

@@ -15,6 +15,7 @@ pub(in crate::call_order::result_use) enum Value {
     Source(Origin),
     Copy(Place),
     Aggregate(Vec<Value>),
+    StagedAggregate(Vec<Place>),
     Other,
 }
 

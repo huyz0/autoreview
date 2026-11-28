@@ -313,6 +313,7 @@ fn transfer_writes(writes: &[Write], live: &mut Live, mut observe: Option<&mut O
                 }
             }
             Value::Copy(binding) if used => copies.push(*binding),
+            Value::StagedAggregate(elements) if used => copies.extend(elements.iter().copied()),
             _ => {}
         }
     }

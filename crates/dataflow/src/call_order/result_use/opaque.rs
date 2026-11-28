@@ -72,6 +72,7 @@ fn opaque_writes(writes: &[super::Write], live: &mut Live, mut report: Option<&m
                 super::Value::Copy(place) if used => copies.push(*place),
                 super::Value::Source(origin) if used => { if let Some(report) = &mut report { report(origin); } }
                 super::Value::Aggregate(items) if used => pending.extend(items),
+                super::Value::StagedAggregate(elements) if used => copies.extend(elements.iter().copied()),
                 _ => {}
             }
         }
