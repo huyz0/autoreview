@@ -1334,7 +1334,7 @@ fn unresolved_imported_associated_methods_report_coverage() {
 fn imported_associated_call_in_skipped_function_reports_coverage() {
     let root = associated_coverage_fixture();
     let src = root.path().join("src");
-    for body in ["Store::unknown(); match 1 { value => {} }", "Store::known(); let [a, b] = [1, 2];"] {
+    for body in ["Store::unknown(); match 1 { value => {} }", "Store::known(); let (Ok(a) | Err(a), b) = (Ok::<u8, u8>(1), 2);"] {
         std::fs::write(src.join("worker.rs"), format!("use crate::support::Files as Store;\nfn run() {{ {body} }}\n")).unwrap();
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("src/worker.rs") && issue.line == Some(2) && issue.rule.as_deref() == Some("rust-discarded-remove-file-result")), "{body}: {:?}", result.coverage);
