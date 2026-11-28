@@ -1,6 +1,6 @@
-use super::{line, Bindings, Lower};
-use crate::cfg::{CallTarget, EdgeKind, NodeId, RhsShape, Stmt};
-use crate::lower::site::children;
+use super::{argument_flow, branch_value::{self, Mode}, line, Bindings, Lower};
+use crate::cfg::{CallSite, CallTarget, EdgeKind, IdentityOperand, NodeId, RhsShape, Stmt};
+use crate::lower::site::{self, children};
 use tree_sitter::Node;
 
 impl Lower<'_> {
@@ -10,31 +10,42 @@ impl Lower<'_> {
         at: NodeId,
         names: &Bindings,
         target: Option<String>,
-    ) -> NodeId {
+    ) -> Option<NodeId> {
         if let Some(awaited) = expr.and_then(keyed_await).filter(|_| self.cfg.keyed_flow.is_some()) {
             if let Some(await_call) = crate::lower::site::await_binding(awaited, self.source) {
                 self.cfg.emit(at, await_call, line(awaited));
             }
         }
         let Some(expr) = expr.map(unwrap_value) else {
-            return at;
+            return Some(at);
         };
         match expr.kind() {
             "try_expression" => self.try_value(expr, at, names, target),
             "call_expression" => self.call(expr, at, names, target),
             _ => {
-                let at = eager_operands(expr).map_or(at, |operands| {
-                    operands.fold(at, |at, operand| self.value(Some(operand), at, names, None))
-                });
+                let at = if let Some(operands) = eager_operands(expr) {
+                    self.eager_values(operands, at, names)?
+                } else { at };
                 if let Some(lhs) = target {
                     let rhs = self
                         .variable(expr, names)
                         .map_or(RhsShape::Unknown, RhsShape::Var);
                     self.cfg.emit(at, Stmt::Assign { lhs, rhs }, line(expr));
                 }
-                at
+                Some(at)
             }
         }
+    }
+
+    fn eager_values<'tree>(&mut self, mut operands: impl Iterator<Item = Node<'tree>>, mut at: NodeId, names: &Bindings) -> Option<NodeId> {
+        while let Some(operand) = operands.next() {
+            let Some(end) = self.value(Some(operand), at, names, None) else {
+                self.skip_calls(operands);
+                return None;
+            };
+            at = end;
+        }
+        Some(at)
     }
 
     fn try_value(
@@ -43,14 +54,14 @@ impl Lower<'_> {
         at: NodeId,
         names: &Bindings,
         target: Option<String>,
-    ) -> NodeId {
-        let evaluated = self.value(children(expr).next(), at, names, target);
+    ) -> Option<NodeId> {
+        let evaluated = self.value(children(expr).next(), at, names, target)?;
         let early_return = self.cfg.push_node(line(expr));
         let success = self.cfg.push_node(line(expr));
         self.edge(evaluated, early_return, EdgeKind::False);
         self.edge(evaluated, success, EdgeKind::True);
         self.finish(early_return, line(expr));
-        success
+        Some(success)
     }
 
     fn call(
@@ -59,26 +70,29 @@ impl Lower<'_> {
         mut at: NodeId,
         names: &Bindings,
         target: Option<String>,
-    ) -> NodeId {
+    ) -> Option<NodeId> {
         let Some(function) = expr.child_by_field_name("function") else {
-            return at;
+            return Some(at);
         };
         let function = function.child_by_field_name("function").unwrap_or(function);
-        let callee = self.call_name(function, names, &mut at);
+        let staged = argument_flow::stages_call(expr);
+        let mut site = site::capture(expr, self.source);
+        let mut arguments = expr.child_by_field_name("arguments").into_iter().flat_map(children);
+        let Some(callee) = self.call_name(function, names, &mut at, staged, site.as_deref_mut()) else {
+            self.skip_call(expr, arguments);
+            return None;
+        };
         let mut args = Vec::new();
-        if let Some(arguments) = expr.child_by_field_name("arguments") {
-            for argument in arguments
-                .named_children(&mut arguments.walk())
-                .filter(|part| !matches!(part.kind(), "line_comment" | "block_comment"))
-            {
-                if let Some(variable) = self.variable(argument, names) {
-                    args.push(variable);
-                } else {
-                    let temporary = self.fresh("expression");
-                    at = self.value(Some(argument), at, names, Some(temporary.clone()));
-                    args.push(temporary);
-                }
+        while let Some(argument) = arguments.next() {
+            let Some((end, argument)) = self.call_argument(argument, at, names, staged) else {
+                self.skip_call(expr, arguments);
+                return None;
+            };
+            at = end;
+            if let Some(operand) = site.as_mut().filter(|_| staged).and_then(|call| call.arguments.get_mut(args.len())) {
+                *operand = Some(IdentityOperand::Binding(argument.clone()));
             }
+            args.push(argument);
         }
         self.cfg.emit(
             at,
@@ -86,15 +100,41 @@ impl Lower<'_> {
                 target: callee,
                 args,
                 assigned_to: target,
-                site: crate::lower::site::capture(expr, self.source),
+                site,
             },
             line(expr),
         );
-        at
+        Some(at)
     }
 
-    fn call_name(&mut self, function: Node<'_>, names: &Bindings, at: &mut NodeId) -> CallTarget {
-        match function.kind() {
+    fn skip_call<'tree>(&mut self, call: Node<'_>, arguments: impl IntoIterator<Item = Node<'tree>>) {
+        if self.cfg.keyed_flow.is_some() {
+            self.cfg.unreachable_calls.push(call.start_byte());
+            self.skip_calls(arguments);
+        }
+    }
+
+    fn call_argument(&mut self, argument: Node<'_>, at: NodeId, names: &Bindings, staged: bool) -> Option<(NodeId, String)> {
+        if !staged {
+            if let Some(variable) = self.variable(argument, names) {
+                return Some((at, variable));
+            }
+        }
+        let temporary = self.fresh(if staged { argument_flow::OPERAND_TEMPORARY } else { "expression" });
+        let end = if let Some(branch) = branch_value::from_value(argument) {
+            self.lower_branch_value(branch, at, names, &Mode::Argument { syntax: argument, temporary: &temporary })?
+        } else {
+            let end = self.value(Some(argument), at, names, Some(temporary.clone()))?;
+            if staged {
+                self.capture_operand(argument, Some(argument), &temporary, end);
+            }
+            end
+        };
+        Some((end, temporary))
+    }
+
+    fn call_name(&mut self, function: Node<'_>, names: &Bindings, at: &mut NodeId, staged: bool, site: Option<&mut CallSite>) -> Option<CallTarget> {
+        Some(match function.kind() {
             "identifier" | "scoped_identifier" => CallTarget::Named(
                 self.text(function)
                     .chars()
@@ -103,7 +143,14 @@ impl Lower<'_> {
             ),
             "field_expression" => {
                 let receiver = function.child_by_field_name("value");
-                *at = self.value(receiver, *at, names, None);
+                *at = self.value(receiver, *at, names, None)?;
+                if let Some(receiver) = receiver.filter(|_| staged) {
+                    let temporary = self.fresh(argument_flow::OPERAND_TEMPORARY);
+                    self.capture_operand(receiver, Some(receiver), &temporary, *at);
+                    if let Some(site) = site.filter(|call| call.receiver.is_some()) {
+                        site.receiver = Some(temporary);
+                    }
+                }
                 function
                     .child_by_field_name("field")
                     .map_or(CallTarget::Unknown, |field| {
@@ -112,7 +159,7 @@ impl Lower<'_> {
                     })
             }
             _ => CallTarget::Unknown,
-        }
+        })
     }
 }
 

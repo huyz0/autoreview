@@ -7,10 +7,10 @@ pub(super) fn test(owner: Node<'_>) -> Option<Node<'_>> {
         .filter(|node| matches!(node.kind(), "let_condition" | "let_chain"))
 }
 
-pub(super) fn control_test(owner: Node<'_>) -> Option<Node<'_>> {
+pub(super) fn control_test<'tree>(owner: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
     test(owner).or_else(|| {
         owner.child_by_field_name("condition").filter(|condition| {
-            match_flow::guard::has_short_circuit(*condition) && match_flow::guard::supported(*condition)
+            match_flow::guard::has_short_circuit(*condition) && match_flow::guard::supported(*condition, source)
         })
     })
 }
@@ -28,9 +28,9 @@ pub(super) fn supported(node: Node<'_>, source: &[u8]) -> bool {
             bindings(node, source).is_some()
                 && node
                     .child_by_field_name("value")
-                    .is_some_and(match_flow::simple_value)
+                    .is_some_and(|value| match_flow::simple_value(value, source))
         }
-        _ => match_flow::guard::supported(node),
+        _ => match_flow::guard::supported(node, source),
     }
 }
 
@@ -165,7 +165,7 @@ impl Lower<'_> {
                 at = next;
             }
         } else if let Some(bindings) = bindings(node, self.source) {
-            let evaluated = self.evaluate(node.child_by_field_name("value"), at, names);
+            let Some(evaluated) = self.evaluate(node.child_by_field_name("value"), at, names) else { return };
             let matched = self.cfg.push_node(line(node));
             self.edge(evaluated, matched, EdgeKind::True);
             if node.child_by_field_name("pattern").is_none_or(|pattern| pattern.kind() != "_") {

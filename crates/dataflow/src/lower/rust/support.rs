@@ -82,7 +82,7 @@ pub fn supports_match_with_source(node: Node<'_>, source: &[u8]) -> bool {
 }
 
 pub(crate) fn discards_match(node: Node<'_>, source: &[u8]) -> bool {
-    supports_match_with_source(node, source) && !branch_value::is_returned(node) && !branch_value::is_initializer(node, source)
+    supports_match_with_source(node, source) && branch_value::is_discarded_statement(node)
 }
 
 /// Simple arm-local bindings in a supported Rust match pattern.

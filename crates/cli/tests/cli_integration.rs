@@ -1204,6 +1204,20 @@ fn rust_branch_initializer_reaches_review_and_replay() {
 }
 
 #[test]
+fn rust_branch_argument_reaches_review_and_replay() {
+    let before = concat!(
+        "use std::fs::remove_file;\n",
+        "fn run(flag: bool) -> std::io::Result<()> {\n",
+        "    ignore(match flag { true => remove_file(\"example.txt\"), _ => return Ok(()) });\n",
+        "    Ok(())\n}\n",
+        "fn ignore(_value: std::io::Result<()>) {}\n",
+        "fn keep(value: std::io::Result<()>) -> std::io::Result<()> { value }\n",
+    );
+    let after = before.replace("    ignore(match", "    keep(match").replace(" });\n    Ok(())", " })");
+    assert_rust_result_replays("Rust branch argument", before, &after);
+}
+
+#[test]
 fn rust_match_guard_let_chain_reaches_review_and_replay() {
     let before = "use std::fs::remove_file;\nfn run(value: Option<u8>, gate: bool) -> std::io::Result<()> {\n    match 1 { _ if gate && let Some(_) = value => { remove_file(\"example.txt\"); }, _ => {} };\n    Ok(())\n}\n";
     let after = before.replace("remove_file(\"example.txt\");", "return remove_file(\"example.txt\");");

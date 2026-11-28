@@ -9,7 +9,7 @@ pub(super) fn supports(node: Node<'_>, source: &[u8]) -> bool {
     if node.kind() != "match_expression"
         || node.has_error()
         || !branch_value::supports_position(node, source)
-        || !node.child_by_field_name("value").is_some_and(simple_value)
+        || !node.child_by_field_name("value").is_some_and(|value| simple_value(value, source))
     {
         return false;
     }
@@ -43,6 +43,7 @@ fn pattern<'tree>(arm: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
 // Only accept arm statements whose nested calls the Rust lowerer traverses.
 pub(super) fn simple_arm(node: Node<'_>, source: &[u8]) -> bool {
     let simple_arm = |child| simple_arm(child, source);
+    let simple_value = |child| simple_value(child, source);
     match node.kind() {
         "block" => children(node).all(simple_arm),
         "empty_statement" => true,
@@ -73,23 +74,30 @@ fn statement_if(node: Node<'_>, source: &[u8]) -> bool {
         })
 }
 
-pub(super) fn simple_value(node: Node<'_>) -> bool {
+pub(super) fn simple_value(node: Node<'_>, source: &[u8]) -> bool {
+    let simple_value = |child| simple_value(child, source);
     match node.kind() {
         "identifier" | "self" | "scoped_identifier" | "integer_literal" | "boolean_literal"
         | "char_literal" | "string_literal" | "unit_expression" => true,
         "reference_expression" | "parenthesized_expression" | "try_expression" => {
             node.child_by_field_name("value").or_else(|| children(node).next()).is_some_and(simple_value)
         }
-        "call_expression" => simple_call(node),
+        "call_expression" => simple_call(node, source),
         _ => values::eager_operands(node).is_some_and(|mut operands| operands.all(simple_value)),
     }
 }
 
-fn simple_call(node: Node<'_>) -> bool {
+fn simple_call(node: Node<'_>, source: &[u8]) -> bool {
     let Some(function) = node.child_by_field_name("function") else { return false };
     let callee = matches!(function.kind(), "identifier" | "scoped_identifier")
-        || (function.kind() == "field_expression" && function.child_by_field_name("value").is_some_and(simple_value));
-    callee && node.child_by_field_name("arguments").is_some_and(|args| args.named_children(&mut args.walk()).all(simple_value))
+        || (function.kind() == "field_expression" && function.child_by_field_name("value").is_some_and(|value| simple_value(value, source)));
+    callee && node.child_by_field_name("arguments").is_some_and(|args| {
+        children(args).all(|argument| match branch_value::from_value(argument) {
+            Some(branch) if branch.kind() == "if_expression" => branch_value::supports_value_if(branch, source),
+            Some(branch) => supports(branch, source),
+            None => simple_value(argument, source),
+        })
+    })
 }
 
 fn supported_arm(arm: Node<'_>, source: &[u8]) -> bool {
@@ -142,7 +150,7 @@ impl Lower<'_> {
     pub(super) fn select_match(
         &mut self, node: Node<'_>, at: NodeId, names: &Bindings, mode: Option<&Mode<'_>>,
     ) -> Option<NodeId> {
-        let evaluated = self.evaluate(node.child_by_field_name("value"), at, names);
+        let evaluated = self.evaluate(node.child_by_field_name("value"), at, names)?;
         let body = node.child_by_field_name("body")?;
         let mut ends = Vec::new();
         let arms: Vec<_> = body

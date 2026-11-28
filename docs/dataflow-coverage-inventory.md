@@ -149,6 +149,13 @@ also accept grouping parentheses around supported `if` and `match` values.
 Ordinary `if` and `while` conditions short-circuit `&&` and `||` when the operands
 are supported, including grouped and negated conditions. [Rust if expressions](https://doc.rust-lang.org/reference/expressions/if-expr.html) [Rust lazy boolean operators](https://doc.rust-lang.org/reference/expressions/operator-expr.html#lazy-boolean-operators)
 
+Supported `if` and `match` expressions can also supply direct arguments to
+functions and methods. Autoreview evaluates the receiver and arguments in
+source order and passes the selected arm's value to the call. An early exit
+inside an argument skips the remaining operands and the call. Branch values
+inside unsupported positions such as array elements still report incomplete
+coverage. [Rust operand evaluation order](https://doc.rust-lang.org/reference/expressions.html#evaluation-order-of-operands)
+
 Rust `match`, conditional patterns, `let-else`, ordinary `let`, and `for`
 support tuple, struct, slice, and reference patterns. The analyzer follows
 shorthand and renamed struct fields, nested patterns, ignored rest fields or

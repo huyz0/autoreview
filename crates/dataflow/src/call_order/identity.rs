@@ -144,6 +144,9 @@ impl<'src> Syntax<'src> {
         name: &str,
         start: usize,
     ) -> Option<IdentityOperand> {
+        if name.starts_with(crate::lower::rust::OPERAND_TEMPORARY) {
+            return values.get(name).cloned().flatten();
+        }
         if let Some(key) = self.projected_key(name, start, false) {
             return values.get(&key).cloned().flatten();
         }

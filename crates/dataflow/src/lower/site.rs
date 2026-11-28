@@ -223,7 +223,7 @@ pub(crate) fn arguments(call: Node<'_>) -> Option<Node<'_>> {
         .or_else(|| children(call).find(|node| node.kind() == "value_arguments"))
 }
 
-fn receiver(call: Node<'_>) -> Option<Node<'_>> {
+pub(crate) fn receiver(call: Node<'_>) -> Option<Node<'_>> {
     if call.kind() == "method_invocation" {
         return call.child_by_field_name("object");
     }

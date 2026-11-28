@@ -99,7 +99,12 @@ impl Lower<'_, '_, '_> {
                     for range in &node.evaluations {
                         let Some(syntax) = evaluation(function, range) else { continue; };
                         if site::identifier(syntax) && site::discarded_conditional_arm(syntax) { continue; }
-                        if let Some((span, kind)) = &range.assignment {
+                        if let Some(operand) = &range.operand {
+                            let value = if operand.has_value { self.value(syntax, &mut effects) } else { Value::Other };
+                            effects.push(Effect::Write(vec![Write {
+                                target: Some(Place::Operand(operand.slot.start, operand.slot.end)), value,
+                            }]));
+                        } else if let Some((span, kind)) = &range.assignment {
                             if let Some((owner, target, reassign)) = syntax_at(function, span, *kind)
                                 .and_then(|owner| assignment_parts(owner, self.source).map(|(target, _, reassign)| (owner, target, reassign))) {
                                 self.assignment(owner, target, Some(syntax), reassign, &mut effects);

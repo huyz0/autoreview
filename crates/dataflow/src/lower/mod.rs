@@ -111,6 +111,6 @@ fn line(node: Node<'_>) -> u32 {
 
 fn record_evaluation(cfg: &mut Cfg<Stmt>, at: NodeId, node: Node<'_>) {
     if cfg.keyed_flow.is_some() {
-        cfg.nodes[at].evaluations.push(Evaluation { span: node.byte_range(), syntax_kind: node.kind_id(), returned: false, assignment: None });
+        cfg.nodes[at].evaluations.push(Evaluation { span: node.byte_range(), syntax_kind: node.kind_id(), returned: false, assignment: None, operand: None });
     }
 }

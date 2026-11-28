@@ -1,11 +1,12 @@
-use super::{conditional, destructuring, line, match_flow, simple_binding, Bindings, Lower, Node, NodeId};
-use crate::cfg::{BindingWrite, Stmt};
+use super::{argument_flow, conditional, destructuring, line, match_flow, simple_binding, Bindings, Lower, Node, NodeId};
+use crate::cfg::{BindingWrite, RhsShape, Stmt};
 use crate::lower::{keyed_syntax, record_evaluation, site};
 
 pub(super) enum Mode<'a> {
     Return,
     Assign(Assignment<'a>),
     Project,
+    Argument { syntax: Node<'a>, temporary: &'a str },
 }
 
 pub(super) struct Assignment<'a> {
@@ -20,7 +21,7 @@ pub(super) fn from_value(mut node: Node<'_>) -> Option<Node<'_>> {
     matches!(node.kind(), "if_expression" | "match_expression").then_some(node)
 }
 
-fn outermost_group(mut node: Node<'_>) -> Node<'_> {
+pub(super) fn outermost_group(mut node: Node<'_>) -> Node<'_> {
     while let Some(group) = node.parent().filter(|owner| owner.kind() == "parenthesized_expression") {
         node = group;
     }
@@ -62,7 +63,7 @@ pub(super) fn is_returned(node: Node<'_>) -> bool {
 }
 
 pub(super) fn supports_position(node: Node<'_>, source: &[u8]) -> bool {
-    is_returned(node) || is_initializer(node, source) || is_discarded_statement(node)
+    is_returned(node) || is_initializer(node, source) || is_discarded_statement(node) || argument_flow::is_argument(node)
 }
 
 pub(super) fn is_discarded_statement(node: Node<'_>) -> bool {
@@ -88,7 +89,7 @@ fn last_statement(node: Node<'_>) -> bool {
 
 pub(super) fn supports_value_if(node: Node<'_>, source: &[u8]) -> bool {
     let root = conditional::root_branch(node);
-    (is_returned(root) || is_initializer(root, source)) && supports_if(node, source)
+    (is_returned(root) || is_initializer(root, source) || argument_flow::is_argument(root)) && supports_if(node, source)
 }
 
 pub(super) fn supports_if(node: Node<'_>, source: &[u8]) -> bool {
@@ -99,7 +100,7 @@ pub(super) fn supports_if(node: Node<'_>, source: &[u8]) -> bool {
         && node
             .child_by_field_name("consequence")
             .is_some_and(|arm| match_flow::simple_arm(arm, source))
-        && alternative(node).is_some_and(|arm| {
+        && alternative(node).map_or_else(|| argument_flow::is_argument(conditional::root_branch(node)), |arm| {
             if arm.kind() == "if_expression" {
                 supports_if(arm, source)
             } else {
@@ -130,7 +131,7 @@ impl Lower<'_> {
         if let Some(value) = value.and_then(from_value) {
             return self.lower_branch_value(value, at, names, &Mode::Return);
         }
-        let end = self.value(value, at, names, None);
+        let end = self.value(value, at, names, None)?;
         record_evaluation(&mut self.cfg, end, stmt);
         if let Some(value) = value {
             self.return_identity(value, end);
@@ -160,7 +161,7 @@ impl Lower<'_> {
                 self.lower_branch_value(value, at, names, &mode)?
             }
             None => {
-                let end = self.value(value, at, names, target.clone());
+                let end = self.value(value, at, names, target.clone())?;
                 record_evaluation(&mut self.cfg, end, stmt);
                 self.keyed_write(stmt, end);
                 end
@@ -184,14 +185,14 @@ impl Lower<'_> {
         }
         let test = node.child_by_field_name("condition")?;
         let yes = node.child_by_field_name("consequence")?;
-        let no = alternative(node)?;
+        let no = alternative(node);
         let (passed, failed, mut success_names) =
-            self.split_branch(test, at, (line(yes), line(no)), names);
+            self.split_branch(test, at, (line(yes), no.map_or(line(node), line)), names);
         let then_end = self.lower_value_arm(yes, passed, &mut success_names, mode);
-        let else_end = if no.kind() == "if_expression" {
-            self.lower_branch_value(no, failed, names, mode)
-        } else {
-            self.lower_value_arm(no, failed, &mut names.clone(), mode)
+        let else_end = match no {
+            Some(no) if no.kind() == "if_expression" => self.lower_branch_value(no, failed, names, mode),
+            Some(no) => self.lower_value_arm(no, failed, &mut names.clone(), mode),
+            None => self.complete_value(None, failed, names, mode),
         };
         self.join_paths(node, [then_end, else_end].into_iter().flatten())
     }
@@ -199,26 +200,28 @@ impl Lower<'_> {
     pub(super) fn lower_value_arm(
         &mut self,
         arm: Node<'_>,
-        mut at: NodeId,
+        at: NodeId,
         names: &mut Bindings,
         mode: &Mode<'_>,
     ) -> Option<NodeId> {
-        if matches!(arm.kind(), "return_expression" | "break_expression" | "continue_expression") {
-            return self.statement(arm, at, names);
+        match arm.kind() {
+            "return_expression" | "break_expression" | "continue_expression" => self.statement(arm, at, names),
+            "assignment_expression" => {
+                let end = self.statement(arm, at, names)?;
+                self.complete_value(None, end, names, mode)
+            }
+            "block" => self.lower_value_block(arm, at, names, mode),
+            _ => self.complete_value(Some(arm), at, names, mode),
         }
-        if arm.kind() == "assignment_expression" {
-            let end = self.statement(arm, at, names)?;
-            return self.complete_value(None, end, names, mode);
-        }
-        if arm.kind() != "block" {
-            return self.complete_value(Some(arm), at, names, mode);
-        }
+    }
+
+    fn lower_value_block(&mut self, arm: Node<'_>, mut at: NodeId, names: &mut Bindings, mode: &Mode<'_>) -> Option<NodeId> {
         let mut statements = site::children(arm).peekable();
         while let Some(statement) = statements.next() {
-            if statements.peek().is_none() && match_flow::simple_value(statement) {
+            if statements.peek().is_none() && match_flow::simple_value(statement, self.source) {
                 return self.complete_value(Some(statement), at, names, mode);
             }
-            at = self.statement(statement, at, names)?;
+            at = self.statement_in_sequence(statement, at, names, &mut statements)?;
         }
         self.complete_value(None, at, names, mode)
     }
@@ -232,7 +235,7 @@ impl Lower<'_> {
     ) -> Option<NodeId> {
         match mode {
             Mode::Return => {
-                let end = self.evaluate(value, at, names);
+                let end = self.evaluate(value, at, names)?;
                 if let Some(value) = value {
                     if let Some(evaluation) = self.cfg.nodes[end].evaluations.last_mut() {
                         evaluation.returned = true;
@@ -243,9 +246,24 @@ impl Lower<'_> {
                 self.finish(end, exit_line);
                 None
             }
-            Mode::Assign(assignment) => Some(self.assign_arm(value, at, names, assignment)),
-            Mode::Project => Some(self.evaluate(value, at, names)),
+            Mode::Assign(assignment) => self.assign_arm(value, at, names, assignment),
+            Mode::Project => self.evaluate(value, at, names),
+            Mode::Argument { syntax, temporary } => {
+                self.complete_argument(*syntax, value, temporary, at, names)
+            }
         }
+    }
+
+    fn complete_argument(&mut self, syntax: Node<'_>, value: Option<Node<'_>>, temporary: &str, at: NodeId, names: &Bindings) -> Option<NodeId> {
+        let target = temporary.to_owned();
+        let end = if value.is_some() {
+            self.value(value, at, names, Some(target))?
+        } else {
+            self.cfg.emit(at, Stmt::Assign { lhs: target, rhs: RhsShape::Unknown }, line(syntax));
+            at
+        };
+        self.capture_operand(syntax, value, temporary, end);
+        Some(end)
     }
 
     fn assign_arm(
@@ -254,9 +272,9 @@ impl Lower<'_> {
         at: NodeId,
         names: &Bindings,
         assignment: &Assignment<'_>,
-    ) -> NodeId {
+    ) -> Option<NodeId> {
         let declaration = assignment.declaration;
-        let end = self.value(value, at, names, assignment.local.map(str::to_owned));
+        let end = self.value(value, at, names, assignment.local.map(str::to_owned))?;
         if let Some(value) = value {
             record_evaluation(&mut self.cfg, end, value);
             if let Some(evaluation) = self.cfg.nodes[end].evaluations.last_mut() {
@@ -280,6 +298,6 @@ impl Lower<'_> {
                 line(declaration),
             );
         }
-        end
+        Some(end)
     }
 }
