@@ -1999,12 +1999,23 @@ fn rust_conditional_literal_with_a_constant_keeps_the_failure_path() {
 
 #[test]
 fn rust_labeled_jumps_in_loop_conditions_keep_coverage_incomplete() {
-    for body in [
-        "'outer: while { if flag { break 'outer; } true } {}",
-        "'outer: loop { while { if flag { break 'outer; } true } {} }",
-    ] {
-        let source = format!("use std::fs::remove_file;\nfn run(flag: bool) {{\n {body}\n remove_file(\"after\");\n}}\n");
-        assert_rust_control_flow_incomplete(&source);
+    let source = r#"use std::fs::remove_file;
+fn own_condition(flag: bool) {
+    'outer: while { if flag { break 'outer; } true } {}
+    remove_file("after");
+}
+fn nested_condition(flag: bool) {
+    'outer: loop { while { if flag { break 'outer; } true } {} }
+    remove_file("after");
+}
+"#;
+    let root = write_single_file("lib.rs", source);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    for line in [2, 6] {
+        assert!(report.coverage.iter().any(|issue| {
+            issue.line == Some(line) && issue.reason == "unsupported_rust_control_flow"
+                && issue.rule.as_deref() == Some("rust-discarded-remove-file-result")
+        }), "{:?}", report.coverage);
     }
 }
 

@@ -181,9 +181,9 @@ and iterator projections still report incomplete coverage. Loop bindings
 receive fresh identities each iteration. [Rust patterns](https://doc.rust-lang.org/reference/patterns.html#destructuring)
 
 Statement-position `unsafe` blocks follow the control flow of their body.
-Loop labels resolve `break` and `continue` to the named enclosing loop,
-including jumps from a nested loop. Value-producing labeled blocks still
-report incomplete coverage.
+Loop labels resolve `break` and `continue` from a loop body to the named
+enclosing loop, including jumps from a nested loop. Jumps inside loop
+conditions and value-producing labeled blocks still report incomplete coverage.
 
 Or-patterns can bind names in unguarded match arms, conditional patterns,
 `let-else`, and supported destructuring. The alternatives must bind the same
