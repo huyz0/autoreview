@@ -119,8 +119,9 @@ fn pending(root: &mut Registry, key: &str, other: &str, early: bool) {
 fn rust_local_and_iterated_patterns_keep_cleanup_keys_distinct() {
     let source = r#"fn pending(root: &mut Registry, key: &str) {
     root.register(key);
-    let pair = (key, "wrong");
-    let _unrelated = 1;
+    let mut current = key;
+    let pair = (current, "wrong");
+    current = "changed after initialization";
     let (selected, other) = pair;
     let entries = [(other, 1), (selected, 2)];
     'items: for (candidate, _) in entries {
