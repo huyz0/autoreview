@@ -4,6 +4,16 @@ This plan starts from main commit 0647f09. Each change requires review, appropri
 tests, Autoreview, and passing CI before merge. The acceptance criteria below
 describe intended results, not completed work.
 
+## Replay evidence follow-ups
+
+- Reduce duplication and complexity in the TypeScript runtime and receiver
+  evidence checks while preserving their fail-closed behavior. The checks rely
+  on explicit closed-deployment attestations; investigate stronger automatic
+  verification of indirect rebinding and runtime instrumentation.
+- Improve Rust call-sequence coverage for unresolved associated calls and
+  control-flow lowering reported while reviewing the replay evidence changes.
+- Investigate the two existing Cilium swallowed-error benchmark false positives.
+
 ## 1. Track ignored results across helpers
 
 Reuse the call-sequence resolver for same-file and imported functions. Build

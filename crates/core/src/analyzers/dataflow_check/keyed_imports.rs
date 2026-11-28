@@ -656,11 +656,35 @@ mod budget_tests {
 
     #[test]
     fn checkout_historical_general_promise_observation() {
+        if std::env::var_os("AUTOREVIEW_TYPESCRIPT_TRUST_EMITTED_GRAPH").is_some()
+            || std::env::var_os("AUTOREVIEW_TYPESCRIPT_TRUST_ACTIONS_CORE_1_1_3").is_some()
+            || std::env::var_os("AUTOREVIEW_TYPESCRIPT_TRUST_NODE_12_22_12").is_some() { return; }
+        checkout_historical_promise_observation(false);
+    }
+
+    // Enable once all four pinned snapshots have complete analysis. This is
+    // intentionally separate from the diagnostic baseline, which checks that
+    // the current incomplete state is still reported rather than scored.
+    #[test]
+    #[ignore = "historical promise analysis is not yet complete"]
+    fn checkout_historical_general_promise_complete() {
+        checkout_historical_promise_observation(true);
+    }
+
+    fn checkout_historical_promise_observation(require_complete: bool) {
         use autoreview_dataflow::call_order::{CallOrderSpec, ContractLanguage, ContractMode, ResultContract};
         use autoreview_schema::Severity;
         use sha2::{Digest, Sha256};
-        let Ok(root) = std::env::var("AUTOREVIEW_CHECKOUT_SNAPSHOTS") else { return };
-        let Ok(compiler) = std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") else { return };
+        let root = match std::env::var("AUTOREVIEW_CHECKOUT_SNAPSHOTS") {
+            Ok(value) => value,
+            Err(_) if !require_complete => return,
+            Err(_) => panic!("AUTOREVIEW_CHECKOUT_SNAPSHOTS is required for the completion test"),
+        };
+        let compiler = match std::env::var("AUTOREVIEW_TEST_TYPESCRIPT") {
+            Ok(value) => value,
+            Err(_) if !require_complete => return,
+            Err(_) => panic!("AUTOREVIEW_TEST_TYPESCRIPT is required for the completion test"),
+        };
         let rule = CallOrderRuleDef { id: "test-general".into(), language: "TypeScript".into(), category: "correctness".into(), severity: Severity::Medium, message: "unused promise".into(), pack_id: None, metadata: None,
             spec: CallOrderSpec { rule_id: "test-general".into(), after: vec![], unless: vec![], before: vec![], check_before_return: false, identity: None, contract: Some(ResultContract { mode: ContractMode::MustUse, language: ContractLanguage::Web, import: String::new(), methods: vec![], borrows: vec![], acquire_awaited: false, complete_observed: false, typed_promise_factory: false, typed_promise: true, typed_go_error: false }) } };
         for (snapshot, paths) in [
@@ -675,7 +699,11 @@ mod budget_tests {
                 let (findings, coverage) = with_resolver(&dir, |resolver| run_group(resolver, &[path.to_owned()], &[(&rule, Language::TypeScript)], &dir, (Some(&checker), TYPED_UNIT_LIMIT)));
                 let lines: Vec<_> = findings.iter().filter(|finding| finding.location.path == path).map(|finding| finding.location.range.start_line).collect();
                 assert_eq!(lines, expected, "{snapshot}/{path}: {findings:#?}");
-                assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved"), "{snapshot}/{path}: {coverage:?}");
+                if require_complete {
+                    assert!(coverage.is_empty(), "{snapshot}/{path}: {coverage:?}");
+                } else {
+                    assert!(coverage.iter().any(|issue| issue.reason == "promise_type_unresolved"), "{snapshot}/{path}: {coverage:?}");
+                }
                 assert!(!coverage.iter().any(|issue| issue.reason == "typescript_checker_incomplete"), "{snapshot}/{path}: {coverage:?}");
             }
         }
