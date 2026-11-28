@@ -283,11 +283,7 @@ pub(crate) fn iterator_bindings(node: Node<'_>) -> Vec<Node<'_>> {
             .filter(|child| site::identifier(*child))
             .into_iter()
             .collect(),
-        "for_expression" => node
-            .child_by_field_name("pattern")
-            .filter(|child| site::identifier(*child))
-            .into_iter()
-            .collect(),
+        "for_expression" => crate::lower::rust::iterator_bindings(node).unwrap_or_default(),
         _ => Vec::new(),
     }
 }

@@ -7,11 +7,12 @@ mod let_else;
 mod conditional;
 mod support;
 mod branch_value;
+mod destructuring;
 
 use support::{simple_binding, supported};
-pub(crate) use conditional::bindings as conditional_bindings;
+pub(crate) use destructuring::iterator_bindings;
 pub use support::{match_arm_bindings, match_binding_lines, supports_function, supports_match};
-pub(crate) use support::{discards_match, let_else_bindings, pattern_projection_sites};
+pub(crate) use support::{discards_match, let_else_bindings, lexical_bindings, pattern_projection_sites};
 
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -90,7 +91,7 @@ impl Lower<'_> {
             "let_declaration" if stmt.child_by_field_name("alternative").is_some() => {
                 self.lower_let_else(stmt, at, names)
             }
-            "let_declaration" => self.binding(stmt, at, names),
+            "let_declaration" => self.lower_local(stmt, at, names),
             "expression_statement" => self.statement(super::site::children(stmt).next()?, at, names),
             "return_expression" => self.explicit_return(stmt, at, names),
             "break_expression" | "continue_expression" => {
@@ -220,18 +221,12 @@ impl Lower<'_> {
             self.edge(condition, after, EdgeKind::False);
         }
         self.loops.push((head, after));
-        let mut body_names = names.clone();
-        if let Some(pattern) = expr.child_by_field_name("pattern") {
-            let name = self.text(pattern).to_owned();
-            body_names.insert(name.clone(), self.fresh(&name));
-        }
         if let Some(body) = expr.child_by_field_name("body") {
             let start = self.cfg.push_node(line(body));
             self.edge(condition, start, EdgeKind::True);
-            if self.cfg.keyed_flow.is_some() {
-                for write in super::keyed_flow::loops::iteration_writes(expr, self.source) {
-                    self.cfg.emit(start, Stmt::Rebind(write), line(expr));
-                }
+            let mut body_names = names.clone();
+            for binding in iterator_bindings(expr).into_iter().flatten() {
+                self.project_pattern_binding(binding, start, &mut body_names);
             }
             if let Some(end) = self.flow_expression(body, start, &body_names) {
                 self.edge(end, head, EdgeKind::Loop);

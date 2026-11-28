@@ -95,7 +95,7 @@ impl<'graph> State<'graph> {
             Some(operand) => self.materialize(plan, operand, write.start),
             None => None,
         };
-        let key = plan.syntax.conditional_key(&write.name, write.start, true)
+        let key = plan.syntax.projected_key(&write.name, write.start, true)
             .unwrap_or_else(|| write.name.clone());
         self.values.insert(key, value);
     }

@@ -144,7 +144,7 @@ impl<'src> Syntax<'src> {
         name: &str,
         start: usize,
     ) -> Option<IdentityOperand> {
-        if let Some(key) = self.conditional_key(name, start, false) {
+        if let Some(key) = self.projected_key(name, start, false) {
             return values.get(&key).cloned().flatten();
         }
         if !self.bindings.can_read(name) {

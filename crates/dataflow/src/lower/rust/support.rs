@@ -1,4 +1,4 @@
-use super::{branch_value, conditional, let_else, match_flow, Node};
+use super::{branch_value, conditional, destructuring, let_else, match_flow, Node};
 
 /// Whether this function's body can be lowered without skipping it entirely.
 pub fn supports_function(function: Node<'_>) -> bool {
@@ -19,7 +19,7 @@ fn supported_node(node: Node<'_>) -> bool {
     match node.kind() {
         "label" | "unsafe_block" => false,
         "let_chain" | "let_condition" => conditional::supported(node),
-        "let_declaration" => simple_binding(node) || let_else::supports(node),
+        "let_declaration" => supported_declaration(node),
         "for_expression"
         | "if_expression"
         | "while_expression"
@@ -38,10 +38,25 @@ fn supported_statement(node: Node<'_>) -> bool {
     }
     statement_position(node)
         && match node.kind() {
-            "for_expression" => simple_binding(node),
+            "for_expression" => destructuring::iterator_bindings(node).is_some(),
             "if_expression" | "while_expression" => conditional::supports_owner(node),
             _ => true,
         }
+}
+
+fn supported_declaration(node: Node<'_>) -> bool {
+    simple_binding(node)
+        || let_else::supports(node)
+        || destructuring::declaration_bindings(node).is_some()
+}
+
+pub(crate) fn lexical_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
+    match node.kind() {
+        "let_condition" => conditional::bindings(node),
+        "let_declaration" => destructuring::declaration_bindings(node),
+        "for_expression" => destructuring::iterator_bindings(node),
+        _ => None,
+    }
 }
 
 /// Whether the match pattern, guard and arm flow can be represented.
@@ -60,33 +75,62 @@ pub fn match_arm_bindings(arm: Node<'_>) -> Vec<Node<'_>> {
 
 /// Lines where a supported match projects one or more arm-local values.
 pub fn match_binding_lines(function: Node<'_>) -> Vec<u32> {
-    match_flow::binding_lines(function, match_flow::has_bindings)
+    binding_sites(function, |node| {
+        match_flow::has_bindings(node).then_some(())
+    })
+    .into_iter()
+    .map(|(_, line)| line)
+    .collect()
 }
 
 pub(crate) use let_else::bindings as let_else_bindings;
 
 pub(crate) fn pattern_projection_sites(function: Node<'_>) -> Vec<(&'static str, u32)> {
-    let match_sites = match_binding_lines(function);
-    let let_else_sites = match_flow::binding_lines(function, |node| {
-        let_else_bindings(node).is_some_and(|names| !names.is_empty())
-    });
-    let conditional_sites = match_flow::binding_lines(function, |node| {
-        conditional::bindings(node).is_some_and(|names| !names.is_empty())
-    });
-    match_sites
-        .into_iter()
-        .map(|line| ("rust_match_binding_projection", line))
-        .chain(
-            let_else_sites
-                .into_iter()
-                .map(|line| ("rust_let_else_binding_projection", line)),
-        )
-        .chain(
-            conditional_sites
-                .into_iter()
-                .map(|line| ("rust_conditional_binding_projection", line)),
-        )
-        .collect()
+    binding_sites(function, projection_reason)
+}
+
+fn projection_reason(node: Node<'_>) -> Option<&'static str> {
+    match node.kind() {
+        "match_expression" if match_flow::has_bindings(node) => {
+            Some("rust_match_binding_projection")
+        }
+        "let_condition" if conditional::bindings(node).is_some_and(|names| !names.is_empty()) => {
+            Some("rust_conditional_binding_projection")
+        }
+        "let_declaration" if let_else_bindings(node).is_some_and(|names| !names.is_empty()) => {
+            Some("rust_let_else_binding_projection")
+        }
+        "let_declaration" if destructuring::declaration_bindings(node).is_some() => {
+            Some("rust_destructuring_binding_projection")
+        }
+        "for_expression" if destructuring::tuple_names(node).is_some() => {
+            Some("rust_destructuring_binding_projection")
+        }
+        _ => None,
+    }
+}
+
+fn binding_sites<Tag: Ord>(
+    function: Node<'_>,
+    describe: impl Fn(Node<'_>) -> Option<Tag>,
+) -> Vec<(Tag, u32)> {
+    let mut pending: Vec<_> = function.child_by_field_name("body").into_iter().collect();
+    let mut sites = Vec::new();
+    while let Some(node) = pending.pop() {
+        if matches!(
+            node.kind(),
+            "function_item" | "closure_expression" | "async_block" | "macro_invocation"
+        ) {
+            continue;
+        }
+        if let Some(reason) = describe(node) {
+            sites.push((reason, node.start_position().row as u32 + 1));
+        }
+        pending.extend(node.named_children(&mut node.walk()));
+    }
+    sites.sort_unstable();
+    sites.dedup();
+    sites
 }
 
 fn statement_position(node: Node<'_>) -> bool {

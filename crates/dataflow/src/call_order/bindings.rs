@@ -60,8 +60,8 @@ impl<'src> Bindings<'src> {
         self.local_values.resolve(name, at, defining)
     }
 
-    pub(super) fn conditional_binding(&self, name: &str, at: usize, defining: bool) -> Option<usize> {
-        self.local_values.conditional_binding(name, at, defining)
+    pub(super) fn projected_binding(&self, name: &str, at: usize, defining: bool) -> Option<usize> {
+        self.local_values.projected_binding(name, at, defining)
     }
 
     pub(super) fn resolve<'a>(
@@ -105,9 +105,9 @@ impl<'src> Bindings<'src> {
     }
 
     fn record_declarations(&mut self, node: Node<'_>, source: &'src [u8], track_results: bool) {
-        if let Some(targets) = crate::lower::rust::conditional_bindings(node) {
+        if let Some(targets) = crate::lower::rust::lexical_bindings(node) {
             for target in targets {
-                self.local_values.record(node, target, source);
+                self.local_values.record_projected(node, target, source);
             }
             return;
         }

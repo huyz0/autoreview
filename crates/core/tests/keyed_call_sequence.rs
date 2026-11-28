@@ -182,6 +182,29 @@ fn rust_if_let_keys_do_not_escape_the_success_path() {
 }
 
 #[test]
+fn rust_tuple_loop_and_block_bindings_keep_the_outer_key() {
+    let source = r#"fn pending(root: &mut Registry, key: &str, pairs: Vec<(&str, u8)>, pair: (&str, u8)) {
+    root.register(key);
+    for (key, _) in pairs {
+        root.register(key);
+        root.remove(key);
+        continue;
+    }
+    {
+        let (key, _) = pair;
+        root.register(key);
+        root.remove(key);
+    }
+    root.remove(key);
+}
+"#;
+    assert!(findings("Rust", "lib.rs", source, RECEIVER, true).is_empty());
+    let missing = source.replace("    root.remove(key);\n}", "}");
+    let hits = findings("Rust", "lib.rs", &missing, RECEIVER, true);
+    assert_eq!(one(&hits).related_locations.as_ref().unwrap()[0].range.start_line, 2);
+}
+
+#[test]
 fn rust_shadowed_match_key_never_appears_fully_verified() {
     let source = "fn pending(root: &mut Registry, key: &str, value: Option<&str>) {\n root.register(key);\n match value { Some(key) => { root.remove(key); }, _ => {} };\n}\n";
     let repo = tempfile::tempdir().unwrap();
