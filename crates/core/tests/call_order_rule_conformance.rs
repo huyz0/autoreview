@@ -2283,6 +2283,11 @@ fn borrowed() {
 fn dynamic(rows: Vec<(&str, u8)>) {
     for (path, _) in rows { remove_file(path); }
 }
+fn opaque(make: fn() -> (&'static str, u8)) {
+    let pair = make();
+    let (path, _) = pair;
+    remove_file(path);
+}
 "#;
     let root = write_single_file("lib.rs", source);
     let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
@@ -2290,7 +2295,7 @@ fn dynamic(rows: Vec<(&str, u8)>) {
         .filter(|issue| issue.reason == "rust_destructuring_binding_projection")
         .filter_map(|issue| issue.line)
         .collect();
-    assert_eq!(unresolved, [5, 11, 15].into(), "{:?}", report.coverage);
+    assert_eq!(unresolved, [5, 11, 15, 19].into(), "{:?}", report.coverage);
 }
 
 #[test]

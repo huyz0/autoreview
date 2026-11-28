@@ -4,15 +4,14 @@ use crate::lower::site::children;
 const MAX_ALIAS_DEPTH: usize = 8;
 
 fn definition<'tree>(consumer: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
-    let name = super::branch_value::ungroup_value(consumer.child_by_field_name("value")?);
-    if name.kind() != "identifier" { return None; }
+    let reference = reference(consumer)?;
     let statement = statement(consumer)?;
     if direct_consumer(statement) != Some(consumer) { return None; }
     let block = statement.parent().filter(|parent| parent.kind() == "block")?;
-    let name = name.utf8_text(source).ok()?;
-    let local = children(block).take_while(|child| *child != statement)
-        .filter(|declaration| declared_name(*declaration, source) == Some(name)).last()?;
-    sole_reference(local, block, name, source).then_some(local)
+    let name = reference.utf8_text(source).ok()?;
+    let local = std::iter::successors(statement.prev_named_sibling(), Node::prev_named_sibling)
+        .find(|declaration| declared_name(*declaration, source) == Some(name))?;
+    (sole_reference(local, block, name, source) == Some(reference.start_byte())).then_some(local)
 }
 
 fn statement(consumer: Node<'_>) -> Option<Node<'_>> {
@@ -43,16 +42,26 @@ fn declared_name<'src>(node: Node<'_>, source: &'src [u8]) -> Option<&'src str> 
     name.bytes().all(|ch| ch.is_ascii_alphanumeric() || ch == b'_').then_some(name)
 }
 
-fn sole_reference(local: Node<'_>, block: Node<'_>, name: &str, source: &[u8]) -> bool {
-    let Some(tail) = source.get(local.end_byte()..block.end_byte()).and_then(|slice| std::str::from_utf8(slice).ok()) else {
-        return false;
-    };
+fn reference(consumer: Node<'_>) -> Option<Node<'_>> {
+    let value = super::branch_value::ungroup_value(consumer.child_by_field_name("value")?);
+    (value.kind() == "identifier").then_some(value)
+}
+
+fn sole_reference(local: Node<'_>, block: Node<'_>, name: &str, source: &[u8]) -> Option<usize> {
+    let start = local.end_byte();
+    let tail = std::str::from_utf8(source.get(start..block.end_byte())?).ok()?;
     // Count every spelling, including macro tokens, shorthand fields and
     // shadowing. More than one occurrence needs lexical and escape analysis.
-    tail.split(|ch: char| !ch.is_alphanumeric() && ch != '_')
-        .filter(|token| *token == name)
-        .take(2)
-        .count() == 1
+    let mut matches = tail.match_indices(name).filter(|(offset, token)| {
+        !tail[..*offset].chars().next_back().is_some_and(identifier_char)
+            && !tail[offset + token.len()..].chars().next().is_some_and(identifier_char)
+    });
+    let (first, _) = matches.next()?;
+    matches.next().is_none().then_some(start + first)
+}
+
+fn identifier_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
 }
 
 pub(super) fn source<'tree>(consumer: Node<'tree>, source: &[u8]) -> Option<(Node<'tree>, Node<'tree>)> {
@@ -116,10 +125,11 @@ fn is_alias(node: Node<'_>, source: &[u8]) -> bool {
 fn next_consumer<'tree>(declaration: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
     let name = declared_name(declaration, source)?;
     let block = declaration.parent().filter(|parent| parent.kind() == "block")?;
-    if !sole_reference(declaration, block, name, source) { return None; }
-    std::iter::successors(declaration.next_named_sibling(), Node::next_named_sibling)
-        .filter_map(direct_consumer)
-        .find(|consumer| definition(*consumer, source) == Some(declaration))
+    let offset = sole_reference(declaration, block, name, source)?;
+    let statement = std::iter::successors(declaration.next_named_sibling(), Node::next_named_sibling)
+        .find(|node| node.byte_range().contains(&offset))?;
+    let consumer = direct_consumer(statement)?;
+    (reference(consumer)?.start_byte() == offset).then_some(consumer)
 }
 
 fn direct_consumer(statement: Node<'_>) -> Option<Node<'_>> {
