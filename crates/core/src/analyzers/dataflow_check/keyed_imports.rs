@@ -1,16 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use autoreview_dataflow::call_order::{check_keyed_units_with_coverage, KeyedExport, KeyedFunction, KeyedImport, KeyedUnit};
-use autoreview_dataflow::lower;
-use autoreview_dataflow::cfg::{Cfg, Stmt};
 use autoreview_langsupport::{language_for_path, Language};
 use autoreview_schema::AnalysisCoverageIssue;
 use tree_sitter::Node;
 
 use super::cache::{ParseCache, ParsedFile, SummaryCaches};
-use super::dispatch::profile;
-use super::functions::{go_initializer_functions, web_named_functions, web_result_functions};
+use super::functions::{lower_keyed_graphs, LoweredFile};
 use super::{call_order_rules::CallOrderRuleDef, AgentFinding};
 
 mod go;
@@ -33,8 +30,6 @@ struct Source {
     imports: Vec<KeyedImport>,
     exports: Vec<KeyedExport>,
 }
-
-type LoweredFile<'tree> = (usize, Vec<(Node<'tree>, Cfg<Stmt>)>);
 
 struct ImportSource<'a> {
     resolver: &'a Resolver<'a>,
@@ -110,30 +105,6 @@ fn run_group(
     (findings, scope_coverage(coverage, rules, &entries))
 }
 
-fn lower_source<'tree>(file: &'tree Source, rules: &[(&CallOrderRuleDef, Language)]) -> LoweredFile<'tree> {
-    let language = file.language;
-    let (extract, _) = profile(language);
-    let tree = &file.parsed.1;
-    let mut nodes = extract(tree);
-    let web = matches!(language, Language::JavaScript | Language::TypeScript | Language::Tsx);
-    if web {
-        nodes.extend(web_named_functions(tree));
-    }
-    let ordinary = nodes.len();
-    if rules.iter().any(|(rule, declared)| rule.spec.tracks_result_use() && language.matches_rule_language(*declared)) {
-        if language == Language::Go {
-            nodes.extend(go_initializer_functions(tree));
-        } else if web {
-            let mut seen: HashSet<_> = nodes.iter().map(Node::id).collect();
-            nodes.extend(web_result_functions(tree).into_iter().filter(|node| seen.insert(node.id())));
-        }
-    }
-    let graphs = nodes.into_iter()
-        .map(|node| (node, lower::keyed_variant(language, file.parsed.0.as_bytes(), node)))
-        .collect();
-    (ordinary, graphs)
-}
-
 fn run_sources(
     sources: &BTreeMap<String, Source>,
     entries: &BTreeSet<String>,
@@ -142,7 +113,12 @@ fn run_sources(
     checker: Option<&TrustedTypeScript>,
 ) -> (Vec<AgentFinding>, Vec<AnalysisCoverageIssue>) {
     let mut coverage = Vec::new();
-    let lowered: Vec<_> = sources.values().map(|file| lower_source(file, rules)).collect();
+    let lowered: Vec<_> = sources.values().map(|file| {
+        let tracks_results = rules.iter().any(|(rule, declared)| {
+            rule.spec.tracks_result_use() && file.language.matches_rule_language(*declared)
+        });
+        lower_keyed_graphs(file.language, &file.parsed, tracks_results)
+    }).collect();
     record_flow_limits(sources, &lowered, rules, &mut coverage);
     let functions: Vec<_> = lowered
         .iter()
