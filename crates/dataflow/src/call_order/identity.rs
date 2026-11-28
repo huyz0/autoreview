@@ -153,14 +153,7 @@ impl<'src> Syntax<'src> {
         values
             .get(name)
             .cloned()
-            .unwrap_or_else(|| match self.bindings.resolve(name, start)? {
-                IdentityOperand::Binding(name) => Some(IdentityOperand::Scoped {
-                    name,
-                    owner: self.owner,
-                    unit: self.unit,
-                }),
-                literal => Some(literal),
-            })
+            .unwrap_or_else(|| self.bindings.resolve(name, start).map(|value| self.scope_identity(value)))
     }
 
     pub(super) fn taken_name(&self, name: &str) -> bool {

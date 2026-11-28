@@ -20,16 +20,25 @@ fn supported_node(node: Node<'_>) -> bool {
         "label" | "unsafe_block" => false,
         "let_chain" | "let_condition" => conditional::supported(node),
         "let_declaration" => simple_binding(node) || let_else::supports(node),
-        "for_expression" => simple_binding(node) && statement_position(node),
-        "if_expression" | "while_expression" => {
-            statement_position(node) && conditional::supports_owner(node)
-        }
-        "loop_expression" | "return_expression" | "break_expression" | "continue_expression" => {
-            statement_position(node)
-        }
+        "for_expression"
+        | "if_expression"
+        | "while_expression"
+        | "loop_expression"
+        | "return_expression"
+        | "break_expression"
+        | "continue_expression" => supported_statement(node),
         "match_expression" => supports_match(node),
         _ => true,
     }
+}
+
+fn supported_statement(node: Node<'_>) -> bool {
+    statement_position(node)
+        && match node.kind() {
+            "for_expression" => simple_binding(node),
+            "if_expression" | "while_expression" => conditional::supports_owner(node),
+            _ => true,
+        }
 }
 
 /// Whether the match pattern, guard and arm flow can be represented.

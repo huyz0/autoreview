@@ -30,13 +30,19 @@ impl Syntax<'_> {
         if self.bindings.conditional_binding(name, at, false).is_some() {
             return None;
         }
-        match self.bindings.stable_identity(name, at)? {
-            IdentityOperand::Binding(name) => Some(IdentityOperand::Scoped {
+        self.bindings
+            .stable_identity(name, at)
+            .map(|value| self.scope_identity(value))
+    }
+
+    pub(super) fn scope_identity(&self, value: IdentityOperand) -> IdentityOperand {
+        match value {
+            IdentityOperand::Binding(name) => IdentityOperand::Scoped {
                 name,
                 owner: self.owner,
                 unit: self.unit,
-            }),
-            value => Some(value),
+            },
+            value => value,
         }
     }
 }
