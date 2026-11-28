@@ -10,7 +10,7 @@ use tree_sitter::Node;
 
 use super::cache::{ParseCache, ParsedFile, SummaryCaches};
 use super::dispatch::profile;
-use super::functions::{web_named_functions, web_result_functions};
+use super::functions::{go_initializer_functions, web_named_functions, web_result_functions};
 use super::{call_order_rules::CallOrderRuleDef, AgentFinding};
 
 mod go;
@@ -128,6 +128,11 @@ fn run_sources(
                 nodes.extend(web_named_functions(&file.parsed.1));
             }
             let ordinary = nodes.len();
+            if file.language == Language::Go && rules.iter().any(|(rule, language)| {
+                *language == Language::Go && rule.spec.tracks_result_use()
+            }) {
+                nodes.extend(go_initializer_functions(&file.parsed.1));
+            }
             if matches!(file.language, Language::JavaScript | Language::TypeScript | Language::Tsx)
                 && rules.iter().any(|(rule, language)| rule.spec.tracks_result_use() && file.language.matches_rule_language(*language))
             {

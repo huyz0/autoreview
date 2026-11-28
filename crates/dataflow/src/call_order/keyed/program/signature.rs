@@ -195,7 +195,7 @@ fn parameter_name(parameter: Node<'_>) -> Option<Node<'_>> {
     }
     if !matches!(
         parameter.kind(),
-        "parameter" | "formal_parameter" | "required_parameter" | "parameter_declaration"
+        "parameter" | "formal_parameter" | "required_parameter" | "optional_parameter" | "parameter_declaration"
     ) {
         return None;
     }

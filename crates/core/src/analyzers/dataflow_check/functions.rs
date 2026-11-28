@@ -7,6 +7,27 @@ pub(super) fn go_functions(tree: &Tree) -> Vec<Node<'_>> {
         .collect()
 }
 
+pub(super) fn go_initializer_functions(tree: &Tree) -> Vec<Node<'_>> {
+    fn collect<'tree>(node: Node<'tree>, functions: &mut Vec<Node<'tree>>) {
+        if node.kind() == "func_literal" {
+            functions.push(node);
+            return;
+        }
+        for child in node.named_children(&mut node.walk()) {
+            collect(child, functions);
+        }
+    }
+
+    let root = tree.root_node();
+    let mut functions = Vec::new();
+    for declaration in root.named_children(&mut root.walk()) {
+        if declaration.kind() == "var_declaration" {
+            collect(declaration, &mut functions);
+        }
+    }
+    functions
+}
+
 pub(super) fn java_functions(tree: &Tree) -> Vec<Node<'_>> {
     descendants_of_kinds(tree, &["method_declaration", "constructor_declaration"])
 }

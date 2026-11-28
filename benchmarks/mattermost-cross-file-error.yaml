@@ -1,0 +1,22 @@
+cases:
+  - name: Mattermost get drops the error from its imported pretty-printer
+    rule: &error_rule {tool: autoreview-dataflow, id: go-project-error-result-unobserved}
+    evidence:
+      kind: historical
+      source: https://github.com/madrisan/go-mattermost-notify/commit/5669311bbe3dae3c452f7bf5031a19d0c7cb4493
+      license: Apache-2.0
+      rationale: The Cobra command callback now returns the error from PrettyPrint, which is defined in another package.
+    before:
+      commit: 33c5f3dd037f09458dd493f2d2c869e90414f8fc
+      path: &command cmd/get.go
+      lines: [53]
+    after: {commit: &fixed 5669311bbe3dae3c452f7bf5031a19d0c7cb4493, path: *command, lines: []}
+  - name: Mattermost REST queries propagate errors from configuration helpers
+    rule: *error_rule
+    evidence:
+      kind: historical
+      source: https://github.com/madrisan/go-mattermost-notify/blob/cb8ebc71651466ad3aa84489d2005268826ba97c/mattermost/methods.go
+      license: MPL-2.0
+      rationale: The query observes and propagates errors from getURL and getAccessToken, both defined in utils.go, in two clean revisions.
+    before: {commit: *fixed, path: &api mattermost/methods.go, lines: []}
+    after: {commit: cb8ebc71651466ad3aa84489d2005268826ba97c, path: *api, lines: []}

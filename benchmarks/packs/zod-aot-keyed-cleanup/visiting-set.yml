@@ -1,0 +1,10 @@
+id: benchmark-zod-aot-visiting-set-cleanup
+language: TypeScript
+category: correctness
+severity: warning
+kind: call-sequence
+message: Remove the same schema from the visiting set on every exit.
+after: [{call: visiting.add}]
+unless: [{call: visiting.delete}]
+checkBeforeReturn: true
+identity: {receiver: true, keyArgument: 0}

@@ -1,0 +1,22 @@
+cases:
+  - name: Zod AOT leaves the active schema in the visiting set when extraction throws
+    rule: &cleanup_rule {tool: autoreview-dataflow, id: benchmark-zod-aot-visiting-set-cleanup}
+    evidence:
+      kind: historical
+      source: https://github.com/wakita181009/zod-aot/commit/7046fb1d64c80afa0d342d05c0bb56e92b08b199
+      license: MIT
+      rationale: A finally block removes the same schema whether the extractor or its fallback returns or throws.
+    before:
+      commit: ba2ad24118e8a19c391dbb5027ecab6f2afa08c6
+      path: &registry packages/zod-aot/src/core/extract/registry.ts
+      lines: [132, 133]
+    after: {commit: 7046fb1d64c80afa0d342d05c0bb56e92b08b199, path: *registry, lines: []}
+  - name: Zod AOT preserves visiting-set cleanup when extractor dispatch changes
+    rule: *cleanup_rule
+    evidence:
+      kind: historical
+      source: https://github.com/wakita181009/zod-aot/blob/7c84eb14347123105d853cbd18fbbcc3165d677a/packages/zod-aot/src/core/extract/registry.ts
+      license: MIT
+      rationale: The later dispatch refactor keeps the same visiting set and schema key paired in finally throughout both snapshots.
+    before: {commit: 22d929703f00a8c1655e18f4a03b60d822d16ebd, path: *registry, lines: []}
+    after: {commit: 7c84eb14347123105d853cbd18fbbcc3165d677a, path: *registry, lines: []}

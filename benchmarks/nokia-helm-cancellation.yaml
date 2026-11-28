@@ -1,0 +1,22 @@
+cases:
+  - name: Nokia Helm lint timeout leaks when temporary directory setup fails
+    rule: &cancel_rule {tool: autoreview-frameworks, id: go-context-cancel-on-all-paths}
+    evidence:
+      kind: historical
+      source: https://github.com/Nokia-Bell-Labs/declarative-agents/commit/d4c5e60371d4b5745166917dfd0d02688ea3fd04
+      license: BSD-3-Clause
+      rationale: Deferring cancellation immediately after creating the context covers the early return when temporary directory creation fails.
+    before:
+      commit: &before 5eeba4e013311ca816e240b4f3e0a892d900c8b6
+      path: &runtime examples/coding-agent/magefiles/integration_helm_runtime.go
+      lines: [141]
+    after: {commit: &after d4c5e60371d4b5745166917dfd0d02688ea3fd04, path: *runtime, lines: []}
+  - name: Nokia Helm smoke commands release their timeout contexts
+    rule: *cancel_rule
+    evidence:
+      kind: historical
+      source: https://github.com/Nokia-Bell-Labs/declarative-agents/blob/d4c5e60371d4b5745166917dfd0d02688ea3fd04/examples/coding-agent/magefiles/integration_helm_smoke.go
+      license: BSD-3-Clause
+      rationale: The smoke helpers cancel their command contexts on the checked paths in both revisions.
+    before: {commit: *before, path: &smoke examples/coding-agent/magefiles/integration_helm_smoke.go, lines: []}
+    after: {commit: *after, path: *smoke, lines: []}
