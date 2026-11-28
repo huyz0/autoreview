@@ -7,6 +7,20 @@ use super::super::places::operand_slot;
 use super::{return_value, transparent, ContractLanguage, Effect, Lower, Value};
 
 impl Lower<'_, '_, '_> {
+    pub(super) fn project_match(&self, node: Node<'_>, effects: &mut Vec<Effect>) -> bool {
+        if node.kind() != "match_expression" || self.language != ContractLanguage::Rust {
+            return false;
+        }
+        let Some(projections) = crate::lower::rust::literal_projection(node, self.source) else {
+            return false;
+        };
+        let writes = projections.into_iter()
+            .filter_map(|(binding, value)| self.write(binding, Some(value), false, effects))
+            .collect();
+        effects.push(Effect::Write(writes));
+        true
+    }
+
     pub(super) fn staged_aggregate(&self, node: Node<'_>) -> bool {
         self.language == ContractLanguage::Rust
             && matches!(node.kind(), "array_expression" | "tuple_expression")
