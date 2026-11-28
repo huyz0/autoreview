@@ -1,0 +1,18 @@
+cases:
+  - name: tokio passes matches results to assertions
+    rule: {tool: autoreview-rust, id: rust-discarded-test-matches}
+    evidence:
+      kind: historical
+      source: https://github.com/tokio-rs/tokio/blob/556820ff84030b37e74e11b86b7733f5795770ea/tokio/tests/io_util_empty.rs
+      license: MIT
+      rationale: >-
+        The async IO tests assert the matches predicate in both snapshots. A
+        wrong result fails the test rather than being discarded.
+    before:
+      commit: fd1659a05222858b675d5515ef609ca39d825bff
+      path: tokio/tests/io_util_empty.rs
+      lines: []
+    after:
+      commit: 556820ff84030b37e74e11b86b7733f5795770ea
+      path: tokio/tests/io_util_empty.rs
+      lines: []

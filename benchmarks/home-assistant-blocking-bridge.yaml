@@ -1,0 +1,19 @@
+cases:
+  - name: home assistant uses runBlocking in a synchronous initializer
+    rule: {tool: ast-grep, id: kotlin-runblocking-in-suspend-function}
+    evidence:
+      kind: historical
+      source: https://github.com/home-assistant/android/blob/fbaa8c349c6994590984f250830055c963f2f856/common/src/main/kotlin/io/homeassistant/companion/android/common/data/prefs/WearPrefsRepositoryImpl.kt
+      license: Apache-2.0
+      rationale: >-
+        Both snapshots contain runBlocking in the initializer and separate
+        suspend methods. The initializer call is outside a suspend function and
+        is clean for this rule.
+    before:
+      commit: 7c10555e5506a3508234282b961dd600c1a63dae
+      path: common/src/main/kotlin/io/homeassistant/companion/android/common/data/prefs/WearPrefsRepositoryImpl.kt
+      lines: []
+    after:
+      commit: fbaa8c349c6994590984f250830055c963f2f856
+      path: common/src/main/kotlin/io/homeassistant/companion/android/common/data/prefs/WearPrefsRepositoryImpl.kt
+      lines: []

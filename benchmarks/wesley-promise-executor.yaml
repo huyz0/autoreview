@@ -1,0 +1,19 @@
+cases:
+  - name: wesley forwards lock operation errors from a synchronous executor
+    rule: {tool: ast-grep, id: js-async-promise-executor}
+    evidence:
+      kind: historical
+      source: https://github.com/flyingrobots/wesley/commit/af231a9d0d211a5ebf2ba39206969acbee201ac2
+      license: Apache-2.0
+      rationale: >-
+        The lock timeout helper used an async executor. The fix keeps the
+        executor synchronous and forwards operation settlement from a promise
+        chain.
+    before:
+      commit: fc4fbf5410ad4a9aa57147ef681fdbbf9ad395cf
+      path: packages/wesley-core/src/domain/locks/AdvisoryLockManager.mjs
+      lines: [446]
+    after:
+      commit: af231a9d0d211a5ebf2ba39206969acbee201ac2
+      path: packages/wesley-core/src/domain/locks/AdvisoryLockManager.mjs
+      lines: []

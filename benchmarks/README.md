@@ -7,7 +7,7 @@ These cases reference public repositories and pinned commits; they do not
 copy the source files into Autoreview. Check each project's license before
 adding cases. Labels cover an entire file, not only the changed lines.
 
-The `pinned-replay` CI check runs all 15 manifests against the proposed merge
+The `pinned-replay` CI check runs all pinned manifests against the proposed merge
 tree. A fetch, setup, or analysis failure fails the check, as do incomplete
 coverage, unexpected findings, and missed labels. The workflow uploads each
 manifest's JSON report and any setup logs for diagnosis.
@@ -19,6 +19,14 @@ builds the declared Gradle compile and runtime classpaths using the public
 checksum-pinned release jars and reconstructed Maven metadata described below.
 The replay assumes those inputs are complete and excludes runtime
 instrumentation. CI restricts these setups to their audited commit pairs.
+
+The suite includes Java string identity fixes in Synthea and async Promise
+executor fixes in Dart Code and Wesley. These are three independent upstream
+fix pairs. Multiple labeled files from a single commit still count as one
+pair. The Home Assistant and Tokio manifests contain separate clean cases.
+Home Assistant uses `runBlocking` in a synchronous initializer, and Tokio
+asserts the boolean returned by `matches!`. Each clean example exercises the
+same file in two snapshots and contributes no positive labels.
 
 `silphscope-digest.yaml` records an MIT-licensed JavaScript fix where a Web
 Crypto digest promise was passed to `Uint8Array` before being awaited. The

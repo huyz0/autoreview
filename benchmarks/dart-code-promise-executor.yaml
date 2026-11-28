@@ -1,0 +1,18 @@
+cases:
+  - name: dart code separates test orchestration from the termination promise
+    rule: &rule {tool: ast-grep, id: ts-async-promise-executor}
+    evidence: &evidence
+      kind: historical
+      source: https://github.com/Dart-Code/Dart-Code/commit/c73205c1bbb57daff2686339359b4a36899cf599
+      license: MIT
+      rationale: >-
+        Test orchestration and package discovery passed async executors to
+        Promise. The fix uses a synchronous executor for the termination
+        event and calls an async helper directly for package discovery.
+    before: {commit: &before cc1c24d3bbb478d8a4d67ca4f64ec092f6538325, path: &file1 src/extension/commands/test.ts, lines: [283]}
+    after: {commit: &after c73205c1bbb57daff2686339359b4a36899cf599, path: *file1, lines: []}
+  - name: dart code awaits package discovery without an async executor
+    rule: *rule
+    evidence: *evidence
+    before: {commit: *before, path: &file2 src/shared/vscode/terminal/package_uri_link_provider.ts, lines: [32]}
+    after: {commit: *after, path: *file2, lines: []}

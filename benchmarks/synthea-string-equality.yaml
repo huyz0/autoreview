@@ -1,0 +1,23 @@
+cases:
+  - name: synthea uses content equality for a required fallback transition
+    rule: &rule {tool: ast-grep, id: java-string-equality-with-eq}
+    evidence: &evidence
+      kind: historical
+      source: https://github.com/synthetichealth/synthea/commit/8059a3083bbaaa63c744a4f8b94109ecc25df82c
+      license: Apache-2.0
+      rationale: >-
+        Identity checks could miss equal strings in the fallback transition,
+        network and administration codes, and gender guard. The fix uses
+        content comparisons and keeps the relevant null checks.
+    before: {commit: &before a3d4ab455b398eea6be762c2455b09f929dd60c8, path: &file1 src/main/java/org/mitre/synthea/engine/State.java, lines: [394]}
+    after: {commit: &after 8059a3083bbaaa63c744a4f8b94109ecc25df82c, path: *file1, lines: []}
+  - name: synthea compares network and administration codes by value
+    rule: *rule
+    evidence: *evidence
+    before: {commit: *before, path: &file2 src/main/java/org/mitre/synthea/export/CPCDSExporter.java, lines: [1105, 1108, 1115]}
+    after: {commit: *after, path: *file2, lines: []}
+  - name: synthea checks the gender attribute by value
+    rule: *rule
+    evidence: *evidence
+    before: {commit: *before, path: &file3 src/main/java/org/mitre/synthea/world/concepts/BirthStatistics.java, lines: [95]}
+    after: {commit: *after, path: *file3, lines: []}
