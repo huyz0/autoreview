@@ -101,7 +101,11 @@ impl Lower<'_, '_, '_> {
                     for range in &node.evaluations {
                         let Some(syntax) = evaluation(function, range) else { continue; };
                         if site::identifier(syntax) && site::discarded_conditional_arm(syntax) { continue; }
-                        if let Some(operand) = &range.operand {
+                        if let Some(slot) = &range.pattern_slot {
+                            let target = self.place(syntax, true);
+                            let value = Value::Copy(Place::Operand(slot.start, slot.end));
+                            effects.push(Effect::Write(vec![Write { target, value }]));
+                        } else if let Some(operand) = &range.operand {
                             if operand.projection_owner.is_some_and(|start| !self.plan.rust_elements.tracks_aggregate(start)) {
                                 continue;
                             }

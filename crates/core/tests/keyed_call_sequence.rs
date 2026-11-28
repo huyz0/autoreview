@@ -116,6 +116,24 @@ fn pending(root: &mut Registry, key: &str, other: &str, early: bool) {
 }
 
 #[test]
+fn rust_local_and_iterated_patterns_keep_cleanup_keys_distinct() {
+    let source = r#"fn pending(root: &mut Registry, key: &str) {
+    root.register(key);
+    let pair = (key, "wrong");
+    let (selected, other) = pair;
+    let entries = [(other, 1), (selected, 2)];
+    'items: for (candidate, _) in entries {
+        root.remove(candidate);
+        continue 'items;
+    }
+}
+"#;
+    assert!(findings("Rust", "lib.rs", source, RECEIVER, true).is_empty());
+    let one_item = source.replace("continue 'items;", "break 'items;");
+    assert_eq!(findings("Rust", "lib.rs", &one_item, RECEIVER, true).len(), 1);
+}
+
+#[test]
 fn rust_nested_literal_projections_bind_the_matching_key() {
     let source = r#"fn pending(root: &mut Registry, key: &str, other: &str) {
     root.register(key);
