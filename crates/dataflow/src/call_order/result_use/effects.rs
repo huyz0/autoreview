@@ -11,6 +11,7 @@ use super::references::captured_names;
 use super::syntax::{items as assignment_items, targets as assignment_targets, transparent};
 use super::{Analysis, Body, ContractLanguage, Flow, HelperSummary, Plan};
 
+mod aggregates;
 mod reads;
 
 mod model;
@@ -265,11 +266,8 @@ impl Lower<'_, '_, '_> {
 
     fn value(&self, node: Node<'_>, effects: &mut Vec<Effect>) -> Value {
         let value = transparent(node);
-        if self.staged_aggregate(value) {
-            return Value::StagedAggregate(site::children(value).map(reads::operand_slot).collect());
-        }
-        if self.language == ContractLanguage::Web && value.kind() == "array" {
-            return Value::Aggregate(self.array_members(value, effects));
+        if let Some(aggregate) = self.aggregate_value(value, effects) {
+            return aggregate;
         }
         if let Some(binding) = self.place(value, false) {
             return Value::Copy(binding);
@@ -286,16 +284,6 @@ impl Lower<'_, '_, '_> {
         }
         self.reads(node, effects);
         Value::Other
-    }
-
-    fn array_members(&self, node: Node<'_>, effects: &mut Vec<Effect>) -> Vec<Value> {
-        site::children(node).map(|item| {
-            let member = self.value(item, effects);
-            if let Value::Copy(place) = member {
-                effects.push(Effect::ObservedOnly(vec![Effect::Read(place)]));
-                Value::Copy(place)
-            } else { member }
-        }).collect()
     }
 
     fn place(&self, node: Node<'_>, defining: bool) -> Option<Place> {
@@ -353,21 +341,6 @@ impl Lower<'_, '_, '_> {
         }
     }
 
-    fn aggregate_expression(&self, node: Node<'_>, effects: &mut Vec<Effect>) -> bool {
-        let value = return_value(node).unwrap_or(node);
-        let aggregate = transparent(value);
-        if !self.staged_aggregate(aggregate) { return false; }
-        if crate::lower::rust::value_is_returned(value) {
-            self.observe_elements(aggregate, effects);
-        } else if node.parent().is_some_and(|owner| owner.kind() == "let_declaration") {
-            effects.extend(site::children(aggregate).map(|item| Effect::OpaqueRead(reads::operand_slot(item))));
-        }
-        true
-    }
-
-    fn observe_elements(&self, aggregate: Node<'_>, effects: &mut Vec<Effect>) {
-        effects.extend(site::children(aggregate).map(|item| Effect::Read(reads::operand_slot(item))));
-    }
 
     fn origin(&self, node: Node<'_>) -> Option<Origin> {
         if !matches!(

@@ -65,15 +65,13 @@ fn transfer(effects: &[Effect], live: &mut Live, closures: &[Body], mut report: 
 fn opaque_writes(writes: &[super::Write], live: &mut Live, mut report: Option<&mut Observer<'_>>) {
     let mut copies = Vec::new();
     for write in writes.iter().rev() {
-        let used = write.target.is_some_and(|place| live.remove(&place));
+        if !write.target.is_some_and(|place| live.remove(&place)) { continue; }
         let mut pending = vec![&write.value];
         while let Some(value) = pending.pop() {
             match value {
-                super::Value::Copy(place) if used => copies.push(*place),
-                super::Value::Source(origin) if used => { if let Some(report) = &mut report { report(origin); } }
-                super::Value::Aggregate(items) if used => pending.extend(items),
-                super::Value::StagedAggregate(elements) if used => copies.extend(elements.iter().copied()),
-                _ => {}
+                super::Value::Source(origin) => { if let Some(report) = &mut report { report(origin); } }
+                super::Value::Aggregate(items) => pending.extend(items),
+                value => value.collect_copies(&mut copies),
             }
         }
     }
