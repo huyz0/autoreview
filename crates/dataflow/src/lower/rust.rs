@@ -11,6 +11,7 @@ mod destructuring;
 mod patterns;
 mod argument_flow;
 mod loops;
+pub(crate) mod element_access;
 
 use support::{simple_binding, supported};
 pub(crate) use destructuring::{iterator_bindings, literal_projection};

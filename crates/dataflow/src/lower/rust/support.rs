@@ -111,9 +111,9 @@ pub fn match_binding_lines_with_source(function: Node<'_>, source: &[u8]) -> Vec
     .collect()
 }
 
-pub(crate) fn pattern_projection_sites(function: Node<'_>, source: &[u8], tracks_results: bool) -> Vec<(&'static str, u32)> {
+pub(crate) fn pattern_projection_sites(function: Node<'_>, source: &[u8], unresolved_aggregate: impl Fn(Node<'_>) -> bool) -> Vec<(&'static str, u32)> {
     binding_sites(function, |node| {
-        if tracks_results && super::stages_aggregate(node) {
+        if super::stages_aggregate(node) && unresolved_aggregate(node) {
             Some("rust_aggregate_element_projection")
         } else {
             projection_reason(node, source)

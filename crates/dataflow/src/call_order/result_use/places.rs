@@ -20,11 +20,16 @@ pub(super) enum Place {
     Return,
 }
 
+pub(super) fn operand_slot(node: Node<'_>) -> Place {
+    Place::Operand(node.start_byte(), node.end_byte())
+}
+
 pub(super) struct Places<'plan, 'src> {
     owners: HashMap<usize, Owner<'src>>,
     escaped_names: HashSet<&'src str>,
     source: &'src [u8],
     plan: &'plan super::super::identity::Syntax<'src>,
+    rust_elements: &'plan super::rust_elements::RustElements,
 }
 
 struct Owner<'src> {
@@ -36,7 +41,7 @@ impl<'plan, 'src> Places<'plan, 'src> {
     pub(super) fn new(plan: &'plan Plan<'_, 'src>, function: Node<'_>, source: &'src [u8]) -> Self {
         let language = plan.spec.contract.as_ref().unwrap().language;
         let allocations = allocations::Allocations::new(function, source, language);
-        let mut places = Self { owners: HashMap::new(), escaped_names: HashSet::new(), source, plan: &plan.syntax };
+        let mut places = Self { owners: HashMap::new(), escaped_names: HashSet::new(), source, plan: &plan.syntax, rust_elements: &plan.rust_elements };
         for (target, value) in descendants(function).flat_map(|node| initializers(node, source)) {
             if let Some((binding, fields)) = places.binding(target, true).zip(allocations.members(value)) {
                 if binding == target.start_byte() {
@@ -72,6 +77,9 @@ impl<'plan, 'src> Places<'plan, 'src> {
         let node = transparent(node);
         if identifier(node) {
             return self.binding(node, defining).map(Place::Local);
+        }
+        if !defining {
+            if let Some(element) = self.rust_elements.place(node) { return Some(element); }
         }
         let (object, member) = field(node)?;
         let binding = self.binding(object, false)?;
