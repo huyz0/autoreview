@@ -4,6 +4,8 @@ use tree_sitter::Node;
 
 use crate::cfg::{CallSite, CallTarget, Cfg, IdentityOperand, Stmt};
 mod build;
+mod kotlin;
+pub(super) use kotlin::{DefaultArgument, KotlinTarget};
 mod signature;
 mod associated;
 use associated::Associated;
@@ -34,7 +36,8 @@ pub struct KeyedUnit<'src, 'tree, 'graph> {
 pub(in crate::call_order) struct Program<'spec, 'src, 'graph> {
     pub frames: Vec<Frame<'spec, 'src, 'graph>>,
     targets: BTreeMap<(Scope, String, usize), Option<usize>>,
-    kotlin_names: BTreeMap<Scope, BTreeMap<String, Option<usize>>>,
+    kotlin_names: BTreeMap<Scope, BTreeMap<String, kotlin::KotlinName>>,
+    has_kotlin_defaults: bool,
     associated: Associated,
     units: Vec<Unit<'src, 'graph>>,
     paths: BTreeMap<&'src str, usize>,
@@ -48,7 +51,8 @@ pub(in crate::call_order) struct Frame<'spec, 'src, 'graph> {
     pub plan: Option<Plan<'spec, 'src>>,
     resolution_syntax: Option<Box<Syntax<'src>>>,
     scope: Scope,
-    named_kotlin_calls: bool,
+    direct_kotlin_calls: bool,
+    pub(super) kotlin_defaults: Vec<DefaultArgument>,
     unsupported_rust_line: Option<u32>,
     declined_cleanup: Option<(u32, bool)>,
     declined_contract: Option<u32>,
@@ -93,6 +97,17 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
 
     pub(in crate::call_order) fn target(&self, from: usize, name: &str, site: &CallSite) -> Option<usize> {
         let frame = &self.frames[from];
+        let root = self.unshadowed_root(from, name, site)?;
+        let arity = frame.call_arity(site);
+        if let Some(target) = self.associated.lookup(frame.unit, frame.export.as_ref(), name, arity) {
+            if target.is_none() { self.unresolved.borrow_mut().insert((from, site.start, "unresolved_helper_target")); }
+            return target;
+        }
+        self.resolve_named(from, name, root, site, arity)
+    }
+
+    fn unshadowed_root<'name>(&self, from: usize, name: &'name str, site: &CallSite) -> Option<&'name str> {
+        let frame = &self.frames[from];
         let root = name.split(['.', ':']).next()?;
         let syntax = frame.plan.as_ref().map(|plan| &plan.syntax).or(frame.resolution_syntax.as_deref())?;
         if name.contains("::") && (syntax.shadows_type(root) || syntax.local_import_shadows(root, site.start)) {
@@ -103,28 +118,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             || (frame.plan.is_none() && syntax.shadows_api_at(root, site.start)) {
             return None;
         }
-        let arity = frame.call_arity(site);
-        if let Some(target) = self.associated.lookup(frame.unit, frame.export.as_ref(), name, arity) {
-            if target.is_none() { self.unresolved.borrow_mut().insert((from, site.start, "unresolved_helper_target")); }
-            return target;
-        }
-        self.resolve_named(from, name, root, site, arity)
-    }
-
-    pub(super) fn unique_kotlin_name(&self, from: usize, name: &str, target: usize) -> bool {
-        let frame = &self.frames[from];
-        let callee = &self.frames[target];
-        if !frame.named_kotlin_calls || !callee.named_kotlin_calls {
-            return false;
-        }
-        let lookup = |scope, name: &str| self.kotlin_names.get(&scope).and_then(|names| names.get(name)).copied();
-        let only_target = |scope, name: &str| lookup(scope, name).is_none_or(|candidate| candidate == Some(target));
-        callee.export.as_ref().is_some_and(|export| lookup(callee.scope, &export.name) == Some(Some(target)))
-            && only_target(frame.scope, name) && only_target(Scope::File(frame.unit), name)
-            && self.units[frame.unit].imports.iter().filter(|binding| binding.owner.is_none()).all(|binding| {
-                binding.target(name).zip(self.paths.get(binding.path.as_str()))
-                    .is_none_or(|(name, &unit)| only_target(Scope::File(unit), name))
-            })
+        Some(root)
     }
 
     pub(super) fn entry_frames(&self) -> impl Iterator<Item = usize> + '_ {

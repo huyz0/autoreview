@@ -6,6 +6,7 @@ use crate::cfg::CallSite;
 use crate::lower::site::children;
 use crate::taint::{has_direct_source, scan_helper_calls, TaintHit, TaintSpec, TaintedCall};
 
+use super::program::{DefaultArgument, KotlinTarget};
 use super::{KeyedUnit, Program};
 
 const HELPER_HOPS: usize = 2;
@@ -89,21 +90,16 @@ impl Analysis<'_, '_, '_> {
     }
 
     fn bind_call(&self, from: usize, call: &mut TaintedCall<'_>) -> Option<usize> {
-        let target = self.program.target(from, call.name, call.site)?;
-        if !self.eligible[target] {
-            return None;
-        }
-        if !call.site.named_arguments.is_empty() {
-            let frame = &self.program.frames[target];
-            if !self.program.unique_kotlin_name(from, call.name, target) {
-                return None;
+        let target = match self.program.kotlin_target(from, call.name, call.site) {
+            KotlinTarget::Declined => return None,
+            KotlinTarget::Positional => self.program.target(from, call.name, call.site)?,
+            KotlinTarget::Bound(target) => {
+                let frame = &self.program.frames[target];
+                bind_kotlin_arguments(call, &frame.params, &frame.kotlin_defaults)?;
+                target
             }
-            let slots = named_slots(call.site, &frame.params)?;
-            for (index, _) in &mut call.arguments {
-                *index = slots[*index];
-            }
-        }
-        Some(target)
+        };
+        self.eligible[target].then_some(target)
     }
 
     fn summarize(&mut self, target: usize, slot: usize, hops: usize) -> Vec<Sink> {
@@ -130,25 +126,52 @@ impl Analysis<'_, '_, '_> {
     }
 }
 
-fn named_slots(site: &CallSite, parameters: &[String]) -> Option<Vec<usize>> {
-    if site.arguments.len() != parameters.len() {
+fn bind_kotlin_arguments(call: &mut TaintedCall<'_>, parameters: &[String], defaults: &[DefaultArgument]) -> Option<()> {
+    let sources = kotlin_argument_sources(call.site, parameters, defaults)?;
+    let mut tainted = vec![None; call.site.arguments.len()];
+    for (index, argument) in call.arguments.drain(..) {
+        tainted[index] = Some(argument);
+    }
+    call.arguments.extend(sources.into_iter().enumerate().filter_map(|(slot, source)| {
+        Some((slot, tainted[source?]?))
+    }));
+    Some(())
+}
+
+fn kotlin_argument_sources(site: &CallSite, parameters: &[String], defaults: &[DefaultArgument]) -> Option<Vec<Option<usize>>> {
+    if site.arguments.len() > parameters.len() || defaults.len() != parameters.len() {
         return None;
     }
-    let mut bound = vec![false; parameters.len()];
+    // Each parameter points back to its supplied argument. Literal defaults have no source slot.
+    let mut sources = vec![None; parameters.len()];
     let mut named = site.named_arguments.iter().peekable();
     let mut reordered = false;
-    (0..parameters.len()).map(|index| {
+    for index in 0..site.arguments.len() {
         let slot = match named.next_if(|arg| arg.index == index) {
             Some(arg) => parameters.iter().position(|name| *name == arg.label)?,
             None if !reordered => index,
             None => return None,
         };
-        if std::mem::replace(&mut bound[slot], true) {
+        if sources[slot].replace(index).is_some() {
             return None;
         }
         reordered |= slot != index;
-        Some(slot)
-    }).collect()
+    }
+    bind_omitted_defaults(&mut sources, defaults)?;
+    Some(sources)
+}
+
+fn bind_omitted_defaults(sources: &mut [Option<usize>], defaults: &[DefaultArgument]) -> Option<()> {
+    for (slot, default) in defaults.iter().enumerate() {
+        if sources[slot].is_none() {
+            sources[slot] = match default {
+                DefaultArgument::Literal => None,
+                DefaultArgument::Alias(earlier) => sources[*earlier],
+                DefaultArgument::Required | DefaultArgument::Unsupported => return None,
+            };
+        }
+    }
+    Some(())
 }
 
 fn eligible_helper(node: Node<'_>) -> bool {

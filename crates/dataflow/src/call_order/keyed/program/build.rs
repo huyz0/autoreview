@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use tree_sitter::Node;
 
 use crate::call_order::CallOrderSpec;
-use crate::lower::site::children;
 
+use super::kotlin::{direct_kotlin_scope, kotlin_parameter_list, kotlin_parameters};
 use super::signature::{candidate, export, parameters};
 use super::{Associated, Frame, KeyedFunction, KeyedUnit, Plan, Program, Scope, Unit};
 
@@ -23,6 +23,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             frames: Vec::new(),
             targets: BTreeMap::new(),
             kotlin_names: BTreeMap::new(),
+            has_kotlin_defaults: false,
             associated: Associated::default(),
             paths: BTreeMap::new(),
             unresolved: RefCell::new(BTreeSet::new()),
@@ -55,10 +56,14 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
     ) {
         let node = function.node;
         let scope = scope(node, unit);
-        if spec.is_none() {
-            self.index_kotlin_name(node, source, scope);
+        let kotlin_list = spec.is_none().then(|| kotlin_parameter_list(node)).flatten();
+        if let Some(list) = kotlin_list {
+            self.index_kotlin_name(node, list, source, scope);
         }
-        let params = parameters(node, source);
+        let (params, kotlin_defaults) = match kotlin_list {
+            Some(list) => kotlin_parameters(list, source).map_or((None, Vec::new()), |(params, defaults)| (Some(params), defaults)),
+            None => (parameters(node, source), Vec::new()),
+        };
         let export = params.as_ref().and_then(|params| {
             let name = candidate(node, source)?;
             self.targets
@@ -92,46 +97,14 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
             declined_contract,
             unit,
             scope,
-            named_kotlin_calls: spec.is_none() && named_kotlin_scope(node),
+            direct_kotlin_calls: kotlin_list.is_some() && direct_kotlin_scope(node),
+            kotlin_defaults,
             unsupported_rust_line: (rust_support == Some(false))
                 .then_some(node.start_position().row as u32 + 1),
             rust_pattern_projections,
             params: params.unwrap_or_default(),
             export,
         });
-    }
-
-    fn index_kotlin_name(&mut self, node: Node<'_>, source: &[u8], scope: Scope) {
-        if node.kind() != "function_declaration"
-            || !node.parent().is_some_and(|parent| matches!(parent.kind(), "source_file" | "class_body"))
-            || !children(node).any(|child| child.kind() == "function_value_parameters") {
-            return;
-        }
-        if let Some(name) = node.child_by_field_name("name").and_then(|name| name.utf8_text(source).ok()) {
-            // Count declarations with defaults or varargs even if their body is not analyzable.
-            self.kotlin_names.entry(scope).or_default().entry(name.to_owned())
-                .and_modify(|candidate| *candidate = None).or_insert(Some(self.frames.len()));
-        }
-    }
-}
-
-fn named_kotlin_scope(node: Node<'_>) -> bool {
-    let Some(parent) = node.parent().filter(|_| node.kind() == "function_declaration") else { return false };
-    let Some(name) = node.child_by_field_name("name") else { return false };
-    if !children(node).any(|child| child.kind() == "function_value_parameters")
-        || children(node).take_while(|child| *child != name)
-            .any(|child| !matches!(child.kind(), "modifiers" | "type_parameters")) {
-        return false;
-    }
-    // Implicit receivers can bind a bare name before Kotlin considers imports.
-    match parent.kind() {
-        "source_file" => true,
-        "class_body" => parent.parent().is_some_and(|owner| {
-            owner.parent().is_some_and(|outer| outer.kind() == "source_file")
-                && !children(owner).any(|child| child.kind() == "delegation_specifiers")
-                && !children(parent).any(|child| child.kind() == "companion_object")
-        }),
-        _ => false,
     }
 }
 
