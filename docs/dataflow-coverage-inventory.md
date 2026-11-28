@@ -123,9 +123,8 @@ Returned arms preserve result identity on each exit. Guards preserve the
 evaluation order of `&&`, `||`, and `!` and carry effects to the next arm
 when the guard fails. Let chains in a match guard expose names to later
 operands and the selected arm. The next arm resolves names in its own scope.
-Matches used in other nested value positions, alternatives that bind names,
-and guards whose operands need additional lowering still produce coverage
-diagnostics. [Rust match expressions](https://doc.rust-lang.org/reference/expressions/match-expr.html) [Rust lazy boolean operators](https://doc.rust-lang.org/reference/expressions/operator-expr.html#lazy-boolean-operators)
+Matches used in other nested value positions and guards whose operands need
+additional lowering still produce coverage diagnostics. [Rust match expressions](https://doc.rust-lang.org/reference/expressions/match-expr.html) [Rust lazy boolean operators](https://doc.rust-lang.org/reference/expressions/operator-expr.html#lazy-boolean-operators)
 
 Rust `let-else` lowering represents both pattern outcomes when the
 initializer is supported and every fallback path ends with `return`, `break`,
@@ -157,6 +156,14 @@ elements, and supported `@` bindings. Ordinary `let` and `for` bindings
 report `rust_destructuring_binding_projection` because their relationship to the
 initializer or iterator item is unresolved. Loop bindings receive fresh
 identities each iteration. [Rust patterns](https://doc.rust-lang.org/reference/patterns.html#destructuring)
+
+Or-patterns can bind names in unguarded match arms, conditional patterns,
+`let-else`, and supported destructuring. The alternatives must bind the same
+names with matching explicit `ref` and `mut` modifiers. Each name has one
+local identity across the alternatives, and its source projection still
+reports incomplete coverage. Guarded match arms with binding alternatives
+need separate modeling because overlapping patterns can run the guard more
+than once. [Rust or-patterns](https://doc.rust-lang.org/reference/expressions/match-expr.html#or-patterns)
 
 When a supported `if` or `match` supplies a tuple, the analyzer follows calls
 through the selected arm,

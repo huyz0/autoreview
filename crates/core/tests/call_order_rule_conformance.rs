@@ -1334,7 +1334,7 @@ fn unresolved_imported_associated_methods_report_coverage() {
 fn imported_associated_call_in_skipped_function_reports_coverage() {
     let root = associated_coverage_fixture();
     let src = root.path().join("src");
-    for body in ["Store::unknown(); match 1 { value => {} }", "Store::known(); let (Ok(a) | Err(a), b) = (Ok::<u8, u8>(1), 2);"] {
+    for body in ["Store::unknown(); match 1 { value => {} }", "Store::known(); let (macro_pattern!(), b) = (1, 2);"] {
         std::fs::write(src.join("worker.rs"), format!("use crate::support::Files as Store;\nfn run() {{ {body} }}\n")).unwrap();
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("src/worker.rs") && issue.line == Some(2) && issue.rule.as_deref() == Some("rust-discarded-remove-file-result")), "{body}: {:?}", result.coverage);
@@ -1418,10 +1418,52 @@ fn rust_enum_exhaustiveness_requires_unconditional_whole_variants() {
 
 #[test]
 fn rust_unmodeled_matches_remain_incomplete() {
-    for body in ["match x { 0 if check() && defer(|| other()) > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { Some(value) | Other(value) => {}, _ => {} };", "match x { 0 => {} };", "match check([risky(); 3]) { _ => {} };", "match x { _ => { let y = defer(|| risky()); } };", "consume(match x { _ => {} });"] {
+    for body in ["match x { 0 if check() && defer(|| other()) > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { 0 => {} };", "match check([risky(); 3]) { _ => {} };", "match x { _ => { let y = defer(|| risky()); } };", "consume(match x { _ => {} });"] {
         let root = write_single_file("lib.rs", &format!("fn run(x: u8) {{ {body} }}\n"));
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("lib.rs")), "{body}: {:?}", result.coverage);
+    }
+}
+
+#[test]
+fn rust_or_patterns_follow_calls_and_keep_projection_diagnostics() {
+    let source = concat!(
+        "use std::fs::remove_file;\n",
+        "enum Choice { First(u8, u8), Second { key: u8 }, Other }\n",
+        "fn run(mut item: Choice, pairs: Vec<Result<u8, u8>>) {\n",
+        " match item { Choice::First(ref mut key, _) | Choice::Second { ref mut key } => { consume(key); remove_file(\"one.txt\"); }, _ => {} };\n",
+        " if let Choice::First(key, _) | Choice::Second { key } = item && allowed(key) { remove_file(\"two.txt\"); }\n",
+        " let (Choice::First(key, _) | Choice::Second { key }) = item else { return };\n",
+        " consume(key); remove_file(\"three.txt\");\n",
+        " for (Ok(key) | Err(key)) in pairs { consume(key); remove_file(\"four.txt\"); }\n",
+        "}\n",
+    );
+    let root = write_single_file("lib.rs", source);
+    let expected = [4, 5, 7, 8].map(|line| ("lib.rs", line));
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &expected);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    for (line, reason) in [
+        (4, "rust_match_binding_projection"),
+        (5, "rust_conditional_binding_projection"),
+        (6, "rust_let_else_binding_projection"),
+        (8, "rust_destructuring_binding_projection"),
+    ] {
+        assert!(report.coverage.iter().any(|issue| issue.line == Some(line) && issue.reason == reason), "{line} {reason}: {:?}", report.coverage);
+    }
+}
+
+#[test]
+fn rust_or_patterns_keep_inconsistent_and_guarded_bindings_incomplete() {
+    for alternative in [
+        "Choice::First(key, _) | Choice::First(_, other)",
+        "Choice::First(ref key, _) | Choice::First(_, key)",
+        "Choice::First(key, _) | Choice::First(_, key) if allowed(key)",
+        "key @ _ | key @ _",
+    ] {
+        let source = format!("fn run(item: Choice) {{ match item {{ {alternative} => {{}}, _ => {{}} }}; }}\n");
+        let root = write_single_file("lib.rs", &source);
+        let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+        assert!(report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{source}: {:?}", report.coverage);
     }
 }
 

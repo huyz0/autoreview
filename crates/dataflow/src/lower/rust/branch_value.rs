@@ -27,13 +27,13 @@ fn outermost_group(mut node: Node<'_>) -> Node<'_> {
     node
 }
 
-pub(super) fn is_initializer(node: Node<'_>) -> bool {
+pub(super) fn is_initializer(node: Node<'_>, source: &[u8]) -> bool {
     let value = outermost_group(node);
     value.parent().is_some_and(|parent| {
         parent.kind() == "let_declaration"
             && parent.child_by_field_name("value") == Some(value)
             && (simple_binding(parent)
-                || destructuring::declaration_bindings(parent).is_some()
+                || destructuring::declaration_bindings(parent, source).is_some()
                 || (value != node && parent.child_by_field_name("alternative").is_some()))
     })
 }
@@ -61,8 +61,8 @@ pub(super) fn is_returned(node: Node<'_>) -> bool {
         })
 }
 
-pub(super) fn supports_position(node: Node<'_>) -> bool {
-    is_returned(node) || is_initializer(node) || is_discarded_statement(node)
+pub(super) fn supports_position(node: Node<'_>, source: &[u8]) -> bool {
+    is_returned(node) || is_initializer(node, source) || is_discarded_statement(node)
 }
 
 pub(super) fn is_discarded_statement(node: Node<'_>) -> bool {
@@ -86,24 +86,24 @@ fn last_statement(node: Node<'_>) -> bool {
         .all(|part| matches!(part.kind(), "line_comment" | "block_comment"))
 }
 
-pub(super) fn supports_value_if(node: Node<'_>) -> bool {
+pub(super) fn supports_value_if(node: Node<'_>, source: &[u8]) -> bool {
     let root = conditional::root_branch(node);
-    (is_returned(root) || is_initializer(root)) && supports_if(node)
+    (is_returned(root) || is_initializer(root, source)) && supports_if(node, source)
 }
 
-pub(super) fn supports_if(node: Node<'_>) -> bool {
+pub(super) fn supports_if(node: Node<'_>, source: &[u8]) -> bool {
     node.kind() == "if_expression"
         && node
             .child_by_field_name("condition")
-            .is_some_and(conditional::supported)
+            .is_some_and(|test| conditional::supported(test, source))
         && node
             .child_by_field_name("consequence")
-            .is_some_and(match_flow::simple_arm)
+            .is_some_and(|arm| match_flow::simple_arm(arm, source))
         && alternative(node).is_some_and(|arm| {
             if arm.kind() == "if_expression" {
-                supports_if(arm)
+                supports_if(arm, source)
             } else {
-                match_flow::simple_arm(arm)
+                match_flow::simple_arm(arm, source)
             }
         })
 }
@@ -114,7 +114,7 @@ fn alternative(node: Node<'_>) -> Option<Node<'_>> {
 
 impl Lower<'_> {
     pub(super) fn lower_local(&mut self, stmt: Node<'_>, at: NodeId, names: &mut Bindings) -> Option<NodeId> {
-        if let Some(bindings) = destructuring::declaration_bindings(stmt) {
+        if let Some(bindings) = destructuring::declaration_bindings(stmt, self.source) {
             return self.destructured_declaration(stmt, at, names, bindings);
         }
         self.binding(stmt, at, names)

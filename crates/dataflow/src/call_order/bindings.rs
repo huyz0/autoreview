@@ -111,7 +111,7 @@ impl<'src> Bindings<'src> {
             }
             return;
         }
-        let targets = declaration_targets(node);
+        let targets = declaration_targets(node, source);
         let single_target = targets.len() == 1 || declares_iteration(node)
             || matches!(
                 node.kind(),
@@ -143,9 +143,9 @@ impl<'src> Bindings<'src> {
     }
 }
 
-fn declaration_targets(node: Node<'_>) -> Vec<Node<'_>> {
+fn declaration_targets<'tree>(node: Node<'tree>, source: &[u8]) -> Vec<Node<'tree>> {
     if declares_iteration(node) {
-        return crate::lower::keyed_flow::loops::iterator_bindings(node);
+        return crate::lower::keyed_flow::loops::iterator_bindings(node, source);
     }
     declaration(node)
 }

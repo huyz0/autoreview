@@ -2,18 +2,18 @@ use super::{branch_value::{self, Mode}, line, match_flow, Bindings, EdgeKind, Lo
 use crate::lower::site::children;
 
 pub(crate) fn bindings<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Vec<Node<'tree>>> {
-    supports(node, source).then(|| pattern_bindings(node)).flatten()
+    supports(node, source).then(|| pattern_bindings(node, source)).flatten()
 }
 
-fn pattern_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
+fn pattern_bindings<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Vec<Node<'tree>>> {
     if node.kind() != "let_declaration" || node.child_by_field_name("alternative").is_none() {
         return None;
     }
-    match_flow::projection_bindings(node)
+    match_flow::projection_bindings(node, source)
 }
 
 pub(super) fn supports(node: Node<'_>, source: &[u8]) -> bool {
-    pattern_bindings(node).is_some()
+    pattern_bindings(node, source).is_some()
         && node
             .child_by_field_name("value")
             .is_some_and(|value| supported_initializer(value, source))
@@ -25,7 +25,7 @@ pub(super) fn supports(node: Node<'_>, source: &[u8]) -> bool {
 fn supported_initializer(value: Node<'_>, source: &[u8]) -> bool {
     match branch_value::from_value(value) {
         Some(branch) if value != branch && branch.kind() == "if_expression" => {
-            branch_value::supports_if(branch)
+            branch_value::supports_if(branch, source)
         }
         Some(branch) if value != branch => match_flow::supports(branch, source),
         Some(_) => false,
@@ -81,7 +81,7 @@ impl Lower<'_> {
         self.block(otherwise, unmatched, names);
         let matched = self.cfg.push_node(line(node));
         self.edge(tested, matched, EdgeKind::True);
-        for binding in pattern_bindings(node)? {
+        for binding in pattern_bindings(node, self.source)? {
             self.project_pattern_binding(binding, matched, names);
         }
         Some(matched)

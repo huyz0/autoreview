@@ -8,7 +8,7 @@ mod exhaustiveness;
 pub(super) fn supports(node: Node<'_>, source: &[u8]) -> bool {
     if node.kind() != "match_expression"
         || node.has_error()
-        || !branch_value::supports_position(node)
+        || !branch_value::supports_position(node, source)
         || !node.child_by_field_name("value").is_some_and(simple_value)
     {
         return false;
@@ -23,25 +23,26 @@ pub(super) fn supports(node: Node<'_>, source: &[u8]) -> bool {
     let Some((last, rest)) = arms.split_last() else {
         return false;
     };
-    let wildcard = wildcard_arm(*last);
-    rest.iter().all(|arm| supported_arm(*arm))
-        && (wildcard || (supported_arm(*last) && exhaustiveness::covers_enum(node, &arms, source)))
+    let wildcard = wildcard_arm(*last, source);
+    rest.iter().all(|arm| supported_arm(*arm, source))
+        && (wildcard || (supported_arm(*last, source) && exhaustiveness::covers_enum(node, &arms, source)))
 }
 
-fn pattern(arm: Node<'_>) -> Option<Node<'_>> {
+fn pattern<'tree>(arm: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
     if arm.kind() != "match_arm" || arm.child_by_field_name("value").is_none() {
         return None;
     }
     let pattern = arm.child_by_field_name("pattern")?;
     (pattern
         .child_by_field_name("condition")
-        .is_none_or(conditional::supported)
-        && arm.child_by_field_name("value").is_some_and(simple_arm))
+        .is_none_or(|guard| conditional::supported(guard, source))
+        && arm.child_by_field_name("value").is_some_and(|value| simple_arm(value, source)))
     .then_some(pattern)
 }
 
 // Only accept arm statements whose nested calls the Rust lowerer traverses.
-pub(super) fn simple_arm(node: Node<'_>) -> bool {
+pub(super) fn simple_arm(node: Node<'_>, source: &[u8]) -> bool {
+    let simple_arm = |child| simple_arm(child, source);
     match node.kind() {
         "block" => children(node).all(simple_arm),
         "empty_statement" => true,
@@ -53,7 +54,7 @@ pub(super) fn simple_arm(node: Node<'_>) -> bool {
             super::simple_binding(node)
                 && node.child_by_field_name("value").is_none_or(simple_value)
         }
-        "if_expression" => statement_if(node),
+        "if_expression" => statement_if(node, source),
         "assignment_expression" => {
             node.child_by_field_name("left").is_some_and(|left| left.kind() == "identifier")
                 && node.child_by_field_name("right").is_some_and(simple_value)
@@ -62,13 +63,13 @@ pub(super) fn simple_arm(node: Node<'_>) -> bool {
     }
 }
 
-fn statement_if(node: Node<'_>) -> bool {
+fn statement_if(node: Node<'_>, source: &[u8]) -> bool {
     let root = conditional::root_branch(node);
     (branch_value::is_discarded_statement(root) || conditional::unit_branch(root))
-        && node.child_by_field_name("condition").is_some_and(conditional::supported)
-        && node.child_by_field_name("consequence").is_some_and(simple_arm)
+        && node.child_by_field_name("condition").is_some_and(|test| conditional::supported(test, source))
+        && node.child_by_field_name("consequence").is_some_and(|body| simple_arm(body, source))
         && node.child_by_field_name("alternative").is_none_or(|otherwise| {
-            children(otherwise).next().is_some_and(simple_arm)
+            children(otherwise).next().is_some_and(|body| simple_arm(body, source))
         })
 }
 
@@ -91,30 +92,37 @@ fn simple_call(node: Node<'_>) -> bool {
     callee && node.child_by_field_name("arguments").is_some_and(|args| args.named_children(&mut args.walk()).all(simple_value))
 }
 
-fn supported_arm(arm: Node<'_>) -> bool {
-    arm_pattern(arm).and_then(patterns::projected_names).is_some()
+fn supported_arm(arm: Node<'_>, source: &[u8]) -> bool {
+    let Some(pattern) = arm_pattern(arm, source) else { return false };
+    // Overlapping alternatives can run the same guard more than once.
+    let bindings_source = if pattern.parent().and_then(|wrapper| wrapper.child_by_field_name("condition")).is_some() {
+        &[]
+    } else {
+        source
+    };
+    patterns::projected_names(pattern, bindings_source).is_some()
 }
 
-fn arm_pattern(arm: Node<'_>) -> Option<Node<'_>> {
-    let pattern = pattern(arm)?;
+fn arm_pattern<'tree>(arm: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
+    let pattern = pattern(arm, source)?;
     pattern.children(&mut pattern.walk()).find(|child| child.kind() == "_" || child.is_named() && !child.is_extra())
 }
 
-pub(super) fn projection_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
-    patterns::projected_names(node.child_by_field_name("pattern")?)
+pub(super) fn projection_bindings<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Vec<Node<'tree>>> {
+    patterns::projected_names(node.child_by_field_name("pattern")?, source)
 }
 
-pub(super) fn arm_bindings(arm: Node<'_>) -> Vec<Node<'_>> {
-    arm_pattern(arm).and_then(patterns::projected_names).unwrap_or_default()
+pub(super) fn arm_bindings<'tree>(arm: Node<'tree>, source: &[u8]) -> Vec<Node<'tree>> {
+    arm_pattern(arm, source).and_then(|pattern| patterns::projected_names(pattern, source)).unwrap_or_default()
 }
 
 pub(super) fn has_bindings(node: Node<'_>, source: &[u8]) -> bool {
     supports(node, source) && node.child_by_field_name("body").is_some_and(|body|
-        body.named_children(&mut body.walk()).any(|arm| !arm_bindings(arm).is_empty()))
+        body.named_children(&mut body.walk()).any(|arm| !arm_bindings(arm, source).is_empty()))
 }
 
-fn wildcard_arm(arm: Node<'_>) -> bool {
-    pattern(arm).is_some_and(|pattern| {
+fn wildcard_arm(arm: Node<'_>, source: &[u8]) -> bool {
+    pattern(arm, source).is_some_and(|pattern| {
         pattern.child_by_field_name("condition").is_none()
             && pattern.children(&mut pattern.walk()).any(|part| part.kind() == "_")
     })
@@ -156,7 +164,7 @@ impl Lower<'_> {
                     EdgeKind::True
                 },
             );
-            if let Some(fallback) = fallback.filter(|_| arm_pattern(arm).is_none_or(|pattern| pattern.kind() != "_")) {
+            if let Some(fallback) = fallback.filter(|_| arm_pattern(arm, self.source).is_none_or(|pattern| pattern.kind() != "_")) {
                 self.edge(next, fallback, EdgeKind::False);
             }
             let mut arm_names = self.bind_arm(arm, start, names);
@@ -177,7 +185,7 @@ impl Lower<'_> {
 
     fn bind_arm(&mut self, arm: Node<'_>, start: NodeId, names: &Bindings) -> Bindings {
         let mut arm_names = names.clone();
-        for binding in arm_bindings(arm) {
+        for binding in arm_bindings(arm, self.source) {
             self.project_pattern_binding(binding, start, &mut arm_names);
         }
         arm_names

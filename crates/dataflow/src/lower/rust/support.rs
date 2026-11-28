@@ -23,7 +23,7 @@ pub(super) fn supported(node: Node<'_>, source: &[u8]) -> bool {
 fn supported_node(node: Node<'_>, source: &[u8]) -> bool {
     match node.kind() {
         "label" | "unsafe_block" => false,
-        "let_chain" | "let_condition" => conditional::supported(node),
+        "let_chain" | "let_condition" => conditional::supported(node, source),
         "let_declaration" => supported_declaration(node, source),
         "for_expression"
         | "if_expression"
@@ -31,19 +31,19 @@ fn supported_node(node: Node<'_>, source: &[u8]) -> bool {
         | "loop_expression"
         | "return_expression"
         | "break_expression"
-        | "continue_expression" => supported_statement(node),
+        | "continue_expression" => supported_statement(node, source),
         "match_expression" => supports_match_with_source(node, source),
         _ => true,
     }
 }
 
-fn supported_statement(node: Node<'_>) -> bool {
-    if node.kind() == "if_expression" && branch_value::supports_value_if(node) {
+fn supported_statement(node: Node<'_>, source: &[u8]) -> bool {
+    if node.kind() == "if_expression" && branch_value::supports_value_if(node, source) {
         return true;
     }
     statement_position(node)
         && match node.kind() {
-            "for_expression" => destructuring::iterator_bindings(node).is_some(),
+            "for_expression" => destructuring::iterator_bindings(node, source).is_some(),
             "if_expression" | "while_expression" => conditional::supports_owner(node),
             _ => true,
         }
@@ -52,21 +52,21 @@ fn supported_statement(node: Node<'_>) -> bool {
 fn supported_declaration(node: Node<'_>, source: &[u8]) -> bool {
     simple_binding(node)
         || let_else::supports(node, source)
-        || destructuring::declaration_bindings(node).is_some()
+        || destructuring::declaration_bindings(node, source).is_some()
 }
 
 pub(crate) fn lexical_bindings<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Vec<Node<'tree>>> {
     match node.kind() {
-        "let_condition" => conditional::bindings(node),
+        "let_condition" => conditional::bindings(node, source),
         "let_declaration" => {
-            let_else::bindings(node, source).or_else(|| destructuring::declaration_bindings(node))
+            let_else::bindings(node, source).or_else(|| destructuring::declaration_bindings(node, source))
         }
-        "for_expression" => destructuring::iterator_bindings(node),
+        "for_expression" => destructuring::iterator_bindings(node, source),
         "match_arm" => node
             .parent()
             .and_then(|body| body.parent())
             .filter(|matched| supports_match_with_source(*matched, source))
-            .map(|_| match_arm_bindings(node)),
+            .map(|_| match_arm_bindings_with_source(node, source)),
         _ => None,
     }
 }
@@ -82,12 +82,17 @@ pub fn supports_match_with_source(node: Node<'_>, source: &[u8]) -> bool {
 }
 
 pub(crate) fn discards_match(node: Node<'_>, source: &[u8]) -> bool {
-    supports_match_with_source(node, source) && !branch_value::is_returned(node) && !branch_value::is_initializer(node)
+    supports_match_with_source(node, source) && !branch_value::is_returned(node) && !branch_value::is_initializer(node, source)
 }
 
 /// Simple arm-local bindings in a supported Rust match pattern.
 pub fn match_arm_bindings(arm: Node<'_>) -> Vec<Node<'_>> {
-    match_flow::arm_bindings(arm)
+    match_arm_bindings_with_source(arm, &[])
+}
+
+/// Arm-local bindings including alternatives verified with source text.
+pub fn match_arm_bindings_with_source<'tree>(arm: Node<'tree>, source: &[u8]) -> Vec<Node<'tree>> {
+    match_flow::arm_bindings(arm, source)
 }
 
 /// Lines where a supported match projects one or more arm-local values.
@@ -114,12 +119,12 @@ fn projection_reason(node: Node<'_>, source: &[u8]) -> Option<&'static str> {
         "match_expression" => {
             match_flow::has_bindings(node, source).then_some("rust_match_binding_projection")
         }
-        "let_condition" => conditional::bindings(node)
+        "let_condition" => conditional::bindings(node, source)
             .is_some_and(|names| !names.is_empty())
             .then_some("rust_conditional_binding_projection"),
         "let_declaration" => declaration_projection(node, source),
         "for_expression" => {
-            destructuring::projected_bindings(node).map(|_| "rust_destructuring_binding_projection")
+            destructuring::projected_bindings(node, source).map(|_| "rust_destructuring_binding_projection")
         }
         _ => None,
     }
@@ -129,7 +134,7 @@ fn declaration_projection(node: Node<'_>, source: &[u8]) -> Option<&'static str>
     if let_else::bindings(node, source).is_some_and(|names| !names.is_empty()) {
         return Some("rust_let_else_binding_projection");
     }
-    destructuring::declaration_bindings(node).map(|_| "rust_destructuring_binding_projection")
+    destructuring::declaration_bindings(node, source).map(|_| "rust_destructuring_binding_projection")
 }
 
 fn binding_sites<Tag: Ord>(

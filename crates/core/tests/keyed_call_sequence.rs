@@ -228,6 +228,24 @@ fn rust_struct_slice_and_reference_patterns_keep_the_outer_key() {
     );
 }
 
+#[test]
+fn rust_or_pattern_bindings_keep_outer_keys_separate() {
+    assert_rust_shadowed_keys(
+        "value: Choice",
+        r#"    match value {
+        Choice::Left(key, other) | Choice::Right(other, key) => root.remove(key),
+        _ => {}
+    };
+    if let Choice::Left(key, _) | Choice::Right(_, key) = value && allowed(key) {
+        root.remove(key);
+    }
+    {
+        let (Choice::Left(key, _) | Choice::Right(_, key)) = value else { root.remove(key); return; };
+        root.remove(key);
+    }"#,
+    );
+}
+
 fn assert_rust_shadowed_keys(parameters: &str, inner: &str) {
     let source = format!("fn pending(root: &mut Registry, key: &str, {parameters}) {{\n    root.register(key);\n{inner}\n    root.remove(key);\n}}\n");
     assert!(findings("Rust", "lib.rs", &source, RECEIVER, true).is_empty());

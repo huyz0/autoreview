@@ -15,17 +15,17 @@ pub(super) fn control_test(owner: Node<'_>) -> Option<Node<'_>> {
     })
 }
 
-pub(crate) fn bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
+pub(crate) fn bindings<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Vec<Node<'tree>>> {
     (node.kind() == "let_condition")
-        .then(|| match_flow::projection_bindings(node))
+        .then(|| match_flow::projection_bindings(node, source))
         .flatten()
 }
 
-pub(super) fn supported(node: Node<'_>) -> bool {
+pub(super) fn supported(node: Node<'_>, source: &[u8]) -> bool {
     match node.kind() {
-        "let_chain" => children(node).all(supported),
+        "let_chain" => children(node).all(|part| supported(part, source)),
         "let_condition" => {
-            bindings(node).is_some()
+            bindings(node, source).is_some()
                 && node
                     .child_by_field_name("value")
                     .is_some_and(match_flow::simple_value)
@@ -164,7 +164,7 @@ impl Lower<'_> {
                 self.lower_pattern_test(part, at, (next, failed), names);
                 at = next;
             }
-        } else if let Some(bindings) = bindings(node) {
+        } else if let Some(bindings) = bindings(node, self.source) {
             let evaluated = self.evaluate(node.child_by_field_name("value"), at, names);
             let matched = self.cfg.push_node(line(node));
             self.edge(evaluated, matched, EdgeKind::True);
