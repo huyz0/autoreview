@@ -175,7 +175,8 @@ mod tests {
     #[test]
     fn array_repeat_evaluates_the_selected_arm_once_and_skips_the_count() {
         for (operand, count, expected) in [
-            ("if true { selected() } else { skipped() }", "0", Some("selected")),
+            ("if true { selected() } else { () }", "0", Some("selected")),
+            ("match 0 { _ => selected() }", "3", Some("selected")),
             ("match 0 { _ => selected() }", "count()", Some("selected")),
             ("const { skipped() }", "0", None),
         ] {

@@ -1531,11 +1531,7 @@ fn rust_branch_elements_preserve_whole_results_and_report_projection_limits() {
         "fn forwarded(flag: bool) -> (std::io::Result<()>, ()) {\n",
         " keep((if flag { remove_file(\"forwarded.txt\") } else { Ok(()) }, ()))\n}\n",
     );
-    let root = write_single_file("lib.rs", source);
-    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 3), ("lib.rs", 9)]);
-    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
-    assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", report.coverage);
-    assert!(report.coverage.iter().any(|issue| issue.reason == "rust_aggregate_element_projection" && issue.line == Some(6)), "{:?}", report.coverage);
+    assert_rust_aggregate_results(source, &[("lib.rs", 3), ("lib.rs", 9)], 6);
 }
 
 #[test]
@@ -1567,11 +1563,15 @@ fn rust_branch_array_repeats_distinguish_an_empty_array_from_a_used_result() {
         "fn forwarded_empty(flag: bool) -> [std::io::Result<()>; 0] {\n",
         " passthrough([match flag { true => remove_file(\"forwarded.txt\"), _ => Ok(()) }; 0])\n}\n",
     );
+    assert_rust_aggregate_results(source, &[("lib.rs", 3), ("lib.rs", 9), ("lib.rs", 13)], 6);
+}
+
+fn assert_rust_aggregate_results(source: &str, discarded: &[(&str, u32)], projection_line: u32) {
     let root = write_single_file("lib.rs", source);
-    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 3), ("lib.rs", 9), ("lib.rs", 13)]);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", discarded);
     let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
     assert!(!report.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow"), "{:?}", report.coverage);
-    assert!(report.coverage.iter().any(|issue| issue.reason == "rust_aggregate_element_projection" && issue.line == Some(6)), "{:?}", report.coverage);
+    assert!(report.coverage.iter().any(|issue| issue.reason == "rust_aggregate_element_projection" && issue.line == Some(projection_line)), "{:?}", report.coverage);
 }
 
 #[test]
