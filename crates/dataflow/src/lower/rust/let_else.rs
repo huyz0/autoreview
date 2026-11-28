@@ -1,4 +1,4 @@
-use super::{line, match_flow, Bindings, EdgeKind, Lower, Node, NodeId};
+use super::{branch_value::{self, Mode}, line, match_flow, Bindings, EdgeKind, Lower, Node, NodeId};
 use crate::lower::site::children;
 
 pub(crate) fn bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
@@ -16,10 +16,21 @@ pub(super) fn supports(node: Node<'_>) -> bool {
     pattern_bindings(node).is_some()
         && node
             .child_by_field_name("value")
-            .is_some_and(match_flow::simple_value)
+            .is_some_and(supported_initializer)
         && node
             .child_by_field_name("alternative")
             .is_some_and(diverges)
+}
+
+fn supported_initializer(value: Node<'_>) -> bool {
+    match branch_value::from_value(value) {
+        Some(branch) if value != branch && branch.kind() == "if_expression" => {
+            branch_value::supports_if(branch)
+        }
+        Some(branch) if value != branch => match_flow::supports(branch),
+        Some(_) => false,
+        None => match_flow::simple_value(value),
+    }
 }
 
 pub(super) fn is_fallback(block: Node<'_>) -> bool {
@@ -56,7 +67,12 @@ impl Lower<'_> {
         names: &mut Bindings,
     ) -> Option<NodeId> {
         let otherwise = node.child_by_field_name("alternative")?;
-        let tested = self.evaluate(node.child_by_field_name("value"), at, names);
+        let value = node.child_by_field_name("value")?;
+        let tested = if let Some(branch) = branch_value::from_value(value) {
+            self.lower_branch_value(branch, at, names, &Mode::Project)?
+        } else {
+            self.evaluate(Some(value), at, names)
+        };
         let unmatched = self.cfg.push_node(line(otherwise));
         if node.child_by_field_name("pattern").is_none_or(|pattern| pattern.kind() != "_") {
             self.edge(tested, unmatched, EdgeKind::False);

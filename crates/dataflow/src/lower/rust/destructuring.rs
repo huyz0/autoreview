@@ -37,8 +37,8 @@ impl Lower<'_> {
         bindings: Vec<Node<'_>>,
     ) -> Option<NodeId> {
         let value = node.child_by_field_name("value")?;
-        let end = if branch_value::is_branch(value) {
-            self.lower_branch_value(value, at, names, &Mode::Project)?
+        let end = if let Some(branch) = branch_value::from_value(value) {
+            self.lower_branch_value(branch, at, names, &Mode::Project)?
         } else {
             self.evaluate(Some(value), at, names)
         };

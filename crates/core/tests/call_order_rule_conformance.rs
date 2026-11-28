@@ -1421,7 +1421,10 @@ fn rust_branch_initializers_track_results_from_each_reachable_arm() {
         "if flag {\n remove_file(\"one.txt\")\n } else {\n remove_file(\"two.txt\")\n }",
         "match flag {\n true => remove_file(\"one.txt\"),\n\n _ => remove_file(\"two.txt\")\n }",
     ];
-    for initializer in initializers {
+    for initializer in initializers
+        .into_iter()
+        .flat_map(|value| [value.to_owned(), format!("(({value}))")])
+    {
         let source = format!("use std::fs::remove_file;\nfn run(flag: bool) -> std::io::Result<()> {{\n let result = {initializer};\n Ok(())\n}}\n");
         let root = write_single_file("lib.rs", &source);
         assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 4), ("lib.rs", 6)]);
@@ -1481,7 +1484,7 @@ fn rust_tuple_branch_results_evaluate_operands_in_order() {
         "fn open(flag: bool) {\n",
         " let (_, _) = match flag { true => (finish(), -begin()), _ => return };\n}\n",
         "fn closed(flag: bool) {\n",
-        " let (_, _) = if flag { (-begin() + finish(), 0) } else { return };\n}\n",
+        " let (_, _) = (if flag { (-begin() + finish(), 0) } else { return });\n}\n",
         "fn assigned(flag: bool) {\n",
         " let mut value = 0; match flag { true => { begin(); value = finish(); }, _ => {} };\n}\n",
     );
@@ -1507,7 +1510,12 @@ fn rust_eager_projections_evaluate_values_from_left_to_right() {
 #[test]
 fn rust_returned_branch_values_preserve_explicit_and_implicit_exits() {
     let conditional = "if let Some(_) = choice {\n   let result = remove_file(\"one.txt\"); result\n } else {\n   remove_file(\"two.txt\")\n }";
-    for returned in [conditional.to_owned(), format!("return {conditional};")] {
+    for returned in [
+        conditional.to_owned(),
+        format!("return {conditional};"),
+        format!("(({conditional}))"),
+        format!("return (({conditional}));"),
+    ] {
         let source = format!("use std::fs::remove_file;\nfn run(choice: Option<u8>) -> std::io::Result<()> {{\n {returned}\n}}\n");
         let root = write_single_file("lib.rs", &source);
         assert_rust_result_is_observed(root.path());
@@ -1565,6 +1573,17 @@ fn rust_returned_matches_preserve_results_through_helpers() {
         std::fs::write(root.path().join("lib.rs"), form).unwrap();
         assert_rust_result_is_observed(root.path());
     }
+}
+
+#[test]
+fn rust_let_else_grouped_initializers_keep_early_exits_separate() {
+    let source = concat!(
+        "fn open(flag: bool) {\n",
+        " let Some(_) = (if flag { begin() } else { return }) else { return };\n finish();\n}\n",
+        "fn closed(flag: bool) {\n",
+        " let Some(_) = (match flag { true => begin(), _ => return }) else { finish(); return };\n finish();\n}\n",
+    );
+    assert_rust_match_cleanup("rust-let-else-grouped-values", source);
 }
 
 #[test]
