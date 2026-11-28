@@ -1,4 +1,4 @@
-use super::{Bindings, Lower, Node, NodeId};
+use super::{branch_value::{self, Mode}, Bindings, Lower, Node, NodeId};
 
 fn tuple_bindings<'tree>(pattern: Node<'tree>, names: &mut Vec<Node<'tree>>) -> Option<()> {
     match pattern.kind() {
@@ -55,11 +55,16 @@ impl Lower<'_> {
         at: NodeId,
         names: &mut Bindings,
         bindings: Vec<Node<'_>>,
-    ) -> NodeId {
-        let end = self.evaluate(node.child_by_field_name("value"), at, names);
+    ) -> Option<NodeId> {
+        let value = node.child_by_field_name("value")?;
+        let end = if branch_value::is_branch(value) {
+            self.lower_branch_value(value, at, names, &Mode::Project)?
+        } else {
+            self.evaluate(Some(value), at, names)
+        };
         for binding in bindings {
             self.project_pattern_binding(binding, end, names);
         }
-        end
+        Some(end)
     }
 }

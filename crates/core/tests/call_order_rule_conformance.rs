@@ -1375,7 +1375,7 @@ fn rust_literal_match_tracks_results_across_arms() {
 
 #[test]
 fn rust_unmodeled_matches_remain_incomplete() {
-    for body in ["match x { 0 if check() && other() + 1 > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { Some(value) | Other(value) => {}, _ => {} };", "match x { 0 => {} };", "match check(risky() + 1) { _ => {} };", "match x { _ => { let y = risky() + 1; } };", "consume(match x { _ => {} });"] {
+    for body in ["match x { 0 if check() && items[other()] > 2 => {}, _ => {} };", "match x { _ if check() => {} };", "match x { value => {} };", "match x { Some(value) | Other(value) => {}, _ => {} };", "match x { 0 => {} };", "match check(items[risky()]) { _ => {} };", "match x { _ => { let y = items[risky()]; } };", "consume(match x { _ => {} });"] {
         let root = write_single_file("lib.rs", &format!("fn run(x: u8) {{ {body} }}\n"));
         let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
         assert!(result.coverage.iter().any(|issue| issue.reason == "unsupported_rust_control_flow" && issue.path.as_deref() == Some("lib.rs")), "{body}: {:?}", result.coverage);
@@ -1435,6 +1435,36 @@ fn rust_match_initializer_keeps_a_direct_return_separate() {
     let source = "use std::fs::remove_file;\nfn run(flag: bool) -> std::io::Result<()> {\n let result = match flag {\n  true => remove_file(\"example.txt\"),\n  _ => return Ok(()),\n };\n result\n}\n";
     let root = write_single_file("lib.rs", source);
     assert_rust_result_is_observed(root.path());
+}
+
+#[test]
+fn rust_match_arm_prefix_can_exit_before_producing_its_value() {
+    let source = concat!(
+        "fn open(flag: bool, abort: bool) -> u8 {\n",
+        " match flag { true => { begin(); if abort { return 0; } finish(); 1 }, _ => 2 }\n}\n",
+        "fn closed(flag: bool, abort: bool) -> u8 {\n",
+        " match flag { true => { begin(); if abort { finish(); return 0; } finish(); 1 }, _ => 2 }\n}\n",
+    );
+    assert_rust_match_cleanup("rust-match-arm-early-exit", source);
+}
+
+#[test]
+fn rust_tuple_branch_results_evaluate_operands_in_order() {
+    let source = concat!(
+        "fn open(flag: bool) {\n",
+        " let (_, _) = match flag { true => (finish(), -begin()), _ => return };\n}\n",
+        "fn closed(flag: bool) {\n",
+        " let (_, _) = if flag { (-begin() + finish(), 0) } else { return };\n}\n",
+        "fn assigned(flag: bool) {\n",
+        " let mut value = 0; match flag { true => { begin(); value = finish(); }, _ => {} };\n}\n",
+    );
+    assert_rust_match_cleanup("rust-tuple-operand-order", source);
+    let root = write_single_file("lib.rs", source);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    for line in [2, 5] {
+        assert!(report.coverage.iter().any(|issue| issue.reason == "rust_destructuring_binding_projection"
+            && issue.line == Some(line)), "{:?}", report.coverage);
+    }
 }
 
 #[test]

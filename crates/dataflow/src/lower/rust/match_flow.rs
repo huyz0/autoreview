@@ -1,5 +1,6 @@
-use super::{branch_value::{self, Mode}, conditional, patterns, Bindings, EdgeKind, Lower, Node, NodeId};
+use super::{branch_value::{self, Mode}, conditional, patterns, values, Bindings, EdgeKind, Lower, Node, NodeId};
 use crate::cfg::{BindingWrite, IdentityOperand, Stmt};
+use crate::lower::site::children;
 
 pub(super) mod guard;
 
@@ -40,12 +41,32 @@ fn pattern(arm: Node<'_>) -> Option<Node<'_>> {
 // Only accept arm statements whose nested calls the Rust lowerer traverses.
 pub(super) fn simple_arm(node: Node<'_>) -> bool {
     match node.kind() {
-        "block" => node.named_children(&mut node.walk()).all(simple_arm),
-        "line_comment" | "block_comment" | "empty_statement" => true,
-        "expression_statement" | "return_expression" => node.named_child(0).is_none_or(simple_arm),
+        "block" => children(node).all(simple_arm),
+        "empty_statement" => true,
+        "expression_statement" => children(node).next().is_some_and(simple_arm),
+        "return_expression" => children(node).next().is_none_or(simple_value),
         "let_declaration" => {
             super::simple_binding(node)
                 && node.child_by_field_name("value").is_none_or(simple_value)
+        }
+        "if_expression" => {
+            let root = conditional::root_branch(node);
+            (branch_value::is_discarded_statement(root) || conditional::unit_branch(root))
+                && node.child_by_field_name("condition").is_some_and(|test| {
+                    if conditional::test(node).is_some() {
+                        conditional::supported(test)
+                    } else {
+                        simple_value(test)
+                    }
+                })
+                && node.child_by_field_name("consequence").is_some_and(simple_arm)
+                && node.child_by_field_name("alternative").is_none_or(|otherwise| {
+                    children(otherwise).next().is_some_and(simple_arm)
+                })
+        }
+        "assignment_expression" => {
+            node.child_by_field_name("left").is_some_and(|left| left.kind() == "identifier")
+                && node.child_by_field_name("right").is_some_and(simple_value)
         }
         _ => simple_value(node),
     }
@@ -60,10 +81,10 @@ pub(super) fn simple_value(node: Node<'_>) -> bool {
                 && simple_value(receiver)
         }),
         "reference_expression" | "parenthesized_expression" | "try_expression" => {
-            node.named_child(0).is_some_and(simple_value)
+            node.child_by_field_name("value").or_else(|| children(node).next()).is_some_and(simple_value)
         }
         "call_expression" => simple_call(node),
-        _ => false,
+        _ => values::eager_operands(node).is_some_and(|mut operands| operands.all(simple_value)),
     }
 }
 

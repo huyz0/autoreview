@@ -46,7 +46,7 @@ pub(super) fn supports_owner(node: Node<'_>) -> bool {
     super::branch_value::is_discarded_statement(root_branch(node)) || unit_branch(node)
 }
 
-fn unit_branch(node: Node<'_>) -> bool {
+pub(super) fn unit_branch(node: Node<'_>) -> bool {
     match node.kind() {
         "block" => children(node).last().is_none_or(|tail| {
             matches!(
