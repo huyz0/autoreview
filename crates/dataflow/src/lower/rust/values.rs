@@ -169,12 +169,18 @@ impl Lower<'_> {
 }
 
 pub(super) fn eager_operands(node: Node<'_>) -> Option<impl Iterator<Item = Node<'_>>> {
-    let single_operand = match node.kind() {
-        "field_expression" | "type_cast_expression" => Some(node.child_by_field_name("value")?),
-        _ if evaluates_all_operands(node) => None,
-        _ => return None,
+    let aggregate = argument_flow::aggregate_operands(node);
+    let plain = if aggregate.is_some() {
+        None
+    } else {
+        let single_operand = match node.kind() {
+            "field_expression" | "type_cast_expression" => Some(node.child_by_field_name("value")?),
+            _ if evaluates_all_operands(node) => None,
+            _ => return None,
+        };
+        Some(children(node).filter(move |operand| single_operand.is_none_or(|value| *operand == value)))
     };
-    Some(children(node).filter(move |operand| single_operand.is_none_or(|value| *operand == value)))
+    Some(aggregate.into_iter().flatten().chain(plain.into_iter().flatten()))
 }
 
 fn evaluates_all_operands(node: Node<'_>) -> bool {
@@ -184,7 +190,7 @@ fn evaluates_all_operands(node: Node<'_>) -> bool {
         "binary_expression" => node.child_by_field_name("operator").is_some_and(|operator| {
             !matches!(operator.kind(), "&&" | "||")
         }),
-        _ => argument_flow::is_aggregate(node),
+        _ => false,
     }
 }
 
