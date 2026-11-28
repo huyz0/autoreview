@@ -78,6 +78,19 @@ const RECEIVER: &str = "{receiver: true, keyArgument: 0}";
 const ARGUMENT: &str = "{collectionArgument: 0, keyArgument: 2}";
 
 #[test]
+fn rust_tuple_literal_keeps_receiver_and_key_tied_to_pre_shadow_values() {
+    let source = r#"fn pending(root: &mut Registry, key: &str, other: &str) {
+    root.register(key);
+    let (key, registry) = (key, root);
+    registry.remove(key);
+}
+"#;
+    assert!(findings("Rust", "lib.rs", source, RECEIVER, true).is_empty());
+    let wrong = source.replace("(key, root);", "(other, root);");
+    assert_eq!(findings("Rust", "lib.rs", &wrong, RECEIVER, true).len(), 1);
+}
+
+#[test]
 fn rust_branch_call_arguments_preserve_the_selected_key() {
     let source = "fn pending(root: &mut Registry, key: &str, other: &str, flag: bool) {\n root.register(key);\n root.remove(if flag { key } else { other });\n}\n";
     assert_eq!(findings("Rust", "lib.rs", source, RECEIVER, true).len(), 1);

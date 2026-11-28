@@ -149,7 +149,7 @@ impl<'spec, 'src, 'graph> Program<'spec, 'src, 'graph> {
         let frame = &self.frames[from];
         let root = name.split(['.', ':']).next()?;
         let syntax = &frame.plan.as_ref()?.syntax;
-        if name.contains("::") && (syntax.shadows_type(root) || syntax.has_local_type_imports()) {
+        if name.contains("::") && (syntax.shadows_type(root) || syntax.local_import_shadows(root, site.start)) {
             self.unresolved.borrow_mut().insert((from, site.start, "unresolved_helper_target"));
             return None;
         }

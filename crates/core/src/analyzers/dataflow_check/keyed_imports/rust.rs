@@ -155,7 +155,7 @@ fn rust_uses(
             if let Some(binding) = resolver.binding(&file, alias.unwrap_or(member), Some(member), None, true) {
                 bindings.push(binding);
             }
-            if let Some((owner_file, owner)) = is_relative(module).then(|| associated_type_origin(resolver, &file, member)).flatten() {
+            if let Some((owner_file, owner)) = is_relative(module).then(|| associated_type_origin(resolver, path, &file, member)).flatten() {
                 let local = format!("{}::", alias.unwrap_or(member));
                 if let Some(binding) = resolver.binding(&owner_file, &local, None, Some(&owner), true) {
                     associated = true;

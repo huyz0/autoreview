@@ -1928,6 +1928,75 @@ fn rust_match_guard_tracks_cleanup_through_a_helper() {
 }
 
 #[test]
+fn rust_tuple_literal_bindings_track_each_result_in_a_match_arm() {
+    let source = r#"use std::fs::remove_file;
+fn run(flag: bool) -> std::io::Result<()> {
+    match flag {
+        true => {
+            let (used, unused) = (remove_file("used"), remove_file("unused"));
+            let _ok = used.is_ok();
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+"#;
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 5)]);
+    let scan = || run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    assert!(scan().coverage.is_empty(), "{:?}", scan().coverage);
+    let clean = source.replace("let _ok = used.is_ok();", "let _ok = used.is_ok();\n            let _also_ok = unused.is_ok();");
+    std::fs::write(root.path().join("lib.rs"), clean).unwrap();
+    assert!(scan().findings.is_empty());
+    assert!(scan().coverage.is_empty());
+}
+
+#[test]
+fn rust_child_resolves_a_private_associated_alias_from_its_ancestor() {
+    let root = tempfile::tempdir().unwrap();
+    let src = root.path().join("src");
+    std::fs::create_dir_all(src.join("parent")).unwrap();
+    let files = [
+        ("lib.rs", "mod support; mod parent; mod sibling;\n"),
+        ("support.rs", "pub(crate) struct Files;\nimpl Files { pub(crate) fn remove(path: &str) -> std::io::Result<()> { std::fs::remove_file(path) } }\n"),
+        ("parent.rs", "mod worker;\nuse crate::support::Files as Store;\n"),
+        ("parent/worker.rs", "use super::Store as Disk;\nfn run() { Disk::remove(\"old.txt\"); }\n"),
+        ("sibling.rs", "use crate::parent::Store as Disk;\nfn run() { Disk::remove(\"old.txt\"); }\n"),
+    ];
+    for (path, source) in files {
+        std::fs::write(src.join(path), source).unwrap();
+    }
+    assert_helper_locations(root.path(), "src/parent/worker.rs", "rust-discarded-remove-file-result", &[("src/support.rs", 2)]);
+    let scan = |path: &str| run_dataflow_check_with_coverage(root.path(), root.path(), &[path.into()], &[]);
+    assert!(scan("src/parent/worker.rs").coverage.is_empty());
+    let sibling = scan("src/sibling.rs");
+    assert!(sibling.findings.is_empty());
+    assert!(sibling.coverage.iter().any(|issue| issue.reason == "unresolved_rust_module_import"));
+}
+
+#[test]
+fn rust_associated_calls_only_consider_imports_in_their_scope() {
+    let root = associated_coverage_fixture();
+    let src = root.path().join("src");
+    std::fs::write(src.join("support.rs"), "pub(crate) struct Files;\nimpl Files { pub(crate) fn remove(path: &str) -> std::io::Result<()> { std::fs::remove_file(path) } }\n").unwrap();
+    let worker = r#"use crate::support::Files;
+fn run(path: &str) {
+    {
+        use std::path::Path as Files;
+        Files::new(path);
+    }
+    use std::{io, collections::HashMap};
+    Files::remove(path);
+}
+"#;
+    std::fs::write(src.join("worker.rs"), worker).unwrap();
+    assert_helper_locations(root.path(), "src/worker.rs", "rust-discarded-remove-file-result", &[("src/support.rs", 2)]);
+    let result = run_dataflow_check_with_coverage(root.path(), root.path(), &["src/worker.rs".into()], &[]);
+    assert!(!result.coverage.iter().any(|issue| issue.reason == "unresolved_helper_target" && issue.line == Some(8)), "{:?}", result.coverage);
+    assert!(result.coverage.iter().any(|issue| issue.reason == "unresolved_helper_target" && issue.line == Some(5)), "{:?}", result.coverage);
+}
+
+#[test]
 fn rust_match_guard_tracks_results_passed_to_helpers() {
     let source = "use std::fs::remove_file;\nfn ignore(_value: std::io::Result<()>) -> bool { true }\nfn run(path: &str, flag: u8) {\n    match flag { 0 if ignore(remove_file(path)) => {}, _ => {} };\n}\n";
     let root = write_single_file("lib.rs", source);

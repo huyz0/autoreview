@@ -56,7 +56,7 @@ pub(super) struct Syntax<'src> {
     guards: HashMap<String, usize>,
     local_callables: HashSet<&'src str>,
     type_parameters: HashSet<&'src str>,
-    local_type_imports: bool,
+    local_type_imports: Vec<lexical::LocalImport<'src>>,
     owner: usize,
     pub(super) unit: usize,
 }
@@ -94,7 +94,9 @@ impl<'src> Syntax<'src> {
                     syntax.type_parameters.insert(name);
                 }
             }
-            syntax.local_type_imports |= node.kind() == "use_declaration";
+            if node.kind() == "use_declaration" {
+                syntax.record_local_import(node, source);
+            }
             if let Some(name) = local_callable(node, function, source) {
                 syntax.local_callables.insert(name);
             }
@@ -119,8 +121,6 @@ impl<'src> Syntax<'src> {
     pub(super) fn shadows_type(&self, name: &str) -> bool {
         self.type_parameters.contains(name)
     }
-
-    pub(super) fn has_local_type_imports(&self) -> bool { self.local_type_imports }
 
     fn record_calls_and_guards(&mut self, node: Node<'_>, source: &[u8]) {
         match node.kind() {

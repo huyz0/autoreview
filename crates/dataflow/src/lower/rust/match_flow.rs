@@ -52,8 +52,12 @@ pub(super) fn simple_arm(node: Node<'_>, source: &[u8]) -> bool {
             children(node).next().is_none_or(simple_value)
         }
         "let_declaration" => {
-            super::simple_binding(node)
-                && node.child_by_field_name("value").is_none_or(simple_value)
+            if node.child_by_field_name("alternative").is_some() {
+                super::let_else::supports(node, source)
+            } else {
+                (super::simple_binding(node) || super::destructuring::declaration_bindings(node, source).is_some())
+                    && node.child_by_field_name("value").is_none_or(|value| simple_operand(value, source))
+            }
         }
         "if_expression" => statement_if(node, source),
         "assignment_expression" => {
@@ -90,6 +94,12 @@ pub(super) fn simple_value(node: Node<'_>, source: &[u8]) -> bool {
 
 fn simple_call(node: Node<'_>, source: &[u8]) -> bool {
     let Some(function) = node.child_by_field_name("function") else { return false };
+    let function = if function.kind() == "generic_function" {
+        let Some(callee) = function.child_by_field_name("function") else { return false };
+        callee
+    } else {
+        function
+    };
     let callee = matches!(function.kind(), "identifier" | "scoped_identifier")
         || (function.kind() == "field_expression" && function.child_by_field_name("value").is_some_and(|value| simple_value(value, source)));
     callee && node.child_by_field_name("arguments").is_some_and(|args| children(args).all(|argument| simple_operand(argument, source)))
