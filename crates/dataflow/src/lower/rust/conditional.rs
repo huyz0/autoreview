@@ -8,10 +8,7 @@ pub(super) fn test(owner: Node<'_>) -> Option<Node<'_>> {
 }
 
 pub(crate) fn bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
-    if node.kind() != "let_condition" {
-        return None;
-    }
-    match_flow::projection_bindings(node.child_by_field_name("pattern")?)
+    (node.kind() == "let_condition").then(|| match_flow::projection_bindings(node)).flatten()
 }
 
 pub(super) fn supported(node: Node<'_>) -> bool {
@@ -27,8 +24,8 @@ pub(super) fn supported(node: Node<'_>) -> bool {
     }
 }
 
-pub(super) fn discards_result(node: Node<'_>) -> bool {
-    if node.child_by_field_name("alternative").is_none() {
+pub(super) fn supports_owner(node: Node<'_>) -> bool {
+    if node.kind() != "if_expression" || test(node).is_none() || node.child_by_field_name("alternative").is_none() {
         return true;
     }
     let root = std::iter::successors(Some(node), |node| {
@@ -78,13 +75,8 @@ fn unit_branch(node: Node<'_>) -> bool {
 }
 
 impl Lower<'_> {
-    pub(super) fn pattern_branch(
-        &mut self,
-        expr: Node<'_>,
-        test: Node<'_>,
-        at: NodeId,
-        names: &Bindings,
-    ) -> Option<NodeId> {
+    pub(super) fn pattern_branch(&mut self, test: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
+        let expr = test.parent()?;
         let consequence = expr.child_by_field_name("consequence")?;
         let passed = self.cfg.push_node(line(consequence));
         let failed = self.cfg.push_node(line(expr));
@@ -97,11 +89,11 @@ impl Lower<'_> {
         let else_end = otherwise.map_or(Some(failed), |node| {
             self.flow_expression(node, failed, names)
         });
-        self.join_pattern_paths(expr, [then_end, else_end])
+        self.join_paths(expr, [then_end, else_end].into_iter().flatten())
     }
 
-    fn join_pattern_paths(&mut self, expr: Node<'_>, ends: [Option<NodeId>; 2]) -> Option<NodeId> {
-        let mut ends = ends.into_iter().flatten().peekable();
+    pub(super) fn join_paths(&mut self, expr: Node<'_>, ends: impl IntoIterator<Item = NodeId>) -> Option<NodeId> {
+        let mut ends = ends.into_iter().peekable();
         ends.peek()?;
         let join = self.cfg.push_node(line(expr));
         for end in ends {
@@ -110,13 +102,8 @@ impl Lower<'_> {
         Some(join)
     }
 
-    pub(super) fn pattern_loop(
-        &mut self,
-        expr: Node<'_>,
-        test: Node<'_>,
-        at: NodeId,
-        names: &Bindings,
-    ) -> Option<NodeId> {
+    pub(super) fn pattern_loop(&mut self, test: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
+        let expr = test.parent()?;
         let body = expr.child_by_field_name("body")?;
         let head = self.cfg.push_node(line(expr));
         let start = self.cfg.push_node(line(body));

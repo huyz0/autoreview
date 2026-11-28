@@ -21,15 +21,12 @@ fn supported_node(node: Node<'_>) -> bool {
         "let_chain" | "let_condition" => conditional::supported(node),
         "let_declaration" => simple_binding(node) || let_else::supports(node),
         "for_expression" => simple_binding(node) && statement_position(node),
-        "if_expression" => {
-            statement_position(node)
-                && (conditional::test(node).is_none() || conditional::discards_result(node))
+        "if_expression" | "while_expression" => {
+            statement_position(node) && conditional::supports_owner(node)
         }
-        "while_expression"
-        | "loop_expression"
-        | "return_expression"
-        | "break_expression"
-        | "continue_expression" => statement_position(node),
+        "loop_expression" | "return_expression" | "break_expression" | "continue_expression" => {
+            statement_position(node)
+        }
         "match_expression" => supports_match(node),
         _ => true,
     }

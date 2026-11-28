@@ -184,7 +184,7 @@ impl Lower<'_> {
 
     fn branch(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
         if let Some(test) = conditional::test(expr) {
-            return self.pattern_branch(expr, test, at, names);
+            return self.pattern_branch(test, at, names);
         }
         let condition = self.test(expr, at, names);
         if self.cfg.keyed_flow.is_some() {
@@ -230,7 +230,7 @@ impl Lower<'_> {
 
     fn loop_body(&mut self, expr: Node<'_>, at: NodeId, names: &Bindings) -> Option<NodeId> {
         if let Some(test) = conditional::test(expr) {
-            return self.pattern_loop(expr, test, at, names);
+            return self.pattern_loop(test, at, names);
         }
         let head = self.cfg.push_node(line(expr));
         let after = self.cfg.push_node(expr.end_position().row as u32 + 1);

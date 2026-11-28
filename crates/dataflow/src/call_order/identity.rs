@@ -12,6 +12,8 @@ use crate::taint::NamePattern;
 use super::bindings::Bindings;
 use super::{CollectionSelector, EntryIdentity};
 
+mod lexical;
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Entry {
     pub collection: IdentityOperand,
@@ -163,28 +165,6 @@ impl<'src> Syntax<'src> {
 
     pub(super) fn taken_name(&self, name: &str) -> bool {
         self.bindings.names().any(|binding| binding == name)
-    }
-
-    pub(super) fn taken_name_at(&self, name: &str, at: usize) -> bool {
-        self.taken_name(name) || self.bindings.conditional_binding(name, at, false).is_some()
-    }
-
-    pub(super) fn conditional_key(&self, name: &str, at: usize, defining: bool) -> Option<String> {
-        let start = self.bindings.conditional_binding(name, at, defining)?;
-        Some(format!("{name}#{start}"))
-    }
-
-    pub(super) fn stable_boolean(&self, name: &str, at: usize) -> Option<bool> {
-        if self.bindings.conditional_binding(name, at, false).is_some() { return None; }
-        self.bindings.stable_boolean(name, at)
-    }
-
-    pub(super) fn stable_identity(&self, name: &str, at: usize) -> Option<IdentityOperand> {
-        if self.bindings.conditional_binding(name, at, false).is_some() { return None; }
-        match self.bindings.stable_identity(name, at)? {
-            IdentityOperand::Binding(name) => Some(IdentityOperand::Scoped { name, owner: self.owner, unit: self.unit }),
-            value => Some(value),
-        }
     }
 
     pub(super) fn local_result_binding(&self, name: &str, start: usize, defining: bool) -> Option<usize> {

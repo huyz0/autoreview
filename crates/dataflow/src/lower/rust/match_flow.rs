@@ -103,7 +103,8 @@ pub(super) fn tuple_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
     has_element.then_some(bindings)
 }
 
-pub(super) fn projection_bindings(pattern: Node<'_>) -> Option<Vec<Node<'_>>> {
+pub(super) fn projection_bindings(node: Node<'_>) -> Option<Vec<Node<'_>>> {
+    let pattern = node.child_by_field_name("pattern")?;
     match pattern.kind() {
         "scoped_identifier" | "boolean_literal" | "integer_literal" => Some(Vec::new()),
         _ => tuple_bindings(pattern),
@@ -183,14 +184,7 @@ impl Lower<'_> {
                 next = fallback;
             }
         }
-        if ends.is_empty() {
-            return None;
-        }
-        let join = self.cfg.push_node(super::line(node));
-        for end in ends {
-            self.edge(end, join, EdgeKind::Fallthrough);
-        }
-        Some(join)
+        self.join_paths(node, ends)
     }
 
     fn bind_arm(&mut self, arm: Node<'_>, start: NodeId, names: &Bindings) -> Bindings {
