@@ -1998,6 +1998,17 @@ fn rust_conditional_literal_with_a_constant_keeps_the_failure_path() {
 }
 
 #[test]
+fn rust_labeled_jumps_in_loop_conditions_keep_coverage_incomplete() {
+    for body in [
+        "'outer: while { if flag { break 'outer; } true } {}",
+        "'outer: loop { while { if flag { break 'outer; } true } {} }",
+    ] {
+        let source = format!("use std::fs::remove_file;\nfn run(flag: bool) {{\n {body}\n remove_file(\"after\");\n}}\n");
+        assert_rust_control_flow_incomplete(&source);
+    }
+}
+
+#[test]
 fn rust_statement_unsafe_blocks_and_reassignment_arms_follow_calls() {
     let source = r#"use std::fs::remove_file;
 fn run(flag: bool) {

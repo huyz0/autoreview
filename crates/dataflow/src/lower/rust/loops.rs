@@ -15,6 +15,11 @@ fn loop_expression(node: Node<'_>) -> bool {
     matches!(node.kind(), "for_expression" | "while_expression" | "loop_expression")
 }
 
+fn lowers_loop_body(parent: Node<'_>, jump: Node<'_>) -> bool {
+    !loop_expression(parent) || parent.child_by_field_name("body")
+        .is_some_and(|body| body.byte_range().contains(&jump.start_byte()))
+}
+
 pub(crate) fn supports_label(node: Node<'_>, source: &[u8]) -> bool {
     let Some(owner) = node.parent() else { return false };
     if loop_expression(owner) {
@@ -26,6 +31,7 @@ pub(crate) fn supports_label(node: Node<'_>, source: &[u8]) -> bool {
     let Ok(name) = node.utf8_text(source) else { return false };
     std::iter::successors(owner.parent(), |parent| parent.parent())
         .take_while(|parent| !matches!(parent.kind(), "function_item" | "closure_expression" | "async_block"))
+        .take_while(|parent| lowers_loop_body(*parent, owner))
         .find(|parent| label(*parent).is_some_and(|candidate| candidate.utf8_text(source) == Ok(name)))
         .is_some_and(loop_expression)
 }
