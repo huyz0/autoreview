@@ -14,9 +14,9 @@ fn pattern_bindings<'tree>(node: Node<'tree>, source: &[u8]) -> Option<Vec<Node<
 
 pub(super) fn supports(node: Node<'_>, source: &[u8]) -> bool {
     pattern_bindings(node, source).is_some()
-        && node
+        && (super::literal_projection(node, source).is_some() || node
             .child_by_field_name("value")
-            .is_some_and(|value| supported_initializer(value, source))
+            .is_some_and(|value| supported_initializer(value, source)))
         && node
             .child_by_field_name("alternative")
             .is_some_and(|fallback| diverges(fallback, source))

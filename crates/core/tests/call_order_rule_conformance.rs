@@ -2080,25 +2080,109 @@ fn rust_conditional_literal_with_a_constant_keeps_the_failure_path() {
 }
 
 #[test]
-fn rust_labeled_jumps_in_loop_conditions_keep_coverage_incomplete() {
+fn rust_loop_condition_jumps_skip_body_and_reach_named_exit() {
     let source = r#"use std::fs::remove_file;
-fn own_condition(flag: bool) {
-    'outer: while { if flag { break 'outer; } true } {}
+fn own_condition() {
+    'outer: while { break 'outer; } {
+        remove_file("unreachable");
+    }
     remove_file("after");
 }
 fn nested_condition(flag: bool) {
-    'outer: loop { while { if flag { break 'outer; } true } {} }
-    remove_file("after");
+    'outer: loop {
+        while flag && { break 'outer; } {
+            remove_file("unreachable");
+        }
+        continue 'outer;
+    }
+    remove_file("after outer");
+}
+fn continuing() {
+    'outer: while { continue 'outer; } {
+        remove_file("unreachable");
+    }
+    remove_file("unreachable after");
+}
+"#;
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 6), ("lib.rs", 15)]);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    assert!(report.coverage.is_empty(), "{:?}", report.coverage);
+}
+
+#[test]
+fn rust_labeled_block_result_follows_break_and_tail_values() {
+    let source = r#"use std::fs::remove_file;
+fn clean(flag: bool) -> std::io::Result<()> {
+    let result = 'output: {
+        if flag { break 'output remove_file("early"); }
+        if flag { remove_file("alternate") } else { remove_file("tail") }
+    };
+    result
+}
+fn ignored(flag: bool) {
+    let _ = 'output: {
+        if flag { break 'output remove_file("early"); }
+        remove_file("tail")
+    };
+}
+fn nested() -> std::io::Result<()> {
+    'out: {
+        'inner: { break 'inner; }
+        loop { break 'out remove_file("outer"); }
+    }
+}
+"#;
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 11), ("lib.rs", 12)]);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    assert!(report.coverage.is_empty(), "{:?}", report.coverage);
+}
+
+#[test]
+fn rust_struct_and_rest_patterns_distinguish_dropped_results() {
+    let source = r#"use std::fs::remove_file;
+type Removal = std::io::Result<()>;
+struct Pair { first: Removal, second: Removal }
+fn fields() -> Removal {
+    let Pair { second, .. } = Pair { first: remove_file("dropped"), second: remove_file("kept") };
+    second
+}
+fn sequence() -> Removal {
+    let [.., last] = [remove_file("dropped"), remove_file("kept")];
+    last
+}
+fn conditional() -> Removal {
+    if let Pair { second: value @ _, .. } = (Pair { second: remove_file("kept"), first: remove_file("dropped") }) {
+        return value;
+    }
+    Ok(())
 }
 "#;
     let root = write_single_file("lib.rs", source);
     let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
-    for line in [2, 6] {
-        assert!(report.coverage.iter().any(|issue| {
-            issue.line == Some(line) && issue.reason == "unsupported_rust_control_flow"
-                && issue.rule.as_deref() == Some("rust-discarded-remove-file-result")
-        }), "{:?}", report.coverage);
-    }
+    let origins: Vec<_> = report.findings.iter()
+        .filter(|finding| finding.source.rule_id.as_deref() == Some("rust-discarded-remove-file-result"))
+        .map(|finding| finding.location.range.start_line)
+        .collect();
+    assert_eq!(origins, [5, 9, 13], "{:?}", report.findings);
+    assert!(report.coverage.is_empty(), "{:?}", report.coverage);
+}
+
+#[test]
+fn rust_qualified_enum_constructor_projects_a_pattern_payload() {
+    let source = r#"use std::fs::remove_file;
+enum Choice<T> { Chosen(T, T), Other }
+fn chosen() -> std::io::Result<()> {
+    let self::Choice::Chosen(kept @ _, ..) =
+        self::Choice::Chosen(remove_file("kept"), remove_file("unused")) else { return Ok(()) };
+    kept
+}
+"#;
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[("lib.rs", 5)]);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    assert!(report.coverage.is_empty(), "{:?}", report.coverage);
 }
 
 #[test]

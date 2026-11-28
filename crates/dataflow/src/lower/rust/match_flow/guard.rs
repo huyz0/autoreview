@@ -1,10 +1,12 @@
-use super::{simple_value, Bindings, EdgeKind, Lower, Node, NodeId};
+use super::{simple_arm, simple_value, Bindings, EdgeKind, Lower, Node, NodeId};
+use crate::lower::rust::branch_value::Mode;
 
 enum Predicate<'a> {
     And(Node<'a>, Node<'a>),
     Or(Node<'a>, Node<'a>),
     Comparison(Node<'a>, Node<'a>),
     Not(Node<'a>),
+    Block(Node<'a>),
     Value(Node<'a>),
 }
 
@@ -40,7 +42,11 @@ fn predicate(mut node: Node<'_>) -> Predicate<'_> {
             _ => {}
         }
     }
-    Predicate::Value(node)
+    if node.kind() == "block" && !crate::lower::rust::is_labeled_block(node) {
+        Predicate::Block(node)
+    } else {
+        Predicate::Value(node)
+    }
 }
 
 pub(in crate::lower::rust) fn supported(node: Node<'_>, source: &[u8]) -> bool {
@@ -50,14 +56,15 @@ pub(in crate::lower::rust) fn supported(node: Node<'_>, source: &[u8]) -> bool {
         }
         Predicate::Not(value) => supported(value, source),
         Predicate::Comparison(left, right) => simple_value(left, source) && simple_value(right, source),
+        Predicate::Block(block) => simple_arm(block, source),
         Predicate::Value(value) => simple_value(value, source),
     }
 }
 
-pub(in crate::lower::rust) fn has_short_circuit(node: Node<'_>) -> bool {
+pub(in crate::lower::rust) fn has_control_flow(node: Node<'_>) -> bool {
     match predicate(node) {
-        Predicate::And(_, _) | Predicate::Or(_, _) => true,
-        Predicate::Not(value) => has_short_circuit(value),
+        Predicate::And(_, _) | Predicate::Or(_, _) | Predicate::Block(_) => true,
+        Predicate::Not(value) => has_control_flow(value),
         _ => false,
     }
 }
@@ -88,6 +95,9 @@ impl Lower<'_> {
                     .and_then(|left| self.evaluate(Some(right), left, names)) else { return };
                 self.edge(end, pass, EdgeKind::True);
                 self.edge(end, fail, EdgeKind::False);
+            }
+            Predicate::Block(block) => {
+                self.lower_value_block(block, at, &mut names.clone(), &Mode::Predicate(targets));
             }
             Predicate::Value(value) => {
                 let Some(end) = self.evaluate(Some(value), at, names) else { return };

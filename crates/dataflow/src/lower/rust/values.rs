@@ -20,6 +20,7 @@ impl Lower<'_> {
             return Some(at);
         };
         match expr.kind() {
+            "block" if super::is_labeled_block(expr) => self.labeled_block(expr, at, names, target),
             "try_expression" => self.try_value(expr, at, names, target),
             "call_expression" => self.call(expr, at, names, target),
             _ => {

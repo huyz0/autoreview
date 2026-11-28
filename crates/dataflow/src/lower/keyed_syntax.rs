@@ -167,6 +167,9 @@ pub(crate) fn result_operand(
     fallback: bool,
 ) -> Option<IdentityOperand> {
     let node = expression_value(node)?;
+    if super::rust::is_labeled_block(node) {
+        return Some(IdentityOperand::Binding(super::rust::block_binding(node)));
+    }
     if matches!(node.kind(), "call_expression" | "method_invocation") {
         return Some(IdentityOperand::CallResult {
             start: node.start_byte(),

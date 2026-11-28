@@ -67,5 +67,6 @@ fn receiver<'tree>(node: Node<'tree>, source: &[u8], plan: &Plan<'_, '_>) -> Opt
     }
     let list = argument.parent()?;
     let outer = list.parent()?;
-    (site::arguments(outer) == Some(list)).then_some((outer, wrapped))
+    (site::arguments(outer) == Some(list) && !crate::lower::rust::projects_constructor_argument(node, outer, source))
+        .then_some((outer, wrapped))
 }

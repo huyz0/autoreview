@@ -118,6 +118,8 @@ impl Lower<'_, '_, '_> {
                             self.returned(syntax, &mut effects);
                         } else if range.returned && self.staged_aggregate(transparent(syntax)) {
                             self.observe_elements(transparent(syntax), &mut effects);
+                        } else if range.returned && crate::lower::rust::is_labeled_block(transparent(syntax)) {
+                            self.reads(syntax, &mut effects);
                         } else {
                             self.statement(syntax, &mut effects);
                         }
@@ -212,7 +214,8 @@ impl Lower<'_, '_, '_> {
         effects: &mut Vec<Effect>,
     ) -> Option<Write> {
         let name = target.utf8_text(self.source).ok()?;
-        let wildcard = name == "_" && self.language != ContractLanguage::Web;
+        let wildcard = (name == "_" && self.language != ContractLanguage::Web)
+            || (self.language == ContractLanguage::Rust && target.kind() == "remaining_field_pattern");
         let binding = self.place(target, !reassignment);
         if !wildcard && binding.is_none() {
             if reassignment {
