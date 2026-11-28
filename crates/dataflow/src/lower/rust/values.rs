@@ -1,4 +1,4 @@
-use super::{argument_flow, branch_value::{self, Mode}, line, Bindings, Lower};
+use super::{argument_flow, branch_value::{self, Mode}, element_access, line, Bindings, Lower};
 use crate::cfg::{CallSite, CallTarget, EdgeKind, IdentityOperand, NodeId, RhsShape, Stmt};
 use crate::lower::site::{self, children};
 use tree_sitter::Node;
@@ -24,7 +24,12 @@ impl Lower<'_> {
             "call_expression" => self.call(expr, at, names, target),
             _ => {
                 let at = if let Some(operands) = eager_operands(expr) {
-                    self.eager_values(operands, at, names, argument_flow::stages_aggregate(expr))?
+                    let staged = argument_flow::stages_aggregate(expr);
+                    let projection_owner = (!staged && self.cfg.keyed_flow.is_some()
+                        && (element_access::local_aggregate(expr).is_some()
+                            || element_access::direct_projection(expr, self.source).is_some()))
+                        .then_some(expr.start_byte());
+                    self.eager_values(operands, at, names, staged, projection_owner)?
                 } else { at };
                 if let Some(lhs) = target {
                     let rhs = self
@@ -37,7 +42,7 @@ impl Lower<'_> {
         }
     }
 
-    fn eager_values<'tree>(&mut self, mut operands: impl Iterator<Item = Node<'tree>>, mut at: NodeId, names: &Bindings, staged: bool) -> Option<NodeId> {
+    fn eager_values<'tree>(&mut self, mut operands: impl Iterator<Item = Node<'tree>>, mut at: NodeId, names: &Bindings, staged: bool, projection_owner: Option<usize>) -> Option<NodeId> {
         while let Some(operand) = operands.next() {
             let end = if staged {
                 self.lower_operand(operand, at, names, true).map(|(end, _)| end)
@@ -48,6 +53,9 @@ impl Lower<'_> {
                 self.skip_calls(operands);
                 return None;
             };
+            if projection_owner.is_some() {
+                self.record_operand(operand, operand, true, projection_owner, end);
+            }
             at = end;
         }
         Some(at)

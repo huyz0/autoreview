@@ -158,14 +158,23 @@ Supported `if` and `match` expressions can supply tuple elements and elements
 of array literals that list their values. Elements execute from left to right.
 An early exit skips later elements and any enclosing call that needs the
 aggregate. Result-use analysis can follow a whole array or tuple. It reports
-`rust_aggregate_element_projection` because it cannot distinguish individual
-element reads in these literals. [Rust array expressions](https://doc.rust-lang.org/reference/expressions/array-expr.html)
+`rust_aggregate_element_projection` when individual element reads in a
+staged aggregate remain unresolved. [Rust array expressions](https://doc.rust-lang.org/reference/expressions/array-expr.html)
+
+Result-use analysis distinguishes literal array indices and numeric tuple
+fields on direct literals and immutable local bindings initialized from those
+literals. A local qualifies when all its uses are supported element reads.
+Observing one element leaves other elements' results eligible for discarded
+result findings. Dynamic indices, tuple structs, nested projections, borrows,
+mutation, and aggregate values that escape their local binding still need
+additional modeling. [Rust array indexing](https://doc.rust-lang.org/reference/expressions/array-expr.html#array-and-slice-indexing-expressions) [Rust tuple indexing](https://doc.rust-lang.org/reference/expressions/tuple-expr.html#tuple-indexing-expressions)
 
 An array repeat can use a supported `if` or `match` as its repeated value.
 Autoreview evaluates that value once, including when the length is zero. A
 literal zero length leaves the resulting array with no elements to observe.
-Whole-array result tracking treats unresolved lengths as potentially nonempty
-and reports the aggregate projection limitation. Compile-time length
+Literal indices into a repeat with literal length select the same repeated
+value. Whole-array result tracking treats unresolved lengths as potentially
+nonempty and reports the aggregate projection limitation. Compile-time length
 expressions, inline const blocks, const item operands, and other repeat-value
 shapes remain outside this coverage. [Rust array expressions](https://doc.rust-lang.org/reference/expressions/array-expr.html)
 

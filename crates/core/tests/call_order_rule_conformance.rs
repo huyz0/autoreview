@@ -1575,6 +1575,89 @@ fn assert_rust_aggregate_results(source: &str, discarded: &[(&str, u32)], projec
 }
 
 #[test]
+fn rust_reads_only_the_selected_array_or_tuple_element() {
+    let source = r#"use std::fs::remove_file;
+fn local_array(flag: bool) -> bool {
+    let values = [
+        if flag { remove_file("used") } else { Ok(()) },
+        remove_file("unused"),
+    ];
+    values[(0x0_usize)].is_ok()
+}
+fn local_tuple() -> std::io::Result<()> {
+    let pair = (remove_file("unused"), remove_file("used"));
+    pair.1
+}
+fn direct_array() -> bool {
+    [
+        remove_file("unused"),
+        remove_file("used"),
+    ][1].is_ok()
+}
+fn direct_tuple(flag: bool) -> std::io::Result<()> {
+    (
+        remove_file("unused"),
+        match flag { true => remove_file("used"), _ => Ok(()) },
+    ).1
+}
+fn repeat(flag: bool) -> bool {
+    let values = [if flag { remove_file("used") } else { Ok(()) }; 1];
+    values[0].is_ok()
+}
+fn shadowed() -> (std::io::Result<()>, std::io::Result<()>) {
+    let pair = (
+        remove_file("used from the first binding"),
+        remove_file("unused from the first binding"),
+    );
+    let earlier = pair.0;
+    let pair = (
+        remove_file("unused from the second binding"),
+        remove_file("used from the second binding"),
+    );
+    (earlier, pair.1)
+}
+"#;
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result",
+        &[("lib.rs", 5), ("lib.rs", 10), ("lib.rs", 15), ("lib.rs", 21), ("lib.rs", 33), ("lib.rs", 37)]);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    assert!(!report.coverage.iter().any(|issue| matches!(issue.reason.as_str(),
+        "unsupported_rust_control_flow" | "rust_aggregate_element_projection")), "{:?}", report.coverage);
+}
+
+#[test]
+fn rust_element_reads_keep_dynamic_or_escaping_aggregates_incomplete() {
+    let source = r#"use std::fs::remove_file;
+fn dynamic(flag: bool, index: usize) -> bool {
+    let values = [if flag { remove_file("maybe used") } else { Ok(()) }, Ok(())];
+    values[index].is_ok()
+}
+fn escapes(flag: bool) -> bool {
+    let pair = (if flag { remove_file("maybe used") } else { Ok(()) }, ());
+    let escaped = pair;
+    escaped.0.is_ok()
+}
+fn hidden_macro(flag: bool) {
+    let pair = (if flag { remove_file("maybe used") } else { Ok(()) }, ());
+    pair.0.is_ok();
+    println!("{pair:?}");
+}
+fn mutated(flag: bool) -> bool {
+    let mut pair = (if flag { remove_file("unknown after mutation") } else { Ok(()) }, ());
+    pair.0 = Ok(());
+    pair.0.is_ok()
+}
+"#;
+    let root = write_single_file("lib.rs", source);
+    assert_helper_locations(root.path(), "lib.rs", "rust-discarded-remove-file-result", &[]);
+    let report = run_dataflow_check_with_coverage(root.path(), root.path(), &["lib.rs".into()], &[]);
+    for line in [3, 7, 12, 17] {
+        assert!(report.coverage.iter().any(|issue| issue.reason == "rust_aggregate_element_projection"
+            && issue.line == Some(line)), "{:?}", report.coverage);
+    }
+}
+
+#[test]
 fn rust_branch_call_arguments_preserve_evaluation_order_and_early_exits() {
     let source = concat!(
         "fn open(flag: bool) {\n invoke(begin(), if flag { token() } else { return }, finish());\n}\n",

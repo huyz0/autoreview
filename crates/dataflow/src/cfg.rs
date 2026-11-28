@@ -22,6 +22,7 @@ pub(crate) struct Evaluation {
 pub(crate) struct OperandEvaluation {
     pub(crate) slot: std::ops::Range<usize>,
     pub(crate) has_value: bool,
+    pub(crate) projection_owner: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
